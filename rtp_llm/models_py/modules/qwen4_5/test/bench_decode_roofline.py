@@ -32,11 +32,87 @@ import torch.distributed as dist
 import torch.nn.functional as F
 
 from rtp_llm.models_py.modules.qwen4_5.tools.roofline_utils import (
+    PARALLEL_MODES,
     DFlash2ModelSpec,
     HardwareRoofline,
     calibrate_l20a_roofline,
     compute_qwen45_workload_metrics,
 )
+
+
+def _resolve_parallel_layout(
+    parallel_mode: str,
+    world_rank: int,
+    world_size: int,
+) -> Tuple[int, int, int, int, int, int, int, int]:
+    """Return ``(dp_size, dp_rank, tp_size, tp_rank, ep_size, ep_rank, sp_size, sp_rank)``."""
+    pm = str(parallel_mode).strip().lower()
+    if pm == "dp4_ep4":
+        return world_size, world_rank, 1, 0, world_size, world_rank, 1, 0
+    if pm in ("dp2_tp2_ep4", "dp2_tpsp2_ep4"):
+        tp = 2 if world_size >= 2 else 1
+        dp = max(1, world_size // tp)
+        dp_r = world_rank // tp
+        tp_r = world_rank % tp
+        sp = tp if pm == "dp2_tpsp2_ep4" else 1
+        sp_r = tp_r if sp > 1 else 0
+        return dp, dp_r, tp, tp_r, world_size, world_rank, sp, sp_r
+    if pm == "sp4_tp4_ep4":
+        return 1, 0, world_size, world_rank, world_size, world_rank, world_size, world_rank
+    return 1, 0, world_size, world_rank, world_size, world_rank, 1, 0
+
+
+def _resolve_global_ctx_list(
+    batch_size: int,
+    *,
+    avg_ctx: int,
+    skew_preset: str,
+    ctx_list_arg: Sequence[int],
+    skew_layout: str = "rank_skewed",
+) -> List[int]:
+    """Build per-request prefix context lengths for uniform or skewed Decode batches."""
+    if batch_size <= 0:
+        return []
+    if ctx_list_arg:
+        base = [max(1, int(c)) for c in ctx_list_arg]
+        ctxs = [base[i % len(base)] for i in range(batch_size)]
+        if skew_layout == "rank_skewed" and len(ctxs) > len(base):
+            ctxs.sort(reverse=True)
+        return ctxs
+    preset = str(skew_preset or "").strip().lower()
+    if not preset:
+        return [int(avg_ctx)] * batch_size
+    if preset == "40k_2k":
+        long_ctx, short_ctx = 40960, 2048
+        n_long = max(1, batch_size // 4)
+    elif preset == "avg20k_skew":
+        if batch_size < 4:
+            return [int(avg_ctx)] * batch_size
+        # 1/4 @ 75776 + 3/4 @ 2048 -> exact mean 20,480 (37x context skew, multiple of 64)
+        long_ctx, short_ctx = 75776, 2048
+        n_long = batch_size // 4
+    elif preset == "straggler_40k_2k":
+        long_ctx, short_ctx = 40960, 2048
+        n_long = 1
+    else:
+        raise ValueError(f"Unsupported skew_preset={skew_preset!r}")
+    if skew_layout == "interleaved" and preset in ("40k_2k", "avg20k_skew"):
+        return [long_ctx if (i % 4 == 0) else short_ctx for i in range(batch_size)]
+    return [long_ctx] * n_long + [short_ctx] * (batch_size - n_long)
+
+
+def _compute_dp_kv_imbalance(global_ctxs: Sequence[int], dp_size: int) -> Tuple[int, int, float]:
+    """Compute min/max per-DP-rank KV prefix tokens and max/min imbalance ratio."""
+    if not global_ctxs:
+        return 0, 0, 1.0
+    if dp_size <= 1:
+        tot = int(sum(global_ctxs))
+        return tot, tot, 1.0
+    bs_local = len(global_ctxs) // dp_size
+    rank_sums = [int(sum(global_ctxs[r * bs_local : (r + 1) * bs_local])) for r in range(dp_size)]
+    mn = min(rank_sums)
+    mx = max(rank_sums)
+    return mn, mx, round(mx / max(1, mn), 2)
 
 
 def load_or_calibrate_roofline(
@@ -133,6 +209,17 @@ def load_dspark_5l_sharded(
     parallelism_config: Any,
     device: torch.device,
     parallel_mode: str = "tp4_ep4",
+    dp_size: Optional[int] = None,
+    dp_rank: Optional[int] = None,
+    dp_group: Any = None,
+    tp_group: Any = None,
+    ep_size: Optional[int] = None,
+    ep_rank: Optional[int] = None,
+    ep_group: Any = None,
+    sp_size: Optional[int] = None,
+    sp_rank: Optional[int] = None,
+    sp_group: Any = None,
+    max_generate_batch_size: int = 128,
     dflash_kv_dtype: str = "bf16",
     dflash_attn_backend: str = "auto",
     dense_linear_mode: Optional[str] = None,
@@ -183,6 +270,21 @@ def load_dspark_5l_sharded(
     if "parallel_mode" in sig_params:
         extra_kw["parallel_mode"] = parallel_mode
         extra_kw["dp_equal_tokens"] = True
+    topo_opts = {
+        "dp_size": dp_size,
+        "dp_rank": dp_rank,
+        "dp_group": dp_group,
+        "tp_group": tp_group,
+        "ep_size": ep_size,
+        "ep_rank": ep_rank,
+        "ep_group": ep_group,
+        "sp_size": sp_size,
+        "sp_rank": sp_rank,
+        "sp_group": sp_group,
+    }
+    for k, v in topo_opts.items():
+        if k in sig_params and v is not None:
+            extra_kw[k] = v
     if "dflash_kv_dtype" in sig_params:
         extra_kw["dflash_kv_dtype"] = dflash_kv_dtype
     if "dflash_attn_backend" in sig_params:
@@ -193,7 +295,11 @@ def load_dspark_5l_sharded(
         extra_kw["enable_tbo"] = bool(enable_tbo)
 
     model = Qwen4_5DSparkModel(
-        cfg, parallelism_config, mw, max_generate_batch_size=128, **extra_kw
+        cfg,
+        parallelism_config,
+        mw,
+        max_generate_batch_size=max(128, int(max_generate_batch_size)),
+        **extra_kw,
     )
     del mw
     torch.cuda.synchronize(device)
@@ -216,6 +322,7 @@ def build_20k_target_kv_cache(
     parallel_mode: str = "tp4_ep4",
     kv_dtype: str = "bf16",
     device: torch.device,
+    max_total_blocks: Optional[int] = None,
 ) -> Any:
     from rtp_llm.models.qwen4_5.qwen4_5_kv_cache import (
         FULL_ATTN_KV_TAG,
@@ -233,7 +340,11 @@ def build_20k_target_kv_cache(
         plan_kw["kv_dtype"] = "FP8" if str(kv_dtype).lower().startswith("fp8") else kv_dtype
     plan = build_qwen4_5_kv_cache_plan(arch, **plan_kw)
     blocks_per_req = (avg_ctx + verify_width + 4 + tokens_per_block - 1) // tokens_per_block + 1
-    num_full_blocks = max_batch * blocks_per_req + 64
+    num_full_blocks = (
+        int(max_total_blocks)
+        if max_total_blocks is not None
+        else (max_batch * blocks_per_req + 64)
+    )
     num_opaque_blocks = max_batch + 32
 
     num_blocks_per_tag: Dict[str, int] = {
@@ -313,11 +424,16 @@ def build_20k_dflash_kv_cache(
     tokens_per_block: int,
     dflash_kv_dtype: str = "bf16",
     device: torch.device,
+    max_total_blocks: Optional[int] = None,
 ) -> Tuple[Any, List[torch.Tensor]]:
     from rtp_llm.models_py.model_desc.qwen4_5_runtime import LocalLayerKVCache
 
     blocks_per_req = (avg_ctx + verify_width + 4 + tokens_per_block - 1) // tokens_per_block + 1
-    total_blocks = max_batch * blocks_per_req + 64
+    total_blocks = (
+        int(max_total_blocks)
+        if max_total_blocks is not None
+        else (max_batch * blocks_per_req + 64)
+    )
     is_fp8 = str(dflash_kv_dtype).lower().startswith("fp8")
     fp8_dt = getattr(torch, "float8_e4m3fn", None) if is_fp8 else None
     kv_dt = fp8_dt if fp8_dt is not None else torch.bfloat16
@@ -383,6 +499,7 @@ def _build_verify_and_draft_inputs(
     seed: int = 42,
     dp_rank: int = 0,
     dp_size: int = 1,
+    local_ctxs: Optional[Sequence[int]] = None,
 ) -> Tuple[Any, Any, torch.Tensor, torch.Tensor]:
     from rtp_llm.models.qwen4_5.qwen4_5_kv_cache import FULL_ATTN_KV_TAG, INDEXER_KV_TAG
     from rtp_llm.models_py.model_desc.qwen4_5_runtime import (
@@ -391,16 +508,24 @@ def _build_verify_and_draft_inputs(
     )
     from rtp_llm.ops import PyAttentionInputs, PyModelInputs
 
-    # Assign contiguous physical block IDs cleanly per request across [0..max_batch-1]
-    blocks_per_req = (avg_ctx + verify_width + 4 + tokens_per_block - 1) // tokens_per_block + 1
+    ctxs = [int(c) for c in local_ctxs] if local_ctxs is not None else [int(avg_ctx)] * batch_size
+    if len(ctxs) != batch_size:
+        raise ValueError(f"local_ctxs len={len(ctxs)} != batch_size={batch_size}")
+
+    # Assign contiguous non-overlapping physical block IDs per request across [0..batch_size-1]
+    req_block_ids: List[List[int]] = []
+    cur_blk = 1
+    for c in ctxs:
+        req_blks = (c + verify_width + 4 + tokens_per_block - 1) // tokens_per_block + 1
+        req_block_ids.append(list(range(cur_blk, cur_blk + req_blks)))
+        cur_blk += req_blks
+    max_req_blk = max((len(r) for r in req_block_ids), default=1)
+
     token_tags = {FULL_ATTN_KV_TAG, INDEXER_KV_TAG}
     tables_by_tag: Dict[str, List[List[int]]] = {}
     for tag in target_kv.group_tags():
         if tag in token_tags:
-            tables_by_tag[tag] = [
-                list(range(1 + b * blocks_per_req, 1 + (b + 1) * blocks_per_req))
-                for b in range(batch_size)
-            ]
+            tables_by_tag[tag] = [list(r) for r in req_block_ids]
         else:
             tables_by_tag[tag] = [[1 + b] for b in range(batch_size)]
 
@@ -413,7 +538,7 @@ def _build_verify_and_draft_inputs(
         is_prefill=True,
         input_lengths=[verify_width] * batch_size,
         sequence_lengths=[],
-        prefix_lengths=[avg_ctx] * batch_size,
+        prefix_lengths=ctxs,
         device=device,
     )
     for grp in verify_attn.values():
@@ -422,13 +547,11 @@ def _build_verify_and_draft_inputs(
     verify_in = LocalPyModelInputs(input_ids=v_toks.reshape(-1), attention_inputs=verify_attn)
 
     # DFlash2 propose inputs (query_width = verify_width = 8)
-    d_bt = torch.tensor(
-        [list(range(1 + b * blocks_per_req, 1 + (b + 1) * blocks_per_req)) for b in range(batch_size)],
-        dtype=torch.int32,
-        device=device,
-    )
+    d_bt = torch.zeros((batch_size, max_req_blk), dtype=torch.int32, device=device)
+    for b_idx, r_ids in enumerate(req_block_ids):
+        d_bt[b_idx, : len(r_ids)] = torch.tensor(r_ids, dtype=torch.int32, device=device)
     qw = int(spec.query_width)
-    pref_t = torch.full((batch_size,), avg_ctx, dtype=torch.int32, device=device)
+    pref_t = torch.tensor(ctxs, dtype=torch.int32, device=device)
     inp_t = torch.full((batch_size,), qw, dtype=torch.int32, device=device)
     cu_t = torch.arange(0, (batch_size + 1) * qw, qw, dtype=torch.int32, device=device)
 
@@ -462,7 +585,7 @@ def _build_verify_and_draft_inputs(
     c_attn.is_prefill = True
     c_attn.is_target_verify = False
     c_attn.total_tokens = int(batch_size)
-    c_attn.prefix_lengths = torch.full((batch_size,), max(0, avg_ctx - 1), dtype=torch.int32, device=device)
+    c_attn.prefix_lengths = torch.tensor([max(0, c - 1) for c in ctxs], dtype=torch.int32, device=device)
     c_attn.input_lengths = torch.ones((batch_size,), dtype=torch.int32, device=device)
     c_attn.sequence_lengths = torch.empty(0, dtype=torch.int32, device="cpu")
     c_cu = torch.arange(0, batch_size + 1, 1, dtype=torch.int32, device=device)
@@ -968,7 +1091,9 @@ def _run_decode_parity_probe(
             for sk, sval in snaps_raw.items():
                 if sk in ref_snaps:
                     rt = torch.tensor(ref_snaps[sk], dtype=torch.float32)
-                    snap_pars[sk] = _compute_parity(sval[: rt.shape[0], : rt.shape[1]], rt)
+                    n_r = min(int(sval.shape[0]), int(rt.shape[0]))
+                    n_c = min(int(sval.shape[1]), int(rt.shape[1]))
+                    snap_pars[sk] = _compute_parity(sval[:n_r, :n_c], rt[:n_r, :n_c])
             min_e2e = min(tl_par["cosine"], dh_par["cosine"])
             min_snap = min((v["cosine"] for v in snap_pars.values()), default=None)
             passed = bool(min_e2e >= parity_min_cos and (min_snap is None or min_snap >= parity_min_cos))
@@ -1024,9 +1149,23 @@ def _update_leaderboard(
         "rows": rows,
     }
     def _same_cfg(e: Dict[str, Any]) -> bool:
-        if not (e.get("round") == round_tag and e.get("parallel_mode") == parallel_mode and e.get("dtype_mode") == dtype_mode):
+        if not (
+            e.get("round") == round_tag
+            and e.get("parallel_mode") == parallel_mode
+            and e.get("dtype_mode") == dtype_mode
+            and e.get("avg_ctx") == avg_ctx
+        ):
             return False
-        for k in ("kv_dtype", "dflash_kv_dtype", "dflash_attn_backend", "dense_linear_mode", "ple_mode", "router_margin"):
+        for k in (
+            "kv_dtype",
+            "dflash_kv_dtype",
+            "dflash_attn_backend",
+            "dense_linear_mode",
+            "ple_mode",
+            "router_margin",
+            "skew_preset",
+            "skew_layout",
+        ):
             if e.get(k) != meta.get(k):
                 return False
         if bool(e.get("enable_tbo", False)) != bool(meta.get("enable_tbo", False)):
@@ -1044,9 +1183,30 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Standalone 4-GPU Decode Roofline Benchmark (Qwen 4.5-Flash)")
     parser.add_argument("--target-ckpt", default="/home/admin/lhc_qwen45_opt/models/Qwen4.5-Flash-5L-fullwidth-qsa-mock")
     parser.add_argument("--dflash-ckpt", default="/home/admin/lhc_qwen45_opt/models/Qwen4.5-Flash-5L-fullwidth-dflash-mock")
-    parser.add_argument("--parallel-mode", choices=("tp4_ep4", "dp4_ep4", "dp2_tp2_ep4", "sp4_tp4_ep4"), default="tp4_ep4")
+    parser.add_argument(
+        "--parallel-mode",
+        choices=("tp4_ep4", "dp4_ep4", "dp2_tp2_ep4", "sp4_tp4_ep4", "dp2_tpsp2_ep4"),
+        default="tp4_ep4",
+    )
     parser.add_argument("--dtype-mode", choices=("w4a8", "auto", "triton", "bf16", "fp8", "nvfp4"), default="w4a8")
     parser.add_argument("--avg-ctx", type=int, default=20480)
+    parser.add_argument(
+        "--ctx-list",
+        default="",
+        help="Optional comma-separated per-request prefix lengths (e.g. 40960,2048,2048,2048)",
+    )
+    parser.add_argument(
+        "--skew-preset",
+        choices=("", "40k_2k", "avg20k_skew", "straggler_40k_2k"),
+        default="",
+        help="Optional skewed-context Decode preset (1x40K+3x2K, avg20K extreme skew, or single 40K straggler)",
+    )
+    parser.add_argument(
+        "--skew-layout",
+        choices=("rank_skewed", "interleaved"),
+        default="rank_skewed",
+        help="Request ordering across DP ranks when --skew-preset or --ctx-list is active",
+    )
     parser.add_argument("--verify-width", type=int, default=8)
     parser.add_argument("--batches", default="1,4,8,16,32,64,96,128")
     parser.add_argument("--tokens-per-block", type=int, default=64)
@@ -1128,27 +1288,20 @@ def main() -> int:
     pc.pp_rank = 0
     pc.ffn_tp_size = 1
     pc.ffn_tp_rank = 0
-    if args.parallel_mode == "dp4_ep4":
-        pc.tp_size = 1
-        pc.tp_rank = 0
-        pc.dp_size = world_size
-        pc.dp_rank = world_rank
-        pc.ep_size = world_size
-        pc.ep_rank = world_rank
-    elif args.parallel_mode == "dp2_tp2_ep4":
-        pc.tp_size = 2 if world_size >= 2 else 1
-        pc.dp_size = max(1, world_size // pc.tp_size)
-        pc.dp_rank = world_rank // pc.tp_size
-        pc.tp_rank = world_rank % pc.tp_size
-        pc.ep_size = world_size
-        pc.ep_rank = world_rank
-    else:  # tp4_ep4 or sp4_tp4_ep4
-        pc.tp_size = world_size
-        pc.tp_rank = world_rank
-        pc.dp_size = 1
-        pc.dp_rank = 0
-        pc.ep_size = world_size
-        pc.ep_rank = world_rank
+    dp_size, dp_rank, tp_size, tp_rank, ep_size, ep_rank, sp_size, sp_rank = _resolve_parallel_layout(
+        args.parallel_mode, world_rank, world_size
+    )
+    pc.tp_size = tp_size
+    pc.tp_rank = tp_rank
+    pc.dp_size = dp_size
+    pc.dp_rank = dp_rank
+    pc.ep_size = ep_size
+    pc.ep_rank = ep_rank
+    for attr, val in (("sp_size", sp_size), ("sp_rank", sp_rank), ("parallel_mode", args.parallel_mode)):
+        try:
+            setattr(pc, attr, val)
+        except Exception:
+            pass
 
     nccl_cfg = NcclCommConfig(nccl_ip=master_addr)
     init_distributed_environment(
@@ -1158,9 +1311,26 @@ def main() -> int:
         backend="nccl",
         collective_config=CollectiveConfig(),
     )
+
+    def _safe_get_group(grp_key: Any) -> Any:
+        try:
+            return _get_group(grp_key)
+        except Exception:
+            return None
+
     world_grp = _get_group(Group.WORLD)
-    tp_grp = _get_group(Group.TP) if pc.tp_size == world_size else None
+    tp_grp = _safe_get_group(Group.TP) if pc.tp_size > 1 else None
+    if tp_grp is None and pc.tp_size == world_size and world_size > 1:
+        tp_grp = world_grp
+    dp_grp = _safe_get_group(Group.DP) if pc.dp_size > 1 else None
+    sp_grp = tp_grp if sp_size > 1 else None
     ep_grp = world_grp
+    for attr, val in (("tp_group", tp_grp), ("dp_group", dp_grp), ("sp_group", sp_grp), ("ep_group", ep_grp)):
+        if val is not None:
+            try:
+                setattr(pc, attr, val)
+            except Exception:
+                pass
 
     hw = load_or_calibrate_roofline(
         device,
@@ -1182,6 +1352,32 @@ def main() -> int:
         batches = [dp_size]
     max_local_batch = max(b // dp_size for b in batches)
 
+    ctx_list_arg = [int(x.strip()) for x in args.ctx_list.split(",") if x.strip()]
+    global_ctxs_by_bs: Dict[int, List[int]] = {
+        bs: _resolve_global_ctx_list(
+            bs,
+            avg_ctx=args.avg_ctx,
+            skew_preset=args.skew_preset,
+            ctx_list_arg=ctx_list_arg,
+            skew_layout=args.skew_layout,
+        )
+        for bs in batches
+    }
+    max_global_ctx = max(
+        [args.avg_ctx] + [c for ctxs in global_ctxs_by_bs.values() for c in ctxs]
+    )
+    tpb = int(args.tokens_per_block)
+    max_local_blocks = 0
+    for bs, g_ctxs in global_ctxs_by_bs.items():
+        bs_loc = bs // dp_size
+        loc_ctxs = g_ctxs[pc.dp_rank * bs_loc : (pc.dp_rank + 1) * bs_loc]
+        needed = sum((c + args.verify_width + 4 + tpb - 1) // tpb + 1 for c in loc_ctxs)
+        max_local_blocks = max(max_local_blocks, needed)
+    if args.ref_out or (args.ref_in and Path(args.ref_in).is_file()):
+        uni_blocks = max_local_batch * ((args.avg_ctx + args.verify_width + 4 + tpb - 1) // tpb + 1)
+        max_local_blocks = max(max_local_blocks, uni_blocks)
+    max_total_blocks = max_local_blocks + 64
+
     lm_sig = inspect.signature(Qwen4_5ForCausalLM.__init__).parameters
     lm_kw: Dict[str, Any] = dict(
         use_triton_mxfp4=(args.dtype_mode != "bf16"),
@@ -1193,8 +1389,17 @@ def main() -> int:
         tp_size=pc.tp_size,
         tp_rank=pc.tp_rank,
     )
-    if tp_grp is not None:
-        lm_kw["tp_group"] = tp_grp
+    for k, v in (
+        ("tp_group", tp_grp),
+        ("dp_size", dp_size),
+        ("dp_rank", pc.dp_rank),
+        ("dp_group", dp_grp),
+        ("sp_size", sp_size),
+        ("sp_rank", sp_rank),
+        ("sp_group", sp_grp),
+    ):
+        if k in lm_sig and v is not None:
+            lm_kw[k] = v
     if "parallel_mode" in lm_sig:
         lm_kw["parallel_mode"] = args.parallel_mode
         lm_kw["dp_equal_tokens"] = True
@@ -1223,7 +1428,7 @@ def main() -> int:
             target_lm.prepare_weights()
 
     mcfg = Qwen4_5ModelConfig(arch_config=t_arch)
-    mcfg.max_seq_len = max(int(getattr(mcfg, "max_seq_len", 8192)), args.avg_ctx + args.verify_width + 64)
+    mcfg.max_seq_len = max(int(getattr(mcfg, "max_seq_len", 8192)), max_global_ctx + args.verify_width + 64)
     mcfg.capture_aux_hidden_layer_ids = [0, 1, 2, 3, 4]
     mcfg.is_mtp = False
     target_kv = build_20k_target_kv_cache(
@@ -1236,6 +1441,7 @@ def main() -> int:
         parallel_mode=args.parallel_mode,
         kv_dtype=args.kv_dtype,
         device=device,
+        max_total_blocks=max_total_blocks,
     )
     target_rtp = Qwen4_5RTPModel.from_causal_lm(
         target_lm,
@@ -1250,6 +1456,17 @@ def main() -> int:
         parallelism_config=pc,
         device=device,
         parallel_mode=args.parallel_mode,
+        dp_size=dp_size,
+        dp_rank=pc.dp_rank,
+        dp_group=dp_grp,
+        tp_group=tp_grp,
+        ep_size=pc.ep_size,
+        ep_rank=pc.ep_rank,
+        ep_group=ep_grp,
+        sp_size=sp_size,
+        sp_rank=sp_rank,
+        sp_group=sp_grp,
+        max_generate_batch_size=max_local_batch,
         dflash_kv_dtype=eff_dflash_kv,
         dflash_attn_backend=args.dflash_attn_backend,
         dense_linear_mode=(args.dense_linear_mode or None),
@@ -1263,6 +1480,7 @@ def main() -> int:
         tokens_per_block=args.tokens_per_block,
         dflash_kv_dtype=eff_dflash_kv,
         device=device,
+        max_total_blocks=max_total_blocks,
     )
     dflash_model.kv_cache = dflash_kv
     if args.router_margin > 0.0:
@@ -1371,6 +1589,13 @@ def main() -> int:
 
     for bs in batches:
         bs_local = bs // dp_size
+        global_ctxs = global_ctxs_by_bs[bs]
+        local_ctxs = global_ctxs[pc.dp_rank * bs_local : (pc.dp_rank + 1) * bs_local]
+        eff_avg_ctx_f = sum(global_ctxs) / float(max(1, len(global_ctxs)))
+        eff_avg_ctx = int(round(eff_avg_ctx_f))
+        ctx_min = min(global_ctxs)
+        ctx_max = max(global_ctxs)
+        dp_kv_min, dp_kv_max, dp_kv_imb = _compute_dp_kv_imbalance(global_ctxs, dp_size)
         torch.cuda.empty_cache()
         dist.barrier(group=world_grp)
         try:
@@ -1379,12 +1604,13 @@ def main() -> int:
                 dflash_kv_bufs=dflash_kv_bufs,
                 spec=d_cfg._dflash2_spec,
                 batch_size=bs_local,
-                avg_ctx=args.avg_ctx,
+                avg_ctx=eff_avg_ctx,
                 verify_width=args.verify_width,
                 tokens_per_block=args.tokens_per_block,
                 device=device,
                 dp_rank=pc.dp_rank,
                 dp_size=dp_size,
+                local_ctxs=local_ctxs,
             )
 
             # Prepare FMHA handles
@@ -1509,7 +1735,8 @@ def main() -> int:
             if bs in kineto_batch_set:
                 trace_dir = Path(args.traces_dir)
                 trace_dir.mkdir(parents=True, exist_ok=True)
-                trace_path = trace_dir / f"decode_{args.round_tag}_{args.parallel_mode}_{args.dtype_mode}_ctx{args.avg_ctx}_b{bs}.json"
+                skew_sfx = f"_{args.skew_preset}" if args.skew_preset else ("_customctx" if ctx_list_arg else "")
+                trace_path = trace_dir / f"decode_{args.round_tag}_{args.parallel_mode}_{args.dtype_mode}_ctx{eff_avg_ctx}{skew_sfx}_b{bs}.json"
                 if world_rank == 0:
                     print(f"[KINETO B={bs}] capturing 4 cycles -> {trace_path}", flush=True)
                 dist.barrier(group=world_grp)
@@ -1533,7 +1760,7 @@ def main() -> int:
                 dist.barrier(group=world_grp)
 
                 if args.op_kineto:
-                    op_trace_path = trace_dir / f"decode_{args.round_tag}_{args.parallel_mode}_{args.dtype_mode}_ctx{args.avg_ctx}_b{bs}_ops.json"
+                    op_trace_path = trace_dir / f"decode_{args.round_tag}_{args.parallel_mode}_{args.dtype_mode}_ctx{eff_avg_ctx}{skew_sfx}_b{bs}_ops.json"
                     op_prof_ctx = (
                         torch.profiler.profile(
                             activities=[torch.profiler.ProfilerActivity.CPU, torch.profiler.ProfilerActivity.CUDA],
@@ -1561,12 +1788,17 @@ def main() -> int:
             mean_tot = statistics.mean(tot_ms)
             p50_tot = sorted(tot_ms)[len(tot_ms) // 2]
 
+            rf_parallel_mode = (
+                args.parallel_mode
+                if args.parallel_mode in PARALLEL_MODES
+                else ("dp2_tp2_ep4" if args.parallel_mode == "dp2_tpsp2_ep4" else args.parallel_mode)
+            )
             rf = compute_qwen45_workload_metrics(
                 t_arch,
                 batch_size=bs,
                 seq_len_per_step=args.verify_width,
-                avg_ctx=args.avg_ctx,
-                parallel_mode=args.parallel_mode,
+                avg_ctx=eff_avg_ctx,
+                parallel_mode=rf_parallel_mode,
                 dtype_mode=(
                     "mxfp4"
                     if args.dtype_mode in ("w4a8", "auto", "triton")
@@ -1577,7 +1809,7 @@ def main() -> int:
                 indexer_kv_dtype=args.indexer_kv_dtype,
                 world_size=world_size,
                 is_prefill=False,
-                prefix_len=args.avg_ctx,
+                prefix_len=eff_avg_ctx,
                 logits_tokens=bs * args.verify_width,
                 include_dflash2=True,
                 dflash_spec=DFlash2ModelSpec(),
@@ -1590,7 +1822,12 @@ def main() -> int:
             row = {
                 "batch_size": bs,
                 "verify_width": args.verify_width,
-                "avg_ctx": args.avg_ctx,
+                "avg_ctx": eff_avg_ctx,
+                "ctx_min": ctx_min,
+                "ctx_max": ctx_max,
+                "dp_kv_min_tokens": dp_kv_min,
+                "dp_kv_max_tokens": dp_kv_max,
+                "dp_kv_imbalance": dp_kv_imb,
                 "cycle_mean_ms": round(mean_tot, 3),
                 "cycle_p50_ms": round(p50_tot, 3),
                 "dflash_propose_ms": round(mean_dp, 3),
@@ -1604,14 +1841,19 @@ def main() -> int:
             }
             bench_rows.append(row)
             if world_rank == 0:
+                skew_note = (
+                    f" [skew {ctx_min}..{ctx_max}, dp_imb={dp_kv_imb:.2f}x]"
+                    if ctx_min != ctx_max
+                    else ""
+                )
                 print(
-                    f"[B={bs:3d} ctx={args.avg_ctx}] cycle={row['cycle_mean_ms']:6.3f}ms "
+                    f"[B={bs:3d} ctx={eff_avg_ctx}] cycle={row['cycle_mean_ms']:6.3f}ms "
                     f"(draft={row['dflash_propose_ms']:.2f}+sel={row['dflash_selector_ms']:.2f}"
                     f"+verify={row['target_verify_ms']:.2f}+lm={row['target_logits_commit_ms']:.2f}) | "
                     f"raw_cyc={row['raw_cycle_tok_s']:7.1f} tok/s (verified={row['raw_verified_tok_s']:8.1f}) | "
                     f"MFU_bf16={rf.get('mfu_bf16_pct', 0.0):5.2f}% MFU_aware={rf.get('mfu_aware_pct', 0.0):5.2f}% "
                     f"MBU={rf.get('mbu_pct', 0.0):5.2f}% SOL={rf.get('sol_efficiency_pct', 0.0):5.2f}% "
-                    f"(HBM floor={rf.get('ideal_hbm_ms', 0.0):.2f}ms)",
+                    f"(HBM floor={rf.get('ideal_hbm_ms', 0.0):.2f}ms){skew_note}",
                     flush=True,
                 )
 
@@ -1632,6 +1874,11 @@ def main() -> int:
             p.parent.mkdir(parents=True, exist_ok=True)
             p.write_text(json.dumps(ref_out_records) + "\n", encoding="utf-8")
 
+        rep_avg_ctx = (
+            int(round(sum(r["avg_ctx"] for r in bench_rows) / len(bench_rows)))
+            if bench_rows
+            else args.avg_ctx
+        )
         extra_meta = {
             "ple_mode": args.ple_mode,
             "dense_linear_mode": args.dense_linear_mode or "bf16",
@@ -1641,12 +1888,16 @@ def main() -> int:
             "indexer_kv_dtype": args.indexer_kv_dtype,
             "router_margin": float(args.router_margin),
             "enable_tbo": bool(args.enable_tbo),
+            "sp_size": int(sp_size),
+            "skew_preset": args.skew_preset,
+            "skew_layout": args.skew_layout,
+            "ctx_list": ctx_list_arg,
         }
         report = {
             "round": args.round_tag,
             "parallel_mode": args.parallel_mode,
             "dtype_mode": args.dtype_mode,
-            "avg_ctx": args.avg_ctx,
+            "avg_ctx": rep_avg_ctx,
             "verify_width": args.verify_width,
             **extra_meta,
             "hw_roofline": hw.to_dict(),
@@ -1663,7 +1914,7 @@ def main() -> int:
                 round_tag=args.round_tag,
                 parallel_mode=args.parallel_mode,
                 dtype_mode=args.dtype_mode,
-                avg_ctx=args.avg_ctx,
+                avg_ctx=rep_avg_ctx,
                 hw=hw,
                 rows=bench_rows,
                 extra_meta=extra_meta,

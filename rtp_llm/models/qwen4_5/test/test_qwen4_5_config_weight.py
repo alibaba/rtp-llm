@@ -676,5 +676,58 @@ class TestQwen4_5ConfigWeightKVCache(unittest.TestCase):
         self.assertEqual(p_fp8_e4m3_upper.kv_bytes_per_token, 2560)
 
 
+    def test_10_dp2_tpsp2_ep4_and_sp4_topology_resolution(self) -> None:
+        from rtp_llm.models_py.model_desc.qwen4_5 import (
+            _SUPPORTED_PARALLEL_MODES,
+            resolve_qwen4_5_parallel_topology,
+        )
+        from rtp_llm.models.qwen4_5.qwen4_5_kv_cache import build_qwen4_5_kv_cache_plan
+
+        self.assertIn("sp4_tp4_ep4", _SUPPORTED_PARALLEL_MODES)
+        self.assertIn("dp2_tpsp2_ep4", _SUPPORTED_PARALLEL_MODES)
+
+        t_dp2_tpsp2 = resolve_qwen4_5_parallel_topology(
+            parallel_mode="dp2_tpsp2_ep4", dp_rank=1, tp_rank=1, ep_rank=3
+        )
+        self.assertEqual(t_dp2_tpsp2.parallel_mode, "dp2_tpsp2_ep4")
+        self.assertEqual(t_dp2_tpsp2.dp_size, 2)
+        self.assertEqual(t_dp2_tpsp2.tp_size, 2)
+        self.assertEqual(t_dp2_tpsp2.sp_size, 2)
+        self.assertEqual(t_dp2_tpsp2.ep_size, 4)
+        self.assertEqual(t_dp2_tpsp2.dp_rank, 1)
+        self.assertEqual(t_dp2_tpsp2.tp_rank, 1)
+        self.assertEqual(t_dp2_tpsp2.sp_rank, 1)
+        self.assertEqual(t_dp2_tpsp2.ep_rank, 3)
+        self.assertFalse(t_dp2_tpsp2.dp_attn)
+
+        t_sp4 = resolve_qwen4_5_parallel_topology(parallel_mode="sp4_tp4_ep4", tp_rank=2, ep_rank=2)
+        self.assertEqual(t_sp4.parallel_mode, "sp4_tp4_ep4")
+        self.assertEqual(t_sp4.dp_size, 1)
+        self.assertEqual(t_sp4.tp_size, 4)
+        self.assertEqual(t_sp4.sp_size, 4)
+        self.assertEqual(t_sp4.ep_size, 4)
+        self.assertEqual(t_sp4.sp_rank, 2)
+        self.assertFalse(t_sp4.dp_attn)
+
+        t_imp_dp_tpsp = resolve_qwen4_5_parallel_topology(
+            dp_size=2, tp_size=2, sp_size=2, ep_size=4, dp_rank=1, tp_rank=1, ep_rank=3
+        )
+        self.assertEqual(t_imp_dp_tpsp.parallel_mode, "dp2_tpsp2_ep4")
+        self.assertEqual(t_imp_dp_tpsp.sp_rank, 1)
+        self.assertFalse(t_imp_dp_tpsp.dp_attn)
+
+        with self.assertRaises(ValueError):
+            resolve_qwen4_5_parallel_topology(parallel_mode="invalid_mode")
+
+        p_dp2_tpsp2 = build_qwen4_5_kv_cache_plan(
+            self.arch_cfg, tp_size=2, parallel_mode="dp2_tpsp2_ep4", enable_yoco_decode=True
+        )
+        p_dp2_tp2 = build_qwen4_5_kv_cache_plan(
+            self.arch_cfg, parallel_mode="dp2_tp2_ep4", enable_yoco_decode=True
+        )
+        self.assertEqual(p_dp2_tpsp2.layers[0].ssm_state_shape, p_dp2_tp2.layers[0].ssm_state_shape)
+        self.assertEqual(p_dp2_tpsp2.layers[0].gdn_conv_channels, 6144)
+
+
 if __name__ == "__main__":
     unittest.main()

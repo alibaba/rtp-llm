@@ -10,13 +10,19 @@ import torch
 
 from rtp_llm.models_py.modules.qwen4_5.contracts import PLELayerState, ShortConvState
 from rtp_llm.models_py.modules.qwen4_5.hyper_connection import (
+    HCStaticWorkspace,
     Qwen4_5HyperConnection,
     grouped_gemma_rmsnorm_bias_ref,
     grouped_gemma_rmsnorm_bias_triton,
     hc_combine_ref,
-    grouped_gemma_rmsnorm_bias_ref,
     hc_combine_and_norm_triton,
     hc_combine_triton,
+    hc_dflash_gconv_combine_norm_triton,
+    hc_down_inject_epilogue_triton,
+    hc_down_silu_epilogue_triton,
+    hc_inject_epilogue_triton,
+    hc_mix_reduce_triton,
+    hc_mix_reduce_with_down_inject_triton,
     hc_sconv_decode_opaque_combine_norm_triton,
 )
 from rtp_llm.models_py.modules.qwen4_5.ple import (
@@ -30,6 +36,7 @@ from rtp_llm.models_py.modules.qwen4_5.ple import (
 )
 from rtp_llm.models_py.modules.qwen4_5.short_conv import (
     Qwen4_5ShortConv,
+    ShortConvStaticWorkspace,
     causal_dwconv1d_prefill_with_snapshots_triton,
     causal_dwconv1d_ragged_prefill_with_snapshots_triton,
     causal_dwconv1d_verify_opaque_triton,
@@ -1483,6 +1490,301 @@ def test_r6_fast_launch_opaque_decode_and_ple_snap_aligned() -> None:
     print("  PASS: HookChain fast_launch, opaque decode ShortConv+HC, PLE snap_aligned & cross-dtype ckey parity verified.")
 
 
+def _r7_sp_shortconv_gloo_worker(rank: int, world_size: int, port: int, cases: dict, err_q) -> None:
+    import os
+    import torch.distributed as dist
+
+    try:
+        os.environ["MASTER_ADDR"] = "127.0.0.1"
+        os.environ["MASTER_PORT"] = str(port)
+        dist.init_process_group("gloo", rank=rank, world_size=world_size)
+        try:
+            from rtp_llm.models_py.modules.qwen4_5.fast_comm import (
+                Qwen4_5FastAllReduce,
+                sp_slice_bounds,
+            )
+
+            dev = torch.device("cuda:0")
+            torch.cuda.set_device(dev)
+            sp_group = dist.new_group(list(range(world_size)))
+            C = int(cases["C"])
+            sp_fc = Qwen4_5FastAllReduce(sp_group, dev, max_tokens=64, hidden_dims=(C,))
+            sc = Qwen4_5ShortConv(
+                channels=C,
+                kernel_size=4,
+                residual=True,
+                use_activation=True,
+                dtype=torch.bfloat16,
+                device=dev,
+                sp_size=world_size,
+                sp_rank=rank,
+                sp_group=sp_group,
+            ).eval()
+            with torch.no_grad():
+                sc.weight.copy_(cases["weight"].to(dev))
+
+                # 1. T=17 non-divisible B=1 packed + state sync
+                x17 = cases["x17"].to(dev)
+                b0, b1 = sp_slice_bounds(17, world_size, rank)
+                st17 = ShortConvState(torch.zeros((1, C, 3), dtype=torch.bfloat16, device=dev))
+                y17_sp = sc.forward_sp_packed(
+                    x17.view(17, C)[b0:b1], 1, 17, state=st17, sp_fast_comm=sp_fc
+                )
+                y17_ref = cases["y17_ref"].to(dev).view(17, C)[b0:b1]
+                assert float((y17_sp.float() - y17_ref.float()).abs().max().item()) < 2e-2
+                assert float((st17.conv_state.float() - cases["st17_ref"].to(dev).float()).abs().max().item()) < 2e-2
+
+                # 2. B=3, T=7 multi-request boundary isolation (mid-request SP splits)
+                xb3 = cases["xb3"].to(dev)
+                s0, s1 = sp_slice_bounds(3 * 7, world_size, rank)
+                stb3 = ShortConvState(torch.zeros((3, C, 3), dtype=torch.bfloat16, device=dev))
+                yb3_sp = sc.forward_sp_packed(
+                    xb3.view(21, C)[s0:s1], 3, 7, state=stb3, sp_fast_comm=sp_fc
+                )
+                yb3_ref = cases["yb3_ref"].to(dev).view(21, C)[s0:s1]
+                assert float((yb3_sp.float() - yb3_ref.float()).abs().max().item()) < 2e-2
+                # Perturb request 0; request 1 & 2 outputs must remain invariant
+                xb3_pert = xb3.clone()
+                xb3_pert[0, -2:].add_(1.5)
+                stb3_p = ShortConvState(torch.zeros((3, C, 3), dtype=torch.bfloat16, device=dev))
+                yb3_pert = sc.forward_sp_packed(
+                    xb3_pert.view(21, C)[s0:s1], 3, 7, state=stb3_p, sp_fast_comm=sp_fc
+                )
+                full_orig = sp_fc.all_gather_sp(yb3_sp, total_tokens=21).view(3, 7, C)
+                full_pert = sp_fc.all_gather_sp(yb3_pert, total_tokens=21).view(3, 7, C)
+                assert float((full_orig[1:].float() - full_pert[1:].float()).abs().max().item()) == 0.0
+
+                # 3. T=3 < sp_size=4 (t_loc=1 < 3 multi-rank left halo + empty rank M_loc=0)
+                x3 = cases["x3"].to(dev)
+                e0, e1 = sp_slice_bounds(3, world_size, rank)
+                st3 = ShortConvState(torch.zeros((1, C, 3), dtype=torch.bfloat16, device=dev))
+                y3_sp = sc.forward_sp_packed(
+                    x3.view(3, C)[e0:e1], 1, 3, state=st3, sp_fast_comm=sp_fc
+                )
+                assert y3_sp.shape == (e1 - e0, C)
+                if e1 > e0:
+                    assert float((y3_sp.float() - cases["y3_ref"].to(dev).view(3, C)[e0:e1].float()).abs().max().item()) < 2e-2
+                assert float((st3.conv_state.float() - cases["st3_ref"].to(dev).float()).abs().max().item()) < 2e-2
+                halo3 = sc.exchange_sp_left_halo(x3[:, e0:e1, :])
+                assert halo3.shape == (1, C, 3)
+                if e1 > e0 and e0 >= 3:
+                    assert float((halo3[0].float() - x3[0, e0 - 3 : e0, :].transpose(0, 1).float()).abs().max().item()) == 0.0
+
+                # 4. B=5, T=1 decode across 4 ranks + replicated state sync
+                xd5 = cases["xd5"].to(dev)
+                d0, d1 = sp_slice_bounds(5, world_size, rank)
+                std5 = ShortConvState(cases["std5_init"].to(dev).clone())
+                yd5_sp = sc.forward_sp_packed(
+                    xd5.view(5, C)[d0:d1], 5, 1, state=std5, sp_fast_comm=sp_fc
+                )
+                assert yd5_sp.shape == (d1 - d0, C)
+                if d1 > d0:
+                    assert float((yd5_sp.float() - cases["yd5_ref"].to(dev).view(5, C)[d0:d1].float()).abs().max().item()) < 2e-2
+                assert float((std5.conv_state.float() - cases["std5_ref"].to(dev).float()).abs().max().item()) < 2e-2
+            dist.barrier()
+        finally:
+            dist.destroy_process_group()
+    except BaseException as exc:
+        err_q.put(f"rank {rank}: {exc!r}")
+        raise
+
+
+def test_r7_fused_hc_epilogues_branch5120_workspaces_and_sp_shortconv() -> None:
+    print("\n=== [3g] R7 Fused HC Epilogues, Branch5120 Decode, Static Workspaces & SP ShortConv ===")
+    import socket
+    import torch.distributed as dist
+    import torch.multiprocessing as mp
+    import torch.nn.functional as F
+
+    device = torch.device("cuda")
+    dtype = torch.bfloat16
+    torch.manual_seed(202670)
+
+    with torch.no_grad():
+        # 1. hc_mix_reduce_with_down_inject_triton (has_latent=True/False) & hc_down_silu_epilogue_triton
+        for H in (512, 5120):
+            HC, lowrank, pad_dim = 4, 32 if H == 512 else 128, 64 if H == 512 else 144
+            for M in (0, 1, 7, 32):
+                logits = torch.randn((1, M, HC * H), device=device, dtype=dtype) * 0.3
+                normed = torch.randn((1, M, HC * H), device=device, dtype=dtype) * 0.3
+                raw = torch.randn((1, M, pad_dim), device=device, dtype=dtype) * 0.3
+                for has_latent in (True, False):
+                    out_f, lat_f, inj_f = hc_mix_reduce_with_down_inject_triton(
+                        logits, normed, raw, lowrank, HC, has_latent=has_latent, has_inj=True
+                    )
+                    out_r = hc_mix_reduce_triton(logits, normed, HC)
+                    if has_latent:
+                        lat_r, inj_r = hc_down_inject_epilogue_triton(raw, lowrank, HC)
+                        assert _diff_stats(lat_f, lat_r)[0] < 1e-2
+                    else:
+                        inj_r = hc_inject_epilogue_triton(raw[..., :HC], HC)
+                    assert _diff_stats(out_f, out_r)[0] < 1e-2
+                    assert _diff_stats(inj_f, inj_r)[0] < 1e-2
+                silu_f = hc_down_silu_epilogue_triton(raw, lowrank, HC)
+                silu_r = F.silu(raw[..., :lowrank].float() / HC).to(dtype)
+                assert _diff_stats(silu_f, silu_r)[0] < 1e-2
+
+        # 2. H=5120 _hc_combine_and_norm_branch5120 & opaque decode fast path (B=1, 8, 16, 65) + CG
+        H, HC, ps = 5120, 4, 64
+        w_sc = torch.randn((H, 1, 4), device=device, dtype=dtype) * 0.2
+        w_hc = torch.randn((HC * H,), device=device, dtype=dtype) * 0.2
+        b_hc = torch.randn((HC * H,), device=device, dtype=dtype) * 0.2
+        for B in (1, 8, 16, 65):
+            raw_sub = torch.randn((B, 1, H), device=device, dtype=dtype) * 0.3
+            res = torch.randn((B, 1, HC * H), device=device, dtype=dtype) * 0.3
+            inj = torch.rand((B, 1, HC), device=device, dtype=dtype) * 1.5
+            pool_3d = torch.randn((B * 2 + 2, 1, H, 3), device=device, dtype=dtype) * 0.2
+            pool_fast = pool_3d.clone().reshape(-1, H * 3)
+            pool_ref = pool_3d.clone().reshape(-1, H * 3)
+            bt = torch.arange(1, B * 2 + 1, dtype=torch.int32, device=device).view(B, 2)
+            sb = torch.full((B,), 10, dtype=torch.int32, device=device)
+
+            comb_f, norm_f = hc_sconv_decode_opaque_combine_norm_triton(
+                raw_sub, res, inj, w_hc, b_hc, w_sc, pool_fast, bt, sb,
+                page_size=ps, conv_residual=True, conv_use_silu=True,
+                clamp_val=1.5,
+            )
+            sub_ref = causal_dwconv1d_decode_opaque_triton(
+                raw_sub, w_sc, pool_ref, bt, sb,
+                page_size=ps, pool_col_offset=0, residual=True, use_activation=True,
+                round_pre_act=False, clamp_val=1.5,
+            )
+            comb_r, norm_r = hc_combine_and_norm_triton(sub_ref, res, inj, w_hc, b_hc, eps=1e-6)
+            assert _diff_stats(comb_f, comb_r)[0] < 2e-2
+            assert _diff_stats(norm_f, norm_r)[0] < 2e-2
+            assert float((pool_fast - pool_ref).abs().max().item()) == 0.0
+
+        # Measure B=1/8/16 CG latency for _hc_sconv_decode_opaque_combine_norm (branch5120 path)
+        for B in (1, 8, 16):
+            raw_b = torch.randn((B, 1, H), device=device, dtype=dtype) * 0.3
+            res_b = torch.randn((B, 1, HC * H), device=device, dtype=dtype) * 0.3
+            inj_b = torch.rand((B, 1, HC), device=device, dtype=dtype) * 1.5
+            pool_b = torch.randn((B * 2 + 2, H * 3), device=device, dtype=dtype) * 0.2
+            bt_b = torch.arange(1, B * 2 + 1, dtype=torch.int32, device=device).view(B, 2)
+            sb_b = torch.full((B,), 10, dtype=torch.int32, device=device)
+            us_b = _bench_us(
+                lambda: hc_sconv_decode_opaque_combine_norm_triton(
+                    raw_b, res_b, inj_b, w_hc, b_hc, w_sc, pool_b, bt_b, sb_b,
+                    page_size=ps, conv_residual=True, conv_use_silu=True,
+                    clamp_val=1.5,
+                )
+            )
+            print(f"  [Bench R7] hc_sconv_decode_opaque_combine_norm B={B} (branch5120): {us_b:.2f} us")
+
+        # 3. hc_dflash_gconv_combine_norm_triton parity (H=512 & H=5120 rows>=64)
+        for H_gc, rows_gc in ((512, 16), (5120, 64)):
+            taps, bs, gs = 4, 8, 512
+            n_grp = H_gc // gs
+            raw_gc = torch.randn((rows_gc, H_gc), device=device, dtype=dtype) * 0.3
+            delta_gc = torch.randn((rows_gc, taps, n_grp), device=device, dtype=dtype) * 0.2
+            base_gc = torch.randn((taps, H_gc), device=device, dtype=dtype) * 0.2
+            res_gc = torch.randn((rows_gc, HC * H_gc), device=device, dtype=dtype) * 0.3
+            inj_gc = torch.rand((rows_gc, HC), device=device, dtype=dtype) * 1.5
+            w_gc = torch.randn((HC * H_gc,), device=device, dtype=dtype) * 0.2
+            b_gc = torch.randn((HC * H_gc,), device=device, dtype=dtype) * 0.2
+            comb_d, norm_d = hc_dflash_gconv_combine_norm_triton(
+                raw_gc, delta_gc, base_gc, bs, gs, taps, res_gc, inj_gc, w_gc, b_gc, clip_value=10.0
+            )
+            row_in_blk = torch.arange(rows_gc, device=device) % bs
+            grp_ids = torch.arange(H_gc, device=device) // gs
+            acc = torch.zeros_like(raw_gc, dtype=torch.float32)
+            for k in range(taps):
+                src_row = (torch.arange(rows_gc, device=device) - k).clamp_min(0)
+                mask = (row_in_blk >= k).float().unsqueeze(-1)
+                eff_w = base_gc[k].float().unsqueeze(0) + delta_gc[:, k, :][:, grp_ids].float()
+                acc += eff_w * raw_gc[src_row].float() * mask
+            sub_gc_ref = acc.clamp(-10.0, 10.0).to(dtype)
+            comb_ref = hc_combine_ref(sub_gc_ref, res_gc, inj_gc)
+            norm_ref = grouped_gemma_rmsnorm_bias_ref(comb_ref, w_gc, b_gc, HC, eps=1e-6)
+            assert _diff_stats(comb_d, comb_ref)[0] < 2e-2
+            assert _diff_stats(norm_d, norm_ref)[0] < 2e-2
+
+        # 4. HCStaticWorkspace & ShortConvStaticWorkspace ping-pong non-aliasing + eager reuse + grad safety
+        hc_mod = Qwen4_5HyperConnection(hidden_size=512, hc_count=4, hc_lowrank=32, dtype=dtype, device=device).eval()
+        hc_ws = HCStaticWorkspace()
+        hi = torch.randn((2, 8, 4 * 512), device=device, dtype=dtype) * 0.2
+        prev_l = torch.randn((2, 8, 32), device=device, dtype=dtype) * 0.2
+        m0, r0, ij0, lt0 = hc_mod.mix_with_latent(hi, prev_l, ws=hc_ws)
+        m0_snap, r0_snap = m0.clone(), r0.clone()
+        m1, r1, ij1, lt1 = hc_mod.combine_and_mix_with_latent(m0, r0, ij0, lt0, ws=hc_ws)
+        assert float((m0 - m0_snap).abs().max().item()) == 0.0
+        assert float((r0 - r0_snap).abs().max().item()) == 0.0
+        assert len(hc_ws._pool) > 0
+        # Grad mode bypasses static pool cleanly
+        with torch.enable_grad():
+            hi_g = hi.detach().requires_grad_(True)
+            mg, rg, ijg, ltg = hc_mod.mix_with_latent(hi_g, prev_l, ws=hc_ws)
+            assert rg.requires_grad and mg.data_ptr() != m0.data_ptr() and mg.data_ptr() != m1.data_ptr()
+            assert float((m0 - m0_snap).abs().max().item()) == 0.0
+
+        sc_ws = ShortConvStaticWorkspace()
+        w_rag = torch.randn((512, 1, 4), device=device, dtype=dtype) * 0.2
+        x_rag = torch.randn((18, 512), device=device, dtype=dtype) * 0.3
+        cu_rag = torch.tensor([0, 7, 18], dtype=torch.int32, device=device)
+        t_req_rag = torch.tensor([0, 1], dtype=torch.int32, device=device)
+        t_t0_rag = torch.tensor([0, 0], dtype=torch.int32, device=device)
+        y_rag0 = causal_dwconv1d_ragged_prefill_with_snapshots_triton(
+            x_rag, w_rag, cu_rag, t_req_rag, t_t0_rag, ws=sc_ws
+        )
+        y_rag0_snap = y_rag0.clone()
+        y_rag1 = causal_dwconv1d_ragged_prefill_with_snapshots_triton(
+            x_rag + 0.5, w_rag, cu_rag, t_req_rag, t_t0_rag, ws=sc_ws
+        )
+        assert float((y_rag0 - y_rag0_snap).abs().max().item()) == 0.0
+        assert len(sc_ws._pool) > 0
+
+    # 5. Real 4-rank Gloo+CUDA Qwen4_5ShortConv.forward_sp_packed & exchange_sp_left_halo
+    with torch.no_grad():
+        C_sp = 256
+        sc_ref = Qwen4_5ShortConv(
+            channels=C_sp, kernel_size=4, residual=True, use_activation=True, dtype=dtype, device=device
+        ).eval()
+        sc_ref.weight.normal_(0.0, 0.15)
+        x17 = torch.randn((1, 17, C_sp), device=device, dtype=dtype) * 0.4
+        xb3 = torch.randn((3, 7, C_sp), device=device, dtype=dtype) * 0.4
+        x3 = torch.randn((1, 3, C_sp), device=device, dtype=dtype) * 0.4
+        xd5 = torch.randn((5, 1, C_sp), device=device, dtype=dtype) * 0.4
+        std5_init = torch.randn((5, C_sp, 3), device=device, dtype=dtype) * 0.2
+
+        st17_ref = ShortConvState(torch.zeros((1, C_sp, 3), dtype=dtype, device=device))
+        y17_ref = sc_ref(x17, state=st17_ref)
+        stb3_ref = ShortConvState(torch.zeros((3, C_sp, 3), dtype=dtype, device=device))
+        yb3_ref = sc_ref(xb3, state=stb3_ref)
+        st3_ref = ShortConvState(torch.zeros((1, C_sp, 3), dtype=dtype, device=device))
+        y3_ref = sc_ref(x3, state=st3_ref)
+        std5_ref = ShortConvState(std5_init.clone())
+        yd5_ref = sc_ref(xd5, state=std5_ref)
+        cases = {
+            "C": C_sp,
+            "weight": sc_ref.weight.cpu(),
+            "x17": x17.cpu(), "y17_ref": y17_ref.cpu(), "st17_ref": st17_ref.conv_state.cpu(),
+            "xb3": xb3.cpu(), "yb3_ref": yb3_ref.cpu(),
+            "x3": x3.cpu(), "y3_ref": y3_ref.cpu(), "st3_ref": st3_ref.conv_state.cpu(),
+            "xd5": xd5.cpu(), "std5_init": std5_init.cpu(), "yd5_ref": yd5_ref.cpu(), "std5_ref": std5_ref.conv_state.cpu(),
+        }
+
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        port = sock.getsockname()[1]
+    ctx = mp.get_context("spawn")
+    err_q = ctx.Queue()
+    procs = [ctx.Process(target=_r7_sp_shortconv_gloo_worker, args=(r, 4, port, cases, err_q)) for r in range(4)]
+    for p in procs:
+        p.start()
+    for p in procs:
+        p.join(timeout=120)
+    errors = []
+    while not err_q.empty():
+        errors.append(err_q.get())
+    for r, p in enumerate(procs):
+        if p.is_alive():
+            p.terminate()
+            raise TimeoutError(f"R7 ShortConv SP worker {r} timed out")
+        assert p.exitcode == 0, f"R7 ShortConv SP worker {r} exited {p.exitcode}: {errors}"
+    assert errors == [], f"R7 ShortConv SP worker errors: {errors}"
+    print("  PASS: R7 fused HC epilogues, branch5120, static workspaces & 4-rank SP ShortConv verified.")
+
+
 def main() -> int:
     print(
         f"Device: {torch.cuda.get_device_name(0)} "
@@ -1499,6 +1801,7 @@ def main() -> int:
     test_r4_shortconv_opaque_verify_and_clip_value()
     test_r5_ple_u64_hc_split5120_and_strided_shortconv()
     test_r6_fast_launch_opaque_decode_and_ple_snap_aligned()
+    test_r7_fused_hc_epilogues_branch5120_workspaces_and_sp_shortconv()
     run_benchmarks()
     print(f"\nALL TESTS & BENCHMARKS PASSED in {time.perf_counter() - t0:.2f}s!")
     return 0

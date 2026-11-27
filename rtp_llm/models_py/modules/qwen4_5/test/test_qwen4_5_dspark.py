@@ -2067,7 +2067,7 @@ class TestDFlash2Phase2MHAAndTP4(unittest.TestCase):
         for p in procs:
             p.start()
         for p in procs:
-            p.join(timeout=120)
+            p.join(timeout=180)
         errors = []
         while not err_q.empty():
             errors.append(err_q.get())
@@ -2289,11 +2289,11 @@ class TestDFlash2Phase2MHAAndTP4(unittest.TestCase):
 
     @unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
     def test_dflash2_multi_parallel_modes_distributed_gloo_parity(self):
-        """Verify 4-rank Gloo DFlash2 dp4_ep4, dp2_tp2_ep4, and sp4_tp4_ep4 parity vs tp1_ep1."""
+        """Verify 4-rank Gloo DFlash2 dp4_ep4, dp2_tp2_ep4, sp4_tp4_ep4, and dp2_tpsp2_ep4 parity vs tp1_ep1."""
         import socket
         import torch.multiprocessing as mp
 
-        for pmode in ("dp4_ep4", "dp2_tp2_ep4", "sp4_tp4_ep4"):
+        for pmode in ("dp4_ep4", "dp2_tp2_ep4", "sp4_tp4_ep4", "dp2_tpsp2_ep4"):
             with socket.socket() as sock:
                 sock.bind(("127.0.0.1", 0))
                 port = sock.getsockname()[1]
@@ -2306,7 +2306,7 @@ class TestDFlash2Phase2MHAAndTP4(unittest.TestCase):
             for p in procs:
                 p.start()
             for p in procs:
-                p.join(timeout=120)
+                p.join(timeout=180)
             errs = []
             while not err_q.empty():
                 errs.append(err_q.get())
@@ -3364,6 +3364,131 @@ class TestDFlash2Phase2MHAAndTP4(unittest.TestCase):
             dm.triton.knobs.runtime.launch_enter_hook.calls.remove(_on_launch)
         self.assertEqual(hook_calls[0], 1)
 
+    @torch.inference_mode()
+    def test_dflash2_r7_gconv_hc_fusion_ws_and_launch_reduction_gpu(self) -> None:
+        """Verify R7 DFlashGroupedConv+HC fusion, HCStaticWorkspace CG/non-alias, & propose launch reduction."""
+        if not torch.cuda.is_available():
+            self.skipTest("CUDA unavailable")
+        import rtp_llm.models_py.model_desc.qwen4_5_dspark_model as dm
+        from rtp_llm.models_py.modules.qwen4_5.hyper_connection import HCStaticWorkspace
+        import torch.nn.functional as F
+
+        device = torch.device("cuda:0")
+        _cpu_rng = torch.random.get_rng_state()
+        _cuda_rng = torch.cuda.get_rng_state(device)
+        self.addCleanup(torch.cuda.set_rng_state, _cuda_rng, device)
+        self.addCleanup(torch.random.set_rng_state, _cpu_rng)
+        torch.manual_seed(7070)
+        cfg, mw = _load_dspark_model_weights(MOCK_8L_DFLASH, device=str(device))
+        spec = cfg._dflash2_spec
+        m = Qwen4_5DSparkModel(
+            cfg, ParallelismConfig(), mw, max_generate_batch_size=8, dflash_attn_backend="triton"
+        )
+        m.eval()
+        for lyr in m.layers:
+            lyr.mlp.gate.weight.data.zero_()
+            lyr.mlp.expert_bias.data.copy_(
+                torch.linspace(8.0, -8.0, lyr.mlp.expert_bias.numel(), device=device)
+            )
+        # 1. Direct combine_dflash_gconv_and_mix_with_latent parity against finish + combine_and_mix_with_latent_ref
+        lyr0 = m.layers[0]
+        raw_sub = torch.randn((16, spec.hidden_size), dtype=torch.bfloat16, device=device) * 0.2
+        res_t = torch.randn((16, spec.hc_count * spec.hidden_size), dtype=torch.bfloat16, device=device) * 0.2
+        inj_t = torch.rand((16, spec.hc_count), dtype=torch.bfloat16, device=device) * 1.5
+        prev_lat_t = torch.randn((16, lyr0.mlp_hyper_connection.hc_lowrank), dtype=torch.bfloat16, device=device) * 0.2
+        pre_g, coeff_g = lyr0.attention_conv.prepare(raw_sub)
+        m_f, r_f, ij_f, lat_f = lyr0.mlp_hyper_connection.combine_dflash_gconv_and_mix_with_latent(
+            pre_g, coeff_g, lyr0.attention_conv.base_kernel[1],
+            lyr0.attention_conv.block_size, lyr0.attention_conv.group_size, lyr0.attention_conv.taps,
+            res_t, inj_t, prev_latent=prev_lat_t, clip_value=10.0, ws=HCStaticWorkspace(),
+        )
+        finished = lyr0.attention_conv.finish(pre_g, coeff_g, clip_value=10.0)
+        m_r, r_r, ij_r, lat_r = lyr0.mlp_hyper_connection.combine_and_mix_with_latent_ref(
+            finished, res_t, inj_t, prev_latent=prev_lat_t
+        )
+        for a, b in ((m_f, m_r), (r_f, r_r), (ij_f, ij_r), (lat_f, lat_r)):
+            self.assertGreaterEqual(
+                F.cosine_similarity(a.float().reshape(-1), b.float().reshape(-1), dim=0).item(),
+                0.9999,
+            )
+
+        # 2. Full 5L forward_propose ws vs no_ws parity, CG replay, launch reduction (<=195), and 0 cutlass_80
+        ps = 16
+        kv_init = [
+            torch.randn((8, 2, 1, ps, spec.head_dim), dtype=torch.bfloat16, device=device) * 0.05
+            for _ in range(spec.num_hidden_layers)
+        ]
+        m.kv_cache = _MultiLayerDictKVCache(
+            [LayerKVCache(t.clone(), ps, i, "default") for i, t in enumerate(kv_init)]
+        )
+        bt = torch.tensor([[1, 2], [3, 4]], dtype=torch.int32, device=device)
+        propose_in = _make_dflash2_inputs(
+            batch_size=2, prefix_lens=[3, 2], query_width=8, anchor_ids=[15, 25],
+            block_table=bt, noise_token_id=cfg.dspark_noise_token_id,
+            device=str(device), use_device_mirrors=True, is_target_verify=False,
+        )
+        fmha = m.prepare_fmha_impl(propose_in)
+        m._hc_ws = HCStaticWorkspace()
+        out_ws = m.forward_propose(propose_in, fmha_impl=fmha).hidden_states.clone()
+        m._hc_ws = None
+        out_nows = m.forward_propose(propose_in, fmha_impl=fmha).hidden_states.clone()
+        self.assertEqual(float((out_ws - out_nows).abs().max().item()), 0.0)
+
+        m._hc_ws = HCStaticWorkspace()
+        _ = m.forward_propose(propose_in, fmha_impl=fmha)
+        torch.cuda.synchronize()
+        g_r7 = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(g_r7):
+            cg_r7 = m.forward_propose(propose_in, fmha_impl=fmha).hidden_states
+        g_r7.replay()
+        torch.cuda.synchronize()
+        self.assertGreaterEqual(
+            F.cosine_similarity(cg_r7.float().reshape(-1), out_ws.float().reshape(-1), dim=0).item(),
+            0.999999,
+        )
+
+        with torch.profiler.profile(
+            activities=[torch.profiler.ProfilerActivity.CUDA, torch.profiler.ProfilerActivity.CPU]
+        ) as prof:
+            _ = m.forward_propose(propose_in, fmha_impl=fmha)
+            torch.cuda.synchronize()
+        cuda_events = [
+            e for e in prof.events()
+            if e.device_type == torch.profiler.DeviceType.CUDA and getattr(e, "device_time_total", 0) > 0
+        ]
+        self.assertLessEqual(len(cuda_events), 195, f"Expected <=195 R7 propose launches, got {len(cuda_events)}")
+        # Check production H=5120 LR=128 combine_dflash_gconv_and_mix_with_latent emits zero cutlass_80
+        from rtp_llm.models_py.modules.qwen4_5.hyper_connection import Qwen4_5HyperConnection
+        hc_prod = Qwen4_5HyperConnection(
+            hidden_size=5120, hc_count=4, hc_lowrank=128, dtype=torch.bfloat16, device=device
+        ).eval()
+        gconv_prod = dm.DFlashGroupedConv(hidden_size=5120, dtype=torch.bfloat16, device=device)
+        p_raw = torch.randn((16, 5120), dtype=torch.bfloat16, device=device) * 0.2
+        p_pre, p_coeff = gconv_prod.prepare(p_raw)
+        p_res = torch.randn((16, 4 * 5120), dtype=torch.bfloat16, device=device) * 0.2
+        p_inj = torch.rand((16, 4), dtype=torch.bfloat16, device=device)
+        p_lat = torch.randn((16, 128), dtype=torch.bfloat16, device=device) * 0.2
+        _ = hc_prod.combine_dflash_gconv_and_mix_with_latent(
+            p_pre, p_coeff, gconv_prod.base_kernel[1], gconv_prod.block_size, gconv_prod.group_size,
+            gconv_prod.taps, p_res, p_inj, prev_latent=p_lat, ws=HCStaticWorkspace(),
+        )
+        torch.cuda.synchronize()
+        with torch.profiler.profile(
+            activities=[torch.profiler.ProfilerActivity.CUDA, torch.profiler.ProfilerActivity.CPU]
+        ) as prof_hc:
+            _ = hc_prod.combine_dflash_gconv_and_mix_with_latent(
+                p_pre, p_coeff, gconv_prod.base_kernel[1], gconv_prod.block_size, gconv_prod.group_size,
+                gconv_prod.taps, p_res, p_inj, prev_latent=p_lat, ws=HCStaticWorkspace(),
+            )
+            torch.cuda.synchronize()
+        self.assertFalse(
+            any(
+                "cutlass_80" in str(getattr(e, "name", "")).lower()
+                for e in prof_hc.events()
+                if e.device_type == torch.profiler.DeviceType.CUDA
+            )
+        )
+
 
 @torch.no_grad()
 def _dflash2_gloo_tp4_worker(rank: int, world_size: int, port: int, err_q) -> None:
@@ -3474,7 +3599,16 @@ def _dflash2_gloo_pmode_worker(rank: int, world_size: int, port: int, pmode: str
                 assert model.fast_all_reduce is not None and model.fast_all_reduce.group is model.tp_group
             elif pmode == "sp4_tp4_ep4":
                 assert model.dp_size == 1 and model.tp_size == 4 and model.sp_size == 4 and model.eff_ep_size == 4
+                assert not model.dp_attn and model.sp_rank == model.tp_rank == rank
+                assert model.lm_head_sharded and model.all_to_all_comm is not None
                 assert model.fast_all_reduce is not None and model.fast_all_reduce.group is model.tp_group
+            elif pmode == "dp2_tpsp2_ep4":
+                assert model.dp_size == 2 and model.tp_size == 2 and model.sp_size == 2 and model.eff_ep_size == 4
+                assert not model.dp_attn and model.dp_rank == (rank // 2) and model.tp_rank == (rank % 2)
+                assert model.sp_rank == model.tp_rank
+                assert model.lm_head_sharded and model.all_to_all_comm is not None
+                assert model.fast_all_reduce is not None and model.fast_all_reduce.group is model.tp_group
+                assert dist.get_world_size(model.tp_group) == 2
 
             for lyr in model.layers:
                 lyr.mlp.gate.weight.data.zero_()
@@ -3540,8 +3674,8 @@ def _dflash2_gloo_pmode_worker(rank: int, world_size: int, port: int, pmode: str
             tbo_cos = F.cosine_similarity(out_tbo.float(), out_par.float(), dim=-1).min().item()
             assert tbo_cos > 0.999, f"DFlash2 {pmode} enable_tbo=True rank={rank} vs eager cos={tbo_cos}"
 
-            # Also verify Triton DFlash2 backend parity under multi-parallel dp2_tp2_ep4
-            if pmode == "dp2_tp2_ep4":
+            # Also verify Triton DFlash2 backend (and unequal DP ragged batches for dp2_tpsp2_ep4)
+            if pmode in ("dp2_tp2_ep4", "dp2_tpsp2_ep4"):
                 del model
                 torch.cuda.empty_cache()
                 m_tri = Qwen4_5DSparkModel(
@@ -3558,7 +3692,44 @@ def _dflash2_gloo_pmode_worker(rank: int, world_size: int, port: int, pmode: str
                 cos_tri_par = F.cosine_similarity(out_tri.float(), out_par.float(), dim=-1).min().item()
                 cos_tri_ref = F.cosine_similarity(out_tri.float(), out_ref.float(), dim=-1).min().item()
                 assert cos_tri_par > 0.99, f"DFlash2 Triton vs FI {pmode} rank={rank} cos={cos_tri_par}"
-                assert cos_tri_ref > 0.99, f"DFlash2 Triton vs ref {pmode} rank={rank} cos={cos_tri_ref}" 
+                assert cos_tri_ref > 0.99, f"DFlash2 Triton vs ref {pmode} rank={rank} cos={cos_tri_ref}"
+                if pmode == "dp2_tpsp2_ep4":
+                    del m_tri
+                    torch.cuda.empty_cache()
+                    m_unbal = Qwen4_5DSparkModel(
+                        cfg, pc, mw_full, max_generate_batch_size=4,
+                        parallel_mode=pmode, dp_equal_tokens=None,
+                    )
+                    assert m_unbal.all_to_all_comm is not None
+                    for lyr in m_unbal.layers:
+                        lyr.mlp.gate.weight.data.zero_()
+                        lyr.mlp.expert_bias.data.copy_(torch.linspace(8.0, -8.0, lyr.mlp.expert_bias.numel(), device=device))
+                    unbal_kv = [torch.zeros((8, 2, 1, page_size, spec.head_dim), dtype=torch.bfloat16, device=device) for _ in range(5)]
+                    m_unbal.kv_cache = _MultiLayerDictKVCache([LayerKVCache(unbal_kv[i], page_size, i, "default") for i in range(5)])
+                    loc_bs = 2 if m_unbal.dp_rank == 0 else 1
+                    loc_pref = [3, 2][:loc_bs]
+                    loc_anch = [15 + m_unbal.dp_rank * 100, 25 + m_unbal.dp_rank * 100][:loc_bs]
+                    loc_bt = bt[:loc_bs]
+                    loc_aux = aux_h if m_unbal.dp_rank == 0 else aux_h[:3]
+                    c_in = _make_dflash2_inputs(
+                        batch_size=loc_bs, prefix_lens=[0] * loc_bs, query_width=8, anchor_ids=loc_anch,
+                        block_table=loc_bt, noise_token_id=cfg.dspark_noise_token_id,
+                        input_hiddens=loc_aux, device=device, use_device_mirrors=True,
+                        is_target_verify=True, active_query_lens=loc_pref,
+                    )
+                    m_unbal.forward_commit(c_in)
+                    p_in = _make_dflash2_inputs(
+                        batch_size=loc_bs, prefix_lens=loc_pref, query_width=8, anchor_ids=loc_anch,
+                        block_table=loc_bt, noise_token_id=cfg.dspark_noise_token_id,
+                        device=device, use_device_mirrors=True, is_target_verify=False,
+                    )
+                    out_u = m_unbal.forward_propose(p_in, fmha_impl=m_unbal.prepare_fmha_impl(p_in)).hidden_states
+                    ref_kv2 = [torch.zeros((8, 2, 1, page_size, spec.head_dim), dtype=torch.bfloat16, device=device) for _ in range(5)]
+                    ref_model.kv_cache = _MultiLayerDictKVCache([LayerKVCache(ref_kv2[i], page_size, i, "default") for i in range(5)])
+                    ref_model.forward_commit(c_in)
+                    out_ref_u = ref_model.forward_propose(p_in, fmha_impl=ref_model.prepare_fmha_impl(p_in)).hidden_states
+                    cos_u = F.cosine_similarity(out_u.float(), out_ref_u.float(), dim=-1).min().item()
+                    assert cos_u > 0.995, f"DFlash2 {pmode} unequal_dp(bs={loc_bs}) rank={rank} cos={cos_u}"
             dist.barrier()
         finally:
             dist.destroy_process_group()

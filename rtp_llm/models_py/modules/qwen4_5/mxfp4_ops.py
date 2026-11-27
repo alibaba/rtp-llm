@@ -52,6 +52,29 @@ from rtp_llm.models_py.modules.qwen4_5.activation import (
 
 MXFP4_BLOCK_SIZE = 32
 _DG_CONTIG_ALIGN = 128
+_MASKED_WS_MAX_M = 512
+_MASKED_WS_CACHE: Dict[Tuple[int, int], torch.Tensor] = {}
+
+
+def _align256(n: int) -> int:
+    return ((n + 255) // 256) * 256
+
+
+def _get_masked_ws_slab(dev: torch.device, need_bytes: int, *, cacheable: bool) -> torch.Tensor:
+    if not cacheable or dev.type != "cuda":
+        return torch.empty((need_bytes,), dtype=torch.uint8, device=dev)
+    dev_idx = int(dev.index if dev.index is not None else torch.cuda.current_device())
+    stream_id = int(torch.cuda.current_stream(dev).cuda_stream)
+    key = (dev_idx, stream_id)
+    cached = _MASKED_WS_CACHE.get(key)
+    if cached is not None and int(cached.numel()) >= need_bytes:
+        return cached
+    if torch.cuda.is_current_stream_capturing():
+        return torch.empty((need_bytes,), dtype=torch.uint8, device=dev)
+    alloc_bytes = need_bytes if cached is None else max(need_bytes, int(cached.numel()))
+    slab = torch.empty((alloc_bytes,), dtype=torch.uint8, device=dev)
+    _MASKED_WS_CACHE[key] = slab
+    return slab
 
 _E2M1_LUT_CPU = torch.tensor(
     [
@@ -2972,7 +2995,27 @@ def mxfp4_moe_deepgemm_contiguous(
         aligned_counts = ((counts + alignment - 1) // alignment) * alignment
         offsets = torch.cumsum(aligned_counts, dim=0) - aligned_counts
         all_tokens_buf = None
-    use_cap_nosync = ep_size <= 1
+    nosync_env = os.environ.get("QWEN4_5_MOE_CONTIG_NOSYNC")
+    explicit_ep_nosync = (
+        nosync_env is not None
+        and nosync_env.strip().lower() in ("1", "true", "yes")
+    )
+    capturing_cg = (
+        torch.cuda.is_current_stream_capturing()
+        or os.environ.get("RTP_LLM_CUDA_GRAPH_WARMUP_FORWARD") == "1"
+    )
+    # Keep EP>1 non-CG prefill exact via all_tokens_buf.item() unless explicitly opted in;
+    # otherwise the M*top_k + E_local*127 upper bound bloats all_tokens >3x on sparse EP=4 ranks.
+    use_cap_nosync = (
+        (ep_size <= 1)
+        or capturing_cg
+        or (
+            explicit_ep_nosync
+            and E_local <= 2048
+            and ids_c.dtype == torch.int32
+            and m_total_slots <= 524288
+        )
+    )
     if use_cap_nosync:
         all_tokens = (
             (m_total_slots + E_local * (alignment - 1) + alignment - 1) // alignment
@@ -3052,6 +3095,7 @@ def mxfp4_moe_deepgemm_contiguous(
         recipe_a=(1, 32),
         recipe_b=(1, 32),
     )
+    del a_fp8, a_scale
 
     h_fp8, h_scale = situ_glu_fp8_quant_packed(
         gate_up,
@@ -3061,6 +3105,7 @@ def mxfp4_moe_deepgemm_contiguous(
         zero_unused_scales=False,
         max_active_rows=active_rows_t,
     )
+    del gate_up
 
     down_out = torch.empty((all_tokens, L), dtype=torch.bfloat16, device=dev)
     deep_gemm.m_grouped_fp8_fp4_gemm_nt_contiguous(
@@ -3071,6 +3116,7 @@ def mxfp4_moe_deepgemm_contiguous(
         recipe_a=(1, 32),
         recipe_b=(1, 32),
     )
+    del h_fp8, h_scale
 
     out = torch.empty((M, L), dtype=res_dtype, device=dev)
     BLOCK_K = 512 if L >= 512 else triton.next_power_of_2(max(L, 64))
@@ -3137,8 +3183,12 @@ def _quant_and_scatter_fp8_to_masked_kernel(
     e_raw = tl.load(ids_ptr + m * TOP_K + slots_k, mask=mk, other=-1).to(tl.int32)
     le = e_raw - e_lo
     valid_e = mk & (le >= 0) & (le < E_local)
-    pos = tl.where(valid_e, tl.atomic_add(masked_m_ptr + le, 1, mask=valid_e), -1)
+    pos = tl.where(valid_e, tl.atomic_add(masked_m_ptr + tl.where(valid_e, le, 0), 1, mask=valid_e), -1)
     tl.store(dst_pos_ptr + m * TOP_K + slots_k, pos, mask=mk)
+    # Sync CTA so Warp 0 global writes to dst_pos are visible to all warps before loading pk_slot.
+    tl.debug_barrier()
+    if tl.sum((pos >= 0).to(tl.int32), axis=0) == 0:
+        return
 
     TILES: tl.constexpr = L // BLOCK_L
     GROUPS: tl.constexpr = BLOCK_L // 32
@@ -3155,18 +3205,27 @@ def _quant_and_scatter_fp8_to_masked_kernel(
             axis=1,
         ).to(tl.int32)
         po = t * PACKS + tl.arange(0, PACKS)
-        for k in tl.static_range(TOP_K):
+        for k in range(TOP_K):
             ek = tl.load(ids_ptr + m * TOP_K + k).to(tl.int32) - e_lo
             pk_slot = tl.load(dst_pos_ptr + m * TOP_K + k)
-            if pk_slot >= 0:
-                tl.store(
-                    a_q_ptr + ek.to(tl.int64) * stride_aqe + pk_slot.to(tl.int64) * stride_aqm + ol,
-                    qf_u8,
-                )
-                tl.store(
-                    a_sc_ptr + ek.to(tl.int64) * stride_asce + po.to(tl.int64) * stride_asck + pk_slot.to(tl.int64),
-                    pk,
-                )
+            ok = (
+                (pk_slot >= 0)
+                & (pk_slot.to(tl.int64) * stride_aqm < stride_aqe)
+                & (ek >= 0)
+                & (ek < E_local)
+            )
+            ek_s = tl.where(ok, ek, 0).to(tl.int64)
+            pk_s = tl.where(ok, pk_slot, 0).to(tl.int64)
+            tl.store(
+                a_q_ptr + ek_s * stride_aqe + pk_s * stride_aqm + ol,
+                qf_u8,
+                mask=ok,
+            )
+            tl.store(
+                a_sc_ptr + ek_s * stride_asce + po.to(tl.int64) * stride_asck + pk_s,
+                pk,
+                mask=ok,
+            )
 
 
 @triton.jit(do_not_specialize=["stride_q_row", "stride_sc_row", "stride_aqe", "stride_aqm", "stride_asce", "stride_asck"])
@@ -3232,20 +3291,115 @@ def _scatter_fp8_to_masked_kernel(
         )
 
 
+@triton.jit(
+    do_not_specialize=[
+        "M",
+        "e_lo",
+        "E_local",
+        "sc_off",
+        "meta_off",
+        "row_bytes",
+        "stride_aqe",
+        "stride_aqm",
+        "stride_asce",
+        "stride_asck",
+    ]
+)
+def _scatter_packed_fp8_to_masked_kernel(
+    all_buf_ptr,
+    masked_m_ptr,
+    a_q_ptr,
+    a_sc_ptr,
+    dst_pos_ptr,
+    M,
+    sc_off: tl.int64,
+    meta_off: tl.int64,
+    row_bytes: tl.int64,
+    e_lo,
+    E_local,
+    stride_aqe: tl.int64,
+    stride_aqm: tl.int64,
+    stride_asce: tl.int64,
+    stride_asck: tl.int64,
+    TOP_K: tl.constexpr,
+    TOP_K_PAD: tl.constexpr,
+    L: tl.constexpr,
+    BLOCK_L: tl.constexpr,
+):
+    """Fused AllToAll unpack + DeepGEMM masked expert scatter (single read of all_buf)."""
+    m = tl.program_id(0).to(tl.int64)
+    if m >= M:
+        return
+    in_row = all_buf_ptr + m * row_bytes
+    meta_i32 = (in_row + meta_off).to(tl.pointer_type(tl.int32))
+    slots_k = tl.arange(0, TOP_K_PAD)
+    mk = slots_k < TOP_K
+    e_raw = tl.load(meta_i32 + slots_k, mask=mk, other=-1).to(tl.int32)
+    le = e_raw - e_lo
+    valid_e = mk & (le >= 0) & (le < E_local)
+    pos = tl.where(valid_e, tl.atomic_add(masked_m_ptr + tl.where(valid_e, le, 0), 1, mask=valid_e), -1)
+    tl.store(dst_pos_ptr + m * TOP_K + slots_k, pos, mask=mk)
+    # Sync CTA so Warp 0 global writes to dst_pos are visible to all warps before loading pk_slot.
+    tl.debug_barrier()
+    if tl.sum((pos >= 0).to(tl.int32), axis=0) == 0:
+        return
+
+    TILES: tl.constexpr = L // BLOCK_L
+    GROUPS: tl.constexpr = BLOCK_L // 32
+    PACKS: tl.constexpr = GROUPS // 4
+    shifts = (tl.arange(0, 4)[None, :] * 8).to(tl.uint32)
+    for t in tl.static_range(TILES):
+        ol = t * BLOCK_L + tl.arange(0, BLOCK_L)
+        og = t * GROUPS + tl.arange(0, GROUPS)
+        qf_u8 = tl.load(in_row + ol)
+        sc_u8 = tl.load(in_row + sc_off + og).to(tl.uint32)
+        pk = tl.sum(sc_u8.reshape((PACKS, 4)) << shifts, axis=1).to(tl.int32)
+        po = t * PACKS + tl.arange(0, PACKS)
+        for k in range(TOP_K):
+            ek = tl.load(meta_i32 + k).to(tl.int32) - e_lo
+            pk_slot = tl.load(dst_pos_ptr + m * TOP_K + k)
+            ok = (
+                (pk_slot >= 0)
+                & (pk_slot.to(tl.int64) * stride_aqm < stride_aqe)
+                & (ek >= 0)
+                & (ek < E_local)
+            )
+            ek_s = tl.where(ok, ek, 0).to(tl.int64)
+            pk_s = tl.where(ok, pk_slot, 0).to(tl.int64)
+            tl.store(
+                a_q_ptr + ek_s * stride_aqe + pk_s * stride_aqm + ol,
+                qf_u8,
+                mask=ok,
+            )
+            tl.store(
+                a_sc_ptr + ek_s * stride_asce + po.to(tl.int64) * stride_asck + pk_s,
+                pk,
+                mask=ok,
+            )
+
+
 @triton.jit
 def _gather_masked_weighted_reduce_kernel(
     down_ptr,
     topk_ids_ptr,
     dst_pos_ptr,
     topk_weights_ptr,
+    all_buf_ptr,
+    scale_gate_ptr,
     out_ptr,
     K,
     ep_start,
     num_experts,
+    meta_off: tl.int64,
+    row_bytes: tl.int64,
     stride_de: tl.int64,
     stride_dm: tl.int64,
     stride_wm,
+    stride_sg: tl.int64,
     stride_om: tl.int64,
+    scale_gate_col: tl.constexpr,
+    PACKED_META: tl.constexpr,
+    HAS_SCALE_GATE: tl.constexpr,
     TOP_K: tl.constexpr,
     BLOCK_K: tl.constexpr,
 ):
@@ -3255,9 +3409,14 @@ def _gather_masked_weighted_reduce_kernel(
     mask_k = offs_k < K
 
     acc = tl.zeros((BLOCK_K,), dtype=tl.float32)
-    id_base = topk_ids_ptr + tok * TOP_K
     pos_base = dst_pos_ptr + tok * TOP_K
-    w_base = topk_weights_ptr + tok * stride_wm
+    if PACKED_META:
+        meta_ptr = all_buf_ptr + tok * row_bytes + meta_off
+        id_base = meta_ptr.to(tl.pointer_type(tl.int32))
+        w_base = (meta_ptr + TOP_K * 4).to(tl.pointer_type(tl.float32))
+    else:
+        id_base = topk_ids_ptr + tok * TOP_K
+        w_base = topk_weights_ptr + tok * stride_wm
     for k_idx in tl.static_range(TOP_K):
         pos = tl.load(pos_base + k_idx).to(tl.int64)
         if pos >= 0:
@@ -3271,11 +3430,32 @@ def _gather_masked_weighted_reduce_kernel(
                 ).to(tl.float32)
                 acc += v * w
 
+    out_val = acc.to(out_ptr.dtype.element_ty)
+    if HAS_SCALE_GATE:
+        sg_raw = tl.load(scale_gate_ptr + tok * stride_sg + scale_gate_col).to(tl.float32)
+        sig_sg = tl.div_rn(1.0, 1.0 + libdevice.exp(-sg_raw)).to(out_ptr.dtype.element_ty)
+        out_val = (out_val.to(tl.float32) * sig_sg.to(tl.float32)).to(out_ptr.dtype.element_ty)
+
     tl.store(
         out_ptr + tok * stride_om + offs_k,
-        acc.to(out_ptr.dtype.element_ty),
+        out_val,
         mask=mask_k,
     )
+
+
+def _unpack_packed_fp8_payload(
+    packed: Tuple[torch.Tensor, int, int, int, int, int],
+) -> Tuple[Tuple[torch.Tensor, torch.Tensor], torch.Tensor, torch.Tensor]:
+    all_buf, L, sc_off, meta_off, row_bytes, top_k = packed
+    M = int(all_buf.shape[0])
+    num_groups = L // 32
+    dev = all_buf.device
+    xq = all_buf[:, :L].contiguous().view(torch.float8_e4m3fn)
+    xsc = all_buf[:, sc_off : sc_off + num_groups].contiguous()
+    meta_u8 = all_buf[:, meta_off : meta_off + top_k * 8].contiguous()
+    ids = meta_u8[:, : top_k * 4].view(torch.int32).reshape(M, top_k)
+    w = meta_u8[:, top_k * 4 :].view(torch.float32).reshape(M, top_k)
+    return (xq, xsc), ids, w
 
 
 def mxfp4_moe_deepgemm_masked(
@@ -3289,15 +3469,28 @@ def mxfp4_moe_deepgemm_masked(
     ep_start: int = 0,
     ep_size: int = 1,
     prequant_fp8: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
+    prequant_packed: Optional[Tuple[torch.Tensor, int, int, int, int, int]] = None,
+    scale_gate: Optional[torch.Tensor] = None,
+    scale_gate_col: int = 0,
     out_dtype: Optional[torch.dtype] = None,
 ) -> torch.Tensor:
     """DeepGEMM SM100 ``m_grouped_fp8_fp4_gemm_nt_masked`` (100% CUDA-Graph Decode)."""
     import deep_gemm
 
-    x_ref = prequant_fp8[0] if prequant_fp8 is not None else x
-    assert x_ref is not None
-    M, L = x_ref.shape
-    dev = x_ref.device
+    if prequant_packed is not None:
+        all_buf, L, sc_off, meta_off, row_bytes, top_k = prequant_packed
+        M = int(all_buf.shape[0])
+        dev = all_buf.device
+    else:
+        x_ref = prequant_fp8[0] if prequant_fp8 is not None else x
+        assert x_ref is not None
+        M, L = x_ref.shape
+        dev = x_ref.device
+        top_k = int(topk_ids.shape[1])
+        all_buf = None
+        sc_off = 0
+        meta_off = 0
+        row_bytes = 0
     res_dtype = (
         out_dtype
         if out_dtype is not None
@@ -3305,7 +3498,6 @@ def mxfp4_moe_deepgemm_masked(
     )
     if M == 0:
         return torch.empty((0, L), dtype=res_dtype, device=dev)
-    top_k = topk_ids.shape[1]
     E_local = weights.num_experts
     I = weights.intermediate_size
     if L % 128 != 0 or I % 128 != 0:
@@ -3321,19 +3513,94 @@ def mxfp4_moe_deepgemm_masked(
 
     (w13_i8, w13_s), (w2_i8, w2_s) = weights.get_deepgemm_pair()
 
-    # Active slots [0..masked_m[e]-1] are fully overwritten and masked_m==0 groups
-    # are skipped by DeepGEMM, avoiding costly FillFunctors inside CUDA Graphs.
-    a_fp8 = torch.empty((E_local, max_m, L), dtype=torch.float8_e4m3fn, device=dev)
     num_groups = L // 32
     num_packs = num_groups // 4
-    a_scale = torch.empty(
-        (E_local, num_packs, max_m), dtype=torch.int32, device=dev
-    ).transpose(1, 2)
-    masked_m = torch.zeros((E_local,), dtype=torch.int32, device=dev)
-    dst_pos = torch.empty((M, top_k), dtype=torch.int32, device=dev)
-    ids_c = topk_ids if topk_ids.is_contiguous() else topk_ids.contiguous()
+    num_groups_i = I // 32
+    num_packs_i = (num_groups_i + 3) // 4
+    tma_m_h = ((max_m + 3) // 4) * 4
 
-    if prequant_fp8 is None and x is not None and M <= 2048:
+    # Single reusable slab eliminates per-layer 100+ MiB allocator churn across all MoE layers.
+    sz_mm = _align256(E_local * 4)
+    sz_dp = _align256(M * top_k * 4)
+    sz_a_q = _align256(E_local * max_m * L)
+    sz_a_sc = _align256(E_local * num_packs * max_m * 4)
+    sz_h_q = _align256(E_local * max_m * I)
+    sz_h_sc = _align256(E_local * num_packs_i * tma_m_h * 4)
+    sz_reg2 = max(sz_a_q + sz_a_sc, sz_h_q + sz_h_sc)
+    sz_gu = _align256(E_local * max_m * 2 * I * 2)
+    sz_dn = _align256(E_local * max_m * L * 2)
+    sz_reg1 = max(sz_gu, sz_dn)
+    off_dp = sz_mm
+    off_reg2 = off_dp + sz_dp
+    off_reg1 = off_reg2 + sz_reg2
+    total_ws = off_reg1 + sz_reg1
+
+    slab = _get_masked_ws_slab(dev, total_ws, cacheable=(max_m <= _MASKED_WS_MAX_M))
+    masked_m = slab[: E_local * 4].view(torch.int32)
+    masked_m.zero_()
+    dst_pos = slab[off_dp : off_dp + M * top_k * 4].view(torch.int32).view(M, top_k)
+
+    a_fp8 = (
+        slab[off_reg2 : off_reg2 + E_local * max_m * L]
+        .view(torch.float8_e4m3fn)
+        .view(E_local, max_m, L)
+    )
+    a_scale = (
+        slab[off_reg2 + sz_a_q : off_reg2 + sz_a_q + E_local * num_packs * max_m * 4]
+        .view(torch.int32)
+        .view(E_local, num_packs, max_m)
+        .transpose(1, 2)
+    )
+    gate_up = (
+        slab[off_reg1 : off_reg1 + E_local * max_m * 2 * I * 2]
+        .view(torch.bfloat16)
+        .view(E_local, max_m, 2 * I)
+    )
+    h_fp8 = (
+        slab[off_reg2 : off_reg2 + E_local * max_m * I]
+        .view(torch.float8_e4m3fn)
+        .view(E_local, max_m, I)
+    )
+    h_scale = (
+        slab[off_reg2 + sz_h_q : off_reg2 + sz_h_q + E_local * num_packs_i * tma_m_h * 4]
+        .view(torch.int32)
+        .view(E_local, num_packs_i, tma_m_h)
+        .transpose(1, 2)[:, :max_m, :]
+    )
+    down_out = (
+        slab[off_reg1 : off_reg1 + E_local * max_m * L * 2]
+        .view(torch.bfloat16)
+        .view(E_local, max_m, L)
+    )
+
+    if prequant_packed is not None:
+        assert all_buf is not None
+        block_l = 512 if (L % 512 == 0) else (256 if (L % 256 == 0) else 128)
+        _scatter_packed_fp8_to_masked_kernel[(M,)](
+            all_buf,
+            masked_m,
+            a_fp8.view(torch.uint8),
+            a_scale,
+            dst_pos.view(-1),
+            M,
+            sc_off,
+            meta_off,
+            row_bytes,
+            e_lo,
+            E_local,
+            a_fp8.stride(0),
+            a_fp8.stride(1),
+            a_scale.stride(0),
+            a_scale.stride(2),
+            TOP_K=top_k,
+            TOP_K_PAD=max(16, triton.next_power_of_2(top_k)),
+            L=L,
+            BLOCK_L=block_l,
+            num_warps=4,
+        )
+        ids_c = all_buf
+    elif prequant_fp8 is None and x is not None and M <= 2048:
+        ids_c = topk_ids if topk_ids.is_contiguous() else topk_ids.contiguous()
         x_c = x if x.stride(-1) == 1 else x.contiguous()
         block_l = 512 if (L % 512 == 0) else (256 if (L % 256 == 0) else 128)
         _quant_and_scatter_fp8_to_masked_kernel[(M,)](
@@ -3359,6 +3626,7 @@ def mxfp4_moe_deepgemm_masked(
             num_warps=4,
         )
     else:
+        ids_c = topk_ids if topk_ids.is_contiguous() else topk_ids.contiguous()
         if prequant_fp8 is not None:
             x_q, x_sc_raw = prequant_fp8
         else:
@@ -3391,7 +3659,6 @@ def mxfp4_moe_deepgemm_masked(
         )
         del x_q, x_sc_raw
 
-    gate_up = torch.empty((E_local, max_m, 2 * I), dtype=torch.bfloat16, device=dev)
     deep_gemm.m_grouped_fp8_fp4_gemm_nt_masked(
         (a_fp8, a_scale),
         (w13_i8, w13_s),
@@ -3401,18 +3668,17 @@ def mxfp4_moe_deepgemm_masked(
         recipe_a=(1, 32),
         recipe_b=(1, 32),
     )
-    del a_fp8, a_scale
 
-    h_fp8, h_scale = situ_glu_fp8_quant_masked_packed(
+    situ_glu_fp8_quant_masked_packed(
         gate_up,
         masked_m,
         gate_beta=gate_beta,
         up_beta=up_beta,
         zero_unused_scales=False,
+        out_q=h_fp8,
+        out_sc=h_scale,
     )
-    del gate_up
 
-    down_out = torch.empty((E_local, max_m, L), dtype=torch.bfloat16, device=dev)
     deep_gemm.m_grouped_fp8_fp4_gemm_nt_masked(
         (h_fp8, h_scale),
         (w2_i8, w2_s),
@@ -3422,28 +3688,60 @@ def mxfp4_moe_deepgemm_masked(
         recipe_a=(1, 32),
         recipe_b=(1, 32),
     )
-    del h_fp8, h_scale
 
     out = torch.empty((M, L), dtype=res_dtype, device=dev)
     BLOCK_K = 512 if L >= 512 else triton.next_power_of_2(max(L, 64))
-    w_f = (
-        topk_weights
-        if (topk_weights.dtype == torch.float32 and topk_weights.is_contiguous())
-        else topk_weights.float().contiguous()
-    )
+    packed_meta = prequant_packed is not None
+    if packed_meta:
+        assert all_buf is not None
+        ids_arg = all_buf
+        w_arg = all_buf
+        all_arg = all_buf
+        w_stride = 0
+    else:
+        w_f = (
+            topk_weights
+            if (topk_weights.dtype == torch.float32 and topk_weights.is_contiguous())
+            else topk_weights.float().contiguous()
+        )
+        ids_arg = ids_c
+        w_arg = w_f
+        all_arg = ids_c
+        w_stride = int(w_f.stride(0))
+    has_sg = scale_gate is not None
+    if has_sg:
+        assert scale_gate is not None
+        sg_2d = scale_gate.reshape(M, -1) if scale_gate.ndim >= 2 else scale_gate.reshape(M, 1)
+        if sg_2d.stride(-1) != 1:
+            sg_2d = sg_2d.contiguous()
+        sg_ptr: torch.Tensor = sg_2d
+        sg_stride = int(sg_2d.stride(0))
+        sg_col = int(scale_gate_col)
+    else:
+        sg_ptr = out
+        sg_stride = 0
+        sg_col = 0
     _gather_masked_weighted_reduce_kernel[(M, triton.cdiv(L, BLOCK_K))](
         down_out,
-        ids_c,
+        ids_arg,
         dst_pos,
-        w_f,
+        w_arg,
+        all_arg,
+        sg_ptr,
         out,
         L,
         e_lo,
         E_local,
+        meta_off,
+        row_bytes,
         down_out.stride(0),
         down_out.stride(1),
-        w_f.stride(0),
+        w_stride,
+        sg_stride,
         out.stride(0),
+        scale_gate_col=sg_col,
+        PACKED_META=packed_meta,
+        HAS_SCALE_GATE=has_sg,
         TOP_K=top_k,
         BLOCK_K=BLOCK_K,
         num_warps=4,
@@ -3706,7 +4004,11 @@ def resolve_moe_backend_for_shape(
         return "triton_splitk" if M <= 64 else "triton"
 
     if M <= 64:
-        dec_env = os.environ.get("QWEN4_5_MXFP4_DECODE_BACKEND", "triton_splitk")
+        dec_env = os.environ.get("QWEN4_5_MXFP4_DECODE_BACKEND", "auto")
+        if dec_env == "auto":
+            default_splitk_max = "32" if (L >= 1024 and I >= 1024) else "64"
+            splitk_max = int(os.environ.get("QWEN4_5_MXFP4_SPLITK_MAX_M", default_splitk_max))
+            return "deepgemm_masked" if (M > splitk_max and dg_masked_ok) else "triton_splitk"
         if dec_env == "sm100_winner":
             return "deepgemm_masked" if (M >= 2 and dg_masked_ok) else "triton_splitk"
         if capturing and dec_env in ("deepgemm_contiguous", "flashinfer", "flashinfer_noswap"):
@@ -3791,6 +4093,9 @@ def mxfp4_moe_forward(
     ep_size: int = 1,
     backend: str = "auto",
     prequant_fp8: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
+    prequant_packed: Optional[Tuple[torch.Tensor, int, int, int, int, int]] = None,
+    scale_gate: Optional[torch.Tensor] = None,
+    scale_gate_col: int = 0,
     out_dtype: Optional[torch.dtype] = None,
 ) -> torch.Tensor:
     """Full 2-stage MXFP4 Routed Experts execution with regime dispatch.
@@ -3808,10 +4113,15 @@ def mxfp4_moe_forward(
       - ``"triton"``: Baseline grouped Triton ``tl.dot_scaled``.
       - ``"ref"``: Exact dequant-BF16 reference.
     """
-    x_ref = prequant_fp8[0] if (x is None and prequant_fp8 is not None) else x
-    assert x_ref is not None
-    M, L = x_ref.shape
-    dev = x_ref.device
+    if prequant_packed is not None and x is None and prequant_fp8 is None:
+        M = int(prequant_packed[0].shape[0])
+        L = int(prequant_packed[1])
+        dev = prequant_packed[0].device
+    else:
+        x_ref = prequant_fp8[0] if (x is None and prequant_fp8 is not None) else x
+        assert x_ref is not None
+        M, L = x_ref.shape
+        dev = x_ref.device
     res_dtype = (
         out_dtype
         if out_dtype is not None
@@ -3823,9 +4133,12 @@ def mxfp4_moe_forward(
     chosen = resolve_moe_backend_for_shape(
         M, L, dev, weights, backend, use_triton, compute_mode=compute_mode
     )
+    if prequant_packed is not None and chosen != "deepgemm_masked":
+        prequant_fp8, topk_ids, topk_weights = _unpack_packed_fp8_payload(prequant_packed)
+        prequant_packed = None
 
     with _cuda_device_ctx(dev):
-        return _dispatch_mxfp4_moe_forward(
+        out = _dispatch_mxfp4_moe_forward(
             chosen,
             x,
             topk_ids,
@@ -3836,11 +4149,19 @@ def mxfp4_moe_forward(
             ep_start=ep_start,
             ep_size=ep_size,
             prequant_fp8=prequant_fp8,
+            prequant_packed=prequant_packed,
+            scale_gate=scale_gate if chosen == "deepgemm_masked" else None,
+            scale_gate_col=scale_gate_col,
             res_dtype=res_dtype,
             M=M,
             L=L,
             compute_mode=compute_mode,
         )
+        if scale_gate is not None and chosen != "deepgemm_masked" and out.shape[0] > 0:
+            sg = scale_gate.reshape(M, -1)[:, scale_gate_col : scale_gate_col + 1]
+            sig = torch.sigmoid(sg.float()).to(out.dtype)
+            out = (out.float() * sig.float()).to(out.dtype)
+        return out
 
 
 def _dispatch_mxfp4_moe_forward(
@@ -3855,10 +4176,13 @@ def _dispatch_mxfp4_moe_forward(
     ep_start: int,
     ep_size: int,
     prequant_fp8: Optional[Tuple[torch.Tensor, torch.Tensor]],
-    res_dtype: torch.dtype,
-    M: int,
-    L: int,
-    compute_mode: str,
+    prequant_packed: Optional[Tuple[torch.Tensor, int, int, int, int, int]] = None,
+    scale_gate: Optional[torch.Tensor] = None,
+    scale_gate_col: int = 0,
+    res_dtype: torch.dtype = torch.bfloat16,
+    M: int = 0,
+    L: int = 0,
+    compute_mode: str = "bf16",
 ) -> torch.Tensor:
     if chosen == "deepgemm_contiguous":
         return mxfp4_moe_deepgemm_contiguous(
@@ -3884,6 +4208,9 @@ def _dispatch_mxfp4_moe_forward(
             ep_start=ep_start,
             ep_size=ep_size,
             prequant_fp8=prequant_fp8,
+            prequant_packed=prequant_packed,
+            scale_gate=scale_gate,
+            scale_gate_col=scale_gate_col,
             out_dtype=res_dtype,
         )
     if chosen == "flashinfer":

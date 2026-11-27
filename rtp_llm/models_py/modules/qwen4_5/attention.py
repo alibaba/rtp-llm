@@ -733,7 +733,24 @@ class Qwen4_5Attention(nn.Module):
             kv_cache_dtype=kv_cache_dtype,
         )
 
-    def _maybe_all_reduce(self, out: torch.Tensor) -> torch.Tensor:
+    def _resolve_cp_indexer_dist(self) -> Tuple[int, int, Any]:
+        if (
+            self.dp_attn
+            or not torch.distributed.is_available()
+            or not torch.distributed.is_initialized()
+        ):
+            return 1, 0, None
+        if self.sp_size > 1 and self.sp_group is not None:
+            return self.sp_size, self.sp_rank, self.sp_group
+        if self.tp_size > 1 and self.tp_group is not None:
+            return self.tp_size, self.tp_rank, self.tp_group
+        return 1, 0, None
+
+    def _maybe_all_reduce(
+        self, out: torch.Tensor, *, skip_allreduce: bool = False
+    ) -> torch.Tensor:
+        if skip_allreduce:
+            return out
         if self.fast_all_reduce is not None:
             return self.fast_all_reduce(out)
         if self.tp_size > 1 and self.tp_group is not None:
@@ -999,6 +1016,7 @@ class Qwen4_5Attention(nn.Module):
                 Optional[torch.Tensor],
             ]
         ] = None,
+        skip_allreduce: bool = False,
     ) -> torch.Tensor:
         """Forward pass for dense MQA-1 Full Attention (producer/normal or YoCo consumer).
 
@@ -1192,6 +1210,7 @@ class Qwen4_5Attention(nn.Module):
                     self.rope_theta,
                     hidden_states.dtype,
                 )
+                cp_s, cp_r, cp_g = self._resolve_cp_indexer_dist()
                 qsa_selected = qsa_select_causal_from_projected(
                     self.indexer,
                     q_idx,
@@ -1200,6 +1219,10 @@ class Qwen4_5Attention(nn.Module):
                     sin_all,
                     past_raw_keys=past_raw,
                     k_norm_gamma=k_gamma,
+                    sp_size=cp_s,
+                    sp_rank=cp_r,
+                    sp_group=cp_g,
+                    fast_all_reduce=self.fast_all_reduce,
                 )
             attn_out = qsa_sparse_prefill_attention(
                 q_bhtd,
@@ -1245,7 +1268,9 @@ class Qwen4_5Attention(nn.Module):
 
         # 6. Output gate & output projection
         out_flat = apply_attn_output_gate_flatten(attn_out, gate)
-        return self._maybe_all_reduce(self.o_proj(out_flat))
+        return self._maybe_all_reduce(
+            self.o_proj(out_flat), skip_allreduce=skip_allreduce
+        )
 
     def forward_paged_decode(
         self,
@@ -1271,6 +1296,7 @@ class Qwen4_5Attention(nn.Module):
             ]
         ] = None,
         preconv_kv: bool = False,
+        skip_allreduce: bool = False,
     ) -> torch.Tensor:
         """CUDA-graph-safe B*1 paged decode path for producer and YoCo consumer layers."""
         bsz, seq_len, _ = hidden_states.shape
@@ -1347,7 +1373,9 @@ class Qwen4_5Attention(nn.Module):
             out_flat = apply_attn_output_gate_flatten(attn_out.unsqueeze(2), gate)
         else:
             out_flat = attn_out.reshape(bsz, seq_len, self.num_heads * self.head_dim)
-        return self._maybe_all_reduce(self.o_proj(out_flat))
+        return self._maybe_all_reduce(
+            self.o_proj(out_flat), skip_allreduce=skip_allreduce
+        )
 
 
 __all__ = [

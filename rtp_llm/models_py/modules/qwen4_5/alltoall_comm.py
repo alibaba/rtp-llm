@@ -27,6 +27,7 @@ import torch
 import torch.distributed as dist
 import triton
 import triton.language as tl
+from triton.language.extra import libdevice
 
 from rtp_llm.models_py.modules.qwen4_5.activation import (
     _QUANT_EPS,
@@ -65,6 +66,11 @@ class AllToAllDispatchState:
     send_src_tok: Optional[torch.Tensor] = None
     send_splits: Optional[List[int]] = None
     recv_splits: Optional[List[int]] = None
+    # Packed dense_gather payload (all_buf, L, sc_off, meta_off, row_bytes, top_k)
+    packed_fp8: Optional[Tuple[torch.Tensor, int, int, int, int, int]] = None
+    # Single-barrier causal tracking (paired GPU dispatch before combine)
+    symm_ready_gen: int = -1
+    captured_in_graph: bool = False
 
 
 @dataclass
@@ -357,11 +363,15 @@ def _combine_scatter_add_kernel(
 def _symm_p2p_sum_rows_kernel(
     ptrs_dev_ptr,
     out_ptr,
+    scale_gate_ptr,
     start_row: tl.int64,
     M,
     L,
     stride_peer: tl.int64,
     stride_out: tl.int64,
+    stride_sg: tl.int64,
+    scale_gate_col: tl.constexpr,
+    HAS_SCALE_GATE: tl.constexpr,
     WORLD_SIZE: tl.constexpr,
     BLOCK_L: tl.constexpr,
 ):
@@ -379,7 +389,12 @@ def _symm_p2p_sum_rows_kernel(
         peer_ptr = tl.cast(base_addr, tl.pointer_type(tl.bfloat16))
         v = tl.load(peer_ptr + row * stride_peer + offs, mask=ml, other=0.0).to(tl.float32)
         acc += v
-    tl.store(out_ptr + m * stride_out + offs, acc.to(out_ptr.dtype.element_ty), mask=ml)
+    out_val = acc.to(out_ptr.dtype.element_ty)
+    if HAS_SCALE_GATE:
+        sg_raw = tl.load(scale_gate_ptr + m * stride_sg + scale_gate_col).to(tl.float32)
+        sig_sg = tl.div_rn(1.0, 1.0 + libdevice.exp(-sg_raw)).to(out_ptr.dtype.element_ty)
+        out_val = (out_val.to(tl.float32) * sig_sg.to(tl.float32)).to(out_ptr.dtype.element_ty)
+    tl.store(out_ptr + m * stride_out + offs, out_val, mask=ml)
 
 
 class Qwen4_5AllToAllComm:
@@ -427,6 +442,13 @@ class Qwen4_5AllToAllComm:
         self._tbo_events: Optional[Tuple[Tuple[torch.cuda.Event, torch.cuda.Event], ...]] = None
         self._is_gloo: bool = False
         self._gloo_tag_seq: int = 0
+        self._disp_gen: int = 0
+        self._last_comb_gen: int = -1
+        self._last_comb_gen_by_slot: list[int] = [-1, -1]
+        self._unclosed_slot_gen: list[int] = [-1, -1]
+        self._m_local_dev: Optional[torch.Tensor] = None
+        self._m_vec_dev: Optional[torch.Tensor] = None
+        self._pack_ws: Optional[torch.Tensor] = None
         self._destroyed: bool = False
 
         if group is None or not dist.is_initialized() or dist.get_world_size(group) <= 1:
@@ -541,6 +563,40 @@ class Qwen4_5AllToAllComm:
         self._symm_max_rows = max_rows
         return True
 
+    def can_symm_p2p_combine(
+        self,
+        *,
+        use_symm_p2p: Optional[bool] = None,
+        routed_dtype: Optional[torch.dtype] = None,
+    ) -> bool:
+        if self.world_size <= 1 or self.group is None:
+            return False
+        env_symm = os.environ.get("QWEN4_5_A2A_SYMM_P2P_COMBINE")
+        want_symm = (
+            bool(use_symm_p2p)
+            if use_symm_p2p is not None
+            else (True if env_symm is None else env_symm.strip().lower() not in ("0", "false", "no"))
+        )
+        return (
+            want_symm
+            and self.active_backend == "symm_mem"
+            and self._symm_hdl is not None
+            and self._symm_buf is not None
+            and self._symm_max_rows >= self.world_size
+            and (routed_dtype is None or routed_dtype == self.dtype)
+        )
+
+    def _get_pack_buf(self, nbytes: int, device: torch.device) -> torch.Tensor:
+        capturing = device.type == "cuda" and torch.cuda.is_current_stream_capturing()
+        if self._pack_ws is not None and self._pack_ws.device == device and int(self._pack_ws.numel()) >= nbytes:
+            return self._pack_ws[:nbytes]
+        if capturing:
+            return torch.empty((nbytes,), dtype=torch.uint8, device=device)
+        alloc = max(nbytes, 0 if self._pack_ws is None else int(self._pack_ws.numel()))
+        buf = torch.empty((alloc,), dtype=torch.uint8, device=device)
+        self._pack_ws = buf
+        return buf[:nbytes]
+
     def dispatch(
         self,
         hidden: torch.Tensor,
@@ -550,6 +606,7 @@ class Qwen4_5AllToAllComm:
         num_experts: Optional[int] = None,
         equal_tokens: Optional[bool] = None,
         quantize_fp8: bool = False,
+        return_packed: bool = False,
     ) -> AllToAllDispatchState:
         """Dispatch local DP latent tokens ``[M_local, L]`` across ``world_size`` EP ranks.
 
@@ -599,15 +656,25 @@ class Qwen4_5AllToAllComm:
                 equal_tokens = True
             else:
                 m_dev = torch.device("cpu") if self._is_gloo else x_c.device
-                m_vec = torch.empty((self.world_size,), dtype=torch.int64, device=m_dev)
-                m_local_t = torch.tensor([M_local], dtype=torch.int64, device=m_dev)
-                dist.all_gather_into_tensor(m_vec, m_local_t, group=self.group)
-                counts_cpu = m_vec.tolist()
+                if self._m_local_dev is None or self._m_local_dev.device != m_dev:
+                    self._m_local_dev = torch.empty((1,), dtype=torch.int64, device=m_dev)
+                    self._m_vec_dev = torch.empty((self.world_size,), dtype=torch.int64, device=m_dev)
+                assert self._m_vec_dev is not None
+                self._m_local_dev.fill_(M_local)
+                dist.all_gather_into_tensor(self._m_vec_dev, self._m_local_dev, group=self.group)
+                counts_cpu = self._m_vec_dev.tolist()
                 equal_tokens = all(c == counts_cpu[0] for c in counts_cpu) and counts_cpu[0] > 0
 
         if equal_tokens:
             return self._dispatch_dense_equal(
-                x_c, ids_i32, w_f32, M_local, L, top_k, quantize_fp8=quantize_fp8
+                x_c,
+                ids_i32,
+                w_f32,
+                M_local,
+                L,
+                top_k,
+                quantize_fp8=quantize_fp8,
+                return_packed=return_packed,
             )
         if num_experts is None or num_experts % self.world_size != 0:
             raise ValueError(
@@ -627,6 +694,7 @@ class Qwen4_5AllToAllComm:
         top_k: int,
         *,
         quantize_fp8: bool,
+        return_packed: bool = False,
     ) -> AllToAllDispatchState:
         assert top_k <= 32, f"Expected top_k <= 32, got {top_k}"
         if M_local == 0:
@@ -664,7 +732,7 @@ class Qwen4_5AllToAllComm:
             meta_off = sc_off + ((num_groups + 15) // 16) * 16
             row_bytes = meta_off + meta_bytes
 
-            pack_buf = torch.empty((M_local, row_bytes), dtype=torch.uint8, device=x_c.device)
+            pack_buf = self._get_pack_buf(M_local * row_bytes, x_c.device).view(M_local, row_bytes)
             block_b = 512 if L >= 512 else max(32, triton.next_power_of_2(L))
             _pack_dense_dp_bf16_to_fp8_kernel[(M_local,)](
                 x_c,
@@ -687,6 +755,25 @@ class Qwen4_5AllToAllComm:
             )
             all_buf = torch.empty((M_global, row_bytes), dtype=torch.uint8, device=x_c.device)
             self._collective_all_gather(all_buf, pack_buf)
+            capturing = x_c.is_cuda and torch.cuda.is_current_stream_capturing()
+            disp_gen = -1
+            if not self._is_gloo and x_c.is_cuda:
+                self._disp_gen += 1
+                disp_gen = self._disp_gen
+            if return_packed and x_c.is_cuda:
+                return AllToAllDispatchState(
+                    mode="dense_gather",
+                    local_num_tokens=M_local,
+                    hidden_dim=L,
+                    dtype=x_c.dtype,
+                    hidden=None,
+                    hidden_fp8=None,
+                    topk_ids=ids_i32[:0],
+                    topk_weights=w_f32[:0],
+                    packed_fp8=(all_buf, L, sc_off, meta_off, row_bytes, top_k),
+                    symm_ready_gen=disp_gen,
+                    captured_in_graph=capturing,
+                )
 
             out_xq = torch.empty((M_global, L), dtype=torch.float8_e4m3fn, device=x_c.device)
             out_xsc = torch.empty((M_global, num_groups), dtype=torch.uint8, device=x_c.device)
@@ -721,11 +808,13 @@ class Qwen4_5AllToAllComm:
                 hidden_fp8=(out_xq, out_xsc),
                 topk_ids=out_ids,
                 topk_weights=out_w,
+                symm_ready_gen=disp_gen,
+                captured_in_graph=capturing,
             )
 
         x_bytes = ((2 * L + 15) // 16) * 16
         row_bytes = x_bytes + meta_bytes
-        pack_buf = torch.empty((M_local, row_bytes), dtype=torch.uint8, device=x_c.device)
+        pack_buf = self._get_pack_buf(M_local * row_bytes, x_c.device).view(M_local, row_bytes)
         _pack_dense_dp_bf16_kernel[(M_local,)](
             x_c,
             ids_i32,
@@ -764,6 +853,11 @@ class Qwen4_5AllToAllComm:
             BLOCK_B=min(1024, triton.next_power_of_2(L)),
             num_warps=4,
         )
+        capturing = x_c.is_cuda and torch.cuda.is_current_stream_capturing()
+        disp_gen = -1
+        if not self._is_gloo and x_c.is_cuda:
+            self._disp_gen += 1
+            disp_gen = self._disp_gen
         return AllToAllDispatchState(
             mode="dense_gather",
             local_num_tokens=M_local,
@@ -773,6 +867,8 @@ class Qwen4_5AllToAllComm:
             hidden_fp8=None,
             topk_ids=out_ids,
             topk_weights=out_w,
+            symm_ready_gen=disp_gen,
+            captured_in_graph=capturing,
         )
 
     def _dispatch_routed_a2a(
@@ -887,20 +983,50 @@ class Qwen4_5AllToAllComm:
             recv_splits=recv_splits,
         )
 
+    @staticmethod
+    def _apply_scale_gate_fallback(
+        out: torch.Tensor,
+        scale_gate: Optional[torch.Tensor],
+        scale_gate_col: int,
+    ) -> torch.Tensor:
+        if scale_gate is None or out.shape[0] == 0:
+            return out
+        M_out = int(out.shape[0])
+        sg_2d = scale_gate.reshape(-1, 1) if scale_gate.ndim == 1 else scale_gate.reshape(scale_gate.shape[0], -1)
+        sg_col = sg_2d[:M_out, scale_gate_col : scale_gate_col + 1]
+        sig = torch.sigmoid(sg_col.float()).to(out.dtype)
+        return (out.float() * sig.float()).to(out.dtype)
+
     def combine(
         self,
         ep_output: torch.Tensor,
         state: AllToAllDispatchState,
         *,
         use_symm_p2p: Optional[bool] = None,
+        scale_gate: Optional[torch.Tensor] = None,
+        scale_gate_col: int = 0,
+        slot: int = 0,
     ) -> torch.Tensor:
         """Combine EP partial expert outputs back into DP rank-local ``[M_local, L]``."""
         if state.mode == "noop" or self.world_size <= 1 or self.group is None:
-            return ep_output
+            return self._apply_scale_gate_fallback(ep_output, scale_gate, scale_gate_col)
 
         L = state.hidden_dim
         M_local = state.local_num_tokens
         ep_c = ep_output if ep_output.is_contiguous() else ep_output.contiguous()
+        has_sg = scale_gate is not None
+        if has_sg:
+            assert scale_gate is not None
+            sg_2d = scale_gate.reshape(-1, 1) if scale_gate.ndim == 1 else scale_gate.reshape(scale_gate.shape[0], -1)
+            if sg_2d.stride(-1) != 1:
+                sg_2d = sg_2d.contiguous()
+            sg_ptr: torch.Tensor = sg_2d
+            sg_stride = int(sg_2d.stride(0))
+            sg_col = int(scale_gate_col)
+        else:
+            sg_ptr = ep_c
+            sg_stride = 0
+            sg_col = 0
 
         if state.mode == "dense_gather":
             out = torch.empty((M_local, L), dtype=state.dtype, device=ep_c.device)
@@ -924,23 +1050,73 @@ class Qwen4_5AllToAllComm:
             if want_symm and can_symm:
                 assert self._symm_buf is not None and self._symm_hdl is not None
                 BK = min(512, triton.next_power_of_2(L))
+                env_sb = os.environ.get("QWEN4_5_A2A_SYMM_SINGLE_BARRIER")
+                want_sb = (
+                    True
+                    if env_sb is None
+                    else env_sb.strip().lower() not in ("0", "false", "no")
+                )
+                capturing = torch.cuda.is_current_stream_capturing()
                 if M_global <= self._symm_max_rows:
-                    self._symm_buf[:M_global].copy_(ep_c)
-                    self._symm_hdl.barrier(channel=0)
+                    half_rows = self._symm_max_rows // 2
+                    dual_disjoint = 2 * M_global <= self._symm_max_rows
+                    use_slot = int(slot) & 1 if dual_disjoint else 0
+                    buf_row_off = half_rows if (use_slot == 1) else 0
+                    ch = use_slot
+                    if self._disp_gen > 0 and self._unclosed_slot_gen[use_slot] == self._disp_gen:
+                        # Fence before overwriting the same symmetric buffer slice if a prior
+                        # combine on this slot omitted its tail barrier without an intervening dispatch.
+                        self._symm_hdl.barrier(channel=1 - ch)
+                        self._unclosed_slot_gen[use_slot] = -1
+                    has_paired_disp = (
+                        want_sb
+                        and state.symm_ready_gen >= 0
+                        and state.symm_ready_gen != self._last_comb_gen
+                        and state.symm_ready_gen != self._last_comb_gen_by_slot[use_slot]
+                        and (not capturing or state.captured_in_graph)
+                        and (
+                            state.symm_ready_gen == self._disp_gen
+                            or (dual_disjoint and (self._disp_gen - state.symm_ready_gen) <= 1)
+                        )
+                    )
+                    self._symm_buf[buf_row_off : buf_row_off + M_global].copy_(ep_c)
+                    self._symm_hdl.barrier(channel=ch)
                     _symm_p2p_sum_rows_kernel[(M_local, triton.cdiv(L, BK))](
                         self._symm_hdl.buffer_ptrs_dev,
                         out,
-                        self.rank * M_local,
+                        sg_ptr,
+                        buf_row_off + self.rank * M_local,
                         M_local,
                         L,
                         self.hidden_dim,
                         out.stride(0),
+                        sg_stride,
+                        scale_gate_col=sg_col,
+                        HAS_SCALE_GATE=has_sg,
                         WORLD_SIZE=self.world_size,
                         BLOCK_L=BK,
                         num_warps=4,
                     )
-                    self._symm_hdl.barrier(channel=1)
+                    if state.symm_ready_gen >= 0:
+                        self._last_comb_gen = state.symm_ready_gen
+                        self._last_comb_gen_by_slot[use_slot] = state.symm_ready_gen
+                    if has_paired_disp:
+                        self._unclosed_slot_gen[use_slot] = self._disp_gen
+                    else:
+                        self._symm_hdl.barrier(channel=1 - ch)
+                        self._unclosed_slot_gen[use_slot] = -1
                     return out
+                if self._disp_gen > 0 and self._unclosed_slot_gen[0] == self._disp_gen:
+                    self._symm_hdl.barrier(channel=1)
+                    self._unclosed_slot_gen[0] = -1
+                has_paired_disp = (
+                    want_sb
+                    and state.symm_ready_gen >= 0
+                    and state.symm_ready_gen == self._disp_gen
+                    and state.symm_ready_gen != self._last_comb_gen
+                    and state.symm_ready_gen != self._last_comb_gen_by_slot[0]
+                    and (not capturing or state.captured_in_graph)
+                )
                 chunk_local = max(1, self._symm_max_rows // self.world_size)
                 ep_3d = ep_c.view(self.world_size, M_local, L)
                 for m0 in range(0, M_local, chunk_local):
@@ -949,22 +1125,37 @@ class Qwen4_5AllToAllComm:
                     total_c = self.world_size * cm
                     self._symm_buf[:total_c].copy_(ep_3d[:, m0:m1, :].reshape(total_c, L))
                     self._symm_hdl.barrier(channel=0)
+                    sg_chunk_ptr = sg_ptr[m0:m1] if has_sg else ep_c
                     _symm_p2p_sum_rows_kernel[(cm, triton.cdiv(L, BK))](
                         self._symm_hdl.buffer_ptrs_dev,
                         out[m0:m1],
+                        sg_chunk_ptr,
                         self.rank * cm,
                         cm,
                         L,
                         self.hidden_dim,
                         out.stride(0),
+                        sg_stride,
+                        scale_gate_col=sg_col,
+                        HAS_SCALE_GATE=has_sg,
                         WORLD_SIZE=self.world_size,
                         BLOCK_L=BK,
                         num_warps=4,
                     )
-                    self._symm_hdl.barrier(channel=1)
+                    if (m1 < M_local) or not has_paired_disp:
+                        self._symm_hdl.barrier(channel=1)
+                        if m1 >= M_local:
+                            if state.symm_ready_gen >= 0:
+                                self._last_comb_gen = state.symm_ready_gen
+                                self._last_comb_gen_by_slot[0] = state.symm_ready_gen
+                            self._unclosed_slot_gen[0] = -1
+                    else:
+                        self._last_comb_gen = state.symm_ready_gen
+                        self._last_comb_gen_by_slot[0] = state.symm_ready_gen
+                        self._unclosed_slot_gen[0] = self._disp_gen
                 return out
             self._collective_reduce_scatter(out, ep_c)
-            return out
+            return self._apply_scale_gate_fallback(out, scale_gate, scale_gate_col)
 
         assert state.mode == "routed_a2a"
         assert state.send_splits is not None and state.recv_splits is not None
@@ -993,7 +1184,7 @@ class Qwen4_5AllToAllComm:
                 BLOCK_L=BK,
                 num_warps=4,
             )
-        return out_fp32.to(state.dtype)
+        return self._apply_scale_gate_fallback(out_fp32.to(state.dtype), scale_gate, scale_gate_col)
 
     def _collective_all_gather(self, dst: torch.Tensor, src: torch.Tensor) -> None:
         if self._is_gloo:
@@ -1097,6 +1288,7 @@ class Qwen4_5AllToAllComm:
         num_experts: Optional[int] = None,
         equal_tokens: Optional[bool] = None,
         quantize_fp8: bool = False,
+        return_packed: bool = False,
         comm_stream: Optional[torch.cuda.Stream] = None,
         slot: int = 0,
     ) -> AllToAllAsyncHandle:
@@ -1114,6 +1306,7 @@ class Qwen4_5AllToAllComm:
                 num_experts=num_experts,
                 equal_tokens=equal_tokens,
                 quantize_fp8=quantize_fp8,
+                return_packed=return_packed,
             )
             return AllToAllAsyncHandle(
                 kind="dispatch",
@@ -1137,6 +1330,7 @@ class Qwen4_5AllToAllComm:
                 num_experts=num_experts,
                 equal_tokens=equal_tokens,
                 quantize_fp8=quantize_fp8,
+                return_packed=return_packed,
             )
             return AllToAllAsyncHandle(
                 kind="dispatch",
@@ -1165,6 +1359,7 @@ class Qwen4_5AllToAllComm:
                     num_experts=num_experts,
                     equal_tokens=equal_tokens,
                     quantize_fp8=quantize_fp8,
+                    return_packed=return_packed,
                 )
         except BaseException:
             exc_hit = True
@@ -1196,6 +1391,8 @@ class Qwen4_5AllToAllComm:
                     for t in st.hidden_fp8:
                         if t.is_cuda:
                             t.record_stream(cur)
+                if st.packed_fp8 is not None and st.packed_fp8[0].is_cuda:
+                    st.packed_fp8[0].record_stream(cur)
         return st
 
     def combine_async(
@@ -1204,12 +1401,20 @@ class Qwen4_5AllToAllComm:
         state: AllToAllDispatchState,
         *,
         use_symm_p2p: Optional[bool] = None,
+        scale_gate: Optional[torch.Tensor] = None,
+        scale_gate_col: int = 0,
         comm_stream: Optional[torch.cuda.Stream] = None,
         slot: int = 0,
     ) -> AllToAllAsyncHandle:
         """Launch AllToAll combine asynchronously on a secondary stream for TBO overlap."""
         if state.mode == "noop" or self.world_size <= 1 or self.group is None or not ep_output.is_cuda:
-            out = self.combine(ep_output, state, use_symm_p2p=use_symm_p2p)
+            out = self.combine(
+                ep_output,
+                state,
+                use_symm_p2p=use_symm_p2p,
+                scale_gate=scale_gate,
+                scale_gate_col=scale_gate_col,
+            )
             return AllToAllAsyncHandle(
                 kind="combine",
                 comm_stream=None,
@@ -1225,7 +1430,14 @@ class Qwen4_5AllToAllComm:
         stream = comm_stream if comm_stream is not None else self._tbo_stream
         events = self._tbo_events[int(slot) & 1] if self._tbo_events is not None else None
         if stream is None or events is None or stream.device != ep_output.device:
-            out = self.combine(ep_output, state, use_symm_p2p=use_symm_p2p)
+            out = self.combine(
+                ep_output,
+                state,
+                use_symm_p2p=use_symm_p2p,
+                scale_gate=scale_gate,
+                scale_gate_col=scale_gate_col,
+                slot=slot,
+            )
             return AllToAllAsyncHandle(
                 kind="combine",
                 comm_stream=None,
@@ -1246,7 +1458,16 @@ class Qwen4_5AllToAllComm:
                     ep_output.record_stream(stream)
                     if state.send_src_tok is not None and state.send_src_tok.is_cuda:
                         state.send_src_tok.record_stream(stream)
-                out = self.combine(ep_output, state, use_symm_p2p=use_symm_p2p)
+                    if scale_gate is not None and scale_gate.is_cuda:
+                        scale_gate.record_stream(stream)
+                out = self.combine(
+                    ep_output,
+                    state,
+                    use_symm_p2p=use_symm_p2p,
+                    scale_gate=scale_gate,
+                    scale_gate_col=scale_gate_col,
+                    slot=slot,
+                )
         except BaseException:
             exc_hit = True
             raise
@@ -1260,7 +1481,7 @@ class Qwen4_5AllToAllComm:
             main_stream=main_stream,
             capturing=capturing,
             result=out,
-            keepalive=(ep_output,),
+            keepalive=(ep_output, scale_gate),
         )
 
     def wait_combine(self, handle: AllToAllAsyncHandle) -> torch.Tensor:
@@ -1281,6 +1502,9 @@ class Qwen4_5AllToAllComm:
         self._symm_buf = None
         self._tbo_stream = None
         self._tbo_events = None
+        self._m_local_dev = None
+        self._m_vec_dev = None
+        self._pack_ws = None
         self.active_backend = "nccl" if self.world_size > 1 else "noop"
 
 

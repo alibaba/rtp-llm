@@ -22,6 +22,45 @@ from .contracts import PLELayerState, ShortConvState
 ConvStateLike = Union[ShortConvState, PLELayerState, torch.Tensor]
 
 _SC_TRITON_CACHE: dict = {}
+_SC_STATIC_WS_MAX_BYTES = 8 * 1024 * 1024
+
+
+class ShortConvStaticWorkspace:
+    """Per-model/per-caller rolling static workspace for ShortConv ragged outputs."""
+
+    def __init__(self, n_slots: int = 4) -> None:
+        self._n_slots = max(1, int(n_slots))
+        self._pool: dict = {}
+
+    def empty(self, shape: tuple, dtype: torch.dtype, device: torch.device) -> torch.Tensor:
+        numel = 1
+        for s in shape:
+            numel *= int(s)
+        if (
+            numel == 0
+            or device.type != "cuda"
+            or torch.is_grad_enabled()
+            or torch.cuda.is_current_stream_capturing()
+        ):
+            return torch.empty(shape, dtype=dtype, device=device)
+        nbytes = numel * torch.empty((), dtype=dtype).element_size()
+        if nbytes > _SC_STATIC_WS_MAX_BYTES:
+            return torch.empty(shape, dtype=dtype, device=device)
+        dev_idx = device.index if device.index is not None else torch.cuda.current_device()
+        stream_id = int(torch.cuda.current_stream(device).cuda_stream)
+        key = (dev_idx, stream_id, dtype)
+        entry = self._pool.get(key)
+        if entry is None:
+            bufs = [torch.empty((numel,), dtype=dtype, device=device) for _ in range(self._n_slots)]
+            entry = [bufs, 0]
+            self._pool[key] = entry
+        bufs, idx = entry
+        buf = bufs[idx]
+        if int(buf.numel()) < numel:
+            buf = torch.empty((numel,), dtype=dtype, device=device)
+            bufs[idx] = buf
+        entry[1] = (idx + 1) % self._n_slots
+        return buf[:numel].view(*shape)
 
 
 def _triton_int_spec(v: int) -> int:
@@ -1351,6 +1390,8 @@ def causal_dwconv1d_ragged_prefill_with_snapshots_triton(
     req_snap_start: Optional[torch.Tensor] = None,
     snap_local_ends: Optional[torch.Tensor] = None,
     snap_aligned: bool = False,
+    out: Optional[torch.Tensor] = None,
+    ws: Optional[ShortConvStaticWorkspace] = None,
 ) -> torch.Tensor:
     """Packed ragged causal depthwise conv1d prefill with optional boundary state snapshots.
 
@@ -1367,7 +1408,8 @@ def causal_dwconv1d_ragged_prefill_with_snapshots_triton(
     N, C = int(x.shape[0]), int(x.shape[1])
     kernel_size = int(weight.shape[-1])
     state_len = kernel_size - 1
-    out = torch.empty((N, C), dtype=x.dtype, device=x.device)
+    if out is None:
+        out = ws.empty((N, C), x.dtype, x.device) if ws is not None else torch.empty((N, C), dtype=x.dtype, device=x.device)
     if N == 0:
         return out
 
@@ -1746,7 +1788,7 @@ class Qwen4_5ShortConv(nn.Module):
         *,
         init_state: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        """Exchange ``(kernel_size - 1)`` left-boundary tail tokens across SP ranks."""
+        """Exchange ``(kernel_size - 1)`` left-boundary tail tokens across SP ranks (supports t_loc < w_ctx)."""
         w_ctx = self.kernel_size - 1
         if x_local.ndim == 2:
             x_3d = x_local.unsqueeze(0)
@@ -1768,27 +1810,238 @@ class Qwen4_5ShortConv(nn.Module):
 
         import torch.distributed as dist
 
+        tail = torch.zeros((bsz, ch, w_ctx), dtype=x_3d.dtype, device=x_3d.device)
         if t_loc >= w_ctx:
-            tail = x_3d[:, t_loc - w_ctx :, :].transpose(1, 2).contiguous()
-        else:
-            tail = torch.zeros((bsz, ch, w_ctx), dtype=x_3d.dtype, device=x_3d.device)
-            if t_loc > 0:
-                tail[:, :, w_ctx - t_loc :] = x_3d.transpose(1, 2)
+            tail.copy_(x_3d[:, t_loc - w_ctx :, :].transpose(1, 2))
+        elif t_loc > 0:
+            tail[:, :, w_ctx - t_loc :] = x_3d.transpose(1, 2)
 
-        ops = []
-        recv_buf = (
-            torch.empty((bsz, ch, w_ctx), dtype=x_3d.dtype, device=x_3d.device)
-            if self.sp_rank > 0
-            else None
-        )
-        if self.sp_rank + 1 < self.sp_size:
-            ops.append(dist.P2POp(dist.isend, tail, peer=self.sp_rank + 1, group=self.sp_group))
-        if self.sp_rank > 0 and recv_buf is not None:
-            ops.append(dist.P2POp(dist.irecv, recv_buf, peer=self.sp_rank - 1, group=self.sp_group))
-        if ops:
-            for req in dist.batch_isend_irecv(ops):
-                req.wait()
-        return recv_buf if recv_buf is not None else left_halo
+        t_cnt = torch.tensor([t_loc], dtype=torch.int64, device=x_3d.device)
+        all_cnts = [torch.empty_like(t_cnt) for _ in range(self.sp_size)]
+        dist.all_gather(all_cnts, t_cnt, group=self.sp_group)
+        lens = [int(c.item()) for c in all_cnts]
+        if all(l >= w_ctx for l in lens[:-1]):
+            ops = []
+            recv_buf = (
+                torch.empty((bsz, ch, w_ctx), dtype=x_3d.dtype, device=x_3d.device)
+                if self.sp_rank > 0
+                else None
+            )
+            if self.sp_rank + 1 < self.sp_size:
+                ops.append(dist.P2POp(dist.isend, tail, peer=self.sp_rank + 1, group=self.sp_group))
+            if self.sp_rank > 0 and recv_buf is not None:
+                ops.append(dist.P2POp(dist.irecv, recv_buf, peer=self.sp_rank - 1, group=self.sp_group))
+            if ops:
+                for req in dist.batch_isend_irecv(ops):
+                    req.wait()
+            return recv_buf if recv_buf is not None else left_halo
+
+        all_tails = [torch.empty_like(tail) for _ in range(self.sp_size)]
+        dist.all_gather(all_tails, tail, group=self.sp_group)
+        if self.sp_rank == 0:
+            return left_halo
+        out_halo = torch.zeros_like(left_halo)
+        need = w_ctx
+        pos = w_ctx
+        for src_rk in range(self.sp_rank - 1, -1, -1):
+            avail = min(need, lens[src_rk], w_ctx)
+            if avail > 0:
+                out_halo[:, :, pos - avail : pos] = all_tails[src_rk][:, :, w_ctx - avail : w_ctx]
+                pos -= avail
+                need -= avail
+            if need <= 0:
+                break
+        if need > 0 and init_state is not None:
+            out_halo[:, :, :need] = left_halo[:, :, w_ctx - need :]
+        return out_halo
+
+    def forward_sp_packed(
+        self,
+        x_sp: torch.Tensor,
+        batch_size: int,
+        seq_len: int,
+        state: Optional[ConvStateLike] = None,
+        *,
+        sp_size: Optional[int] = None,
+        sp_rank: Optional[int] = None,
+        sp_group: Any = None,
+        sp_fast_comm: Any = None,
+        clip_value: Optional[float] = None,
+        ws: Optional[ShortConvStaticWorkspace] = None,
+    ) -> torch.Tensor:
+        """Run causal depthwise conv1d directly on an SP-partitioned [M_loc, C] slice.
+
+        Respects per-request boundaries inside flattened [B * T, C] so left halos
+        never bleed across requests, and supports arbitrary non-divisible T, T_loc < 3,
+        empty ranks (M_loc == 0), and replicated state sync.
+        """
+        import torch.distributed as dist
+        from rtp_llm.models_py.modules.qwen4_5.fast_comm import sp_slice_bounds
+
+        eff_sp = max(1, int(self.sp_size if sp_size is None else sp_size))
+        eff_rk = int(self.sp_rank if sp_rank is None else sp_rank)
+        eff_grp = self.sp_group if sp_group is None else sp_group
+        total_tokens = int(batch_size) * int(seq_len)
+        w_ctx = self.kernel_size - 1
+        conv_state = _extract_conv_state(state)
+
+        if eff_sp <= 1 or eff_grp is None or not dist.is_available() or not dist.is_initialized():
+            x_3d = x_sp.view(batch_size, seq_len, self.channels)
+            y_3d = self.forward(x_3d, state=state, clip_value=clip_value)
+            return y_3d.reshape(total_tokens, self.channels)
+
+        if total_tokens == 0:
+            return torch.empty((0, self.channels), dtype=x_sp.dtype, device=x_sp.device)
+
+        bounds = [sp_slice_bounds(total_tokens, eff_sp, r) for r in range(eff_sp)]
+        s0, s1 = bounds[eff_rk]
+        m_loc = s1 - s0
+        any_mid_req = any((b0 > (b0 // seq_len) * seq_len) for b0, b1 in bounds if b1 > b0)
+
+        gathered_tails: Optional[torch.Tensor] = None
+        if w_ctx > 0 and any_mid_req:
+            tail_x = torch.zeros((w_ctx, self.channels), dtype=x_sp.dtype, device=x_sp.device)
+            take = min(m_loc, w_ctx)
+            if take > 0:
+                tail_x[w_ctx - take :].copy_(x_sp[m_loc - take :])
+            if sp_fast_comm is not None and sp_fast_comm.group is eff_grp:
+                gathered_tails = sp_fast_comm.all_gather_sp(
+                    tail_x, total_tokens=eff_sp * w_ctx
+                ).view(eff_sp, w_ctx, self.channels)
+            else:
+                bufs = [torch.empty_like(tail_x) for _ in range(eff_sp)]
+                dist.all_gather(bufs, tail_x.contiguous(), group=eff_grp)
+                gathered_tails = torch.stack(bufs, dim=0)
+
+        if seq_len == 1:
+            if m_loc > 0:
+                sub_state = conv_state[s0:s1].contiguous() if conv_state is not None else None
+                if sub_state is not None and x_sp.is_cuda and self.kernel_size == 4:
+                    y_loc = causal_dwconv1d_decode_triton(
+                        x_sp.unsqueeze(1),
+                        self.weight,
+                        sub_state,
+                        residual=self.residual,
+                        use_activation=self.use_activation,
+                        clamp_val=clip_value,
+                    ).squeeze(1)
+                else:
+                    st_arg: Optional[ConvStateLike] = ShortConvState(sub_state) if sub_state is not None else None
+                    y_loc = self.forward(x_sp.unsqueeze(1), state=st_arg, clip_value=clip_value).squeeze(1)
+            else:
+                sub_state = (
+                    torch.empty((0, self.channels, w_ctx), dtype=conv_state.dtype, device=conv_state.device)
+                    if conv_state is not None
+                    else None
+                )
+                y_loc = torch.empty((0, self.channels), dtype=x_sp.dtype, device=x_sp.device)
+
+            if conv_state is not None and sub_state is not None:
+                flat_sub = sub_state.reshape(m_loc, self.channels * w_ctx)
+                if sp_fast_comm is not None and sp_fast_comm.group is eff_grp:
+                    full_st = sp_fast_comm.all_gather_sp(flat_sub, total_tokens=batch_size)
+                else:
+                    chunk = (batch_size + eff_sp - 1) // eff_sp
+                    pad = chunk - m_loc
+                    in_f = (
+                        torch.cat(
+                            [flat_sub, torch.zeros((pad, self.channels * w_ctx), dtype=flat_sub.dtype, device=flat_sub.device)],
+                            dim=0,
+                        )
+                        if pad > 0
+                        else flat_sub.contiguous()
+                    )
+                    bufs = [torch.empty_like(in_f) for _ in range(eff_sp)]
+                    dist.all_gather(bufs, in_f, group=eff_grp)
+                    full_st = torch.cat(bufs, dim=0)[:batch_size]
+                conv_state.copy_(full_st.view(batch_size, self.channels, w_ctx))
+            return y_loc
+
+        init_sub: Optional[torch.Tensor] = None
+        if m_loc > 0:
+            r0 = s0 // seq_len
+            r1 = (s1 - 1) // seq_len
+            num_sub = r1 - r0 + 1
+            halo_loc_start = s0 - r0 * seq_len
+            cu_list = [0]
+            sub_slices = []
+            for k in range(num_sub):
+                b = r0 + k
+                a_g = max(s0, b * seq_len)
+                c_g = min(s1, (b + 1) * seq_len)
+                sub_slices.append((b, a_g - s0, c_g - s0, c_g == (b + 1) * seq_len))
+                cu_list.append(cu_list[-1] + (c_g - a_g))
+
+            if w_ctx > 0 and (conv_state is not None or halo_loc_start > 0):
+                init_sub = torch.zeros((num_sub, self.channels, w_ctx), dtype=x_sp.dtype, device=x_sp.device)
+                for k, (b, _, _, _) in enumerate(sub_slices):
+                    if k == 0 and halo_loc_start > 0:
+                        for j in range(w_ctx):
+                            tg = s0 - w_ctx + j
+                            if tg >= r0 * seq_len:
+                                if gathered_tails is not None:
+                                    for owner_rk, (b0, b1) in enumerate(bounds):
+                                        if b0 <= tg < b1:
+                                            init_sub[0, :, j].copy_(gathered_tails[owner_rk, w_ctx - (b1 - tg)])
+                                            break
+                            elif conv_state is not None:
+                                idx_prev = halo_loc_start + j
+                                if 0 <= idx_prev < w_ctx:
+                                    init_sub[0, :, j].copy_(conv_state[r0, :, idx_prev])
+                    elif conv_state is not None:
+                        init_sub[k].copy_(conv_state[b])
+
+            if x_sp.is_cuda:
+                block_t = 32
+                t_req_list = []
+                t_t0_list = []
+                for k in range(num_sub):
+                    sub_len = cu_list[k + 1] - cu_list[k]
+                    for t0 in range(0, sub_len, block_t):
+                        t_req_list.append(k)
+                        t_t0_list.append(t0)
+                cu_t = torch.tensor(cu_list, dtype=torch.int32, device=x_sp.device)
+                tr_t = torch.tensor(t_req_list, dtype=torch.int32, device=x_sp.device)
+                tt0_t = torch.tensor(t_t0_list, dtype=torch.int32, device=x_sp.device)
+                y_loc = causal_dwconv1d_ragged_prefill_with_snapshots_triton(
+                    x_sp,
+                    self.weight,
+                    cu_t,
+                    tr_t,
+                    tt0_t,
+                    init_state=init_sub,
+                    residual=self.residual,
+                    use_activation=self.use_activation,
+                    clamp_val=clip_value,
+                    block_t=block_t,
+                    ws=ws,
+                )
+            else:
+                outs = []
+                for k, (_, a_l, c_l, _) in enumerate(sub_slices):
+                    st_k = ShortConvState(init_sub[k : k + 1].clone()) if init_sub is not None else None
+                    outs.append(self.forward_ref(x_sp[a_l:c_l].unsqueeze(0), state=st_k, clip_value=clip_value).squeeze(0))
+                y_loc = torch.cat(outs, dim=0)
+        else:
+            sub_slices = []
+            y_loc = torch.empty((0, self.channels), dtype=x_sp.dtype, device=x_sp.device)
+
+        if conv_state is not None and w_ctx > 0:
+            upd_state = torch.zeros_like(conv_state)
+            if m_loc > 0:
+                for k, (b, a_l, c_l, is_req_tail) in enumerate(sub_slices):
+                    if not is_req_tail:
+                        continue
+                    seg_len = c_l - a_l
+                    if seg_len >= w_ctx:
+                        upd_state[b].copy_(x_sp[c_l - w_ctx : c_l].transpose(0, 1))
+                    else:
+                        if init_sub is not None:
+                            upd_state[b, :, : w_ctx - seg_len].copy_(init_sub[k, :, seg_len:])
+                        upd_state[b, :, w_ctx - seg_len :].copy_(x_sp[a_l:c_l].transpose(0, 1))
+            dist.all_reduce(upd_state, op=dist.ReduceOp.SUM, group=eff_grp)
+            conv_state.copy_(upd_state)
+        return y_loc
 
     def forward(
         self,

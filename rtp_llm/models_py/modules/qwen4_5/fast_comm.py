@@ -168,6 +168,26 @@ def _group_identity(group: Any) -> Any:
     return id(group)
 
 
+def sp_slice_bounds(total_tokens: int, sp_size: int, sp_rank: int) -> Tuple[int, int]:
+    """Return monotonic [start, end) dim-0 bounds for sp_rank in sp_size.
+
+    Uses contiguous ceil-chunk partitioning (chunk = ceil_div(T, sp_size))
+    so trailing ranks receive empty slices (T, T) when T < sp_size and all
+    padding resides purely at [T : sp_size * chunk].
+    """
+    T = max(0, int(total_tokens))
+    ws = max(1, int(sp_size))
+    rk = int(sp_rank)
+    if rk < 0 or rk >= ws:
+        raise ValueError(f"sp_rank={rk} out of range for sp_size={ws}")
+    if ws <= 1 or T == 0:
+        return (0, T) if rk == 0 else (T, T)
+    chunk = (T + ws - 1) // ws
+    start = min(T, rk * chunk)
+    end = min(T, start + chunk)
+    return start, end
+
+
 class Qwen4_5FastAllReduce:
     """CUDA-Graph-safe low-latency AllReduce for Qwen 4.5-Flash (H=2560 & H=5120)."""
 
@@ -246,6 +266,7 @@ class Qwen4_5FastAllReduce:
             int(env_ag_min) if env_ag_min is not None and env_ag_min != "" else None
         )
         self._gemma_gamma_cache: Dict[int, Tuple[torch.Tensor, int, torch.Tensor]] = {}
+        self._sp_ws: Dict[Tuple[Any, ...], torch.Tensor] = {}
         self._destroyed: bool = False
         self._is_gloo: bool = False
 
@@ -1092,6 +1113,224 @@ class Qwen4_5FastAllReduce:
             return out
         return res
 
+    def _alloc_sp_scratch(
+        self,
+        tag: str,
+        shape: Tuple[int, ...],
+        dtype: torch.dtype,
+        device: torch.device,
+    ) -> torch.Tensor:
+        """Return an ephemeral contiguous workspace shape (CG-safe, zero aliasing)."""
+        rows = max(1, int(shape[0]))
+        tail = tuple(int(d) for d in shape[1:])
+        dev_idx = device.index if device.type == "cuda" else -1
+        stream_id = (
+            int(torch.cuda.current_stream(device).cuda_stream)
+            if device.type == "cuda"
+            else 0
+        )
+        key = (tag, tail, dtype, device.type, dev_idx, stream_id)
+        capturing = device.type == "cuda" and torch.cuda.is_current_stream_capturing()
+        cached = self._sp_ws.get(key)
+        if cached is not None and int(cached.shape[0]) >= rows:
+            return cached[:rows]
+        if capturing:
+            return torch.empty(shape, dtype=dtype, device=device)
+        alloc_rows = rows if cached is None else max(rows, int(cached.shape[0]) * 2)
+        buf = torch.empty((alloc_rows, *tail), dtype=dtype, device=device)
+        self._sp_ws[key] = buf
+        return buf[:rows]
+
+    def all_gather_sp(
+        self,
+        x: torch.Tensor,
+        *,
+        total_tokens: Optional[int] = None,
+        out: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        """CUDA-Graph-safe dim-0 AllGather for sequence-parallel tensors.
+
+        Supports arbitrary non-divisible total_tokens (including T < world_size
+        with empty trailing SP ranks) using contiguous ceil-chunk slicing and
+        reusable ephemeral scratch buffers with zero host synchronization.
+        """
+        T_in = int(x.shape[0])
+        rest = tuple(x.shape[1:])
+        if total_tokens is None:
+            if self.world_size <= 1 or self.group is None:
+                if out is not None:
+                    if out.data_ptr() != x.data_ptr():
+                        out.copy_(x)
+                    return out
+                return x
+            if T_in == 0:
+                if out is not None and tuple(out.shape) == (0, *rest):
+                    return out
+                return torch.empty((0, *rest), dtype=x.dtype, device=x.device)
+            return self.all_gather(x, dim=0, out=out)
+
+        T = int(total_tokens)
+        if T < 0:
+            raise ValueError(f"total_tokens must be non-negative, got {T}")
+        if T == 0:
+            if out is not None and tuple(out.shape) == (0, *rest):
+                return out
+            return torch.empty((0, *rest), dtype=x.dtype, device=x.device)
+        if self.world_size <= 1 or self.group is None:
+            res = x[:T] if T_in != T else x
+            if out is not None:
+                if out.data_ptr() != res.data_ptr():
+                    out.copy_(res)
+                return out
+            return res
+
+        ws = self.world_size
+        chunk = (T + ws - 1) // ws
+        padded_T = ws * chunk
+        if T_in == chunk and padded_T == T:
+            return self.all_gather(x, dim=0, out=out)
+
+        x_c = x if x.is_contiguous() else x.contiguous()
+        if T_in == chunk:
+            src_pad = x_c
+        else:
+            src_pad = self._alloc_sp_scratch("sp_ag_src", (chunk, *rest), x_c.dtype, x_c.device)
+            copy_rows = min(T_in, chunk)
+            if copy_rows > 0:
+                src_pad[:copy_rows].copy_(x_c[:copy_rows])
+
+        use_out_full = (
+            out is not None
+            and out.is_contiguous()
+            and tuple(out.shape) == (padded_T, *rest)
+            and out.dtype == x_c.dtype
+            and out.device == x_c.device
+        )
+        if use_out_full:
+            assert out is not None
+            self.all_gather(src_pad, dim=0, out=out)
+            return out[:T]
+
+        dst_full = torch.empty((padded_T, *rest), dtype=x_c.dtype, device=x_c.device)
+        self.all_gather(src_pad, dim=0, out=dst_full)
+        res = dst_full[:T]
+        if out is not None:
+            if tuple(out.shape) != (T, *rest):
+                raise ValueError(
+                    f"out shape {tuple(out.shape)} != expected {(T, *rest)} or {(padded_T, *rest)}"
+                )
+            out.copy_(res)
+            return out
+        return res
+
+    def reduce_scatter_sp(
+        self,
+        x: torch.Tensor,
+        *,
+        total_tokens: Optional[int] = None,
+        out: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        """CUDA-Graph-safe dim-0 ReduceScatter for sequence-parallel tensors.
+
+        Handles arbitrary total_tokens (auto-pads tail [T : ws * chunk]
+        with zeros and slices local [s0:s1] rows) plus Gloo CPU fallback.
+        """
+        T_in = int(x.shape[0])
+        rest = tuple(x.shape[1:])
+        ws = self.world_size
+        if total_tokens is None:
+            if ws <= 1 or self.group is None:
+                if out is not None:
+                    if out.data_ptr() != x.data_ptr():
+                        out.copy_(x)
+                    return out
+                return x
+            if T_in % ws != 0:
+                raise ValueError(
+                    f"reduce_scatter_sp requires x.shape[0]={T_in} divisible by world_size={ws} "
+                    "when total_tokens is None"
+                )
+            T = T_in
+        else:
+            T = int(total_tokens)
+            if T < 0:
+                raise ValueError(f"total_tokens must be non-negative, got {T}")
+            if T > T_in:
+                raise ValueError(f"total_tokens={T} exceeds x.shape[0]={T_in}")
+
+        if T == 0:
+            if out is not None and tuple(out.shape) == (0, *rest):
+                return out
+            return torch.empty((0, *rest), dtype=x.dtype, device=x.device)
+
+        s0, s1 = sp_slice_bounds(T, ws, self.rank)
+        local_T = s1 - s0
+        if ws <= 1 or self.group is None:
+            res = x[s0:s1] if T_in != local_T else x
+            if out is not None:
+                if out.data_ptr() != res.data_ptr():
+                    out.copy_(res)
+                return out
+            return res
+
+        chunk = (T + ws - 1) // ws
+        padded_T = ws * chunk
+        x_c = x if x.is_contiguous() else x.contiguous()
+        if T_in == padded_T and T == padded_T:
+            src_full = x_c
+        elif T_in == padded_T:
+            src_full = x_c
+        else:
+            src_full = self._alloc_sp_scratch("sp_rs_src", (padded_T, *rest), x_c.dtype, x_c.device)
+            src_full[:T].copy_(x_c[:T])
+            if padded_T > T:
+                src_full[T:padded_T].zero_()
+
+        if self._is_gloo:
+            cpu_in = (src_full.detach().cpu() if src_full.is_cuda else src_full).clone()
+            dist.all_reduce(cpu_in, op=dist.ReduceOp.SUM, group=self.group)
+            res_cpu = cpu_in[s0:s1]
+            res = (
+                res_cpu.to(device=x_c.device, dtype=x_c.dtype)
+                if x_c.is_cuda
+                else res_cpu.clone()
+            )
+            if out is not None:
+                out.copy_(res)
+                return out
+            return res
+
+        if local_T == chunk:
+            use_out = (
+                out is not None
+                and out.is_contiguous()
+                and tuple(out.shape) == (chunk, *rest)
+                and out.dtype == x_c.dtype
+                and out.device == x_c.device
+            )
+            dst = out if use_out else torch.empty((chunk, *rest), dtype=x_c.dtype, device=x_c.device)
+            dist.reduce_scatter_tensor(dst, src_full, op=dist.ReduceOp.SUM, group=self.group)
+            if out is not None and not use_out:
+                out.copy_(dst)
+                return out
+            return dst
+
+        dst_chunk = self._alloc_sp_scratch("sp_rs_dst", (chunk, *rest), x_c.dtype, x_c.device)
+        dist.reduce_scatter_tensor(dst_chunk, src_full, op=dist.ReduceOp.SUM, group=self.group)
+        if local_T == 0:
+            if out is not None and tuple(out.shape) == (0, *rest):
+                return out
+            return torch.empty((0, *rest), dtype=x_c.dtype, device=x_c.device)
+        if out is not None and out.is_contiguous() and tuple(out.shape) == (local_T, *rest):
+            out.copy_(dst_chunk[:local_T])
+            return out
+        res = torch.empty((local_T, *rest), dtype=x_c.dtype, device=x_c.device)
+        res.copy_(dst_chunk[:local_T])
+        if out is not None:
+            out.copy_(res)
+            return out
+        return res
+
     def destroy(self) -> None:
         if self._destroyed:
             return
@@ -1106,6 +1345,7 @@ class Qwen4_5FastAllReduce:
         self._ag_symm_buf = None
         self._ag_symm_hdl = None
         self._gemma_gamma_cache.clear()
+        self._sp_ws.clear()
         self.active_backend = "nccl" if self.world_size > 1 else "noop"
 
 
@@ -1205,8 +1445,13 @@ def destroy_qwen4_5_fast_all_reduce() -> None:
         _COMM_CACHE.clear()
 
 
+FastAllReduce = Qwen4_5FastAllReduce
+
+
 __all__ = [
+    "FastAllReduce",
     "Qwen4_5FastAllReduce",
     "destroy_qwen4_5_fast_all_reduce",
     "get_qwen4_5_fast_all_reduce",
+    "sp_slice_bounds",
 ]

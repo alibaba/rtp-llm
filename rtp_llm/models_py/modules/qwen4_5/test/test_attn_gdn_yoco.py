@@ -1251,6 +1251,363 @@ def bench_cuda(fn, warmup: int = 10, iters: int = 50) -> tuple[float, float]:
 
 
 @torch.no_grad()
+def _r7_ple_sp_worker(rank: int, world_size: int, init_file: str, q: object) -> None:
+    import torch.distributed as dist
+    from rtp_llm.models_py.modules.qwen4_5.contracts import PLELayerState
+    from rtp_llm.models_py.modules.qwen4_5.fast_comm import sp_slice_bounds
+    from rtp_llm.models_py.modules.qwen4_5.ple import DEFAULT_PLE_WEIGHT_SCALE, Qwen4_5PLELayer
+
+    dist.init_process_group(
+        backend="gloo",
+        init_method=f"file://{init_file}",
+        rank=rank,
+        world_size=world_size,
+    )
+    try:
+        device = torch.device("cuda", 0)
+        dtype = torch.bfloat16
+        H = 128
+        hc = 4
+        ple_dim = 160
+        total_shards = 8
+        shard_rows = 256
+        vocab_sizes = [64] * 20
+
+        def _make_ple(sharded: bool) -> Qwen4_5PLELayer:
+            torch.manual_seed(7001)
+            ple = Qwen4_5PLELayer(
+                hidden_size=H,
+                hc_count=hc,
+                ple_embed_dim=ple_dim,
+                ngram_size=3,
+                heads_per_ngram=10,
+                ngram_heads_vocab_sizes=vocab_sizes,
+                split_ngram_parts=total_shards,
+                dtype=dtype,
+                device=device,
+                sp_size=world_size,
+                sp_rank=rank,
+                sp_group=dist.group.WORLD,
+            )
+            shards = [
+                torch.empty((shard_rows, ple.head_dim), dtype=dtype, device=device)
+                for _ in range(total_shards)
+            ]
+            for idx_s, sh in enumerate(shards):
+                torch.manual_seed(9100 + idx_s)
+                sh.normal_(0.0, 0.05)
+            if sharded:
+                per_rank = total_shards // world_size
+                ple.set_ngram_table(
+                    shards[rank * per_rank : (rank + 1) * per_rank],
+                    weight_scale=DEFAULT_PLE_WEIGHT_SCALE,
+                    pin_cpu=False,
+                    enable_cpu_uva=False,
+                    total_shards=total_shards,
+                    shard_offset=rank * per_rank,
+                    ep_group=dist.group.WORLD,
+                )
+            else:
+                ple.set_ngram_table(
+                    shards,
+                    weight_scale=DEFAULT_PLE_WEIGHT_SCALE,
+                    pin_cpu=False,
+                    enable_cpu_uva=False,
+                )
+            return ple
+
+        def _build_local_ragged(in_lens, pfx_lens, s0, s1, h_full, ids_full):
+            cu_global = [0]
+            for ln in in_lens:
+                cu_global.append(cu_global[-1] + ln)
+            loc_cu = [0]
+            loc_treq = []
+            loc_tr = []
+            loc_tt0 = []
+            sub_req_indices = []
+            loc_start = 0
+            req0_start = 0
+            cur_loc = 0
+            for ri, ln in enumerate(in_lens):
+                rs, re = cu_global[ri], cu_global[ri + 1]
+                ov_s = max(s0, rs)
+                ov_e = min(s1, re)
+                if ov_e <= ov_s:
+                    continue
+                sub_bi = len(sub_req_indices)
+                if sub_bi == 0:
+                    loc_start = ov_s - rs
+                    req0_start = rs
+                sub_req_indices.append(ri)
+                sub_ln = ov_e - ov_s
+                loc_treq.extend([sub_bi] * sub_ln)
+                for t0 in range(0, sub_ln, 16):
+                    loc_tr.append(sub_bi)
+                    loc_tt0.append(t0)
+                cur_loc += sub_ln
+                loc_cu.append(cur_loc)
+            return (
+                h_full[s0:s1].contiguous(),
+                ids_full[s0:s1].contiguous(),
+                torch.tensor(loc_cu, dtype=torch.int32, device=device),
+                torch.tensor(loc_treq, dtype=torch.int32, device=device),
+                torch.tensor(loc_tr, dtype=torch.int32, device=device),
+                torch.tensor(loc_tt0, dtype=torch.int32, device=device),
+                sub_req_indices,
+                loc_start,
+                req0_start,
+            )
+
+        # Case 1: Packed ragged [37, 29] with prefix context + straddling SP boundaries + boundary snapshots
+        for sharded in (False, True):
+            ple = _make_ple(sharded=sharded)
+            ple_ref = _make_ple(sharded=False)
+            ple_ref.sp_size = 1
+            ple_ref.sp_rank = 0
+            ple_ref.sp_group = None
+
+            in_lens = [37, 29]
+            pfx_lens = [11, 5]
+            T_tot = sum(in_lens)
+            torch.manual_seed(4201)
+            h_full = torch.randn((T_tot, hc * H), dtype=dtype, device=device) * 0.25
+            ids_full = torch.randint(10, 5000, (T_tot,), dtype=torch.int64, device=device)
+            init_ctx = torch.randint(10, 5000, (2, 2), dtype=torch.int64, device=device)
+            init_conv = torch.randn((2, hc * H, 3), dtype=dtype, device=device) * 0.1
+
+            cu_g = torch.tensor([0, 37, 66], dtype=torch.int32, device=device)
+            treq_g = torch.tensor([0] * 37 + [1] * 29, dtype=torch.int32, device=device)
+            tr_g = torch.tensor([0, 0, 0, 1, 1], dtype=torch.int32, device=device)
+            tt0_g = torch.tensor([0, 16, 32, 0, 16], dtype=torch.int32, device=device)
+            snap_g = [15, 31, 36, 40, 55, 65]
+            snap_req_g = [0, 0, 0, 1, 1, 1]
+            snap_end_g = [16, 32, 37, 4, 19, 29]
+            snap_phys_g = [1, 2, 3, 4, 5, 6]
+            rss_g = [0, 3, 6]
+            conv_pool_ref = torch.zeros((8, hc * H * 3), dtype=dtype, device=device)
+            ctx_pool_ref = torch.full((8, 2), ple.eos_token_id, dtype=torch.int64, device=device)
+            out_ref, _ = ple_ref.forward_packed_prefill_with_hc(
+                h_full,
+                ids_full,
+                cu_g,
+                treq_g,
+                tr_g,
+                tt0_g,
+                prev_ngram_ctx=init_ctx,
+                init_conv_state=init_conv,
+                snap_tok_idx=torch.tensor(snap_g, dtype=torch.int32, device=device),
+                snap_req_idx=torch.tensor(snap_req_g, dtype=torch.int32, device=device),
+                conv_dst_pool=conv_pool_ref,
+                conv_snap_phys=torch.tensor(snap_phys_g, dtype=torch.int32, device=device),
+                req_snap_start=torch.tensor(rss_g, dtype=torch.int32, device=device),
+                snap_local_ends=torch.tensor(snap_end_g, dtype=torch.int32, device=device),
+                snap_aligned=False,
+                ctx_dst_pool=ctx_pool_ref,
+                ctx_snap_phys=torch.tensor(snap_phys_g, dtype=torch.int32, device=device),
+                skip_invalid_phys=True,
+                block_t=16,
+            )
+
+            s0, s1 = sp_slice_bounds(T_tot, world_size, rank)
+            h_loc, ids_loc, cu_l, treq_l, tr_l, tt0_l, sub_reqs, loc_start, req0_start = _build_local_ragged(
+                in_lens, pfx_lens, s0, s1, h_full, ids_full
+            )
+            sub_init_ctx = torch.stack([init_ctx[ri].clone() for ri in sub_reqs], dim=0)
+            sub_init_conv = torch.stack([init_conv[ri].clone() for ri in sub_reqs], dim=0)
+            if loc_start == 1:
+                sub_init_ctx[0, 0] = sub_init_ctx[0, 1]
+                sub_init_ctx[0, 1] = ids_full[s0 - 1]
+            elif loc_start >= 2:
+                sub_init_ctx[0, 0] = ids_full[s0 - 2]
+                sub_init_ctx[0, 1] = ids_full[s0 - 1]
+            if loc_start >= 3:
+                sub_init_conv[0].zero_()
+            elif loc_start > 0:
+                keep = 3 - loc_start
+                sub_init_conv[0, :, :keep] = init_conv[sub_reqs[0], :, loc_start:]
+                sub_init_conv[0, :, keep:].zero_()
+
+            cu_global = [0, 37, 66]
+            loc_snaps = []
+            loc_sreqs = []
+            loc_sphys = []
+            loc_sends = []
+            loc_rss = [0]
+            for sub_bi, ri in enumerate(sub_reqs):
+                rs = cu_global[ri]
+                for gi, g_tok in enumerate(snap_g):
+                    if s0 <= g_tok < s1 and snap_req_g[gi] == ri:
+                        loc_snaps.append(g_tok - s0)
+                        loc_sreqs.append(sub_bi)
+                        loc_sphys.append(snap_phys_g[gi])
+                        loc_sends.append((g_tok - rs + 1) - (max(s0, rs) - rs))
+                loc_rss.append(len(loc_snaps))
+            conv_pool_sp = torch.zeros_like(conv_pool_ref)
+            ctx_pool_sp = torch.full_like(ctx_pool_ref, ple.eos_token_id)
+
+            out_loc, _ = ple.forward_packed_prefill_with_hc(
+                h_loc,
+                ids_loc,
+                cu_l,
+                treq_l,
+                tr_l,
+                tt0_l,
+                prev_ngram_ctx=sub_init_ctx,
+                init_conv_state=sub_init_conv,
+                snap_tok_idx=torch.tensor(loc_snaps, dtype=torch.int32, device=device),
+                snap_req_idx=torch.tensor(loc_sreqs, dtype=torch.int32, device=device),
+                conv_dst_pool=conv_pool_sp,
+                conv_snap_phys=torch.tensor(loc_sphys, dtype=torch.int32, device=device),
+                req_snap_start=torch.tensor(loc_rss, dtype=torch.int32, device=device),
+                snap_local_ends=torch.tensor(loc_sends, dtype=torch.int32, device=device),
+                snap_aligned=False,
+                ctx_dst_pool=ctx_pool_sp,
+                ctx_snap_phys=torch.tensor(loc_sphys, dtype=torch.int32, device=device),
+                skip_invalid_phys=True,
+                block_t=16,
+                sp_tokens_sharded=True,
+                sp_total_tokens=T_tot,
+                sp_halo_exchange=True,
+                sp_halo_loc_start=loc_start,
+                sp_halo_req0_start=req0_start,
+            )
+            diff_max = float((out_loc.float() - out_ref[s0:s1].float()).abs().max().item())
+            assert diff_max < 2e-2, f"rank={rank} sharded={sharded} ragged diff={diff_max}"
+            for p_idx in loc_sphys:
+                assert torch.equal(ctx_pool_sp[p_idx], ctx_pool_ref[p_idx]), "ctx snap mismatch"
+                c_diff = float((conv_pool_sp[p_idx].float() - conv_pool_ref[p_idx].float()).abs().max().item())
+                assert c_diff < 2e-2, f"rank={rank} sharded={sharded} conv snap diff={c_diff}"
+
+        # Case 2: T=3 < sp_size=4 (rank 3 gets N_loc==0, tail spans multi-rank + non-divisible gpu_sharded)
+        ple_sh = _make_ple(sharded=True)
+        ple_ref = _make_ple(sharded=False)
+        ple_ref.sp_size = 1
+        ple_ref.sp_group = None
+        torch.manual_seed(4202)
+        h3 = torch.randn((1, 3, hc * H), dtype=dtype, device=device) * 0.25
+        ids3 = torch.randint(10, 5000, (1, 3), dtype=torch.int64, device=device)
+        st_ref3 = PLELayerState(
+            ngram_context=torch.full((1, 2), ple_ref.eos_token_id, dtype=torch.int64, device=device),
+            conv_state=torch.zeros((1, hc * H, 3), dtype=dtype, device=device),
+        )
+        out_ref3 = ple_ref.forward(h3, ids3, state=st_ref3)
+        s0, s1 = sp_slice_bounds(3, world_size, rank)
+        st_sp3 = PLELayerState(
+            ngram_context=torch.full((1, 2), ple_sh.eos_token_id, dtype=torch.int64, device=device),
+            conv_state=torch.zeros((1, hc * H, 3), dtype=dtype, device=device),
+        )
+        out_loc3 = ple_sh.forward(
+            h3[:, s0:s1].contiguous(),
+            ids3[:, s0:s1].contiguous(),
+            state=st_sp3,
+            sp_tokens_sharded=True,
+            sp_total_tokens=3,
+            sp_halo_exchange=True,
+        )
+        if s1 > s0:
+            d3 = float((out_loc3.float() - out_ref3[:, s0:s1].float()).abs().max().item())
+            assert d3 < 2e-2, f"T=3 SP diff={d3}"
+            assert torch.equal(st_sp3.ngram_context, st_ref3.ngram_context)
+            sd3 = float((st_sp3.conv_state.float() - st_ref3.conv_state.float()).abs().max().item())
+            assert sd3 < 2e-2, f"T=3 conv_state diff={sd3}"
+
+        # Case 3: Batch-SP decode with B=3 < sp_size=4 (rank 3 gets B_loc==0) under gpu_sharded
+        torch.manual_seed(4203)
+        hd = torch.randn((3, 1, hc * H), dtype=dtype, device=device) * 0.25
+        ids_d = torch.randint(10, 5000, (3, 1), dtype=torch.int64, device=device)
+        st_ref_d = PLELayerState(
+            ngram_context=torch.randint(10, 5000, (3, 2), dtype=torch.int64, device=device),
+            conv_state=torch.randn((3, hc * H, 3), dtype=dtype, device=device) * 0.1,
+        )
+        out_ref_d = ple_ref.forward(
+            hd, ids_d, state=PLELayerState(st_ref_d.ngram_context.clone(), st_ref_d.conv_state.clone())
+        )
+        b0, b1 = sp_slice_bounds(3, world_size, rank)
+        st_sp_d = PLELayerState(
+            ngram_context=st_ref_d.ngram_context[b0:b1].clone(),
+            conv_state=st_ref_d.conv_state[b0:b1].clone(),
+        )
+        out_loc_d = ple_sh.forward(
+            hd[b0:b1].contiguous(),
+            ids_d[b0:b1].contiguous(),
+            state=st_sp_d,
+            sp_tokens_sharded=True,
+            sp_total_tokens=3,
+            sp_halo_exchange=False,
+        )
+        if b1 > b0:
+            dd = float((out_loc_d.float() - out_ref_d[b0:b1].float()).abs().max().item())
+            assert dd < 2e-2, f"Batch-SP decode diff={dd}"
+
+        # Case 4: Verify Step-SP forward_verify (B=1, V=8, sp_halo_exchange=True) under gpu_sharded
+        torch.manual_seed(4204)
+        V_st = 8
+        hv = torch.randn((1, V_st, hc * H), dtype=dtype, device=device) * 0.25
+        ids_v = torch.randint(10, 5000, (1, V_st), dtype=torch.int64, device=device)
+        in_ctx_v = torch.randint(10, 5000, (1, 2), dtype=torch.int64, device=device)
+        in_conv_v = torch.randn((1, hc * H, 3), dtype=dtype, device=device) * 0.1
+        st_ctx_ref = torch.empty((1, V_st, 2), dtype=torch.int64, device=device)
+        st_conv_ref = torch.empty((1, V_st, hc * H, 3), dtype=dtype, device=device)
+        out_v_ref = ple_ref.forward_verify(
+            hv, ids_v, in_ctx_v.clone(), in_conv_v.clone(), stage_ctx=st_ctx_ref, stage_conv=st_conv_ref
+        )
+        v0, v1 = sp_slice_bounds(V_st, world_size, rank)
+        v_loc = v1 - v0
+        st_ctx_sp = torch.empty((1, v_loc, 2), dtype=torch.int64, device=device)
+        st_conv_sp = torch.empty((1, v_loc, hc * H, 3), dtype=dtype, device=device)
+        out_v_sp = ple_sh.forward_verify(
+            hv[:, v0:v1].contiguous(),
+            ids_v[:, v0:v1].contiguous(),
+            in_ctx_v.clone(),
+            in_conv_v.clone(),
+            stage_ctx=st_ctx_sp,
+            stage_conv=st_conv_sp,
+            sp_tokens_sharded=True,
+            sp_total_tokens=V_st,
+            sp_halo_exchange=True,
+            sp_halo_step_start=v0,
+            sp_full_input_ids_2d=ids_v,
+        )
+        if v_loc > 0:
+            dv = float((out_v_sp.float() - out_v_ref[:, v0:v1].float()).abs().max().item())
+            assert dv < 2e-2, f"Verify Step-SP forward_verify diff={dv}"
+            assert torch.equal(st_ctx_sp, st_ctx_ref[:, v0:v1]), "Verify Step-SP stage_ctx mismatch"
+            dcv = float((st_conv_sp.float() - st_conv_ref[:, v0:v1].float()).abs().max().item())
+            assert dcv < 2e-2, f"Verify Step-SP stage_conv diff={dcv}"
+
+        if rank == 0:
+            q.put(("ok", True))
+    except Exception:
+        import traceback
+        q.put((f"rank={rank} err", traceback.format_exc()))
+        raise
+    finally:
+        dist.destroy_process_group()
+
+
+def test_r7_ple_sp_and_sharded_table() -> None:
+    import multiprocessing as mp
+    import os
+    import tempfile
+
+    print("=== [R7 PLE] SP Sharded Table + Boundary Halo + Empty-Rank 4-Rank Gloo ===")
+    ctx = mp.get_context("spawn")
+    q = ctx.Queue()
+    with tempfile.TemporaryDirectory(prefix="q45_ple_sp_") as td:
+        init_file = os.path.join(td, "dist_init")
+        procs = []
+        for r in range(4):
+            p = ctx.Process(target=_r7_ple_sp_worker, args=(r, 4, init_file, q))
+            p.start()
+            procs.append(p)
+        for p in procs:
+            p.join(timeout=120)
+            assert p.exitcode == 0, f"PLE SP worker exit={p.exitcode}"
+    msg, val = q.get(timeout=5)
+    assert msg == "ok" and val is True, f"PLE SP test failed: {msg}: {val}"
+    print("  [R7 PLE SP PASS] ragged [37,29] + T=3<SP + Batch-SP Decode B=3<SP (gpu_full & gpu_sharded)")
+
+
 def run_b300_benchmarks() -> None:
     print("\n=== Test 4: Real-Shape B300 Single-Layer GPU Micro-Benchmarks (hidden=5120, BF16) ===")
     device = torch.device("cuda")
@@ -1414,6 +1771,7 @@ def main() -> None:
     test_r4_rmsnorm_gated_packed_yoco_subdv_and_prefill_tuning()
     test_r5_gdn_verify_readout_stage1_and_fused_projections()
     test_r6_gdn_decode_opaque_and_direct_chunk64_snaps()
+    test_r7_ple_sp_and_sharded_table()
     run_b300_benchmarks()
     print(f"\nALL TESTS & BENCHMARKS PASSED in {time.time() - t0:.2f}s")
 

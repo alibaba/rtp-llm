@@ -45,7 +45,7 @@ from rtp_llm.models_py.modules.qwen4_5.attention import (
     apply_partial_neox_rope,
     gemma_rmsnorm_and_partial_rope,
 )
-from rtp_llm.models_py.modules.qwen4_5.hyper_connection import Qwen4_5HyperConnection
+from rtp_llm.models_py.modules.qwen4_5.hyper_connection import HCStaticWorkspace, Qwen4_5HyperConnection
 from rtp_llm.models_py.modules.qwen4_5.moe import Qwen4_5LatentMoE
 from rtp_llm.models_py.speculative.dspark_proposer_mixin import (
     DSparkProposerMixin,
@@ -4918,17 +4918,20 @@ class Qwen4_5DFlash2DecoderLayer(nn.Module):
         positions: torch.Tensor,
         fmha_impl: _DFlash2PagedFMHADispatcher,
         kv_cache: Optional[LayerKVCache],
-        deferred: Optional[Tuple[torch.Tensor, torch.Tensor, torch.Tensor]],
+        deferred: Optional[Tuple[Any, ...]],
         latent: Optional[torch.Tensor],
         *,
         enable_tbo: bool = False,
         tbo_equal_tokens: Optional[bool] = None,
-    ) -> Tuple[Tuple[torch.Tensor, torch.Tensor, torch.Tensor], Optional[torch.Tensor]]:
+        defer_mlp_conv_finish: bool = False,
+        hc_ws: Optional[HCStaticWorkspace] = None,
+    ) -> Tuple[Tuple[Any, ...], Optional[torch.Tensor]]:
         use_cuda = hidden_states.is_cuda
+        fuse_gconv_hc = use_cuda and _HAS_TRITON
         if deferred is None:
             if use_cuda:
                 mixed, residual, inject, latent = self.attn_hyper_connection.mix_with_latent(
-                    hidden_states, latent
+                    hidden_states, latent, ws=hc_ws
                 )
             else:
                 mixed, residual, inject, latent = self.attn_hyper_connection.mix_with_latent_ref(
@@ -4936,11 +4939,30 @@ class Qwen4_5DFlash2DecoderLayer(nn.Module):
                 )
         else:
             if use_cuda:
-                mixed, residual, inject, latent = (
-                    self.attn_hyper_connection.combine_and_mix_with_latent(
-                        *deferred, prev_latent=latent
+                if len(deferred) == 4:
+                    raw_sub, d_res, d_inj, gconv_spec = deferred
+                    d_delta, d_base, d_bs, d_gs, d_taps, d_clip = gconv_spec
+                    mixed, residual, inject, latent = (
+                        self.attn_hyper_connection.combine_dflash_gconv_and_mix_with_latent(
+                            raw_sub,
+                            d_delta,
+                            d_base,
+                            d_bs,
+                            d_gs,
+                            d_taps,
+                            d_res,
+                            d_inj,
+                            prev_latent=latent,
+                            clip_value=d_clip,
+                            ws=hc_ws,
+                        )
                     )
-                )
+                else:
+                    mixed, residual, inject, latent = (
+                        self.attn_hyper_connection.combine_and_mix_with_latent(
+                            *deferred, prev_latent=latent, ws=hc_ws
+                        )
+                    )
             else:
                 mixed, residual, inject, latent = (
                     self.attn_hyper_connection.combine_and_mix_with_latent_ref(
@@ -4950,20 +4972,37 @@ class Qwen4_5DFlash2DecoderLayer(nn.Module):
 
         mixed, attn_coeff = self.attention_conv.prepare(mixed)
         attended = self.self_attn(mixed, positions, fmha_impl, kv_cache)
-        attended = self.attention_conv.finish(attended, attn_coeff)
 
-        if use_cuda:
+        if fuse_gconv_hc:
             mixed, residual, inject, latent = (
-                self.mlp_hyper_connection.combine_and_mix_with_latent(
-                    attended, residual, inject, prev_latent=latent
+                self.mlp_hyper_connection.combine_dflash_gconv_and_mix_with_latent(
+                    attended,
+                    attn_coeff,
+                    self.attention_conv.base_kernel[1],
+                    self.attention_conv.block_size,
+                    self.attention_conv.group_size,
+                    self.attention_conv.taps,
+                    residual,
+                    inject,
+                    prev_latent=latent,
+                    clip_value=None,
+                    ws=hc_ws,
                 )
             )
         else:
-            mixed, residual, inject, latent = (
-                self.mlp_hyper_connection.combine_and_mix_with_latent_ref(
-                    attended, residual, inject, prev_latent=latent
+            attended = self.attention_conv.finish(attended, attn_coeff)
+            if use_cuda:
+                mixed, residual, inject, latent = (
+                    self.mlp_hyper_connection.combine_and_mix_with_latent(
+                        attended, residual, inject, prev_latent=latent, ws=hc_ws
+                    )
                 )
-            )
+            else:
+                mixed, residual, inject, latent = (
+                    self.mlp_hyper_connection.combine_and_mix_with_latent_ref(
+                        attended, residual, inject, prev_latent=latent
+                    )
+                )
 
         mixed, mlp_coeff = self.mlp_conv.prepare(mixed)
         mlp_out = (
@@ -4975,8 +5014,19 @@ class Qwen4_5DFlash2DecoderLayer(nn.Module):
             if enable_tbo
             else self.mlp(mixed, use_triton_mxfp4=use_cuda)
         )
+        mlp_clip = self.clip_mlp_output or None
+        if defer_mlp_conv_finish and fuse_gconv_hc:
+            gconv_spec = (
+                mlp_coeff,
+                self.mlp_conv.base_kernel[1],
+                self.mlp_conv.block_size,
+                self.mlp_conv.group_size,
+                self.mlp_conv.taps,
+                mlp_clip,
+            )
+            return (mlp_out, residual, inject, gconv_spec), latent
         output = self.mlp_conv.finish(
-            mlp_out, mlp_coeff, clip_value=self.clip_mlp_output or None
+            mlp_out, mlp_coeff, clip_value=mlp_clip
         )
         return (output, residual, inject), latent
 
@@ -5047,7 +5097,8 @@ class Qwen4_5DSparkModel(DSparkProposerMixin, GptModelBase):
         pc_ep_s = int(getattr(parallelism_config, "ep_size", 1) or 1)
         pc_ep_r = int(getattr(parallelism_config, "ep_rank", 0) or 0)
         pc_sp_s = int(getattr(parallelism_config, "sp_size", 1) or 1)
-        pc_sp_r = int(getattr(parallelism_config, "sp_rank", 0) or 0)
+        pc_sp_r_raw = getattr(parallelism_config, "sp_rank", None)
+        pc_sp_r = None if pc_sp_r_raw is None else int(pc_sp_r_raw)
         if eff_pmode is None:
             if pc_ep_s <= 1 and pc_tp_s > 1 and pc_dp_s == 1 and ep_size is None:
                 pc_ep_s = pc_tp_s
@@ -5199,7 +5250,12 @@ class Qwen4_5DSparkModel(DSparkProposerMixin, GptModelBase):
                 **df_ar_kw,
             )
 
-        if all_to_all_comm is None and eff_ep_size > 1 and self.dp_attn and ep_group is not None:
+        if (
+            all_to_all_comm is None
+            and eff_ep_size > 1
+            and (self.dp_attn or self.sp_size > 1 or self.dp_size > 1)
+            and ep_group is not None
+        ):
             all_to_all_comm = resolve_qwen4_5_all_to_all(
                 ep_group,
                 device=device,
@@ -5281,6 +5337,7 @@ class Qwen4_5DSparkModel(DSparkProposerMixin, GptModelBase):
         )
         init_slots = max(1024 if local_num_heads <= 16 else 512, init_batch_cap * 8)
         # Flat workspace reserves up to 1024 slots at tp4 (~67 MiB) so B=1..128 runs CG-safe.
+        self._hc_ws = HCStaticWorkspace()
         self._mha_workspace = _DFlash2SplitKVWorkspace(
             max_batch=max(1, init_slots // 8),
             num_heads=local_num_heads,
@@ -5777,6 +5834,8 @@ class Qwen4_5DSparkModel(DSparkProposerMixin, GptModelBase):
 
         deferred = None
         latent = None
+        defer_mlp = bool(hidden.is_cuda and _HAS_TRITON and self.hyper_connection_mixer is not None)
+        hc_ws = getattr(self, "_hc_ws", None)
         for layer_idx, layer in enumerate(self.layers):
             layer_kv = self._get_layer_full_kv(layer_idx)
             deferred, latent = layer(
@@ -5788,14 +5847,33 @@ class Qwen4_5DSparkModel(DSparkProposerMixin, GptModelBase):
                 latent,
                 enable_tbo=eff_tbo,
                 tbo_equal_tokens=eff_eq,
+                defer_mlp_conv_finish=defer_mlp,
+                hc_ws=hc_ws,
             )
 
         assert deferred is not None
         if self.hyper_connection_mixer is not None:
             if hidden.is_cuda:
-                mixed, _, _, _ = self.hyper_connection_mixer.combine_and_mix_with_latent(
-                    *deferred
-                )
+                if len(deferred) == 4:
+                    raw_sub, d_res, d_inj, gconv_spec = deferred
+                    d_delta, d_base, d_bs, d_gs, d_taps, d_clip = gconv_spec
+                    mixed, _, _, _ = (
+                        self.hyper_connection_mixer.combine_dflash_gconv_and_mix_with_latent(
+                            raw_sub,
+                            d_delta,
+                            d_base,
+                            d_bs,
+                            d_gs,
+                            d_taps,
+                            d_res,
+                            d_inj,
+                            clip_value=d_clip,
+                        )
+                    )
+                else:
+                    mixed, _, _, _ = self.hyper_connection_mixer.combine_and_mix_with_latent(
+                        *deferred
+                    )
             else:
                 mixed, _, _, _ = (
                     self.hyper_connection_mixer.combine_and_mix_with_latent_ref(

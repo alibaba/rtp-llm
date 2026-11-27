@@ -43,11 +43,110 @@ from triton.language.extra import libdevice
 
 from rtp_llm.models_py.modules.qwen4_5.activation import SituAndMul
 from rtp_llm.models_py.modules.qwen4_5.contracts import Qwen4_5ArchConfig
+from rtp_llm.models_py.modules.qwen4_5.fast_comm import (
+    FastAllReduce,
+    sp_slice_bounds,
+)
 from rtp_llm.models_py.modules.qwen4_5.fp8_linear import (
     SM100FP8Linear,
     _cuda_device_ctx,
     has_deepgemm_fp8,
 )
+
+
+def _resolve_sp_comm(
+    sp_group: Any,
+    sp_fast_comm: Any,
+    fast_all_reduce: Any,
+) -> Any:
+    if sp_fast_comm is not None:
+        return sp_fast_comm
+    if fast_all_reduce is not None and (
+        sp_group is None or getattr(fast_all_reduce, "group", None) is sp_group
+    ):
+        return fast_all_reduce
+    return None
+
+
+def _sp_all_gather(
+    x: torch.Tensor,
+    *,
+    sp_size: int,
+    sp_rank: int,
+    sp_group: Any,
+    sp_comm: Any,
+    total_tokens: Optional[int],
+) -> torch.Tensor:
+    if sp_size <= 1 or sp_group is None:
+        return x[:total_tokens] if total_tokens is not None and x.shape[0] != total_tokens else x
+    if sp_comm is not None and hasattr(sp_comm, "all_gather_sp"):
+        return sp_comm.all_gather_sp(x, total_tokens=total_tokens)
+    dist = torch.distributed
+    T_in = int(x.shape[0])
+    rest = tuple(x.shape[1:])
+    T = T_in * sp_size if total_tokens is None else int(total_tokens)
+    if T == 0:
+        return torch.empty((0, *rest), dtype=x.dtype, device=x.device)
+    chunk = (T + sp_size - 1) // sp_size
+    padded_T = sp_size * chunk
+    x_c = x if x.is_contiguous() else x.contiguous()
+    if T_in == chunk:
+        src_pad = x_c
+    else:
+        src_pad = torch.empty((chunk, *rest), dtype=x_c.dtype, device=x_c.device)
+        copy_rows = min(T_in, chunk)
+        if copy_rows > 0:
+            src_pad[:copy_rows].copy_(x_c[:copy_rows])
+    if dist.get_backend(sp_group) == "gloo" or not x_c.is_cuda:
+        cpu_in = src_pad.detach().cpu() if src_pad.is_cuda else src_pad
+        chunks = [torch.empty_like(cpu_in) for _ in range(sp_size)]
+        dist.all_gather(chunks, cpu_in, group=sp_group)
+        full = torch.cat(chunks, dim=0)[:T]
+        return full.to(device=x_c.device, dtype=x_c.dtype) if x_c.is_cuda else full
+    dst_full = torch.empty((padded_T, *rest), dtype=x_c.dtype, device=x_c.device)
+    dist.all_gather_into_tensor(dst_full.view(sp_size, chunk, *rest), src_pad, group=sp_group)
+    return dst_full[:T]
+
+
+def _sp_reduce_scatter(
+    x: torch.Tensor,
+    *,
+    sp_size: int,
+    sp_rank: int,
+    sp_group: Any,
+    sp_comm: Any,
+    total_tokens: Optional[int],
+) -> torch.Tensor:
+    if sp_size <= 1 or sp_group is None:
+        return x[:total_tokens] if total_tokens is not None and x.shape[0] != total_tokens else x
+    if sp_comm is not None and hasattr(sp_comm, "reduce_scatter_sp"):
+        return sp_comm.reduce_scatter_sp(x, total_tokens=total_tokens)
+    dist = torch.distributed
+    T_in = int(x.shape[0])
+    rest = tuple(x.shape[1:])
+    T = T_in if total_tokens is None else int(total_tokens)
+    if T == 0:
+        return torch.empty((0, *rest), dtype=x.dtype, device=x.device)
+    s0, s1 = sp_slice_bounds(T, sp_size, sp_rank)
+    local_T = s1 - s0
+    chunk = (T + sp_size - 1) // sp_size
+    padded_T = sp_size * chunk
+    x_c = x if x.is_contiguous() else x.contiguous()
+    if T_in == padded_T:
+        src_full = x_c
+    else:
+        src_full = torch.empty((padded_T, *rest), dtype=x_c.dtype, device=x_c.device)
+        src_full[:T].copy_(x_c[:T])
+        if padded_T > T:
+            src_full[T:padded_T].zero_()
+    if dist.get_backend(sp_group) == "gloo" or not x_c.is_cuda:
+        cpu_in = (src_full.detach().cpu() if src_full.is_cuda else src_full).clone()
+        dist.all_reduce(cpu_in, op=dist.ReduceOp.SUM, group=sp_group)
+        loc = cpu_in[s0:s1]
+        return loc.to(device=x_c.device, dtype=x_c.dtype) if x_c.is_cuda else loc.clone()
+    dst_chunk = torch.empty((chunk, *rest), dtype=x_c.dtype, device=x_c.device)
+    dist.reduce_scatter_tensor(dst_chunk, src_full, op=dist.ReduceOp.SUM, group=sp_group)
+    return dst_chunk if local_T == chunk else dst_chunk[:local_T].clone()
 
 
 def _bind_fp8_bf16_alias(fp8_mod: SM100FP8Linear, w_tensor: torch.Tensor) -> None:
@@ -403,6 +502,10 @@ class Qwen4_5DenseMLP(nn.Module):
         tp_rank: int = 0,
         tp_group: Any = None,
         fast_all_reduce: Any = None,
+        sp_size: int = 1,
+        sp_rank: int = 0,
+        sp_group: Any = None,
+        sp_fast_comm: Optional[FastAllReduce] = None,
         dense_linear_mode: Optional[str] = None,
         dtype: torch.dtype = torch.bfloat16,
         device: Optional[torch.device] = None,
@@ -414,6 +517,10 @@ class Qwen4_5DenseMLP(nn.Module):
         self.tp_rank = int(tp_rank)
         self.tp_group = tp_group
         self.fast_all_reduce = fast_all_reduce
+        self.sp_size = int(sp_size)
+        self.sp_rank = int(sp_rank)
+        self.sp_group = sp_group if sp_group is not None else tp_group
+        self.sp_fast_comm = _resolve_sp_comm(self.sp_group, sp_fast_comm, fast_all_reduce)
         self.dense_linear_mode = (
             str(dense_linear_mode).lower()
             if dense_linear_mode is not None
@@ -468,6 +575,10 @@ class Qwen4_5DenseMLP(nn.Module):
         tp_rank: int = 0,
         tp_group: Any = None,
         fast_all_reduce: Any = None,
+        sp_size: int = 1,
+        sp_rank: int = 0,
+        sp_group: Any = None,
+        sp_fast_comm: Optional[FastAllReduce] = None,
         dense_linear_mode: Optional[str] = None,
         dtype: torch.dtype = torch.bfloat16,
         device: Optional[torch.device] = None,
@@ -487,6 +598,10 @@ class Qwen4_5DenseMLP(nn.Module):
             tp_rank=tp_rank,
             tp_group=tp_group,
             fast_all_reduce=fast_all_reduce,
+            sp_size=sp_size,
+            sp_rank=sp_rank,
+            sp_group=sp_group,
+            sp_fast_comm=sp_fast_comm,
             dense_linear_mode=dense_linear_mode,
             dtype=dtype,
             device=device,
@@ -617,21 +732,27 @@ class Qwen4_5DenseMLP(nn.Module):
         *,
         use_triton: Optional[bool] = None,
         skip_allreduce: bool = False,
+        scale_gate: Optional[torch.Tensor] = None,
+        scale_gate_col: int = 0,
     ) -> torch.Tensor:
         """Run SiTU-GLU + down projection from precomputed ``gate_up`` [..., 2*D]."""
-        act = self.act_fn(gate_up, use_triton=use_triton)
+        act = self.act_fn(
+            gate_up,
+            use_triton=use_triton,
+            scale_gate=scale_gate,
+            scale_gate_col=scale_gate_col,
+        )
         return self._finish_down_and_reduce(act, skip_allreduce=skip_allreduce)
 
-    def forward(
+    def _forward_compute(
         self,
         hidden_states: torch.Tensor,
         *,
-        use_triton: Optional[bool] = None,
-        skip_allreduce: bool = False,
+        use_triton: Optional[bool],
+        skip_allreduce: bool,
     ) -> torch.Tensor:
         if hidden_states.numel() == 0:
             return torch.empty_like(hidden_states)
-
         if self._gate_up_weight is not None and (use_triton is None or use_triton):
             gate_up = (
                 self._fp8_gate_up(hidden_states)
@@ -641,7 +762,6 @@ class Qwen4_5DenseMLP(nn.Module):
             return self.forward_from_gate_up(
                 gate_up, use_triton=use_triton, skip_allreduce=skip_allreduce
             )
-
         gate = (
             self._fp8_gate(hidden_states)
             if self._fp8_gate is not None
@@ -654,6 +774,59 @@ class Qwen4_5DenseMLP(nn.Module):
         )
         act = self.act_fn(gate, up, use_triton=use_triton)
         return self._finish_down_and_reduce(act, skip_allreduce=skip_allreduce)
+
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        *,
+        use_triton: Optional[bool] = None,
+        skip_allreduce: bool = False,
+        sp_input: bool = False,
+        sp_total_tokens: Optional[int] = None,
+    ) -> torch.Tensor:
+        eff_sp_size = (
+            self.sp_size if self.sp_size > 1 else (self.tp_size if self.tp_size > 1 else 1)
+        )
+        eff_sp_rank = self.sp_rank if self.sp_size > 1 else self.tp_rank
+        eff_sp_group = self.sp_group if self.sp_group is not None else self.tp_group
+        if sp_input and eff_sp_size > 1 and self.tp_size > 1 and eff_sp_group is not None:
+            orig_ndim = hidden_states.ndim
+            orig_b = int(hidden_states.shape[0]) if orig_ndim >= 3 else 0
+            x_2d = hidden_states.reshape(-1, self.hidden_size)
+            if sp_total_tokens == 0 or (sp_total_tokens is None and x_2d.shape[0] == 0):
+                return torch.empty_like(hidden_states)
+            sp_comm = _resolve_sp_comm(eff_sp_group, self.sp_fast_comm, self.fast_all_reduce)
+            x_full = _sp_all_gather(
+                x_2d,
+                sp_size=eff_sp_size,
+                sp_rank=eff_sp_rank,
+                sp_group=eff_sp_group,
+                sp_comm=sp_comm,
+                total_tokens=sp_total_tokens,
+            )
+            partial_full = self._forward_compute(
+                x_full, use_triton=use_triton, skip_allreduce=True
+            )
+            out_2d = _sp_reduce_scatter(
+                partial_full,
+                sp_size=eff_sp_size,
+                sp_rank=eff_sp_rank,
+                sp_group=eff_sp_group,
+                sp_comm=sp_comm,
+                total_tokens=sp_total_tokens,
+            )
+            if orig_ndim == 2:
+                return out_2d
+            if orig_ndim == 3:
+                return out_2d.reshape(orig_b, -1, self.hidden_size)
+            return out_2d.reshape(-1, self.hidden_size)
+
+        if hidden_states.numel() == 0:
+            return torch.empty_like(hidden_states)
+        eff_skip_ar = skip_allreduce or (sp_input and self.tp_size == 1)
+        return self._forward_compute(
+            hidden_states, use_triton=use_triton, skip_allreduce=eff_skip_ar
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -686,6 +859,10 @@ class LatentMoETBOContext:
     shared: Optional[torch.Tensor] = None
     shared_gate_up: Optional[torch.Tensor] = None
     gates: Optional[torch.Tensor] = None
+    sp_input: bool = False
+    sp_total_tokens: Optional[int] = None
+    sp_local_tokens: Optional[int] = None
+    fused_epilogue: bool = False
     early_return: Optional[torch.Tensor] = None
 
 
@@ -725,6 +902,10 @@ class Qwen4_5LatentMoE(nn.Module):
         tp_rank: int = 0,
         tp_group: Any = None,
         fast_all_reduce: Any = None,
+        sp_size: int = 1,
+        sp_rank: int = 0,
+        sp_group: Any = None,
+        sp_fast_comm: Optional[FastAllReduce] = None,
         all_to_all_comm: Any = None,
         dp_equal_tokens: Optional[bool] = None,
         use_symm_p2p_combine: Optional[bool] = None,
@@ -784,6 +965,10 @@ class Qwen4_5LatentMoE(nn.Module):
         self.tp_rank = int(tp_rank)
         self.tp_group = tp_group
         self.fast_all_reduce = fast_all_reduce
+        self.sp_size = int(sp_size)
+        self.sp_rank = int(sp_rank)
+        self.sp_group = sp_group if sp_group is not None else (tp_group if tp_size > 1 else ep_group)
+        self.sp_fast_comm = _resolve_sp_comm(self.sp_group, sp_fast_comm, fast_all_reduce)
         self.all_to_all_comm = all_to_all_comm
         self.dp_equal_tokens = dp_equal_tokens
         self.use_symm_p2p_combine = use_symm_p2p_combine
@@ -951,6 +1136,10 @@ class Qwen4_5LatentMoE(nn.Module):
         tp_rank: int = 0,
         tp_group: Any = None,
         fast_all_reduce: Any = None,
+        sp_size: int = 1,
+        sp_rank: int = 0,
+        sp_group: Any = None,
+        sp_fast_comm: Optional[FastAllReduce] = None,
         all_to_all_comm: Any = None,
         dp_equal_tokens: Optional[bool] = None,
         use_symm_p2p_combine: Optional[bool] = None,
@@ -972,6 +1161,10 @@ class Qwen4_5LatentMoE(nn.Module):
             tp_rank=tp_rank,
             tp_group=tp_group,
             fast_all_reduce=fast_all_reduce,
+            sp_size=sp_size,
+            sp_rank=sp_rank,
+            sp_group=sp_group,
+            sp_fast_comm=sp_fast_comm,
             all_to_all_comm=all_to_all_comm,
             dp_equal_tokens=dp_equal_tokens,
             use_symm_p2p_combine=use_symm_p2p_combine,
@@ -1353,6 +1546,234 @@ class Qwen4_5LatentMoE(nn.Module):
         )
         return routed * torch.sigmoid(l_gate)
 
+    def _effective_sp_size(self, sp_input: bool) -> int:
+        if not sp_input:
+            return 1
+        if self.sp_size > 1:
+            return self.sp_size
+        if self.tp_size > 1:
+            return self.tp_size
+        return self.ep_size if self.ep_size > 1 else 1
+
+    def _prepare_sp_dispatch(
+        self,
+        routed: torch.Tensor,
+        topk_ids: torch.Tensor,
+        topk_weights: torch.Tensor,
+        *,
+        sp_input: bool,
+        sp_total_tokens: Optional[int],
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, Optional[bool], Optional[int]]:
+        local_T = int(routed.shape[0])
+        if not sp_input:
+            return routed, topk_ids, topk_weights, self.dp_equal_tokens, None
+
+        eff_sp = self._effective_sp_size(True)
+        if sp_total_tokens is None:
+            if eff_sp == self.ep_size and self.dp_equal_tokens is True:
+                return routed, topk_ids, topk_weights, True, None
+            return routed, topk_ids, topk_weights, self.dp_equal_tokens, None
+
+        T_sp = int(sp_total_tokens)
+        can_pad_equal = (
+            (eff_sp == self.ep_size and self.dp_equal_tokens is not False)
+            or self.dp_equal_tokens is True
+        )
+        if can_pad_equal and T_sp > 0:
+            chunk = (T_sp + eff_sp - 1) // eff_sp
+            if local_T == chunk:
+                return routed, topk_ids, topk_weights, True, None
+            if local_T < chunk:
+                routed_p = torch.zeros(
+                    (chunk, self.latent_dim), dtype=routed.dtype, device=routed.device
+                )
+                ids_p = torch.full(
+                    (chunk, self.top_k), -1, dtype=torch.int32, device=routed.device
+                )
+                w_p = torch.zeros(
+                    (chunk, self.top_k), dtype=torch.float32, device=routed.device
+                )
+                if local_T > 0:
+                    routed_p[:local_T].copy_(routed)
+                    ids_p[:local_T].copy_(topk_ids)
+                    w_p[:local_T].copy_(topk_weights)
+                return routed_p, ids_p, w_p, True, local_T
+        return routed, topk_ids, topk_weights, self.dp_equal_tokens, None
+
+    def _fallback_sp_ep_non_a2a(
+        self,
+        routed: torch.Tensor,
+        topk_ids: torch.Tensor,
+        topk_weights: torch.Tensor,
+        weights: MXFP4MoEWeights,
+        *,
+        run_triton: bool,
+        mode: str,
+        backend: str,
+        sp_total_tokens: Optional[int],
+    ) -> torch.Tensor:
+        """Exact SP-domain fallback when all_to_all_comm is disabled and ep_size > 1."""
+        eff_sp = self._effective_sp_size(True)
+        eff_sp_rk = (
+            self.sp_rank
+            if self.sp_size > 1
+            else (self.tp_rank if self.tp_size > 1 else self.ep_rank)
+        )
+        eff_sp_grp = self.sp_group if self.sp_group is not None else self.ep_group
+        sp_comm = _resolve_sp_comm(eff_sp_grp, self.sp_fast_comm, self.fast_all_reduce)
+        routed_full = _sp_all_gather(
+            routed,
+            sp_size=eff_sp,
+            sp_rank=eff_sp_rk,
+            sp_group=eff_sp_grp,
+            sp_comm=sp_comm,
+            total_tokens=sp_total_tokens,
+        )
+        ids_full = _sp_all_gather(
+            topk_ids.to(torch.int32),
+            sp_size=eff_sp,
+            sp_rank=eff_sp_rk,
+            sp_group=eff_sp_grp,
+            sp_comm=sp_comm,
+            total_tokens=sp_total_tokens,
+        )
+        w_full = _sp_all_gather(
+            topk_weights.to(torch.float32),
+            sp_size=eff_sp,
+            sp_rank=eff_sp_rk,
+            sp_group=eff_sp_grp,
+            sp_comm=sp_comm,
+            total_tokens=sp_total_tokens,
+        )
+        if run_triton:
+            routed_part = mxfp4_moe_forward(
+                routed_full,
+                ids_full,
+                w_full,
+                weights,
+                gate_beta=self.gate_beta,
+                up_beta=self.up_beta,
+                compute_mode=mode,
+                use_triton=True,
+                ep_start=self.ep_start,
+                ep_size=self.ep_size,
+                backend=backend,
+            )
+        else:
+            routed_part = mxfp4_moe_forward_ref(
+                routed_full,
+                ids_full,
+                w_full,
+                weights,
+                gate_beta=self.gate_beta,
+                up_beta=self.up_beta,
+                ep_start=self.ep_start,
+                ep_size=self.ep_size,
+            )
+        if self.ep_group is eff_sp_grp and eff_sp == self.ep_size:
+            return _sp_reduce_scatter(
+                routed_part,
+                sp_size=eff_sp,
+                sp_rank=eff_sp_rk,
+                sp_group=eff_sp_grp,
+                sp_comm=sp_comm,
+                total_tokens=sp_total_tokens,
+            )
+        if eff_sp < self.ep_size and self.ep_group is not None:
+            # DP x SP hybrid without A2A: isolate each DP group across ep_group cleanly.
+            payload = (
+                routed_full.detach().cpu(),
+                ids_full.detach().cpu(),
+                w_full.detach().cpu(),
+            )
+            gathered: Any = [None] * self.ep_size
+            torch.distributed.all_gather_object(gathered, payload, group=self.ep_group)
+            dp_idx = self.ep_rank // eff_sp
+            dp_heads = list(range(0, self.ep_size, eff_sp))
+            local_dp_partials = {}
+            for h_r in dp_heads:
+                rb_h, ib_h, wb_h = gathered[h_r]
+                rd_h = rb_h.to(routed.device, dtype=routed.dtype)
+                id_h = ib_h.to(routed.device, dtype=torch.int32)
+                wd_h = wb_h.to(routed.device, dtype=torch.float32)
+                lp_h = (
+                    mxfp4_moe_forward(
+                        rd_h,
+                        id_h,
+                        wd_h,
+                        weights,
+                        gate_beta=self.gate_beta,
+                        up_beta=self.up_beta,
+                        compute_mode=mode,
+                        use_triton=True,
+                        ep_start=self.ep_start,
+                        ep_size=self.ep_size,
+                        backend=backend,
+                    )
+                    if run_triton
+                    else mxfp4_moe_forward_ref(
+                        rd_h,
+                        id_h,
+                        wd_h,
+                        weights,
+                        gate_beta=self.gate_beta,
+                        up_beta=self.up_beta,
+                        ep_start=self.ep_start,
+                        ep_size=self.ep_size,
+                    )
+                )
+                local_dp_partials[h_r] = lp_h.detach().cpu()
+            all_ep_dp = [None] * self.ep_size
+            torch.distributed.all_gather_object(all_ep_dp, local_dp_partials, group=self.ep_group)
+            my_head = dp_idx * eff_sp
+            acc = torch.zeros_like(local_dp_partials[my_head].to(routed.device), dtype=torch.float32)
+            for ep_dict in all_ep_dp:
+                acc.add_(ep_dict[my_head].to(device=routed.device, dtype=torch.float32))
+            routed_res = acc.to(routed.dtype)
+            s0, s1 = sp_slice_bounds(int(routed_res.shape[0]), eff_sp, eff_sp_rk)
+            return routed_res[s0:s1]
+        if self.ep_group is not None:
+            if not routed_part.is_contiguous():
+                routed_part = routed_part.contiguous()
+            torch.distributed.all_reduce(
+                routed_part, op=torch.distributed.ReduceOp.SUM, group=self.ep_group
+            )
+        T_tot = int(routed_part.shape[0])
+        s0, s1 = sp_slice_bounds(T_tot, eff_sp, eff_sp_rk)
+        return routed_part[s0:s1]
+
+    def _can_fuse_latent_shared_epilogue(
+        self,
+        M: int,
+        device: torch.device,
+        *,
+        run_triton: bool,
+        has_a2a: bool,
+        sp_input: bool,
+        sp_total_tokens: Optional[int],
+    ) -> bool:
+        if os.environ.get("QWEN4_5_FUSE_MOE_EPILOGUE", "0") != "1":
+            return False
+        if not (run_triton and device.type == "cuda" and M > 0):
+            return False
+        if self.latent_up_proj.weight.dtype != self.gate.weight.dtype:
+            return False
+        if self.shared_expert.down_proj.weight.dtype != self.gate.weight.dtype:
+            return False
+        if self._fp8_latent_up is not None and self._fp8_latent_up._resolve_backend(M, device) != "bf16":
+            return False
+        if self.shared_expert._fp8_down is not None and self.shared_expert._fp8_down._resolve_backend(M, device) != "bf16":
+            return False
+        if has_a2a and not hasattr(self.all_to_all_comm, "can_symm_p2p_combine"):
+            return False
+        if not has_a2a and self.ep_size > 1:
+            return False
+        if sp_input and sp_total_tokens is not None:
+            eff_sp = max(1, self._effective_sp_size(True))
+            if int(sp_total_tokens) % eff_sp != 0:
+                return False
+        return True
+
     def _forward_routed_from_norm(
         self,
         x: torch.Tensor,
@@ -1362,6 +1783,11 @@ class Qwen4_5LatentMoE(nn.Module):
         mode: str,
         backend: str,
         apply_scale_gate: bool = True,
+        sp_input: bool = False,
+        sp_total_tokens: Optional[int] = None,
+        return_pre_up: bool = False,
+        routed_scale_gate: Optional[torch.Tensor] = None,
+        routed_scale_gate_col: int = 0,
     ) -> torch.Tensor:
         topk_ids, topk_weights = self.route(routed, use_triton=run_triton)
         weights = self._mxfp4_weights()
@@ -1371,11 +1797,18 @@ class Qwen4_5LatentMoE(nn.Module):
             and getattr(self.all_to_all_comm, "world_size", 1) > 1
         )
         if use_a2a:
-            eff_m_est = int(routed.shape[0]) * self.ep_size
+            r_disp, ids_disp, w_disp, eq_tok, sp_loc_t = self._prepare_sp_dispatch(
+                routed,
+                topk_ids,
+                topk_weights,
+                sp_input=sp_input,
+                sp_total_tokens=sp_total_tokens,
+            )
+            eff_m_est = int(r_disp.shape[0]) * self.ep_size
             resolved_b = resolve_moe_backend_for_shape(
                 eff_m_est,
                 self.latent_dim,
-                routed.device,
+                r_disp.device,
                 weights,
                 backend,
                 run_triton,
@@ -1387,13 +1820,15 @@ class Qwen4_5LatentMoE(nn.Module):
                 "flashinfer",
                 "flashinfer_noswap",
             )
+            want_packed = want_fp8_a2a and resolved_b == "deepgemm_masked"
             a2a_state = self.all_to_all_comm.dispatch(
-                routed,
-                topk_ids,
-                topk_weights,
+                r_disp,
+                ids_disp,
+                w_disp,
                 num_experts=self.num_experts,
-                equal_tokens=self.dp_equal_tokens,
+                equal_tokens=eq_tok,
                 quantize_fp8=want_fp8_a2a,
+                return_packed=want_packed,
             )
             if run_triton:
                 routed_ep = mxfp4_moe_forward(
@@ -1409,6 +1844,7 @@ class Qwen4_5LatentMoE(nn.Module):
                     ep_size=self.ep_size,
                     backend=backend,
                     prequant_fp8=a2a_state.hidden_fp8,
+                    prequant_packed=getattr(a2a_state, "packed_fp8", None),
                     out_dtype=routed.dtype,
                 )
             else:
@@ -1423,10 +1859,35 @@ class Qwen4_5LatentMoE(nn.Module):
                     ep_start=self.ep_start,
                     ep_size=self.ep_size,
                 )
+            comb_sg = routed_scale_gate if (routed_scale_gate is not None and sp_loc_t is None) else None
             routed = self.all_to_all_comm.combine(
-                routed_ep, a2a_state, use_symm_p2p=self.use_symm_p2p_combine
+                routed_ep,
+                a2a_state,
+                use_symm_p2p=self.use_symm_p2p_combine,
+                scale_gate=comb_sg,
+                scale_gate_col=routed_scale_gate_col,
             )
+            if sp_loc_t is not None:
+                routed = routed[:sp_loc_t]
+                if routed_scale_gate is not None and routed.shape[0] > 0:
+                    sg = routed_scale_gate.reshape(int(x.shape[0]), -1)[:, routed_scale_gate_col : routed_scale_gate_col + 1]
+                    routed = (routed.float() * torch.sigmoid(sg.float()).to(routed.dtype).float()).to(routed.dtype)
+        elif sp_input and self.ep_size > 1 and self._effective_sp_size(True) > 1:
+            routed = self._fallback_sp_ep_non_a2a(
+                routed,
+                topk_ids,
+                topk_weights,
+                weights,
+                run_triton=run_triton,
+                mode=mode,
+                backend=backend,
+                sp_total_tokens=sp_total_tokens,
+            )
+            if routed_scale_gate is not None and routed.shape[0] > 0:
+                sg = routed_scale_gate.reshape(int(x.shape[0]), -1)[:, routed_scale_gate_col : routed_scale_gate_col + 1]
+                routed = (routed.float() * torch.sigmoid(sg.float()).to(routed.dtype).float()).to(routed.dtype)
         else:
+            local_sg = routed_scale_gate if (self.ep_size <= 1 and routed_scale_gate is not None) else None
             if run_triton:
                 routed = mxfp4_moe_forward(
                     routed,
@@ -1440,6 +1901,8 @@ class Qwen4_5LatentMoE(nn.Module):
                     ep_start=self.ep_start,
                     ep_size=self.ep_size,
                     backend=backend,
+                    scale_gate=local_sg,
+                    scale_gate_col=routed_scale_gate_col,
                 )
             else:
                 routed = mxfp4_moe_forward_ref(
@@ -1452,6 +1915,9 @@ class Qwen4_5LatentMoE(nn.Module):
                     ep_start=self.ep_start,
                     ep_size=self.ep_size,
                 )
+                if local_sg is not None and routed.shape[0] > 0:
+                    sg = local_sg.reshape(int(x.shape[0]), -1)[:, routed_scale_gate_col : routed_scale_gate_col + 1]
+                    routed = (routed.float() * torch.sigmoid(sg.float()).to(routed.dtype).float()).to(routed.dtype)
             if self.ep_size > 1 and self.ep_group is not None:
                 if (
                     self.fast_all_reduce is not None
@@ -1464,6 +1930,16 @@ class Qwen4_5LatentMoE(nn.Module):
                     torch.distributed.all_reduce(
                         routed, op=torch.distributed.ReduceOp.SUM, group=self.ep_group
                     )
+                if routed_scale_gate is not None and routed.shape[0] > 0:
+                    sg = routed_scale_gate.reshape(int(x.shape[0]), -1)[:, routed_scale_gate_col : routed_scale_gate_col + 1]
+                    routed = (routed.float() * torch.sigmoid(sg.float()).to(routed.dtype).float()).to(routed.dtype)
+
+        if x.shape[0] == 0:
+            dim_out = self.latent_dim if return_pre_up else self.hidden_size
+            return torch.empty((0, dim_out), dtype=x.dtype, device=x.device)
+
+        if return_pre_up:
+            return routed
 
         routed = (
             self._fp8_latent_up(routed)
@@ -1488,6 +1964,8 @@ class Qwen4_5LatentMoE(nn.Module):
         mode: str,
         backend: str,
         apply_scale_gate: bool = True,
+        sp_input: bool = False,
+        sp_total_tokens: Optional[int] = None,
     ) -> torch.Tensor:
         routed = self._project_and_norm_latent(x, run_triton=run_triton)
         return self._forward_routed_from_norm(
@@ -1497,6 +1975,8 @@ class Qwen4_5LatentMoE(nn.Module):
             mode=mode,
             backend=backend,
             apply_scale_gate=apply_scale_gate,
+            sp_input=sp_input,
+            sp_total_tokens=sp_total_tokens,
         )
 
     def _project_gate_no_cutlass80(
@@ -1752,10 +2232,14 @@ class Qwen4_5LatentMoE(nn.Module):
         use_triton_mxfp4: Optional[bool] = None,
         compute_mode: Optional[str] = None,
         backend: Optional[str] = None,
+        sp_input: bool = False,
+        sp_total_tokens: Optional[int] = None,
     ) -> torch.Tensor:
-        """Run Latent MoE + Shared Expert forward pass with optional aux_stream overlap.
+        """Run Latent MoE + Shared Expert forward pass in replicated or SP domain.
 
-        Accepts 2D ``[M, hidden_size]`` or 3D ``[B, T, hidden_size]`` tensors.
+        When ``sp_input=True``, ``hidden_states`` is the SP-sharded local slice
+        ``[T_loc, H]``; projections, router, shared expert, and EP AllToAll stay
+        strictly in the SP domain with zero AllReduce on MoE.
         """
         orig_shape = hidden_states.shape
         x = hidden_states.reshape(-1, self.hidden_size)
@@ -1764,9 +2248,14 @@ class Qwen4_5LatentMoE(nn.Module):
             and self.ep_size > 1
             and getattr(self.all_to_all_comm, "world_size", 1) > 1
         )
-        # Never skip DP-EP collective dispatch on a 0-token rank: other DP ranks may
-        # route tokens to this rank's local experts inside all_to_all_comm.
-        if x.shape[0] == 0 and not has_a2a:
+        eff_sp = self._effective_sp_size(sp_input)
+        sp_empty = (
+            sp_input
+            and sp_total_tokens == 0
+            and eff_sp == self.ep_size
+            and self.dp_equal_tokens is not False
+        )
+        if sp_empty or (x.shape[0] == 0 and not has_a2a and not (sp_input and self.ep_size > 1)):
             return torch.empty_like(hidden_states)
 
         use_triton = (
@@ -1783,6 +2272,74 @@ class Qwen4_5LatentMoE(nn.Module):
                 x, run_triton=run_triton
             )
             capturing = torch.cuda.is_current_stream_capturing() if use_overlap else False
+            fuse_epi = (
+                pre_gates is not None
+                and self._can_fuse_latent_shared_epilogue(
+                    M,
+                    x.device,
+                    run_triton=run_triton,
+                    has_a2a=has_a2a,
+                    sp_input=sp_input,
+                    sp_total_tokens=sp_total_tokens,
+                )
+            )
+            if fuse_epi:
+                assert pre_gates is not None
+                has_sg = self.shared_expert_gate is not None
+                sg_shared = pre_gates if has_sg else None
+                if use_overlap and (capturing or M >= 1024):
+                    routed_sc, shared_sc = self._run_with_shared_stream(
+                        x.device,
+                        lambda: self.shared_expert.forward_from_gate_up(
+                            sgu,
+                            use_triton=run_triton,
+                            skip_allreduce=True,
+                            scale_gate=sg_shared,
+                            scale_gate_col=1,
+                        ),
+                        lambda: self._forward_routed_from_norm(
+                            x,
+                            routed_norm,
+                            run_triton=run_triton,
+                            mode=mode,
+                            backend=eff_backend,
+                            apply_scale_gate=False,
+                            sp_input=sp_input,
+                            sp_total_tokens=sp_total_tokens,
+                            return_pre_up=True,
+                            routed_scale_gate=pre_gates,
+                            routed_scale_gate_col=0,
+                        ),
+                    )
+                else:
+                    routed_sc = self._forward_routed_from_norm(
+                        x,
+                        routed_norm,
+                        run_triton=run_triton,
+                        mode=mode,
+                        backend=eff_backend,
+                        apply_scale_gate=False,
+                        sp_input=sp_input,
+                        sp_total_tokens=sp_total_tokens,
+                        return_pre_up=True,
+                        routed_scale_gate=pre_gates,
+                        routed_scale_gate_col=0,
+                    )
+                    shared_sc = self.shared_expert.forward_from_gate_up(
+                        sgu,
+                        use_triton=run_triton,
+                        skip_allreduce=True,
+                        scale_gate=sg_shared,
+                        scale_gate_col=1,
+                    )
+                r2d = routed_sc if routed_sc.is_contiguous() else routed_sc.contiguous()
+                s2d = shared_sc if shared_sc.is_contiguous() else shared_sc.contiguous()
+                w_up_t = self.latent_up_proj.weight.t()
+                if not s2d.requires_grad and not r2d.requires_grad:
+                    torch.addmm(s2d, r2d, w_up_t, beta=1.0, alpha=1.0, out=s2d)
+                    return s2d.reshape(orig_shape)
+                return torch.addmm(s2d, r2d, w_up_t, beta=1.0, alpha=1.0).reshape(orig_shape)
+
             if use_overlap and (capturing or M >= 1024):
                 routed_up, shared = self._run_with_shared_stream(
                     x.device,
@@ -1796,6 +2353,8 @@ class Qwen4_5LatentMoE(nn.Module):
                         mode=mode,
                         backend=eff_backend,
                         apply_scale_gate=False,
+                        sp_input=sp_input,
+                        sp_total_tokens=sp_total_tokens,
                     ),
                 )
             else:
@@ -1806,6 +2365,8 @@ class Qwen4_5LatentMoE(nn.Module):
                     mode=mode,
                     backend=eff_backend,
                     apply_scale_gate=False,
+                    sp_input=sp_input,
+                    sp_total_tokens=sp_total_tokens,
                 )
                 shared = self.shared_expert.forward_from_gate_up(
                     sgu, use_triton=run_triton, skip_allreduce=True
@@ -1830,6 +2391,8 @@ class Qwen4_5LatentMoE(nn.Module):
                     mode=mode,
                     backend=eff_backend,
                     apply_scale_gate=False,
+                    sp_input=sp_input,
+                    sp_total_tokens=sp_total_tokens,
                 ),
             )
             return self._combine_latent_and_shared(
@@ -1842,6 +2405,8 @@ class Qwen4_5LatentMoE(nn.Module):
             mode=mode,
             backend=eff_backend,
             apply_scale_gate=False,
+            sp_input=sp_input,
+            sp_total_tokens=sp_total_tokens,
         )
         shared = self._forward_shared(x, run_triton=run_triton, apply_gate=False)
         return self._combine_latent_and_shared(
@@ -1864,6 +2429,8 @@ class Qwen4_5LatentMoE(nn.Module):
         backend: Optional[str] = None,
         equal_tokens: Optional[bool] = None,
         slot: int = 0,
+        sp_input: bool = False,
+        sp_total_tokens: Optional[int] = None,
     ) -> LatentMoETBOContext:
         """TBO Stage 1: project latent + route + launch async AllToAll dispatch."""
         orig_shape = tuple(hidden_states.shape)
@@ -1880,7 +2447,14 @@ class Qwen4_5LatentMoE(nn.Module):
         eff_backend = self.backend if backend is None else backend
         run_triton = use_triton and x.is_cuda and supports_triton_mxfp4(x.device)
         weights = self._mxfp4_weights()
-        if x.shape[0] == 0 and not has_a2a:
+        eff_sp = self._effective_sp_size(sp_input)
+        sp_empty = (
+            sp_input
+            and sp_total_tokens == 0
+            and eff_sp == self.ep_size
+            and self.dp_equal_tokens is not False
+        )
+        if sp_empty or (x.shape[0] == 0 and not has_a2a and not (sp_input and self.ep_size > 1)):
             return LatentMoETBOContext(
                 orig_shape=orig_shape,
                 x=x,
@@ -1901,13 +2475,21 @@ class Qwen4_5LatentMoE(nn.Module):
         else:
             routed, topk_ids, topk_weights = self._compute_latent_and_route(x, run_triton=run_triton)
         dispatch_handle = None
+        sp_loc_t: Optional[int] = None
         if has_a2a:
             assert self.all_to_all_comm is not None
-            eff_m_est = int(routed.shape[0]) * self.ep_size
+            r_disp, ids_disp, w_disp, sp_eq, sp_loc_t = self._prepare_sp_dispatch(
+                routed,
+                topk_ids,
+                topk_weights,
+                sp_input=sp_input,
+                sp_total_tokens=sp_total_tokens,
+            )
+            eff_m_est = int(r_disp.shape[0]) * self.ep_size
             resolved_b = resolve_moe_backend_for_shape(
                 eff_m_est,
                 self.latent_dim,
-                routed.device,
+                r_disp.device,
                 weights,
                 eff_backend,
                 run_triton,
@@ -1919,14 +2501,16 @@ class Qwen4_5LatentMoE(nn.Module):
                 "flashinfer",
                 "flashinfer_noswap",
             )
-            eq_tok = self.dp_equal_tokens if equal_tokens is None else equal_tokens
+            want_packed = want_fp8_a2a and resolved_b == "deepgemm_masked"
+            eq_tok = sp_eq if equal_tokens is None else equal_tokens
             dispatch_handle = self.all_to_all_comm.dispatch_async(
-                routed,
-                topk_ids,
-                topk_weights,
+                r_disp,
+                ids_disp,
+                w_disp,
                 num_experts=self.num_experts,
                 equal_tokens=eq_tok,
                 quantize_fp8=want_fp8_a2a,
+                return_packed=want_packed,
                 slot=slot,
             )
         return LatentMoETBOContext(
@@ -1943,6 +2527,9 @@ class Qwen4_5LatentMoE(nn.Module):
             dispatch_handle=dispatch_handle,
             shared_gate_up=shared_gate_up,
             gates=pre_gates,
+            sp_input=sp_input,
+            sp_total_tokens=sp_total_tokens,
+            sp_local_tokens=sp_loc_t,
         )
 
     def forward_routed_compute_and_combine(
@@ -1952,6 +2539,20 @@ class Qwen4_5LatentMoE(nn.Module):
         if ctx.early_return is not None:
             return ctx
         assert ctx.routed is not None and ctx.topk_ids is not None and ctx.topk_weights is not None
+        fuse_epi = (
+            ctx.gates is not None
+            and ctx.shared_gate_up is not None
+            and ctx.sp_local_tokens is None
+            and self._can_fuse_latent_shared_epilogue(
+                int(ctx.x.shape[0]),
+                ctx.x.device,
+                run_triton=ctx.run_triton,
+                has_a2a=ctx.has_a2a,
+                sp_input=ctx.sp_input,
+                sp_total_tokens=ctx.sp_total_tokens,
+            )
+        )
+        ctx.fused_epilogue = fuse_epi
         if ctx.has_a2a:
             assert self.all_to_all_comm is not None and ctx.dispatch_handle is not None
             a2a_state = self.all_to_all_comm.wait_dispatch(ctx.dispatch_handle)
@@ -1969,6 +2570,7 @@ class Qwen4_5LatentMoE(nn.Module):
                     ep_size=self.ep_size,
                     backend=ctx.backend,
                     prequant_fp8=a2a_state.hidden_fp8,
+                    prequant_packed=getattr(a2a_state, "packed_fp8", None),
                     out_dtype=ctx.routed.dtype,
                 )
             else:
@@ -1987,48 +2589,70 @@ class Qwen4_5LatentMoE(nn.Module):
                 routed_ep,
                 a2a_state,
                 use_symm_p2p=self.use_symm_p2p_combine,
+                scale_gate=(ctx.gates if fuse_epi else None),
+                scale_gate_col=0,
                 slot=slot,
             )
         else:
-            if ctx.run_triton:
-                routed = mxfp4_moe_forward(
+            if ctx.sp_input and self.ep_size > 1 and self._effective_sp_size(True) > 1:
+                routed = self._fallback_sp_ep_non_a2a(
                     ctx.routed,
                     ctx.topk_ids,
                     ctx.topk_weights,
                     ctx.weights,
-                    gate_beta=self.gate_beta,
-                    up_beta=self.up_beta,
-                    compute_mode=ctx.mode,
-                    use_triton=True,
-                    ep_start=self.ep_start,
-                    ep_size=self.ep_size,
+                    run_triton=ctx.run_triton,
+                    mode=ctx.mode,
                     backend=ctx.backend,
+                    sp_total_tokens=ctx.sp_total_tokens,
                 )
             else:
-                routed = mxfp4_moe_forward_ref(
-                    ctx.routed,
-                    ctx.topk_ids,
-                    ctx.topk_weights,
-                    ctx.weights,
-                    gate_beta=self.gate_beta,
-                    up_beta=self.up_beta,
-                    ep_start=self.ep_start,
-                    ep_size=self.ep_size,
-                )
-            if self.ep_size > 1 and self.ep_group is not None:
-                if self.fast_all_reduce is not None and self.fast_all_reduce.group is self.ep_group:
-                    routed = self.fast_all_reduce(routed)
-                else:
-                    if not routed.is_contiguous():
-                        routed = routed.contiguous()
-                    torch.distributed.all_reduce(
-                        routed, op=torch.distributed.ReduceOp.SUM, group=self.ep_group
+                local_sg = ctx.gates if (fuse_epi and self.ep_size <= 1) else None
+                if ctx.run_triton:
+                    routed = mxfp4_moe_forward(
+                        ctx.routed,
+                        ctx.topk_ids,
+                        ctx.topk_weights,
+                        ctx.weights,
+                        gate_beta=self.gate_beta,
+                        up_beta=self.up_beta,
+                        compute_mode=ctx.mode,
+                        use_triton=True,
+                        ep_start=self.ep_start,
+                        ep_size=self.ep_size,
+                        backend=ctx.backend,
+                        scale_gate=local_sg,
+                        scale_gate_col=0,
                     )
+                else:
+                    routed = mxfp4_moe_forward_ref(
+                        ctx.routed,
+                        ctx.topk_ids,
+                        ctx.topk_weights,
+                        ctx.weights,
+                        gate_beta=self.gate_beta,
+                        up_beta=self.up_beta,
+                        ep_start=self.ep_start,
+                        ep_size=self.ep_size,
+                    )
+                if self.ep_size > 1 and self.ep_group is not None:
+                    if self.fast_all_reduce is not None and self.fast_all_reduce.group is self.ep_group:
+                        routed = self.fast_all_reduce(routed)
+                    else:
+                        if not routed.is_contiguous():
+                            routed = routed.contiguous()
+                        torch.distributed.all_reduce(
+                            routed, op=torch.distributed.ReduceOp.SUM, group=self.ep_group
+                        )
             ctx.routed = routed
         # Compute collective-free shared branch on main stream (overlapping combine_async on comm_stream when has_a2a).
+        sg_shared = (ctx.gates if (fuse_epi and self.shared_expert_gate is not None) else None)
         ctx.shared = (
             self.shared_expert.forward_from_gate_up(
-                ctx.shared_gate_up, use_triton=ctx.run_triton, skip_allreduce=True
+                ctx.shared_gate_up,
+                use_triton=ctx.run_triton,
+                skip_allreduce=True,
+                scale_gate=sg_shared,
+                scale_gate_col=1,
             )
             if ctx.shared_gate_up is not None
             else self._forward_shared(ctx.x, run_triton=ctx.run_triton, apply_gate=False)
@@ -2043,18 +2667,30 @@ class Qwen4_5LatentMoE(nn.Module):
         if ctx.has_a2a:
             assert self.all_to_all_comm is not None and ctx.combine_handle is not None
             routed = self.all_to_all_comm.wait_combine(ctx.combine_handle)
+            if ctx.sp_local_tokens is not None:
+                routed = routed[:ctx.sp_local_tokens]
         else:
             assert ctx.routed is not None
             routed = ctx.routed
-        routed = (
-            self._fp8_latent_up(routed)
-            if self._fp8_latent_up is not None
-            else F.linear(routed, self.latent_up_proj.weight)
-        )
+        if ctx.x.shape[0] == 0:
+            return torch.empty(ctx.orig_shape, dtype=ctx.x.dtype, device=ctx.x.device)
         shared = (
             ctx.shared
             if ctx.shared is not None
             else self._forward_shared(ctx.x, run_triton=ctx.run_triton, apply_gate=False)
+        )
+        if ctx.fused_epilogue:
+            r2d = routed if routed.is_contiguous() else routed.contiguous()
+            s2d = shared if shared.is_contiguous() else shared.contiguous()
+            w_up_t = self.latent_up_proj.weight.t()
+            if not s2d.requires_grad and not r2d.requires_grad:
+                torch.addmm(s2d, r2d, w_up_t, beta=1.0, alpha=1.0, out=s2d)
+                return s2d.reshape(ctx.orig_shape)
+            return torch.addmm(s2d, r2d, w_up_t, beta=1.0, alpha=1.0).reshape(ctx.orig_shape)
+        routed = (
+            self._fp8_latent_up(routed)
+            if self._fp8_latent_up is not None
+            else F.linear(routed, self.latent_up_proj.weight)
         )
         return self._combine_latent_and_shared(
             ctx.x, routed, shared, run_triton=ctx.run_triton, precomputed_gates=ctx.gates

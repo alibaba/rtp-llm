@@ -3102,6 +3102,7 @@ class Qwen4_5GatedDeltaNet(nn.Module):
         *,
         use_chunk_threshold: int = 16,
         enable_yoco_decode: Optional[bool] = None,
+        skip_allreduce: bool = False,
     ) -> Tuple[torch.Tensor, Optional[SharedGDNInputs]]:
         """Run GDN forward pass for normal, YoCo source, or YoCo consumer layer.
 
@@ -3200,7 +3201,7 @@ class Qwen4_5GatedDeltaNet(nn.Module):
 
             out = self.norm(core_out, z_view)
             out = self.out_proj(out.reshape(bsz, seq_len, self.value_dim))
-            out = self._maybe_all_reduce(out)
+            out = self._maybe_all_reduce(out, skip_allreduce=skip_allreduce)
             return out, None
 
         # Normal / YoCo Source layer
@@ -3293,7 +3294,7 @@ class Qwen4_5GatedDeltaNet(nn.Module):
 
         out = self.norm(core_out, z_view)
         out = self.out_proj(out.reshape(bsz, seq_len, self.value_dim))
-        out = self._maybe_all_reduce(out)
+        out = self._maybe_all_reduce(out, skip_allreduce=skip_allreduce)
 
         published: Optional[SharedGDNInputs] = None
         if self.publishes_shared:
@@ -3306,7 +3307,11 @@ class Qwen4_5GatedDeltaNet(nn.Module):
             )
         return out, published
 
-    def _maybe_all_reduce(self, out: torch.Tensor) -> torch.Tensor:
+    def _maybe_all_reduce(
+        self, out: torch.Tensor, *, skip_allreduce: bool = False
+    ) -> torch.Tensor:
+        if skip_allreduce:
+            return out
         if self.fast_all_reduce is not None:
             return self.fast_all_reduce(out)
         if self.tp_size > 1 and self.tp_group is not None:
@@ -3444,6 +3449,7 @@ class Qwen4_5GatedDeltaNet(nn.Module):
         seq_before: torch.Tensor,
         shared: Optional[SharedGDNInputs] = None,
         enable_yoco_decode: Optional[bool] = None,
+        skip_allreduce: bool = False,
     ) -> Tuple[torch.Tensor, Optional[SharedGDNInputs]]:
         """Zero-copy T=1 paged decode path reading & updating opaque pools directly."""
         bsz, seq_len, _ = hidden_states.shape
@@ -3482,7 +3488,7 @@ class Qwen4_5GatedDeltaNet(nn.Module):
                 )
             out = self.norm(core_out, z_view)
             out = self.out_proj(out.reshape(bsz, 1, self.value_dim))
-            return self._maybe_all_reduce(out), None
+            return self._maybe_all_reduce(out, skip_allreduce=skip_allreduce), None
 
         assert self.in_proj_ba is not None and self.A_log is not None and self.dt_bias is not None
         assert conv_pool_2d is not None and bt_conv is not None and ssm_pool_2d is not None and bt_ssm is not None
@@ -3504,7 +3510,7 @@ class Qwen4_5GatedDeltaNet(nn.Module):
         )
         out = self.norm(core_out, z_view)
         out = self.out_proj(out.reshape(bsz, 1, self.value_dim))
-        out = self._maybe_all_reduce(out)
+        out = self._maybe_all_reduce(out, skip_allreduce=skip_allreduce)
         published = SharedGDNInputs(key=k, value=v, g=g, beta=beta, ssm_state=final_ssm) if self.publishes_shared else None
         return out, published
 
@@ -3779,6 +3785,7 @@ class Qwen4_5GatedDeltaNet(nn.Module):
         shared: Optional[SharedGDNInputs] = None,
         enable_yoco_decode: Optional[bool] = None,
         lazy_kvgb_buffers: Optional[Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]] = None,
+        skip_allreduce: bool = False,
     ) -> Tuple[torch.Tensor, Optional[SharedGDNInputs]]:
         """Single-pass batched V-step verify forward keeping SSM & conv state in registers."""
         bsz, verify_w, _ = int(hidden_states.shape[0]), int(hidden_states.shape[1]), int(hidden_states.shape[2])
@@ -3933,7 +3940,7 @@ class Qwen4_5GatedDeltaNet(nn.Module):
 
             out = self.norm(core_out, z_view)
             out = self.out_proj(out.reshape(bsz, verify_w, self.value_dim))
-            out = self._maybe_all_reduce(out)
+            out = self._maybe_all_reduce(out, skip_allreduce=skip_allreduce)
             return out, None
 
         # Normal / YoCo Source verify
@@ -4036,7 +4043,7 @@ class Qwen4_5GatedDeltaNet(nn.Module):
 
         out = self.norm(core_out, z_view)
         out = self.out_proj(out.reshape(bsz, verify_w, self.value_dim))
-        out = self._maybe_all_reduce(out)
+        out = self._maybe_all_reduce(out, skip_allreduce=skip_allreduce)
 
         published: Optional[SharedGDNInputs] = None
         if self.publishes_shared:
@@ -4076,6 +4083,7 @@ class Qwen4_5GatedDeltaNet(nn.Module):
         snaps_direct_chunk64: bool = False,
         block_t: int = 32,
         enable_yoco_decode: Optional[bool] = None,
+        skip_allreduce: bool = False,
     ) -> Tuple[torch.Tensor, Optional[SharedGDNInputs]]:
         """Whole-batch packed ragged prefill [N, H] with 64-token SSM & 3-token conv snapshots."""
         del enable_yoco_decode
@@ -4162,7 +4170,7 @@ class Qwen4_5GatedDeltaNet(nn.Module):
             )
             out = self.norm(core_out.unsqueeze(0), z_view).squeeze(0)
             out = self.out_proj(out.reshape(N, self.value_dim))
-            out = self._maybe_all_reduce(out)
+            out = self._maybe_all_reduce(out, skip_allreduce=skip_allreduce)
             return out, None
 
         # Normal / YoCo Source packed prefill
@@ -4249,7 +4257,7 @@ class Qwen4_5GatedDeltaNet(nn.Module):
 
         out = self.norm(core_out.unsqueeze(0), z_view).squeeze(0)
         out = self.out_proj(out.reshape(N, self.value_dim))
-        out = self._maybe_all_reduce(out)
+        out = self._maybe_all_reduce(out, skip_allreduce=skip_allreduce)
 
         published: Optional[SharedGDNInputs] = None
         if self.publishes_shared:

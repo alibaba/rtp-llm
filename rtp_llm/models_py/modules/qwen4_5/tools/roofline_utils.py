@@ -673,6 +673,7 @@ PARALLEL_MODES: Dict[str, Tuple[int, int, int, int]] = {
     "tp4_ep4": (1, 4, 4, 1),
     "dp4_ep4": (4, 1, 4, 1),
     "dp2_tp2_ep4": (2, 2, 4, 1),
+    "dp2_tpsp2_ep4": (2, 2, 4, 2),
     "sp4_tp4_ep4": (1, 4, 4, 4),
     "tp1_ep1": (1, 1, 1, 1),
 }
@@ -1137,6 +1138,8 @@ def compute_qwen45_workload_metrics(
     """Compute exact algorithmic + executed FLOPs, Bytes, MFU%, and MBU% for Qwen4.5-Flash 5L."""
     spec = model_spec_from_arch_config(arch_config)
     pm = parallel_mode.lower()
+    if pm == "tpsp4_ep4":
+        pm = "sp4_tp4_ep4"
     if pm not in PARALLEL_MODES:
         raise ValueError(f"Unsupported parallel_mode={parallel_mode!r}; expected {tuple(PARALLEL_MODES)}")
     dp, tp, ep, sp = PARALLEL_MODES[pm]
@@ -1328,8 +1331,8 @@ def compute_qwen45_workload_metrics(
         n_full_total * (kv_sum_full / max(1, spec.indexer_compress_ratio)) * spec.indexer_head_dim * idx_kv_b
         + n_full_total * kv_sum_sparse * (2 * kv_out * kv_b)
     )
-    # Only QSA Indexer & producer KV SConv replicate in TP=4; 32 Q-head QSA Attention is TP-sharded (8/GPU)
-    fa_idx_rep = float(tp) if tp > 1 else 1.0
+    # Under SP/CP-Indexer (sp>1), Indexer scoring shards across sp ranks; only unsharded tp>sp replicates.
+    fa_idx_rep = max(1.0, float(tp) / float(sp)) if tp > 1 else 1.0
     fa_sconv_w_bytes = spec.n_full_producer * (2 * kv_out * spec.linear_conv_kernel_dim) * bf16_b
     ops["full_attn_qsa_core"] = _make_op(
         "full_attn_qsa_core",
@@ -1505,12 +1508,29 @@ def compute_qwen45_workload_metrics(
     bus_scale_ar = 2.0 * (active_gpus - 1) / float(active_gpus) if active_gpus > 1 else 0.0
     bus_scale_a2a = (active_gpus - 1) / float(active_gpus) if active_gpus > 1 else 0.0
     if tp > 1:
-        # GDN + FullAttn + DenseMLP AllReduces in H=5120 space over local tokens
+        # GDN + FullAttn + DenseMLP AllReduce (or AG+RS under SP) in H=5120 space over TP-group tokens
         n_tp_ar_h = n_gdn_total + n_full_total + spec.n_dense_mlp
         comm_ar_bytes += n_tp_ar_h * M_local * H * bf16_b * (2.0 * (tp - 1) / float(tp))
-        # PLE shard AllReduce across ep ranks + LatentMoE EP AllReduce in latent_dim=2560
-        comm_ar_bytes += spec.n_ple_layers * M_local * H * bf16_b * bus_scale_ar
-        comm_ar_bytes += spec.n_latent_moe * M_local * L_lat * bf16_b * bus_scale_ar
+        if sp > 1:
+            # TPSP: PLE/MoE run in SP domain (M_local / sp per rank); MoE uses 1024-dim EP AllToAll, zero AllReduce.
+            m_sp_local = M_local / float(sp)
+            comm_ar_bytes += spec.n_ple_layers * m_sp_local * H * bf16_b * bus_scale_ar
+            if ep > 1:
+                comm_a2a_bytes += (
+                    spec.n_latent_moe
+                    * m_sp_local
+                    * spec.num_experts_per_tok
+                    * L_lat
+                    * (1.0 + bf16_b)
+                    * bus_scale_a2a
+                )
+            comm_ar_bytes += (
+                n_full_total * M_local * spec.indexer_budget * 4.0 * (float(sp - 1) / float(sp))
+            )
+        else:
+            # Legacy TP: PLE shard AllReduce across ep ranks + LatentMoE EP AllReduce in latent_dim=2560
+            comm_ar_bytes += spec.n_ple_layers * M_local * H * bf16_b * bus_scale_ar
+            comm_ar_bytes += spec.n_latent_moe * M_local * L_lat * bf16_b * bus_scale_ar
     elif ep > 1:
         # dp4_ep4: PLE EP AllReduce + per-GPU AllToAll dispatch (1B) + combine (2B) on M_local tokens
         comm_ar_bytes += spec.n_ple_layers * M_local * H * bf16_b * bus_scale_ar

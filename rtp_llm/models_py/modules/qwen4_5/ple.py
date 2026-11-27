@@ -1346,6 +1346,10 @@ class Qwen4_5PLELayer(nn.Module):
         self.tp_rank = int(tp_rank)
         self.tp_group = tp_group
         self.fast_all_reduce = fast_all_reduce
+        self.sp_size = max(1, int(sp_size))
+        self.sp_rank = int(sp_rank)
+        self.sp_group = sp_group
+        self.dp_attn = bool(dp_attn)
 
         # Inference cache for fused [key_proj.weight; value_proj.weight]
         self._fused_kv_key: Optional[Tuple[int, int, int, int]] = None
@@ -1603,20 +1607,19 @@ class Qwen4_5PLELayer(nn.Module):
             )
         return self.compute_ngram_ids_ref(input_ids, state=state, update_state=update_state)
 
-    def gather_embeddings(
+    def _gather_embeddings_local(
         self,
         ngram_ids: torch.Tensor,
         *,
         out_dtype: Optional[torch.dtype] = None,
     ) -> torch.Tensor:
-        """Gather [B, T, ngram_heads] -> [B, T, ple_embed_dim] from CUDA or CPU table."""
-        if self._ngram_shards is None:
-            raise RuntimeError(
-                "Qwen4_5PLELayer.ngram_table is not set; call set_ngram_table() first."
-            )
+        """Gather local shards [B, T, ngram_heads] -> [B, T, ple_embed_dim] without reducing."""
+        assert self._ngram_shards is not None
         B, T, H = ngram_ids.shape
         target_device = ngram_ids.device
         dtype = out_dtype if out_dtype is not None else self.key_proj.weight.dtype
+        if B == 0 or T == 0:
+            return torch.empty((B, T, self.ple_embed_dim), dtype=dtype, device=target_device)
         shards = self._ngram_shards
         is_fp8 = shards[0].dtype == torch.float8_e4m3fn
         is_bf16 = shards[0].dtype == torch.bfloat16
@@ -1641,12 +1644,8 @@ class Qwen4_5PLELayer(nn.Module):
                 out_dtype=dtype,
                 allow_u64_vec=self._pointer_u64_aligned,
             )
-            out = gathered.reshape(B, T, self.ple_embed_dim)
-            if self._total_shards > len(shards):
-                out = self._reduce_sharded_embeddings(out)
-            return out
+            return gathered.reshape(B, T, self.ple_embed_dim)
 
-        # Fallback: host-side gather (keeps compact 1-byte FP8 over H2D) or generic device gather
         table_device = shards[0].device
         flat_ids = ngram_ids.reshape(-1)
         ids_on_table = flat_ids.to(table_device, non_blocking=False)
@@ -1675,7 +1674,170 @@ class Qwen4_5PLELayer(nn.Module):
             rows = rows.to(dtype) * scale
         elif rows.dtype != dtype:
             rows = rows.to(dtype)
-        out = rows.reshape(B, T, self.ple_embed_dim)
+        return rows.reshape(B, T, self.ple_embed_dim)
+
+    def _resolve_sp_dist(
+        self,
+        sp_size: Optional[int],
+        sp_rank: Optional[int],
+        sp_group: Any,
+        sp_fast_comm: Any,
+    ) -> Tuple[int, int, Any, Any]:
+        eff_size = int(sp_size) if sp_size is not None and int(sp_size) > 1 else self.sp_size
+        eff_rank = int(sp_rank) if (sp_size is not None and int(sp_size) > 1 and sp_rank is not None) else self.sp_rank
+        eff_group = sp_group if sp_group is not None else self.sp_group
+        if eff_size > 1 and eff_group is None and self.tp_size == eff_size and self.tp_group is not None:
+            eff_group = self.tp_group
+        eff_comm = sp_fast_comm if sp_fast_comm is not None else self.fast_all_reduce
+        if eff_comm is not None and getattr(eff_comm, "group", None) is not eff_group:
+            eff_comm = None
+        return eff_size, eff_rank, eff_group, eff_comm
+
+    @staticmethod
+    def _sp_all_gather_dim0(
+        x_loc: torch.Tensor,
+        *,
+        total_tokens: int,
+        sp_size: int,
+        sp_rank: int,
+        sp_group: Any,
+        sp_comm: Any = None,
+    ) -> torch.Tensor:
+        if total_tokens == 0:
+            return torch.empty((0, *x_loc.shape[1:]), dtype=x_loc.dtype, device=x_loc.device)
+        if sp_comm is not None and hasattr(sp_comm, "all_gather_sp"):
+            return sp_comm.all_gather_sp(x_loc, total_tokens=total_tokens)
+        from rtp_llm.models_py.modules.qwen4_5.fast_comm import sp_slice_bounds
+
+        chunk = (total_tokens + sp_size - 1) // sp_size
+        padded_t = sp_size * chunk
+        rest = tuple(x_loc.shape[1:])
+        x_c = x_loc if x_loc.is_contiguous() else x_loc.contiguous()
+        if int(x_c.shape[0]) == chunk:
+            src_pad = x_c
+        else:
+            src_pad = torch.empty((chunk, *rest), dtype=x_c.dtype, device=x_c.device)
+            copy_n = min(int(x_c.shape[0]), chunk)
+            if copy_n > 0:
+                src_pad[:copy_n].copy_(x_c[:copy_n])
+        if not x_c.is_cuda or "gloo" in str(torch.distributed.get_backend(sp_group)).lower():
+            cpu_in = src_pad.detach().cpu() if src_pad.is_cuda else src_pad
+            chunks = [torch.empty_like(cpu_in) for _ in range(sp_size)]
+            torch.distributed.all_gather(chunks, cpu_in, group=sp_group)
+            full_cpu = torch.cat(chunks, dim=0)[:total_tokens]
+            return full_cpu.to(device=x_c.device, dtype=x_c.dtype) if x_c.is_cuda else full_cpu
+        dst_full = torch.empty((padded_t, *rest), dtype=x_c.dtype, device=x_c.device)
+        torch.distributed.all_gather_into_tensor(dst_full.view(sp_size, chunk, *rest), src_pad, group=sp_group)
+        return dst_full[:total_tokens]
+
+    @staticmethod
+    def _sp_reduce_scatter_dim0(
+        x_full: torch.Tensor,
+        *,
+        total_tokens: int,
+        sp_size: int,
+        sp_rank: int,
+        sp_group: Any,
+        sp_comm: Any = None,
+    ) -> torch.Tensor:
+        if total_tokens == 0:
+            return torch.empty((0, *x_full.shape[1:]), dtype=x_full.dtype, device=x_full.device)
+        if sp_comm is not None and hasattr(sp_comm, "reduce_scatter_sp"):
+            return sp_comm.reduce_scatter_sp(x_full, total_tokens=total_tokens)
+        from rtp_llm.models_py.modules.qwen4_5.fast_comm import sp_slice_bounds
+
+        s0, s1 = sp_slice_bounds(total_tokens, sp_size, sp_rank)
+        chunk = (total_tokens + sp_size - 1) // sp_size
+        padded_t = sp_size * chunk
+        rest = tuple(x_full.shape[1:])
+        x_c = x_full if x_full.is_contiguous() else x_full.contiguous()
+        if int(x_c.shape[0]) == padded_t:
+            src_pad = x_c
+        else:
+            src_pad = torch.zeros((padded_t, *rest), dtype=x_c.dtype, device=x_c.device)
+            src_pad[:total_tokens].copy_(x_c[:total_tokens])
+        if not x_c.is_cuda or "gloo" in str(torch.distributed.get_backend(sp_group)).lower():
+            cpu_in = (src_pad.detach().cpu() if src_pad.is_cuda else src_pad).clone()
+            torch.distributed.all_reduce(cpu_in, op=torch.distributed.ReduceOp.SUM, group=sp_group)
+            out_cpu = cpu_in[s0:s1]
+            return out_cpu.to(device=x_c.device, dtype=x_c.dtype) if x_c.is_cuda else out_cpu.clone()
+        dst_chunk = torch.empty((chunk, *rest), dtype=x_c.dtype, device=x_c.device)
+        torch.distributed.reduce_scatter_tensor(dst_chunk, src_pad, op=torch.distributed.ReduceOp.SUM, group=sp_group)
+        return dst_chunk[: s1 - s0]
+
+    def gather_embeddings(
+        self,
+        ngram_ids: torch.Tensor,
+        *,
+        out_dtype: Optional[torch.dtype] = None,
+        sp_tokens_sharded: bool = False,
+        sp_total_tokens: Optional[int] = None,
+        sp_size: Optional[int] = None,
+        sp_rank: Optional[int] = None,
+        sp_group: Any = None,
+        sp_fast_comm: Any = None,
+    ) -> torch.Tensor:
+        """Gather [B, T, ngram_heads] -> [B, T, ple_embed_dim] from CUDA or CPU table."""
+        if self._ngram_shards is None:
+            raise RuntimeError(
+                "Qwen4_5PLELayer.ngram_table is not set; call set_ngram_table() first."
+            )
+        B, T, H = ngram_ids.shape
+        dtype = out_dtype if out_dtype is not None else self.key_proj.weight.dtype
+        shards = self._ngram_shards
+        if (
+            sp_tokens_sharded
+            and self._total_shards > len(shards)
+            and sp_total_tokens is not None
+            and sp_total_tokens >= 0
+        ):
+            eff_sp, eff_rk, eff_grp, eff_comm = self._resolve_sp_dist(
+                sp_size, sp_rank, sp_group, sp_fast_comm
+            )
+            reduce_group = self._ple_ep_group if self._ple_ep_group is not None else self.tp_group
+            if (
+                eff_sp > 1
+                and eff_grp is not None
+                and torch.distributed.is_available()
+                and torch.distributed.is_initialized()
+            ):
+                ids_loc = ngram_ids.reshape(B * T, H)
+                ids_full = self._sp_all_gather_dim0(
+                    ids_loc,
+                    total_tokens=int(sp_total_tokens),
+                    sp_size=eff_sp,
+                    sp_rank=eff_rk,
+                    sp_group=eff_grp,
+                    sp_comm=eff_comm,
+                )
+                partial_full = self._gather_embeddings_local(
+                    ids_full.unsqueeze(0), out_dtype=dtype
+                ).squeeze(0)
+                same_group = (
+                    reduce_group is eff_grp
+                    or (
+                        reduce_group is not None
+                        and int(torch.distributed.get_world_size(reduce_group)) == eff_sp
+                    )
+                )
+                if same_group:
+                    out_loc = self._sp_reduce_scatter_dim0(
+                        partial_full,
+                        total_tokens=int(sp_total_tokens),
+                        sp_size=eff_sp,
+                        sp_rank=eff_rk,
+                        sp_group=eff_grp,
+                        sp_comm=eff_comm,
+                    )
+                else:
+                    reduced_full = self._reduce_sharded_embeddings(partial_full)
+                    from rtp_llm.models_py.modules.qwen4_5.fast_comm import sp_slice_bounds
+
+                    s0, s1 = sp_slice_bounds(int(sp_total_tokens), eff_sp, eff_rk)
+                    out_loc = reduced_full[s0:s1]
+                return out_loc.reshape(B, T, self.ple_embed_dim)
+
+        out = self._gather_embeddings_local(ngram_ids, out_dtype=dtype)
         if self._total_shards > len(shards):
             out = self._reduce_sharded_embeddings(out)
         return out
@@ -1707,6 +1869,15 @@ class Qwen4_5PLELayer(nn.Module):
         init_conv_state: torch.Tensor,
         stage_ctx: Optional[torch.Tensor] = None,
         stage_conv: Optional[torch.Tensor] = None,
+        sp_tokens_sharded: bool = False,
+        sp_total_tokens: Optional[int] = None,
+        sp_halo_exchange: bool = False,
+        sp_halo_step_start: int = 0,
+        sp_full_input_ids_2d: Optional[torch.Tensor] = None,
+        sp_size: Optional[int] = None,
+        sp_rank: Optional[int] = None,
+        sp_group: Any = None,
+        sp_fast_comm: Any = None,
     ) -> torch.Tensor:
         """Batched V-step verify forward writing per-step rollback states in one pass."""
         B, V, W = hidden_states.shape
@@ -1714,8 +1885,102 @@ class Qwen4_5PLELayer(nn.Module):
             raise ValueError(
                 f"Expected hidden_states width {self.hc_hidden_size}, got {W}"
             )
+        eff_sp, eff_rk, eff_grp, eff_comm = self._resolve_sp_dist(
+            sp_size, sp_rank, sp_group, sp_fast_comm
+        )
+        sp_active = (
+            sp_tokens_sharded
+            and eff_sp > 1
+            and eff_grp is not None
+            and torch.distributed.is_available()
+            and torch.distributed.is_initialized()
+        )
+        do_step_halo = sp_active and sp_halo_exchange and (B <= 1) and (sp_total_tokens is not None)
+        halo_w = self.conv_kernel_size - 1
         if B == 0 or V == 0:
+            if sp_active and sp_total_tokens is not None and sp_total_tokens > 0:
+                if do_step_halo and sp_full_input_ids_2d is None and self.context_len > 0:
+                    id_tail = torch.full(
+                        (self.context_len,), self.eos_token_id, dtype=torch.int64, device=hidden_states.device
+                    )
+                    _ = self._sp_all_gather_dim0(
+                        id_tail,
+                        total_tokens=eff_sp * self.context_len,
+                        sp_size=eff_sp,
+                        sp_rank=eff_rk,
+                        sp_group=eff_grp,
+                        sp_comm=eff_comm,
+                    )
+                if self._ngram_shards is not None and self._total_shards > len(self._ngram_shards):
+                    _ = self.gather_embeddings(
+                        torch.empty((1, 0, self.ngram_heads), dtype=torch.int64, device=hidden_states.device),
+                        out_dtype=hidden_states.dtype,
+                        sp_tokens_sharded=True,
+                        sp_total_tokens=sp_total_tokens,
+                        sp_size=eff_sp,
+                        sp_rank=eff_rk,
+                        sp_group=eff_grp,
+                        sp_fast_comm=eff_comm,
+                    )
+                if do_step_halo and halo_w > 0:
+                    u_tail = torch.zeros(
+                        (halo_w, self.hc_hidden_size), dtype=hidden_states.dtype, device=hidden_states.device
+                    )
+                    _ = self._sp_all_gather_dim0(
+                        u_tail,
+                        total_tokens=eff_sp * halo_w,
+                        sp_size=eff_sp,
+                        sp_rank=eff_rk,
+                        sp_group=eff_grp,
+                        sp_comm=eff_comm,
+                    )
             return hidden_states.clone()
+
+        eff_init_ctx = init_ngram_ctx
+        if do_step_halo and self.context_len > 0 and sp_halo_step_start > 0:
+            ctx_len = self.context_len
+            if sp_full_input_ids_2d is not None:
+                eff_init_ctx = torch.cat(
+                    [init_ngram_ctx, sp_full_input_ids_2d[:, :sp_halo_step_start].to(torch.int64)],
+                    dim=1,
+                )[:, -ctx_len:].contiguous()
+            else:
+                from rtp_llm.models_py.modules.qwen4_5.fast_comm import sp_slice_bounds
+
+                bounds = [sp_slice_bounds(int(sp_total_tokens), eff_sp, r) for r in range(eff_sp)]
+                id_tail = torch.full((ctx_len,), self.eos_token_id, dtype=torch.int64, device=hidden_states.device)
+                take_id = min(V, ctx_len)
+                id_tail[ctx_len - take_id :].copy_(input_ids_2d[0, V - take_id :].to(torch.int64))
+                all_id_tails = self._sp_all_gather_dim0(
+                    id_tail,
+                    total_tokens=eff_sp * ctx_len,
+                    sp_size=eff_sp,
+                    sp_rank=eff_rk,
+                    sp_group=eff_grp,
+                    sp_comm=eff_comm,
+                ).view(eff_sp, ctx_len)
+                eff_init_ctx = torch.empty_like(init_ngram_ctx)
+                for j in range(ctx_len):
+                    tg = sp_halo_step_start - ctx_len + j
+                    if tg >= 0:
+                        for owner_rk, (b0, b1) in enumerate(bounds):
+                            if b0 <= tg < b1:
+                                eff_init_ctx[0, j] = all_id_tails[owner_rk, ctx_len - (b1 - tg)]
+                                break
+                    else:
+                        eff_init_ctx[0, j] = init_ngram_ctx[0, ctx_len + tg]
+        elif do_step_halo and sp_full_input_ids_2d is None and self.context_len > 0:
+            id_tail = torch.full((self.context_len,), self.eos_token_id, dtype=torch.int64, device=hidden_states.device)
+            take_id = min(V, self.context_len)
+            id_tail[self.context_len - take_id :].copy_(input_ids_2d[0, V - take_id :].to(torch.int64))
+            _ = self._sp_all_gather_dim0(
+                id_tail,
+                total_tokens=eff_sp * self.context_len,
+                sp_size=eff_sp,
+                sp_rank=eff_rk,
+                sp_group=eff_grp,
+                sp_comm=eff_comm,
+            )
 
         if input_ids_2d.is_cuda and self.ngram_size == 3:
             ngram_ids = ple_hash_ngram_ids_triton(
@@ -1724,22 +1989,31 @@ class Qwen4_5PLELayer(nn.Module):
                 self.ngram_heads_offsets,
                 self.layer_multipliers,
                 self.eos_token_id,
-                prev_context=init_ngram_ctx,
+                prev_context=eff_init_ctx,
                 update_context_inplace=False,
                 stage_context=stage_ctx,
             )
         else:
             ngram_ids = self.compute_ngram_ids_ref(
                 input_ids_2d,
-                state=PLELayerState(ngram_context=init_ngram_ctx.clone(), conv_state=init_conv_state),
+                state=PLELayerState(ngram_context=eff_init_ctx.clone(), conv_state=init_conv_state),
                 update_state=False,
             )
             if stage_ctx is not None:
-                full = torch.cat([init_ngram_ctx, input_ids_2d.to(torch.int64)], dim=1)
+                full = torch.cat([eff_init_ctx, input_ids_2d.to(torch.int64)], dim=1)
                 for step in range(V):
                     stage_ctx[:, step].copy_(full[:, step + 1 : step + 3])
 
-        emb = self.gather_embeddings(ngram_ids, out_dtype=hidden_states.dtype)
+        emb = self.gather_embeddings(
+            ngram_ids,
+            out_dtype=hidden_states.dtype,
+            sp_tokens_sharded=sp_active,
+            sp_total_tokens=sp_total_tokens,
+            sp_size=eff_sp,
+            sp_rank=eff_rk,
+            sp_group=eff_grp,
+            sp_fast_comm=eff_comm,
+        )
         key, value = self._project_kv_fused(emb, use_fused_cuda=hidden_states.is_cuda)
         u, u_norm = ple_gate_and_norm_triton(
             key,
@@ -1751,10 +2025,37 @@ class Qwen4_5PLELayer(nn.Module):
             self.hc_count,
             self.eps,
         )
+        eff_init_conv = init_conv_state
+        if do_step_halo and halo_w > 0:
+            from rtp_llm.models_py.modules.qwen4_5.fast_comm import sp_slice_bounds
+
+            bounds = [sp_slice_bounds(int(sp_total_tokens), eff_sp, r) for r in range(eff_sp)]
+            u_tail = torch.zeros((halo_w, self.hc_hidden_size), dtype=u_norm.dtype, device=u_norm.device)
+            take_u = min(V, halo_w)
+            u_tail[halo_w - take_u :].copy_(u_norm[0, V - take_u :])
+            all_u_tails = self._sp_all_gather_dim0(
+                u_tail,
+                total_tokens=eff_sp * halo_w,
+                sp_size=eff_sp,
+                sp_rank=eff_rk,
+                sp_group=eff_grp,
+                sp_comm=eff_comm,
+            ).view(eff_sp, halo_w, self.hc_hidden_size)
+            if sp_halo_step_start > 0:
+                eff_init_conv = torch.empty_like(init_conv_state)
+                for j in range(halo_w):
+                    tg = sp_halo_step_start - halo_w + j
+                    if tg >= 0:
+                        for owner_rk, (b0, b1) in enumerate(bounds):
+                            if b0 <= tg < b1:
+                                eff_init_conv[0, :, j].copy_(all_u_tails[owner_rk, halo_w - (b1 - tg)])
+                                break
+                    else:
+                        eff_init_conv[0, :, j].copy_(init_conv_state[0, :, halo_w + tg])
         conv_out = causal_dwconv1d_verify_triton(
             u_norm,
             self.conv1d.weight,
-            init_conv_state,
+            eff_init_conv,
             stage_conv,
             residual=False,
             use_activation=False,
@@ -1831,6 +2132,15 @@ class Qwen4_5PLELayer(nn.Module):
         hc_norm_weight: Optional[torch.Tensor] = None,
         hc_norm_bias: Optional[torch.Tensor] = None,
         hc_eps: float = 1e-6,
+        sp_tokens_sharded: bool = False,
+        sp_total_tokens: Optional[int] = None,
+        sp_halo_exchange: bool = False,
+        sp_halo_loc_start: int = 0,
+        sp_halo_req0_start: int = 0,
+        sp_size: Optional[int] = None,
+        sp_rank: Optional[int] = None,
+        sp_group: Any = None,
+        sp_fast_comm: Any = None,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
         """Whole-batch packed ragged prefill optionally fused with pre/post HC ops."""
         N, W = hidden_states.shape
@@ -1838,7 +2148,47 @@ class Qwen4_5PLELayer(nn.Module):
             raise ValueError(
                 f"Expected hidden_states width {self.hc_hidden_size}, got {W}"
             )
+        eff_sp, eff_rk, eff_grp, eff_comm = self._resolve_sp_dist(
+            sp_size, sp_rank, sp_group, sp_fast_comm
+        )
+        sp_active = (
+            sp_tokens_sharded
+            and eff_sp > 1
+            and eff_grp is not None
+            and torch.distributed.is_available()
+            and torch.distributed.is_initialized()
+        )
         if N == 0:
+            if (
+                sp_active
+                and sp_total_tokens is not None
+                and sp_total_tokens > 0
+                and self._ngram_shards is not None
+                and self._total_shards > len(self._ngram_shards)
+            ):
+                _ = self.gather_embeddings(
+                    torch.empty((1, 0, self.ngram_heads), dtype=torch.int64, device=hidden_states.device),
+                    out_dtype=hidden_states.dtype,
+                    sp_tokens_sharded=True,
+                    sp_total_tokens=sp_total_tokens,
+                    sp_size=eff_sp,
+                    sp_rank=eff_rk,
+                    sp_group=eff_grp,
+                    sp_fast_comm=eff_comm,
+                )
+            if sp_active and sp_halo_exchange and (self.conv_kernel_size - 1) > 0:
+                halo_w = self.conv_kernel_size - 1
+                tail_zero = torch.zeros(
+                    (halo_w, self.hc_hidden_size), dtype=hidden_states.dtype, device=hidden_states.device
+                )
+                _ = self._sp_all_gather_dim0(
+                    tail_zero,
+                    total_tokens=eff_sp * halo_w,
+                    sp_size=eff_sp,
+                    sp_rank=eff_rk,
+                    sp_group=eff_grp,
+                    sp_comm=eff_comm,
+                )
             h_empty = hidden_states.clone()
             n_empty = torch.empty_like(h_empty) if hc_norm_weight is not None else None
             return h_empty, n_empty
@@ -2009,7 +2359,14 @@ class Qwen4_5PLELayer(nn.Module):
                     ctx_dst_pool[phys, 1] = c1
 
         emb = self.gather_embeddings(
-            ngram_ids.unsqueeze(0), out_dtype=hidden_states.dtype
+            ngram_ids.unsqueeze(0),
+            out_dtype=hidden_states.dtype,
+            sp_tokens_sharded=sp_active,
+            sp_total_tokens=sp_total_tokens,
+            sp_size=eff_sp,
+            sp_rank=eff_rk,
+            sp_group=eff_grp,
+            sp_fast_comm=eff_comm,
         )
         key, value = self._project_kv_fused(emb, use_fused_cuda=hidden_states.is_cuda)
         h_3d = hidden_states.unsqueeze(0)
@@ -2028,13 +2385,56 @@ class Qwen4_5PLELayer(nn.Module):
             combine_inj=pre_combine_inj.unsqueeze(0) if has_pre else None,
             out_combined=h_eff_3d if has_pre else None,
         )
+        eff_init_conv = init_conv_state
+        if sp_active and sp_halo_exchange and (self.conv_kernel_size - 1) > 0:
+            from rtp_llm.models_py.modules.qwen4_5.fast_comm import sp_slice_bounds
+
+            halo_w = self.conv_kernel_size - 1
+            u_2d = u_norm.squeeze(0)
+            tail_u = torch.zeros(
+                (halo_w, self.hc_hidden_size), dtype=u_2d.dtype, device=u_2d.device
+            )
+            take_u = min(N, halo_w)
+            if take_u > 0:
+                tail_u[halo_w - take_u :].copy_(u_2d[N - take_u :])
+            gathered_tails = self._sp_all_gather_dim0(
+                tail_u,
+                total_tokens=eff_sp * halo_w,
+                sp_size=eff_sp,
+                sp_rank=eff_rk,
+                sp_group=eff_grp,
+                sp_comm=eff_comm,
+            ).view(eff_sp, halo_w, self.hc_hidden_size)
+            if sp_halo_loc_start > 0 and sp_total_tokens is not None:
+                s0, _ = sp_slice_bounds(int(sp_total_tokens), eff_sp, eff_rk)
+                bounds = [
+                    sp_slice_bounds(int(sp_total_tokens), eff_sp, rk_i)
+                    for rk_i in range(eff_sp)
+                ]
+                num_sub_reqs = int(cu_seqlens.numel()) - 1
+                if eff_init_conv is None:
+                    eff_init_conv = torch.zeros(
+                        (num_sub_reqs, self.hc_hidden_size, halo_w),
+                        dtype=u_2d.dtype,
+                        device=u_2d.device,
+                    )
+                else:
+                    eff_init_conv = eff_init_conv.clone()
+                for j in range(halo_w):
+                    target_g = s0 - halo_w + j
+                    if target_g >= sp_halo_req0_start:
+                        for owner_rk, (b0, b1) in enumerate(bounds):
+                            if b0 <= target_g < b1:
+                                tail_idx = halo_w - (b1 - target_g)
+                                eff_init_conv[0, :, j].copy_(gathered_tails[owner_rk, tail_idx])
+                                break
         conv_out = causal_dwconv1d_ragged_prefill_with_snapshots_triton(
             u_norm.squeeze(0),
             self.conv1d.weight,
             cu_seqlens,
             tile_req,
             tile_t0,
-            init_state=init_conv_state,
+            init_state=eff_init_conv,
             snap_tok_idx=snap_tok_idx,
             snap_req_idx=snap_req_idx,
             dst_pool=conv_dst_pool,
@@ -2068,6 +2468,14 @@ class Qwen4_5PLELayer(nn.Module):
         hidden_states: torch.Tensor,
         input_ids: torch.Tensor,
         state: Optional[PLELayerState] = None,
+        *,
+        sp_tokens_sharded: bool = False,
+        sp_total_tokens: Optional[int] = None,
+        sp_halo_exchange: bool = False,
+        sp_size: Optional[int] = None,
+        sp_rank: Optional[int] = None,
+        sp_group: Any = None,
+        sp_fast_comm: Any = None,
     ) -> torch.Tensor:
         """Compute H + delta where delta = U + conv1d(gemma_rmsnorm(U, norm_conv))."""
         B, T, W = hidden_states.shape
@@ -2075,12 +2483,113 @@ class Qwen4_5PLELayer(nn.Module):
             raise ValueError(
                 f"Expected hidden_states width {self.hc_hidden_size}, got {W}"
             )
-        if T == 0:
+        eff_sp, eff_rk, eff_grp, eff_comm = self._resolve_sp_dist(
+            sp_size, sp_rank, sp_group, sp_fast_comm
+        )
+        sp_active = (
+            sp_tokens_sharded
+            and eff_sp > 1
+            and eff_grp is not None
+            and torch.distributed.is_available()
+            and torch.distributed.is_initialized()
+        )
+        do_seq_halo = sp_active and sp_halo_exchange and (B <= 1) and (sp_total_tokens is not None)
+        halo_w = self.conv_kernel_size - 1
+        if B == 0 or T == 0:
+            if sp_active and sp_total_tokens is not None and sp_total_tokens > 0:
+                if do_seq_halo and self.context_len > 0:
+                    id_tail = torch.full(
+                        (self.context_len,), self.eos_token_id, dtype=torch.int64, device=hidden_states.device
+                    )
+                    _ = self._sp_all_gather_dim0(
+                        id_tail,
+                        total_tokens=eff_sp * self.context_len,
+                        sp_size=eff_sp,
+                        sp_rank=eff_rk,
+                        sp_group=eff_grp,
+                        sp_comm=eff_comm,
+                    )
+                if self._ngram_shards is not None and self._total_shards > len(self._ngram_shards):
+                    _ = self.gather_embeddings(
+                        torch.empty((1, 0, self.ngram_heads), dtype=torch.int64, device=hidden_states.device),
+                        out_dtype=hidden_states.dtype,
+                        sp_tokens_sharded=True,
+                        sp_total_tokens=sp_total_tokens,
+                        sp_size=eff_sp,
+                        sp_rank=eff_rk,
+                        sp_group=eff_grp,
+                        sp_fast_comm=eff_comm,
+                    )
+                if do_seq_halo and halo_w > 0:
+                    u_tail = torch.zeros(
+                        (halo_w, self.hc_hidden_size), dtype=hidden_states.dtype, device=hidden_states.device
+                    )
+                    _ = self._sp_all_gather_dim0(
+                        u_tail,
+                        total_tokens=eff_sp * halo_w,
+                        sp_size=eff_sp,
+                        sp_rank=eff_rk,
+                        sp_group=eff_grp,
+                        sp_comm=eff_comm,
+                    )
             return hidden_states.clone()
 
         # 1. Hash token n-grams & gather FP8 embeddings
-        ngram_ids = self.compute_ngram_ids(input_ids, state=state, update_state=True)
-        emb = self.gather_embeddings(ngram_ids, out_dtype=hidden_states.dtype)
+        if do_seq_halo and self.context_len > 0:
+            from rtp_llm.models_py.modules.qwen4_5.fast_comm import sp_slice_bounds
+
+            s0, s1 = sp_slice_bounds(int(sp_total_tokens), eff_sp, eff_rk)
+            bounds = [sp_slice_bounds(int(sp_total_tokens), eff_sp, r) for r in range(eff_sp)]
+            ctx_len = self.context_len
+            id_tail = torch.full((ctx_len,), self.eos_token_id, dtype=torch.int64, device=hidden_states.device)
+            take_id = min(T, ctx_len)
+            id_tail[ctx_len - take_id :].copy_(input_ids[0, T - take_id :].to(torch.int64))
+            all_id_tails = self._sp_all_gather_dim0(
+                id_tail,
+                total_tokens=eff_sp * ctx_len,
+                sp_size=eff_sp,
+                sp_rank=eff_rk,
+                sp_group=eff_grp,
+                sp_comm=eff_comm,
+            ).view(eff_sp, ctx_len)
+            eff_ctx = torch.full((1, ctx_len), self.eos_token_id, dtype=torch.int64, device=hidden_states.device)
+            for j in range(ctx_len):
+                tg = s0 - ctx_len + j
+                if tg >= 0:
+                    for owner_rk, (b0, b1) in enumerate(bounds):
+                        if b0 <= tg < b1:
+                            eff_ctx[0, j] = all_id_tails[owner_rk, ctx_len - (b1 - tg)]
+                            break
+                elif state is not None:
+                    init_idx = ctx_len + tg
+                    if 0 <= init_idx < ctx_len:
+                        eff_ctx[0, j] = state.ngram_context[0, init_idx]
+            ngram_ids = self.compute_ngram_ids(
+                input_ids,
+                state=PLELayerState(ngram_context=eff_ctx, conv_state=torch.empty(0, device=hidden_states.device)),
+                update_state=False,
+            )
+            if state is not None and sp_total_tokens > 0:
+                for j in range(ctx_len):
+                    tg = int(sp_total_tokens) - ctx_len + j
+                    if tg >= 0:
+                        for owner_rk, (b0, b1) in enumerate(bounds):
+                            if b0 <= tg < b1:
+                                state.ngram_context[0, j] = all_id_tails[owner_rk, ctx_len - (b1 - tg)]
+                                break
+        else:
+            ngram_ids = self.compute_ngram_ids(input_ids, state=state, update_state=True)
+
+        emb = self.gather_embeddings(
+            ngram_ids,
+            out_dtype=hidden_states.dtype,
+            sp_tokens_sharded=sp_active,
+            sp_total_tokens=sp_total_tokens,
+            sp_size=eff_sp,
+            sp_rank=eff_rk,
+            sp_group=eff_grp,
+            sp_fast_comm=eff_comm,
+        )
 
         # 2. Fused K/V projection (single GEMM, zero-copy strided split consumed by Triton gate)
         key, value = self._project_kv_fused(emb, use_fused_cuda=hidden_states.is_cuda)
@@ -2098,7 +2607,55 @@ class Qwen4_5PLELayer(nn.Module):
         )
 
         # 4. Depthwise causal conv1d (k=4, residual=False, use_activation=False)
-        conv_out = self.conv1d(u_norm, state=state)
+        if do_seq_halo and halo_w > 0:
+            from rtp_llm.models_py.modules.qwen4_5.fast_comm import sp_slice_bounds
+
+            s0, s1 = sp_slice_bounds(int(sp_total_tokens), eff_sp, eff_rk)
+            bounds = [sp_slice_bounds(int(sp_total_tokens), eff_sp, r) for r in range(eff_sp)]
+            u_tail = torch.zeros((halo_w, self.hc_hidden_size), dtype=u_norm.dtype, device=u_norm.device)
+            take_u = min(T, halo_w)
+            u_tail[halo_w - take_u :].copy_(u_norm[0, T - take_u :])
+            all_u_tails = self._sp_all_gather_dim0(
+                u_tail,
+                total_tokens=eff_sp * halo_w,
+                sp_size=eff_sp,
+                sp_rank=eff_rk,
+                sp_group=eff_grp,
+                sp_comm=eff_comm,
+            ).view(eff_sp, halo_w, self.hc_hidden_size)
+            eff_conv_st = torch.zeros(
+                (1, self.hc_hidden_size, halo_w), dtype=u_norm.dtype, device=u_norm.device
+            )
+            for j in range(halo_w):
+                tg = s0 - halo_w + j
+                if tg >= 0:
+                    for owner_rk, (b0, b1) in enumerate(bounds):
+                        if b0 <= tg < b1:
+                            eff_conv_st[0, :, j].copy_(all_u_tails[owner_rk, halo_w - (b1 - tg)])
+                            break
+                elif state is not None:
+                    init_idx = halo_w + tg
+                    if 0 <= init_idx < halo_w:
+                        eff_conv_st[0, :, j].copy_(state.conv_state[0, :, init_idx])
+            if state is not None and sp_total_tokens > 0:
+                new_conv_st = torch.zeros_like(eff_conv_st)
+                for j in range(halo_w):
+                    tg = int(sp_total_tokens) - halo_w + j
+                    if tg >= 0:
+                        for owner_rk, (b0, b1) in enumerate(bounds):
+                            if b0 <= tg < b1:
+                                new_conv_st[0, :, j].copy_(all_u_tails[owner_rk, halo_w - (b1 - tg)])
+                                break
+                    else:
+                        init_idx = halo_w + tg
+                        if 0 <= init_idx < halo_w:
+                            new_conv_st[0, :, j].copy_(state.conv_state[0, :, init_idx])
+                state.conv_state.copy_(new_conv_st)
+            conv_out = self.conv1d(
+                u_norm, state=PLELayerState(ngram_context=torch.empty(0, device=u_norm.device), conv_state=eff_conv_st)
+            )
+        else:
+            conv_out = self.conv1d(u_norm, state=state)
 
         # 5. Return H + (U + conv_out)
         return ple_add3_triton(hidden_states, u, conv_out)

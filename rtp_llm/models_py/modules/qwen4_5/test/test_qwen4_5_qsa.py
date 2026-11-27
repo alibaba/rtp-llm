@@ -2713,5 +2713,1115 @@ class Qwen4_5QSATest(unittest.TestCase):
             od_eag2 = rt_eag.forward(LocalPyModelInputs(input_ids=d1, attention_inputs=da_e2)).hidden_states
             self.assertGreaterEqual(_cosine(od_cg, od_eag2), 0.9999)
 
+
+    def test_r7_cp_indexer_and_skip_allreduce(self) -> None:
+        if not torch.cuda.is_available():
+            self.skipTest("CUDA required")
+        import socket
+        import torch.multiprocessing as mp
+
+        with socket.socket() as sock:
+            sock.bind(("127.0.0.1", 0))
+            port = sock.getsockname()[1]
+
+        ctx = mp.get_context("spawn")
+        err_q = ctx.SimpleQueue()
+        procs = []
+        world_size = 4
+        for rk in range(world_size):
+            proc = ctx.Process(target=_r7_cp_indexer_worker, args=(rk, world_size, port, err_q))
+            proc.start()
+            procs.append(proc)
+        for proc in procs:
+            proc.join(timeout=180)
+        errors = []
+        while not err_q.empty():
+            errors.append(err_q.get())
+        for rk, proc in enumerate(procs):
+            if proc.is_alive():
+                proc.terminate()
+                self.fail(f"CP-Indexer worker {rk} timed out")
+            self.assertEqual(proc.exitcode, 0, f"Worker {rk} exit={proc.exitcode}: {errors}")
+        self.assertEqual(errors, [])
+
+    def test_r7_tpsp_runtime_and_short_prefill_cg(self) -> None:
+        if not torch.cuda.is_available():
+            self.skipTest("CUDA required")
+        import socket
+        import torch.multiprocessing as mp
+        from rtp_llm.models_py.model_desc.qwen4_5_runtime import (
+            QWEN4_5_CACHE_TAGS,
+            Qwen4_5PrefillHandle,
+        )
+
+        # Part A: Single-GPU Short-Seq Prefill CUDA Graph (Qwen4_5PrefillHandle) + Pinned DMA metadata
+        dev = _device()
+        dt = torch.bfloat16
+        with torch.no_grad():
+            arch = _make_mini_arch(
+                indexer_head_dim=128,
+                indexer_n_heads=8,
+                indexer_kv_heads=1,
+                indexer_compress_ratio=4,
+                indexer_budget=16,
+                max_position_embeddings=512,
+            )
+            clm = Qwen4_5ForCausalLM(
+                arch, use_triton_mxfp4=True, compute_mode="bf16", dtype=dt, device=dev
+            )
+            clm.init_synthetic_weights(seed=7101, ple_mode="gpu_full", ple_fp8=False)
+            _stabilize_router_margins(clm)
+            clm.prepare_weights()
+            plan = build_qwen4_5_kv_cache_plan(arch)
+            pools = {t: 64 for t in set(QWEN4_5_CACHE_TAGS) | {"linear"}}
+            kv_cg = LocalKVCache(plan, tokens_per_block=64, num_blocks_per_tag=pools, device=dev, dtype=dt)
+            kv_eg = LocalKVCache(plan, tokens_per_block=64, num_blocks_per_tag=pools, device=dev, dtype=dt)
+            rt_cg = Qwen4_5RTPModel.from_causal_lm(clm, kv_cache=kv_cg)
+            rt_eg = Qwen4_5RTPModel.from_causal_lm(clm, kv_cache=kv_eg)
+
+            tb_cg = build_block_tables_for_requests(kv_cg, [128])
+            tb_eg = build_block_tables_for_requests(kv_eg, [128])
+            gen = torch.Generator(device="cpu").manual_seed(7102)
+            ids_a = torch.randint(4, 240, (64,), generator=gen, dtype=torch.int64).to(dev)
+            ids_b = torch.randint(4, 240, (64,), generator=gen, dtype=torch.int64).to(dev)
+
+            # A.1: T=64 cold Prefill CG capture + mutated replay
+            static_ids = ids_a.clone()
+            attn_cg = make_tagged_attention_inputs(
+                tb_cg, is_prefill=True, input_lengths=[64], sequence_lengths=[64], prefix_lengths=[0], device=dev
+            )
+            self.assertIsNotNone(attn_cg[FULL_ATTN_KV_TAG]._input_lengths_dev)
+            cg_in = LocalPyModelInputs(input_ids=static_ids, attention_inputs=attn_cg)
+            pre_h = rt_cg.prepare_fmha_impl(cg_in, is_cuda_graph=True)
+            self.assertIsInstance(pre_h, Qwen4_5PrefillHandle)
+            self.assertTrue(pre_h.support_cuda_graph())
+            _ = rt_cg.forward(cg_in, fmha_impl=pre_h)
+            rt_cg.on_cuda_graph_warmup(cg_in)
+            static_out = torch.empty((64, arch.hidden_size), dtype=dt, device=dev)
+            g = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(g):
+                o = rt_cg.forward(cg_in, fmha_impl=pre_h)
+                static_out.copy_(o.hidden_states)
+            static_ids.copy_(ids_b)
+            g.replay()
+            out_eg = rt_eg.forward(
+                LocalPyModelInputs(
+                    input_ids=ids_b,
+                    attention_inputs=make_tagged_attention_inputs(
+                        tb_eg, is_prefill=True, input_lengths=[64], sequence_lengths=[64], prefix_lengths=[0], device=dev
+                    ),
+                )
+            )
+            cos_cg1 = _cosine(rt_cg.compute_logits(static_out[-1:]), rt_eg.compute_logits(out_eg.hidden_states[-1:]))
+            self.assertGreaterEqual(cos_cg1, 0.99999, f"Short-seq Prefill CG T=64 pfx=0 cos={cos_cg1}")
+
+            # A.2: T=64 prefix-hit (pfx=64) Prefill CG capture + replay
+            tb_cg2 = build_block_tables_for_requests(kv_cg, [128])
+            tb_eg2 = build_block_tables_for_requests(kv_eg, [128])
+            rt_cg.forward(
+                LocalPyModelInputs(
+                    input_ids=ids_a,
+                    attention_inputs=make_tagged_attention_inputs(
+                        tb_cg2, is_prefill=True, input_lengths=[64], sequence_lengths=[64], prefix_lengths=[0], device=dev
+                    ),
+                )
+            )
+            rt_eg.forward(
+                LocalPyModelInputs(
+                    input_ids=ids_a,
+                    attention_inputs=make_tagged_attention_inputs(
+                        tb_eg2, is_prefill=True, input_lengths=[64], sequence_lengths=[64], prefix_lengths=[0], device=dev
+                    ),
+                )
+            )
+            static_ids2 = ids_b.clone()
+            attn_cg2 = make_tagged_attention_inputs(
+                tb_cg2, is_prefill=True, input_lengths=[64], sequence_lengths=[128], prefix_lengths=[64], device=dev
+            )
+            cg_in2 = LocalPyModelInputs(input_ids=static_ids2, attention_inputs=attn_cg2)
+            pre_h2 = rt_cg.prepare_fmha_impl(cg_in2, is_cuda_graph=True)
+            self.assertIsInstance(pre_h2, Qwen4_5PrefillHandle)
+            _ = rt_cg.forward(cg_in2, fmha_impl=pre_h2)
+            static_out2 = torch.empty((64, arch.hidden_size), dtype=dt, device=dev)
+            g2 = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(g2):
+                o2 = rt_cg.forward(cg_in2, fmha_impl=pre_h2)
+                static_out2.copy_(o2.hidden_states)
+            g2.replay()
+            out_eg2 = rt_eg.forward(
+                LocalPyModelInputs(
+                    input_ids=ids_b,
+                    attention_inputs=make_tagged_attention_inputs(
+                        tb_eg2, is_prefill=True, input_lengths=[64], sequence_lengths=[128], prefix_lengths=[64], device=dev
+                    ),
+                )
+            )
+            cos_cg2 = _cosine(rt_cg.compute_logits(static_out2[-1:]), rt_eg.compute_logits(out_eg2.hidden_states[-1:]))
+            self.assertGreaterEqual(cos_cg2, 0.99999, f"Short-seq Prefill CG T=64 pfx=64 cos={cos_cg2}")
+
+            # Verify Qwen4_5RTPModel.__init__ fallback without backbone keeps sp_rank == tp_rank % sp_size
+            from types import SimpleNamespace
+            from rtp_llm.config.qwen4_5_config import Qwen4_5ModelConfig
+            pc_nb = SimpleNamespace(
+                world_size=4,
+                world_rank=3,
+                tp_size=4,
+                tp_rank=3,
+                ep_size=4,
+                ep_rank=3,
+                dp_size=1,
+                dp_rank=0,
+                sp_size=4,
+                parallel_mode="sp4_tp4_ep4",
+            )
+            mcfg_nb = Qwen4_5ModelConfig(arch_config=arch)
+            mcfg_nb.is_mtp = True
+            rt_nb = Qwen4_5RTPModel(config=mcfg_nb, parallelism_config=pc_nb, arch_config=arch, device=dev, dtype=dt)
+            self.assertEqual(rt_nb.sp_size, 4)
+            self.assertEqual(rt_nb.sp_rank, 3)
+            self.assertEqual(rt_nb.bridge.sp_rank, 3)
+
+        # Part B: Single-rank TP1 reference (in isolated child process) + 4-Rank Gloo TPSP Runtime E2E
+        import tempfile
+        ctx = mp.get_context("spawn")
+        with tempfile.TemporaryDirectory(prefix="q45_r7_tp1_") as tmp_dir:
+            ref_path = os.path.join(tmp_dir, "tp1_refs.pt")
+            ref_err_q = ctx.SimpleQueue()
+            ref_proc = ctx.Process(target=_r7_tp1_ref_worker, args=(ref_path, ref_err_q))
+            ref_proc.start()
+            ref_proc.join(timeout=180)
+            ref_errs = []
+            while not ref_err_q.empty():
+                ref_errs.append(ref_err_q.get())
+            self.assertEqual(ref_proc.exitcode, 0, f"tp1 ref exit={ref_proc.exitcode}: {ref_errs}")
+            self.assertEqual(ref_errs, [])
+
+            for mode in ("sp4_tp4_ep4", "dp2_tpsp2_ep4"):
+                with socket.socket() as sock:
+                    sock.bind(("127.0.0.1", 0))
+                    port = sock.getsockname()[1]
+                err_q = ctx.SimpleQueue()
+                procs = []
+                for rk in range(4):
+                    proc = ctx.Process(target=_r7_tpsp_runtime_worker, args=(rk, 4, port, mode, ref_path, err_q))
+                    proc.start()
+                    procs.append(proc)
+                for proc in procs:
+                    proc.join(timeout=180)
+                errors = []
+                while not err_q.empty():
+                    errors.append(err_q.get())
+                for rk, proc in enumerate(procs):
+                    if proc.is_alive():
+                        proc.terminate()
+                        self.fail(f"{mode} worker {rk} timed out")
+                    self.assertEqual(proc.exitcode, 0, f"{mode} worker {rk} exit={proc.exitcode}: {errors}")
+                self.assertEqual(errors, [])
+
+            # Part C: 2-GPU NCCL SP=2 continuous batching Decode (B=2->B=1 & CG) + Prefill SP=2 CUDA Graph
+            if torch.cuda.device_count() >= 2:
+                for pmode in ("tp4_ep4", "sp4_tp4_ep4"):
+                    with socket.socket() as sock:
+                        sock.bind(("127.0.0.1", 0))
+                        port = sock.getsockname()[1]
+                    err_q = ctx.SimpleQueue()
+                    out_prefix = os.path.join(tmp_dir, f"nccl_{pmode}")
+                    procs = []
+                    for rk in range(2):
+                        proc = ctx.Process(
+                            target=_r7_sp2_nccl_cg_worker,
+                            args=(rk, 2, port, pmode, out_prefix, err_q),
+                        )
+                        proc.start()
+                        procs.append(proc)
+                    for proc in procs:
+                        proc.join(timeout=120)
+                    errors = []
+                    while not err_q.empty():
+                        errors.append(err_q.get())
+                    for rk, proc in enumerate(procs):
+                        if proc.is_alive():
+                            proc.terminate()
+                            self.fail(f"NCCL {pmode} worker {rk} timed out")
+                        self.assertEqual(proc.exitcode, 0, f"NCCL {pmode} worker {rk} exit={proc.exitcode}: {errors}")
+                    self.assertEqual(errors, [])
+
+                tp0 = torch.load(os.path.join(tmp_dir, "nccl_tp4_ep4.0.pt"), map_location="cpu")
+                tp1 = torch.load(os.path.join(tmp_dir, "nccl_tp4_ep4.1.pt"), map_location="cpu")
+                sp0 = torch.load(os.path.join(tmp_dir, "nccl_sp4_tp4_ep4.0.pt"), map_location="cpu")
+                sp1 = torch.load(os.path.join(tmp_dir, "nccl_sp4_tp4_ep4.1.pt"), map_location="cpu")
+                for k in ("dec_b2", "dec_b1", "dec_cg", "dec_after_cg_b1", "pre_cg", "pre_cg_pfx", "dec_after_pre_cg"):
+                    c0 = _cosine(sp0[k], tp0[k])
+                    c1 = _cosine(sp1[k], tp1[k])
+                    r_diff = (sp0[k] - sp1[k]).abs().max().item()
+                    self.assertGreaterEqual(c0, 0.999, f"NCCL sp2 r0 {k} vs tp cos={c0}")
+                    self.assertGreaterEqual(c1, 0.999, f"NCCL sp2 r1 {k} vs tp cos={c1}")
+                    self.assertLessEqual(r_diff, 1e-3, f"NCCL sp2 {k} r0 vs r1 max_diff={r_diff}")
+                for cg_k, eg_k in (
+                    ("pre_cg", "pre_eg"),
+                    ("pre_cg_pfx", "pre_eg_pfx"),
+                    ("dec_after_pre_cg", "dec_after_pre_eg"),
+                ):
+                    ce = _cosine(sp0[cg_k], sp0[eg_k])
+                    self.assertGreaterEqual(ce, 0.99999, f"NCCL sp2 {cg_k} vs {eg_k} cos={ce}")
+
+def _r7_sp2_nccl_cg_worker(
+    rank: int,
+    world_size: int,
+    port: int,
+    mode: str,
+    out_prefix: str,
+    err_queue: object,
+) -> None:
+    import datetime
+    import traceback
+    import torch.distributed as dist
+    from rtp_llm.models_py.model_desc.qwen4_5_runtime import QWEN4_5_CACHE_TAGS
+
+    prev_strict_bf16 = os.environ.get("QWEN4_5_MXFP4_STRICT_BF16")
+    os.environ["QWEN4_5_MXFP4_STRICT_BF16"] = "1"
+    try:
+        os.environ["MASTER_ADDR"] = "127.0.0.1"
+        os.environ["MASTER_PORT"] = str(port)
+        os.environ["RANK"] = str(rank)
+        os.environ["WORLD_SIZE"] = str(world_size)
+        torch.cuda.set_device(rank)
+        dev = torch.device(f"cuda:{rank}")
+        dist.init_process_group(
+            backend="nccl",
+            rank=rank,
+            world_size=world_size,
+            device_id=dev,
+            timeout=datetime.timedelta(seconds=30),
+        )
+        dt = torch.bfloat16
+        cfg = _make_mini_arch(
+            indexer_head_dim=128,
+            indexer_n_heads=8,
+            indexer_kv_heads=1,
+            indexer_compress_ratio=4,
+            indexer_budget=64,
+            max_position_embeddings=512,
+        )
+        with torch.no_grad():
+            lm = Qwen4_5ForCausalLM(
+                cfg,
+                use_triton_mxfp4=True,
+                compute_mode="bf16",
+                dtype=dt,
+                device=dev,
+                parallel_mode=mode,
+                kv_dtype="bf16",
+            )
+            lm.init_synthetic_weights(seed=7201, ple_mode="gpu_sharded", ple_fp8=False)
+            _stabilize_router_margins(lm)
+            lm.prepare_weights()
+            pools = {t: 64 for t in set(QWEN4_5_CACHE_TAGS) | {"linear"}}
+            kv = LocalKVCache(
+                build_qwen4_5_kv_cache_plan(cfg, tp_size=int(lm.model.tp_size), parallel_mode=mode),
+                tokens_per_block=64,
+                num_blocks_per_tag=pools,
+                device=dev,
+                dtype=dt,
+            )
+            from rtp_llm.config.qwen4_5_config import Qwen4_5ModelConfig
+            from rtp_llm.ops import ParallelismConfig
+            pc = ParallelismConfig()
+            pc.world_size = world_size
+            pc.world_rank = rank
+            pc.tp_size = int(lm.model.tp_size)
+            pc.tp_rank = int(lm.model.tp_rank)
+            pc.ep_size = int(lm.model.ep_size)
+            pc.ep_rank = int(lm.model.ep_rank)
+            pc.dp_size = int(lm.model.dp_size)
+            pc.dp_rank = int(lm.model.dp_rank)
+            mcfg = Qwen4_5ModelConfig(arch_config=cfg)
+            mcfg.is_mtp = True
+            rt = Qwen4_5RTPModel.from_causal_lm(lm, model_config=mcfg, kv_cache=kv, parallelism_config=pc)
+            if mode == "sp4_tp4_ep4":
+                assert rt.sp_size == world_size and rt.sp_rank == rank and rt.bridge.sp_rank == rank
+                if rank != 0:
+                    assert rt.sp_rank != 0 and rt.bridge.sp_rank != 0
+
+            # 1) Continuous batching Decode: B=2 -> B=1 (req1 only) + Decode CG (B=2) -> B=1
+            tb = build_block_tables_for_requests(kv, [96, 96])
+            gen = torch.Generator(device="cpu").manual_seed(7202)
+            p0 = torch.randint(4, 240, (37,), generator=gen, dtype=torch.int64).to(dev)
+            p1 = torch.randint(4, 240, (29,), generator=gen, dtype=torch.int64).to(dev)
+            d1_tok = torch.randint(4, 240, (2,), generator=gen, dtype=torch.int64).to(dev)
+            d2_tok = torch.randint(4, 240, (1,), generator=gen, dtype=torch.int64).to(dev)
+            d3_tok = torch.randint(4, 240, (2,), generator=gen, dtype=torch.int64).to(dev)
+            d3_tok2 = torch.randint(4, 240, (2,), generator=gen, dtype=torch.int64).to(dev)
+            d4_tok = torch.randint(4, 240, (1,), generator=gen, dtype=torch.int64).to(dev)
+            rt.forward(
+                LocalPyModelInputs(
+                    input_ids=torch.cat([p0, p1]),
+                    attention_inputs=make_tagged_attention_inputs(
+                        tb, is_prefill=True, input_lengths=[37, 29], sequence_lengths=[37, 29], prefix_lengths=[0, 0], device=dev
+                    ),
+                )
+            )
+            ai_b2 = make_tagged_attention_inputs(
+                tb, is_prefill=False, input_lengths=[1, 1], sequence_lengths=[37, 29], prefix_lengths=[0, 0], device=dev
+            )
+            fm_b2 = rt.prepare_fmha_impl(LocalPyModelInputs(input_ids=d1_tok, attention_inputs=ai_b2), is_cuda_graph=False)
+            lg_dec_b2 = rt.compute_logits(
+                rt.forward(LocalPyModelInputs(input_ids=d1_tok, attention_inputs=ai_b2), fmha_impl=fm_b2).hidden_states
+            ).detach().cpu()
+
+            tb_req1 = {t: [rows[1]] for t, rows in tb.items()}
+            ai_b1 = make_tagged_attention_inputs(
+                tb_req1, is_prefill=False, input_lengths=[1], sequence_lengths=[30], prefix_lengths=[0], device=dev
+            )
+            fm_b1 = rt.prepare_fmha_impl(LocalPyModelInputs(input_ids=d2_tok, attention_inputs=ai_b1), is_cuda_graph=False)
+            lg_dec_b1 = rt.compute_logits(
+                rt.forward(LocalPyModelInputs(input_ids=d2_tok, attention_inputs=ai_b1), fmha_impl=fm_b1).hidden_states
+            ).detach().cpu()
+
+            static_d_ids = d3_tok.clone()
+            ai_cg_d = make_tagged_attention_inputs(
+                tb, is_prefill=False, input_lengths=[1, 1], sequence_lengths=[38, 31], prefix_lengths=[0, 0], device=dev
+            )
+            seq_p1_dev = torch.tensor([39, 32], dtype=torch.int32, device=dev)
+            pos_cg_d = torch.tensor([[38], [31]], dtype=torch.int64, device=dev)
+            for g_ai in ai_cg_d.values():
+                g_ai.sequence_lengths_plus_1_device = seq_p1_dev
+                g_ai.combo_position_ids = pos_cg_d
+            inp_cg_d = LocalPyModelInputs(input_ids=static_d_ids, attention_inputs=ai_cg_d, combo_position_ids=pos_cg_d)
+            fm_cg_d = rt.prepare_fmha_impl(inp_cg_d, is_cuda_graph=True)
+            _ = rt.forward(inp_cg_d, fmha_impl=fm_cg_d)
+            g_dec = torch.cuda.CUDAGraph()
+            torch.cuda.synchronize()
+            with torch.cuda.graph(g_dec):
+                out_cg_d = rt.forward(inp_cg_d, fmha_impl=fm_cg_d).hidden_states
+            static_d_ids.copy_(d3_tok2)
+            seq_p1_dev.copy_(torch.tensor([40, 33], dtype=torch.int32, device=dev))
+            pos_cg_d.copy_(torch.tensor([[39], [32]], dtype=torch.int64, device=dev))
+            g_dec.replay()
+            lg_dec_cg = rt.compute_logits(out_cg_d).detach().cpu()
+
+            ai_b1_after_cg = make_tagged_attention_inputs(
+                tb_req1, is_prefill=False, input_lengths=[1], sequence_lengths=[33], prefix_lengths=[0], device=dev
+            )
+            lg_dec_after_cg_b1 = rt.compute_logits(
+                rt.forward(LocalPyModelInputs(input_ids=d4_tok, attention_inputs=ai_b1_after_cg)).hidden_states
+            ).detach().cpu()
+
+            # 2) SP=2 Prefill CUDA Graph (0-warmup capture + replay + post-CG decode) for cold & ragged prefix>0
+            tb_cg1 = build_block_tables_for_requests(kv, [80, 80])
+            tb_eg1 = build_block_tables_for_requests(kv, [80, 80])
+            pre_tok = torch.randint(4, 240, (64,), generator=gen, dtype=torch.int64).to(dev)
+            pre_tok2 = torch.randint(4, 240, (64,), generator=gen, dtype=torch.int64).to(dev)
+            static_pre_ids = pre_tok.clone()
+            ai_pre_cg = make_tagged_attention_inputs(
+                tb_cg1, is_prefill=True, input_lengths=[37, 27], sequence_lengths=[37, 27], prefix_lengths=[0, 0], device=dev
+            )
+            inp_pre_cg = LocalPyModelInputs(input_ids=static_pre_ids, attention_inputs=ai_pre_cg)
+            fm_pre_cg = rt.prepare_fmha_impl(inp_pre_cg, is_cuda_graph=True)
+            g_pre = torch.cuda.CUDAGraph()
+            torch.cuda.synchronize()
+            with torch.cuda.graph(g_pre):
+                out_pre_cg = rt.forward(inp_pre_cg, fmha_impl=fm_pre_cg).hidden_states
+            static_pre_ids.copy_(pre_tok2)
+            g_pre.replay()
+            lg_pre_cg = rt.compute_logits(out_pre_cg[[36, 63]]).detach().cpu()
+            out_pre_eg = rt.forward(
+                LocalPyModelInputs(
+                    input_ids=pre_tok2,
+                    attention_inputs=make_tagged_attention_inputs(
+                        tb_eg1, is_prefill=True, input_lengths=[37, 27], sequence_lengths=[37, 27], prefix_lengths=[0, 0], device=dev
+                    ),
+                )
+            ).hidden_states
+            lg_pre_eg = rt.compute_logits(out_pre_eg[[36, 63]]).detach().cpu()
+
+            d5_tok = torch.randint(4, 240, (2,), generator=gen, dtype=torch.int64).to(dev)
+            lg_dec_after_pre_cg = rt.compute_logits(
+                rt.forward(
+                    LocalPyModelInputs(
+                        input_ids=d5_tok,
+                        attention_inputs=make_tagged_attention_inputs(
+                            tb_cg1, is_prefill=False, input_lengths=[1, 1], sequence_lengths=[37, 27], prefix_lengths=[0, 0], device=dev
+                        ),
+                    )
+                ).hidden_states
+            ).detach().cpu()
+            lg_dec_after_pre_eg = rt.compute_logits(
+                rt.forward(
+                    LocalPyModelInputs(
+                        input_ids=d5_tok,
+                        attention_inputs=make_tagged_attention_inputs(
+                            tb_eg1, is_prefill=False, input_lengths=[1, 1], sequence_lengths=[37, 27], prefix_lengths=[0, 0], device=dev
+                        ),
+                    )
+                ).hidden_states
+            ).detach().cpu()
+
+            tb_p2_cg = build_block_tables_for_requests(kv, [96, 96])
+            tb_p2_eg = build_block_tables_for_requests(kv, [96, 96])
+            pfx_tok = torch.randint(4, 240, (64,), generator=gen, dtype=torch.int64).to(dev)
+            rt.forward(
+                LocalPyModelInputs(
+                    input_ids=pfx_tok,
+                    attention_inputs=make_tagged_attention_inputs(
+                        tb_p2_cg, is_prefill=True, input_lengths=[37, 27], sequence_lengths=[37, 27], prefix_lengths=[0, 0], device=dev
+                    ),
+                )
+            )
+            rt.forward(
+                LocalPyModelInputs(
+                    input_ids=pfx_tok,
+                    attention_inputs=make_tagged_attention_inputs(
+                        tb_p2_eg, is_prefill=True, input_lengths=[37, 27], sequence_lengths=[37, 27], prefix_lengths=[0, 0], device=dev
+                    ),
+                )
+            )
+            cont_tok = torch.randint(4, 240, (64,), generator=gen, dtype=torch.int64).to(dev)
+            cont_tok2 = torch.randint(4, 240, (64,), generator=gen, dtype=torch.int64).to(dev)
+            static_p2 = cont_tok.clone()
+            ai_p2_cg = make_tagged_attention_inputs(
+                tb_p2_cg, is_prefill=True, input_lengths=[27, 37], sequence_lengths=[64, 64], prefix_lengths=[37, 27], device=dev
+            )
+            inp_p2_cg = LocalPyModelInputs(input_ids=static_p2, attention_inputs=ai_p2_cg)
+            fm_p2_cg = rt.prepare_fmha_impl(inp_p2_cg, is_cuda_graph=True)
+            g_pre2 = torch.cuda.CUDAGraph()
+            torch.cuda.synchronize()
+            with torch.cuda.graph(g_pre2):
+                out_pre_cg2 = rt.forward(inp_p2_cg, fmha_impl=fm_p2_cg).hidden_states
+            static_p2.copy_(cont_tok2)
+            g_pre2.replay()
+            lg_pre_cg_pfx = rt.compute_logits(out_pre_cg2[[26, 63]]).detach().cpu()
+            out_pre_eg_pfx = rt.forward(
+                LocalPyModelInputs(
+                    input_ids=cont_tok2,
+                    attention_inputs=make_tagged_attention_inputs(
+                        tb_p2_eg, is_prefill=True, input_lengths=[27, 37], sequence_lengths=[64, 64], prefix_lengths=[37, 27], device=dev
+                    ),
+                )
+            ).hidden_states
+            lg_pre_eg_pfx = rt.compute_logits(out_pre_eg_pfx[[26, 63]]).detach().cpu()
+
+            torch.save(
+                {
+                    "dec_b2": lg_dec_b2,
+                    "dec_b1": lg_dec_b1,
+                    "dec_cg": lg_dec_cg,
+                    "dec_after_cg_b1": lg_dec_after_cg_b1,
+                    "pre_cg": lg_pre_cg,
+                    "pre_eg": lg_pre_eg,
+                    "dec_after_pre_cg": lg_dec_after_pre_cg,
+                    "dec_after_pre_eg": lg_dec_after_pre_eg,
+                    "pre_cg_pfx": lg_pre_cg_pfx,
+                    "pre_eg_pfx": lg_pre_eg_pfx,
+                },
+                f"{out_prefix}.{rank}.pt",
+            )
+            del g_dec, g_pre, g_pre2
+            torch.cuda.synchronize()
+            dist.barrier()
+    except Exception as exc:  # pragma: no cover - surfaced by parent test
+        err_queue.put((rank, f"{exc!r}\n{traceback.format_exc()}"))
+    finally:
+        if prev_strict_bf16 is None:
+            os.environ.pop("QWEN4_5_MXFP4_STRICT_BF16", None)
+        else:
+            os.environ["QWEN4_5_MXFP4_STRICT_BF16"] = prev_strict_bf16
+        if dist.is_initialized():
+            dist.destroy_process_group()
+
+def _r7_cp_indexer_worker(
+    rank: int,
+    world_size: int,
+    port: int,
+    err_queue: object,
+) -> None:
+    import torch.distributed as dist
+    from rtp_llm.models_py.modules.qwen4_5.attention import Qwen4_5Attention
+    from rtp_llm.models_py.modules.qwen4_5.gdn import Qwen4_5GatedDeltaNet
+
+    try:
+        os.environ["MASTER_ADDR"] = "127.0.0.1"
+        os.environ["MASTER_PORT"] = str(port)
+        os.environ["RANK"] = str(rank)
+        os.environ["WORLD_SIZE"] = str(world_size)
+        dist.init_process_group(backend="gloo", rank=rank, world_size=world_size)
+        dev = torch.device("cuda:0")
+        torch.cuda.set_device(dev)
+        dt = torch.bfloat16
+        group = dist.group.WORLD
+
+        # 1. skip_allreduce=True parity on Attention & GDN (using identical seeded inputs)
+        cfg = _make_mini_arch(
+            indexer_head_dim=128,
+            indexer_n_heads=8,
+            indexer_kv_heads=1,
+            indexer_compress_ratio=4,
+            indexer_budget=16,
+            max_position_embeddings=256,
+        )
+        torch.manual_seed(7001 + rank)
+        attn_m = Qwen4_5Attention.from_config(
+            cfg, layer_idx=3, tp_size=world_size, tp_rank=rank, tp_group=group,
+            sp_size=world_size, sp_rank=rank, sp_group=group,
+        ).to(device=dev, dtype=dt).eval()
+        gdn_m = Qwen4_5GatedDeltaNet.from_config(
+            cfg, layer_idx=0, tp_size=world_size, tp_rank=rank, tp_group=group,
+            sp_size=world_size, sp_rank=rank, sp_group=group,
+        ).to(device=dev, dtype=dt).eval()
+
+        torch.manual_seed(9001)
+        x_seq = torch.randn((2, 16, cfg.hidden_size), device=dev, dtype=dt) * 0.2
+        kvc = attn_m.create_kv_cache(2, 64, dev, dt)
+        with torch.no_grad():
+            kvc.seq_len = 0
+            o_ar = attn_m(x_seq, kv_cache=kvc)
+            kvc.seq_len = 0
+            o_skip = attn_m(x_seq, kv_cache=kvc, skip_allreduce=True)
+            o_skip_c = o_skip.detach().cpu()
+            dist.all_reduce(o_skip_c, op=dist.ReduceOp.SUM, group=group)
+            assert torch.allclose(o_ar.cpu(), o_skip_c, atol=1e-2, rtol=1e-2)
+
+            # GDN forward + packed_prefill + verify skip_allreduce parity
+            g_ar, _ = gdn_m(x_seq)
+            g_skip, _ = gdn_m(x_seq, skip_allreduce=True)
+            g_skip_c = g_skip.detach().cpu()
+            dist.all_reduce(g_skip_c, op=dist.ReduceOp.SUM, group=group)
+            assert torch.allclose(g_ar.cpu(), g_skip_c, atol=1e-2, rtol=1e-2)
+
+            cu = torch.tensor([0, 16, 32], dtype=torch.int32, device=dev)
+            tr = torch.tensor([0, 1], dtype=torch.int32, device=dev)
+            tt0 = torch.tensor([0, 0], dtype=torch.int32, device=dev)
+            rcs = torch.tensor([0, 1, 2], dtype=torch.int32, device=dev)
+            gp_ar, _ = gdn_m.forward_packed_prefill(x_seq.reshape(32, -1), cu, tr, tt0, tr, tt0, rcs)
+            gp_sk, _ = gdn_m.forward_packed_prefill(x_seq.reshape(32, -1), cu, tr, tt0, tr, tt0, rcs, skip_allreduce=True)
+            gp_sk_c = gp_sk.detach().cpu()
+            dist.all_reduce(gp_sk_c, op=dist.ReduceOp.SUM, group=group)
+            assert torch.allclose(gp_ar.cpu(), gp_sk_c, atol=1e-2, rtol=1e-2)
+
+            init_c = torch.zeros((2, gdn_m.conv_dim, 3), dtype=dt, device=dev)
+            init_s = torch.zeros((2, gdn_m.num_v_heads, 64, 64), dtype=torch.float32, device=dev)
+            gv_ar, _ = gdn_m.forward_verify(x_seq[:, :4], init_conv_state=init_c, init_ssm_state=init_s)
+            gv_sk, _ = gdn_m.forward_verify(x_seq[:, :4], init_conv_state=init_c, init_ssm_state=init_s, skip_allreduce=True)
+            gv_sk_c = gv_sk.detach().cpu()
+            dist.all_reduce(gv_sk_c, op=dist.ReduceOp.SUM, group=group)
+            assert torch.allclose(gv_ar.cpu(), gv_sk_c, atol=1e-2, rtol=1e-2)
+
+        # 2. CP-Indexer bit-exact parity across B/S divisible, non-divisible, empty-rank, causal & paged
+        torch.manual_seed(7777)
+        idx = Qwen4_5QSAIndexer(cfg).to(device=dev, dtype=dt).eval()
+        for bsz_c, seq_c, past_c in ((1, 32, 0), (3, 37, 8), (5, 8, 4)):
+            q_u = torch.randn((bsz_c, seq_c, idx.n_heads, idx.head_dim), device=dev, dtype=dt) * 0.2
+            rk_u = torch.randn((bsz_c, seq_c, idx.head_dim), device=dev, dtype=dt) * 0.2
+            past_u = torch.randn((bsz_c, past_c, idx.head_dim), device=dev, dtype=dt) * 0.2 if past_c > 0 else None
+            pos_u = torch.arange(past_c, past_c + seq_c, device=dev, dtype=torch.int64).unsqueeze(0).expand(bsz_c, seq_c)
+            ref_sel = qsa_select_causal_from_projected(
+                idx, q_u, rk_u, past_raw_keys=past_u, q_norm_gamma=idx.q_norm_gamma, positions=pos_u,
+            )
+            cp_sel = qsa_select_causal_from_projected(
+                idx, q_u, rk_u, past_raw_keys=past_u, q_norm_gamma=idx.q_norm_gamma, positions=pos_u,
+                sp_size=world_size, sp_rank=rank, sp_group=group,
+            )
+            assert torch.equal(ref_sel, cp_sel), (
+                f"Rank {rank} causal CP-Indexer mismatch for (B={bsz_c}, S={seq_c}, past={past_c})"
+            )
+
+        # Paged score_and_select_qsa_paged parity (Prefill S-stride, Verify V=8 B=1 & B=5, Decode B=5 & B=2)
+        ps = 16
+        entries_per_blk = ps // 4
+        max_blks = 8
+        pool_blks = 64
+        kv_pool = torch.randn((pool_blks, entries_per_blk, idx.head_dim), device=dev, dtype=dt) * 0.2
+        bt = torch.arange(1, 1 + 6 * max_blks, dtype=torch.int32, device=dev).view(6, max_blks)
+        for bsz_p, seq_p, pfx_p in ((1, 64, 16), (3, 29, 24), (1, 8, 48), (5, 8, 32), (5, 1, 40), (2, 1, 40)):
+            q_p = torch.randn((bsz_p, seq_p, idx.n_heads, idx.head_dim), device=dev, dtype=dt) * 0.2
+            pos_p = (
+                torch.arange(pfx_p, pfx_p + seq_p, device=dev, dtype=torch.int64)
+                .unsqueeze(0)
+                .expand(bsz_p, seq_p)
+                .contiguous()
+            )
+            vis_p = (
+                torch.arange(pfx_p + 1, pfx_p + seq_p + 1, device=dev, dtype=torch.int32)
+                .unsqueeze(0)
+                .expand(bsz_p, seq_p)
+                .contiguous()
+            )
+            bt_p = bt[:bsz_p]
+            ref_ps = score_and_select_qsa_paged(
+                q_p, pos_p, kv_pool, bt_p, vis_p,
+                compress_ratio=4, token_budget=16, rotary_dim=64, rope_theta=10000.0,
+                max_ctx_len=max_blks * entries_per_blk, q_norm_gamma=idx.q_norm_gamma, norm_eps=idx.norm_eps,
+            )
+            cp_ps = score_and_select_qsa_paged(
+                q_p, pos_p, kv_pool, bt_p, vis_p,
+                compress_ratio=4, token_budget=16, rotary_dim=64, rope_theta=10000.0,
+                max_ctx_len=max_blks * entries_per_blk, q_norm_gamma=idx.q_norm_gamma, norm_eps=idx.norm_eps,
+                sp_size=world_size, sp_rank=rank, sp_group=group,
+            )
+            assert torch.equal(ref_ps, cp_ps), (
+                f"Rank {rank} paged CP-Indexer mismatch for (B={bsz_p}, S={seq_p}, pfx={pfx_p})"
+            )
+    except Exception as exc:  # pragma: no cover - surfaced by parent test
+        err_queue.put((rank, repr(exc)))
+    finally:
+        if dist.is_initialized():
+            dist.destroy_process_group()
+
+
+def _r7_tpsp_test_inputs(dev: torch.device):
+    gen = torch.Generator(device="cpu").manual_seed(7202)
+    return {
+        "p0_a": torch.randint(4, 240, (37,), generator=gen, dtype=torch.int64).to(dev),
+        "p1_a": torch.randint(4, 240, (29,), generator=gen, dtype=torch.int64).to(dev),
+        "p0_b": torch.randint(4, 240, (35,), generator=gen, dtype=torch.int64).to(dev),
+        "p1_b": torch.randint(4, 240, (39,), generator=gen, dtype=torch.int64).to(dev),
+        "v_tok1": torch.randint(4, 240, (1, 8), generator=gen, dtype=torch.int64).to(dev),
+        "v_tok4": torch.randint(4, 240, (4, 8), generator=gen, dtype=torch.int64).to(dev),
+        "dec_tok1": torch.randint(4, 240, (1,), generator=gen, dtype=torch.int64).to(dev),
+        "dec_tok2": torch.randint(4, 240, (2,), generator=gen, dtype=torch.int64).to(dev),
+        "dec_tok4": torch.randint(4, 240, (4,), generator=gen, dtype=torch.int64).to(dev),
+        "b_toks_4": [torch.randint(4, 240, (61 + (bi % 3),), generator=gen, dtype=torch.int64).to(dev) for bi in range(4)],
+    }
+
+
+def _r7_tp1_ref_worker(ref_path: str, err_queue: object) -> None:
+    import traceback
+    from rtp_llm.models_py.model_desc.qwen4_5_runtime import (
+        QWEN4_5_CACHE_TAGS,
+        LocalMemoryCacheStoreWriter,
+    )
+
+    prev_strict_bf16 = os.environ.get("QWEN4_5_MXFP4_STRICT_BF16")
+    os.environ["QWEN4_5_MXFP4_STRICT_BF16"] = "1"
+    try:
+        dev = torch.device("cuda:0")
+        torch.cuda.set_device(dev)
+        dt = torch.bfloat16
+        cfg = _make_mini_arch(
+            indexer_head_dim=128,
+            indexer_n_heads=8,
+            indexer_kv_heads=1,
+            indexer_compress_ratio=4,
+            indexer_budget=64,
+            max_position_embeddings=512,
+        )
+        with torch.no_grad():
+            lm = Qwen4_5ForCausalLM(cfg, use_triton_mxfp4=True, compute_mode="bf16", dtype=dt, device=dev, kv_dtype="bf16")
+            lm.init_synthetic_weights(seed=7201, ple_mode="gpu_full", ple_fp8=False)
+            _stabilize_router_margins(lm)
+            lm.prepare_weights()
+            pools = {t: 64 for t in set(QWEN4_5_CACHE_TAGS) | {"linear"}}
+            kv = LocalKVCache(build_qwen4_5_kv_cache_plan(cfg), tokens_per_block=64, num_blocks_per_tag=pools, device=dev, dtype=dt)
+            rt = Qwen4_5RTPModel.from_causal_lm(lm, kv_cache=kv)
+            inp = _r7_tpsp_test_inputs(dev)
+            out = {}
+
+            tb = build_block_tables_for_requests(kv, [96, 96])
+            wr = LocalMemoryCacheStoreWriter(record_payload=False)
+            h1 = rt.forward(LocalPyModelInputs(
+                input_ids=torch.cat([inp["p0_a"], inp["p1_a"]]),
+                attention_inputs=make_tagged_attention_inputs(
+                    tb, is_prefill=True, input_lengths=[37, 29], sequence_lengths=[37, 29], prefix_lengths=[0, 0], device=dev, cache_store_writer=wr
+                ),
+            )).hidden_states
+            out["prefill1"] = rt.compute_logits(torch.stack([h1[36], h1[65]], dim=0)).cpu()
+            h2 = rt.forward(LocalPyModelInputs(
+                input_ids=torch.cat([inp["p0_b"], inp["p1_b"]]),
+                attention_inputs=make_tagged_attention_inputs(
+                    tb, is_prefill=True, input_lengths=[35, 39], sequence_lengths=[72, 68], prefix_lengths=[37, 29], device=dev, cache_store_writer=wr
+                ),
+            )).hidden_states
+            out["prefill2"] = rt.compute_logits(torch.stack([h2[34], h2[35 + 38]], dim=0)).cpu()
+
+            tb1 = build_block_tables_for_requests(kv, [80])
+            p61 = torch.cat([inp["p0_a"], inp["p1_a"][:24]])
+            rt.forward(LocalPyModelInputs(
+                input_ids=p61,
+                attention_inputs=make_tagged_attention_inputs(
+                    tb1, is_prefill=True, input_lengths=[61], sequence_lengths=[61], prefix_lengths=[0], device=dev
+                ),
+            ))
+            va1 = make_tagged_attention_inputs(
+                tb1, is_prefill=True, input_lengths=[8], sequence_lengths=[], prefix_lengths=[61], device=dev
+            )
+            for g in va1.values():
+                g.is_target_verify = True
+            hv1 = rt.forward(LocalPyModelInputs(input_ids=inp["v_tok1"].reshape(-1), attention_inputs=va1)).hidden_states
+            out["step_v1"] = rt.compute_logits(hv1).cpu()
+            rt.prepare_speculative_target_commit(torch.tensor([5], dtype=torch.int32, device=dev))
+            rt.finish_speculative_target_commit(True)
+            rt.finalize_speculative_target_commit()
+            hd1 = rt.forward(LocalPyModelInputs(
+                input_ids=inp["dec_tok1"],
+                attention_inputs=make_tagged_attention_inputs(
+                    tb1, is_prefill=False, input_lengths=[1], sequence_lengths=[66], prefix_lengths=[0], device=dev
+                ),
+            )).hidden_states
+            out["step_d1"] = rt.compute_logits(hd1).cpu()
+
+            for b_batch in (4, 2):
+                tb_b = build_block_tables_for_requests(kv, [80] * b_batch)
+                b_lens = [61 + (bi % 3) for bi in range(b_batch)]
+                b_toks = inp["b_toks_4"][:b_batch]
+                rt.forward(LocalPyModelInputs(
+                    input_ids=torch.cat(b_toks),
+                    attention_inputs=make_tagged_attention_inputs(
+                        tb_b, is_prefill=True, input_lengths=b_lens, sequence_lengths=b_lens, prefix_lengths=[0] * b_batch, device=dev
+                    ),
+                ))
+                va_b = make_tagged_attention_inputs(
+                    tb_b, is_prefill=True, input_lengths=[8] * b_batch, sequence_lengths=[], prefix_lengths=b_lens, device=dev
+                )
+                for g in va_b.values():
+                    g.is_target_verify = True
+                hvb = rt.forward(LocalPyModelInputs(input_ids=inp["v_tok4"][:b_batch].reshape(-1), attention_inputs=va_b)).hidden_states
+                out[f"batch_v_{b_batch}"] = rt.compute_logits(hvb).cpu()
+                acc_vals = [5, 3, 2, 4][:b_batch]
+                rt.prepare_speculative_target_commit(torch.tensor(acc_vals, dtype=torch.int32, device=dev))
+                rt.finish_speculative_target_commit(True)
+                rt.finalize_speculative_target_commit()
+                after_lens = [l + a for l, a in zip(b_lens, acc_vals)]
+                dtok = inp["dec_tok4"] if b_batch == 4 else inp["dec_tok2"]
+                hdb = rt.forward(LocalPyModelInputs(
+                    input_ids=dtok,
+                    attention_inputs=make_tagged_attention_inputs(
+                        tb_b, is_prefill=False, input_lengths=[1] * b_batch, sequence_lengths=after_lens, prefix_lengths=[0] * b_batch, device=dev
+                    ),
+                )).hidden_states
+                out[f"batch_d_{b_batch}"] = rt.compute_logits(hdb).cpu()
+                tb_last = {t: [r[-1]] for t, r in tb_b.items()}
+                hd_last = rt.forward(LocalPyModelInputs(
+                    input_ids=inp["dec_tok1"],
+                    attention_inputs=make_tagged_attention_inputs(
+                        tb_last, is_prefill=False, input_lengths=[1], sequence_lengths=[after_lens[-1] + 1], prefix_lengths=[0], device=dev
+                    ),
+                )).hidden_states
+                out[f"cont_d1_{b_batch}"] = rt.compute_logits(hd_last).cpu()
+                if b_batch == 4:
+                    tb2 = {t: r[:2] for t, r in tb_b.items()}
+                    hdf = rt.forward(LocalPyModelInputs(
+                        input_ids=inp["dec_tok2"],
+                        attention_inputs=make_tagged_attention_inputs(
+                            tb2, is_prefill=False, input_lengths=[1, 1], sequence_lengths=[a + 1 for a in after_lens[:2]], prefix_lengths=[0, 0], device=dev
+                        ),
+                    )).hidden_states
+                    out["fallback_d2"] = rt.compute_logits(hdf).cpu()
+            torch.save(out, ref_path)
+    except Exception as exc:  # pragma: no cover - surfaced by parent test
+        err_queue.put(("tp1_ref", f"{exc!r}\n{traceback.format_exc()}"))
+    finally:
+        if prev_strict_bf16 is None:
+            os.environ.pop("QWEN4_5_MXFP4_STRICT_BF16", None)
+        else:
+            os.environ["QWEN4_5_MXFP4_STRICT_BF16"] = prev_strict_bf16
+
+
+def _r7_tpsp_runtime_worker(
+    rank: int,
+    world_size: int,
+    port: int,
+    mode: str,
+    ref_path: str,
+    err_queue: object,
+) -> None:
+    import traceback
+    import torch.distributed as dist
+    from rtp_llm.models_py.model_desc.qwen4_5_runtime import (
+        QWEN4_5_CACHE_TAGS,
+        LocalMemoryCacheStoreWriter,
+    )
+
+    prev_strict_bf16 = os.environ.get("QWEN4_5_MXFP4_STRICT_BF16")
+    os.environ["QWEN4_5_MXFP4_STRICT_BF16"] = "1"
+    try:
+        os.environ["MASTER_ADDR"] = "127.0.0.1"
+        os.environ["MASTER_PORT"] = str(port)
+        os.environ["RANK"] = str(rank)
+        os.environ["WORLD_SIZE"] = str(world_size)
+        dist.init_process_group(backend="gloo", rank=rank, world_size=world_size)
+        dev = torch.device("cuda:0")
+        torch.cuda.set_device(dev)
+        dt = torch.bfloat16
+        cfg = _make_mini_arch(
+            indexer_head_dim=128,
+            indexer_n_heads=8,
+            indexer_kv_heads=1,
+            indexer_compress_ratio=4,
+            indexer_budget=64,
+            max_position_embeddings=512,
+        )
+        base_mode = "tp4_ep4" if mode == "sp4_tp4_ep4" else "dp2_tp2_ep4"
+        tp1_refs = torch.load(ref_path, map_location="cpu") if rank == 0 else None
+        with torch.no_grad():
+            def _build_rt(pmode: str):
+                lm = Qwen4_5ForCausalLM(
+                    cfg,
+                    use_triton_mxfp4=True,
+                    compute_mode="bf16",
+                    dtype=dt,
+                    device=dev,
+                    parallel_mode=pmode,
+                    dp_equal_tokens=False,
+                    kv_dtype="bf16",
+                )
+                lm.init_synthetic_weights(seed=7201, ple_mode="gpu_sharded", ple_fp8=False)
+                _stabilize_router_margins(lm)
+                lm.prepare_weights()
+                plan = build_qwen4_5_kv_cache_plan(cfg, tp_size=int(lm.model.tp_size), parallel_mode=pmode)
+                pools = {t: 64 for t in set(QWEN4_5_CACHE_TAGS) | {"linear"}}
+                kv = LocalKVCache(plan, tokens_per_block=64, num_blocks_per_tag=pools, device=dev, dtype=dt)
+                from rtp_llm.config.qwen4_5_config import Qwen4_5ModelConfig
+                from rtp_llm.ops import ParallelismConfig
+                pc = ParallelismConfig()
+                pc.world_size = world_size
+                pc.world_rank = rank
+                pc.tp_size = int(lm.model.tp_size)
+                pc.tp_rank = int(lm.model.tp_rank)
+                pc.ep_size = int(lm.model.ep_size)
+                pc.ep_rank = int(lm.model.ep_rank)
+                pc.dp_size = int(lm.model.dp_size)
+                pc.dp_rank = int(lm.model.dp_rank)
+                mcfg = Qwen4_5ModelConfig(arch_config=cfg)
+                mcfg.is_mtp = True
+                # Deliberately pass C++ ParallelismConfig (lacks sp_rank) to verify sp_rank != 0 propagation
+                return Qwen4_5RTPModel.from_causal_lm(lm, model_config=mcfg, kv_cache=kv, parallelism_config=pc), kv
+
+            rt_par, kv_par = _build_rt(mode)
+            rt_same, kv_same = _build_rt(base_mode)
+            assert rt_par.dp_attn is False
+            eff_sp, eff_rk, _, _ = rt_par.bridge._resolve_sp_dist()
+            expected_sp = 4 if mode == "sp4_tp4_ep4" else 2
+            expected_rk = rank % expected_sp
+            assert eff_sp == expected_sp, f"{mode}: expected eff_sp={expected_sp}, got {eff_sp}"
+            assert eff_rk == expected_rk, f"{mode} r{rank}: expected eff_rk={expected_rk}, got {eff_rk}"
+            assert rt_par.sp_rank == expected_rk, f"{mode} r{rank}: expected rt.sp_rank={expected_rk}, got {rt_par.sp_rank}"
+            if expected_rk != 0:
+                assert rt_par.sp_rank != 0 and rt_par.bridge.sp_rank != 0
+
+            inp = _r7_tpsp_test_inputs(dev)
+            is_empty_dp = (mode == "dp2_tpsp2_ep4" and int(rt_par.dp_rank) == 1)
+
+            def _run_prefill(rt, tb, toks, lens, pfxs, writer=None):
+                ai = make_tagged_attention_inputs(
+                    ({t: [] for t in tb} if is_empty_dp else tb),
+                    is_prefill=True,
+                    input_lengths=([] if is_empty_dp else lens),
+                    sequence_lengths=([] if is_empty_dp else [p + l for p, l in zip(pfxs, lens)]),
+                    prefix_lengths=([] if is_empty_dp else pfxs),
+                    device=dev,
+                    cache_store_writer=(None if is_empty_dp else writer),
+                )
+                x = torch.empty((0,), dtype=torch.int64, device=dev) if is_empty_dp else toks
+                return rt.forward(LocalPyModelInputs(input_ids=x, attention_inputs=ai)).hidden_states
+
+            def _make_vrf_ai(tb, lens, pfxs):
+                ai = make_tagged_attention_inputs(
+                    ({t: [] for t in tb} if is_empty_dp else tb),
+                    is_prefill=True,
+                    input_lengths=([] if is_empty_dp else lens),
+                    sequence_lengths=[],
+                    prefix_lengths=([] if is_empty_dp else pfxs),
+                    device=dev,
+                )
+                for g in ai.values():
+                    g.is_target_verify = True
+                return ai
+
+            def _run_dec(rt, tb, toks, seq_lens):
+                ai = make_tagged_attention_inputs(
+                    ({t: [] for t in tb} if is_empty_dp else tb),
+                    is_prefill=False,
+                    input_lengths=([] if is_empty_dp else [1] * len(seq_lens)),
+                    sequence_lengths=([] if is_empty_dp else seq_lens),
+                    prefix_lengths=([] if is_empty_dp else [0] * len(seq_lens)),
+                    device=dev,
+                )
+                x = torch.empty((0,), dtype=torch.int64, device=dev) if is_empty_dp else toks
+                return rt.forward(LocalPyModelInputs(input_ids=x, attention_inputs=ai)).hidden_states
+
+            def _assert_parity(tag_s: str, h_p: torch.Tensor, h_s: torch.Tensor, tp1_key: Optional[str] = None, idx_sl=None):
+                hp = h_p if idx_sl is None else h_p[idx_sl]
+                hs = h_s if idx_sl is None else h_s[idx_sl]
+                lg_p = rt_par.compute_logits(hp)
+                cs = _cosine(lg_p, rt_same.compute_logits(hs))
+                assert cs >= 0.999, f"{mode} r{rank} {tag_s} vs {base_mode} cos={cs}"
+                if tp1_key is not None and tp1_refs is not None:
+                    c1 = _cosine(lg_p.cpu(), tp1_refs[tp1_key])
+                    min_tp1 = 0.9985 if tp1_key == "prefill2" else 0.999
+                    assert c1 >= min_tp1, f"{mode} r{rank} {tag_s} vs tp1 cos={c1}"
+
+            # 1) Ragged Prefill [37, 29] -> then continuation [35, 39] crossing 64-tok boundary + CacheStore!
+            tb_p = build_block_tables_for_requests(kv_par, [96, 96])
+            tb_s = build_block_tables_for_requests(kv_same, [96, 96])
+            wr_p = LocalMemoryCacheStoreWriter(record_payload=False)
+            wr_s = LocalMemoryCacheStoreWriter(record_payload=False)
+            cat_a = torch.cat([inp["p0_a"], inp["p1_a"]])
+            op1 = _run_prefill(rt_par, tb_p, cat_a, [37, 29], [0, 0], wr_p)
+            os1 = _run_prefill(rt_same, tb_s, cat_a, [37, 29], [0, 0], wr_s)
+            if is_empty_dp:
+                assert op1.shape[0] == 0
+            else:
+                _assert_parity("prefill1", op1, os1, "prefill1", idx_sl=[36, 65])
+
+            cat_b = torch.cat([inp["p0_b"], inp["p1_b"]])
+            op2 = _run_prefill(rt_par, tb_p, cat_b, [35, 39], [37, 29], wr_p)
+            os2 = _run_prefill(rt_same, tb_s, cat_b, [35, 39], [37, 29], wr_s)
+            if not is_empty_dp:
+                _assert_parity("prefill2+pfx", op2, os2, "prefill2", idx_sl=[34, 35 + 38])
+                for tag_chk in ("ple_conv_state", "ple_ngram_ctx", "ffn_output_sconv", "full_attn_output_sconv"):
+                    for lid_k, m_p in enumerate(kv_par.layer_caches):
+                        if tag_chk not in m_p:
+                            continue
+                        b_p = m_p[tag_chk].kv_cache_base[tb_p[tag_chk][0][0]]
+                        b_s = kv_same.layer_caches[lid_k][tag_chk].kv_cache_base[tb_s[tag_chk][0][0]]
+                        if tag_chk == "ple_ngram_ctx":
+                            assert torch.equal(b_p, b_s), f"{mode} r{rank} L{lid_k} {tag_chk} snap mismatch"
+                        else:
+                            cs = _cosine(b_p, b_s)
+                            assert cs >= 0.998, f"{mode} r{rank} L{lid_k} {tag_chk} snap cos={cs}"
+
+            # 2) Verify B=1, V=8 (Step-SP!) + Rollback + Commit + Continuation Decode
+            tb1_p = build_block_tables_for_requests(kv_par, [80])
+            tb1_s = build_block_tables_for_requests(kv_same, [80])
+            p_61 = torch.cat([inp["p0_a"], inp["p1_a"][:24]])
+            _run_prefill(rt_par, tb1_p, p_61, [61], [0])
+            _run_prefill(rt_same, tb1_s, p_61, [61], [0])
+            snap_v1 = {
+                (l, t): lc.kv_cache_base.clone()
+                for l, m in enumerate(kv_par.layer_caches)
+                for t, lc in m.items()
+            }
+            va1_p = _make_vrf_ai(tb1_p, [8], [61])
+            va1_s = _make_vrf_ai(tb1_s, [8], [61])
+            vin1 = torch.empty((0,), dtype=torch.int64, device=dev) if is_empty_dp else inp["v_tok1"].reshape(-1)
+
+            _ = rt_par.forward(LocalPyModelInputs(input_ids=vin1, attention_inputs=va1_p))
+            if not is_empty_dp:
+                rt_par.prepare_speculative_target_commit(torch.tensor([5], dtype=torch.int32, device=dev))
+                rt_par.finish_speculative_target_commit(False)
+                rt_par.finalize_speculative_target_commit()
+                for (l, t), prev_blk in snap_v1.items():
+                    if t not in ("full", FULL_ATTN_KV_TAG, INDEXER_KV_TAG):
+                        assert torch.equal(kv_par.layer_caches[l][t].kv_cache_base, prev_blk), f"{mode} B=1 rollback diff L{l} {t}"
+
+            ov1_p = rt_par.forward(LocalPyModelInputs(input_ids=vin1, attention_inputs=va1_p)).hidden_states
+            ov1_s = rt_same.forward(LocalPyModelInputs(input_ids=vin1, attention_inputs=va1_s)).hidden_states
+            acc_1 = torch.tensor([5], dtype=torch.int32, device=dev)
+            if not is_empty_dp:
+                for rt_cur in (rt_par, rt_same):
+                    rt_cur.prepare_speculative_target_commit(acc_1)
+                    rt_cur.finish_speculative_target_commit(True)
+                    rt_cur.finalize_speculative_target_commit()
+                _assert_parity("Step-SP verify B=1,V=8", ov1_p, ov1_s, "step_v1")
+                for tag_chk in ("ple_ngram_ctx", "ple_conv_state", "ffn_output_sconv", "full_attn_output_sconv", "linear_attn_output_sconv"):
+                    for lid_k, m_p in enumerate(kv_par.layer_caches):
+                        if tag_chk not in m_p:
+                            continue
+                        blks = sorted(set(tb1_p[tag_chk][0]))
+                        bp = m_p[tag_chk].kv_cache_base[blks]
+                        bs = kv_same.layer_caches[lid_k][tag_chk].kv_cache_base[sorted(set(tb1_s[tag_chk][0]))]
+                        if tag_chk == "ple_ngram_ctx":
+                            assert torch.equal(bp, bs), f"{mode} r{rank} L{lid_k} post-Step-SP {tag_chk} diff"
+                        else:
+                            c_p = _cosine(bp, bs)
+                            assert c_p >= 0.998, f"{mode} r{rank} L{lid_k} post-Step-SP {tag_chk} cos={c_p}"
+            else:
+                assert ov1_p.shape[0] == 0
+
+            cd_p = _run_dec(rt_par, tb1_p, inp["dec_tok1"], [66])
+            cd_s = _run_dec(rt_same, tb1_s, inp["dec_tok1"], [66])
+            if is_empty_dp:
+                assert cd_p.shape[0] == 0
+            else:
+                _assert_parity("post-Step-SP decode B=1", cd_p, cd_s, "step_d1")
+
+            # 3) Batch-SP Verify (B=4 for sp4_tp4_ep4, B=2 for dp2_tpsp2_ep4) + Batch-SP Decode
+            b_batch = 4 if mode == "sp4_tp4_ep4" else 2
+            tb_b_p = build_block_tables_for_requests(kv_par, [80] * b_batch)
+            tb_b_s = build_block_tables_for_requests(kv_same, [80] * b_batch)
+            b_lens = [61 + (bi % 3) for bi in range(b_batch)]
+            b_toks = inp["b_toks_4"][:b_batch]
+            _run_prefill(rt_par, tb_b_p, torch.cat(b_toks), b_lens, [0] * b_batch)
+            _run_prefill(rt_same, tb_b_s, torch.cat(b_toks), b_lens, [0] * b_batch)
+
+            vab_p = _make_vrf_ai(tb_b_p, [8] * b_batch, b_lens)
+            vab_s = _make_vrf_ai(tb_b_s, [8] * b_batch, b_lens)
+            vinb = torch.empty((0,), dtype=torch.int64, device=dev) if is_empty_dp else inp["v_tok4"][:b_batch].reshape(-1)
+            ovb_p = rt_par.forward(LocalPyModelInputs(input_ids=vinb, attention_inputs=vab_p)).hidden_states
+            ovb_s = rt_same.forward(LocalPyModelInputs(input_ids=vinb, attention_inputs=vab_s)).hidden_states
+            acc_vals = [5, 3, 2, 4][:b_batch]
+            acc_t = torch.tensor(acc_vals, dtype=torch.int32, device=dev)
+            if not is_empty_dp:
+                for rt_cur in (rt_par, rt_same):
+                    rt_cur.prepare_speculative_target_commit(acc_t)
+                    rt_cur.finish_speculative_target_commit(True)
+                    rt_cur.finalize_speculative_target_commit()
+                _assert_parity(f"Batch-SP verify B={b_batch},V=8", ovb_p, ovb_s, f"batch_v_{b_batch}")
+            else:
+                assert ovb_p.shape[0] == 0
+
+            after_lens = [l + a for l, a in zip(b_lens, acc_vals)]
+            dtok = inp["dec_tok4"] if b_batch == 4 else inp["dec_tok2"]
+            db_p = _run_dec(rt_par, tb_b_p, dtok, after_lens)
+            db_s = _run_dec(rt_same, tb_b_s, dtok, after_lens)
+            if is_empty_dp:
+                assert db_p.shape[0] == 0
+            else:
+                _assert_parity(f"Batch-SP decode B={b_batch}", db_p, db_s, f"batch_d_{b_batch}")
+
+            # 3b) Continuous batching B -> 1 decode on last request (must match across all SP ranks)
+            tb_last_p = {t: [r[-1]] for t, r in tb_b_p.items()}
+            tb_last_s = {t: [r[-1]] for t, r in tb_b_s.items()}
+            dl_p = _run_dec(rt_par, tb_last_p, inp["dec_tok1"], [after_lens[-1] + 1])
+            dl_s = _run_dec(rt_same, tb_last_s, inp["dec_tok1"], [after_lens[-1] + 1])
+            if is_empty_dp:
+                assert dl_p.shape[0] == 0
+            else:
+                _assert_parity(f"Continuous B={b_batch}->1 decode", dl_p, dl_s, f"cont_d1_{b_batch}")
+                if mode == "sp4_tp4_ep4":
+                    lg_loc = rt_par.compute_logits(dl_p).contiguous()
+                    lg_all = [torch.empty_like(lg_loc) for _ in range(world_size)]
+                    dist.all_gather(lg_all, lg_loc)
+                    r_diff = (lg_all[0] - lg_loc).abs().max().item()
+                    assert r_diff <= 1e-4, f"sp4_tp4_ep4 r{rank} B={b_batch}->1 rank diff={r_diff}"
+
+            # 4) sp4_tp4_ep4 clean TP fallback for B=2 < sp_size=4 decode
+            if mode == "sp4_tp4_ep4":
+                tb2_p = {t: r[:2] for t, r in tb_b_p.items()}
+                tb2_s = {t: r[:2] for t, r in tb_b_s.items()}
+                lens2 = [a + 1 for a in after_lens[:2]]
+                df_p = _run_dec(rt_par, tb2_p, inp["dec_tok2"], lens2)
+                df_s = _run_dec(rt_same, tb2_s, inp["dec_tok2"], lens2)
+                _assert_parity("Decode B=2<SP fallback", df_p, df_s, "fallback_d2")
+                _assert_parity("Decode B=2<SP fallback req1", df_p[1:2], df_s[1:2])
+
+                # 5) Exact T=64 boundary snapshot parity (t=63 belongs to sp_rank=3) across ALL ranks including rank 0
+                tb64_p = build_block_tables_for_requests(kv_par, [128])
+                tb64_s = build_block_tables_for_requests(kv_same, [128])
+                tok64 = torch.cat([inp["p0_a"], inp["p1_a"][:27]])
+                _run_prefill(rt_par, tb64_p, tok64, [64], [0])
+                _run_prefill(rt_same, tb64_s, tok64, [64], [0])
+                for lid_k, m_p in enumerate(kv_par.layer_caches):
+                    for tag_chk in ("ple_conv_state", "ple_ngram_ctx", "ffn_output_sconv", "full_attn_output_sconv", "linear_attn_output_sconv"):
+                        if tag_chk not in m_p:
+                            continue
+                        b_p = m_p[tag_chk].kv_cache_base[tb64_p[tag_chk][0][0]]
+                        b_s = kv_same.layer_caches[lid_k][tag_chk].kv_cache_base[tb64_s[tag_chk][0][0]]
+                        assert int((b_p != 0).sum().item()) > 0, f"{mode} r{rank} L{lid_k} T=64 {tag_chk} all zero"
+                        if tag_chk == "ple_ngram_ctx":
+                            assert torch.equal(b_p, b_s), f"{mode} r{rank} L{lid_k} T=64 {tag_chk} diff"
+                        else:
+                            cs64 = _cosine(b_p, b_s)
+                            assert cs64 >= 0.998, f"{mode} r{rank} L{lid_k} T=64 {tag_chk} cos={cs64}"
+    except Exception as exc:  # pragma: no cover - surfaced by parent test
+        err_queue.put((rank, f"{exc!r}\n{traceback.format_exc()}"))
+    finally:
+        if prev_strict_bf16 is None:
+            os.environ.pop("QWEN4_5_MXFP4_STRICT_BF16", None)
+        else:
+            os.environ["QWEN4_5_MXFP4_STRICT_BF16"] = prev_strict_bf16
+        if dist.is_initialized():
+            dist.destroy_process_group()
+
 if __name__ == "__main__":
     unittest.main()

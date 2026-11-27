@@ -43,9 +43,11 @@ from rtp_llm.models_py.modules.qwen4_5.alltoall_comm import (
 )
 from rtp_llm.models_py.modules.qwen4_5.contracts import Qwen4_5ArchConfig
 from rtp_llm.models_py.modules.qwen4_5.fast_comm import (
+    FastAllReduce,
     Qwen4_5FastAllReduce,
     destroy_qwen4_5_fast_all_reduce,
     get_qwen4_5_fast_all_reduce,
+    sp_slice_bounds,
 )
 from rtp_llm.models_py.modules.qwen4_5.fp8_linear import (
     SM100FP8Linear,
@@ -368,7 +370,7 @@ def test_and_benchmark_latent_moe_real(device: torch.device) -> None:
     # --- Accuracy comparison: Triton BF16xE2M1 + Auto SM100 dispatch vs Dequant-BF16 ref ---
     print("\n--- Accuracy: Triton SM103 BF16xE2M1 & Auto Dispatch vs Dequant-BF16 Reference ---")
     torch.manual_seed(404)
-    for M in (1, 16, 128):
+    for M in (1, 16, 32, 49, 128):
         x = torch.randn((M, cfg.hidden_size), dtype=torch.bfloat16, device=device) * 0.5
         y_ref = moe(x, use_triton_mxfp4=False)
         y_tri = moe(x, use_triton_mxfp4=True, compute_mode="bf16", backend="triton")
@@ -380,7 +382,7 @@ def test_and_benchmark_latent_moe_real(device: torch.device) -> None:
         y_auto = moe(x, use_triton_mxfp4=True, compute_mode="bf16", backend="auto")
         ma_a, mr_a, cos_a = _diff_stats(y_auto, y_ref)
         dev_idx = 0 if device.index is None else int(device.index)
-        auto_is_fp8 = M > 64 and (has_deepgemm_fp8_fp4(dev_idx) or has_flashinfer_mxfp4(dev_idx))
+        auto_is_fp8 = resolve_moe_backend_for_shape(M, moe.latent_dim, device, moe._mxfp4_weights(), "auto", True) in ("deepgemm_masked", "deepgemm_contiguous", "flashinfer", "flashinfer_noswap")
         if auto_is_fp8:
             # Prefill auto-dispatch selects FP8xMXFP4 W4A8; verify >= 0.9999 vs FP8+UE8M0 ref and >= 0.9985 vs BF16
             r_in = moe.pre_moe_latent_layernorm(F.linear(x, moe.latent_down_proj.weight))
@@ -679,7 +681,11 @@ def test_sm100_mxfp4_backends_and_cuda_graph(device: torch.device) -> None:
     try:
         os.environ.pop("QWEN4_5_MXFP4_DECODE_BACKEND", None)
         assert _resolve_moe_backend(torch.empty((1, K), device=device, dtype=torch.bfloat16), w_all_chk, "auto", True) == "triton_splitk"
+        assert _resolve_moe_backend(torch.empty((8, K), device=device, dtype=torch.bfloat16), w_all_chk, "auto", True) == "triton_splitk"
         assert _resolve_moe_backend(torch.empty((16, K), device=device, dtype=torch.bfloat16), w_all_chk, "auto", True) == "triton_splitk"
+        assert _resolve_moe_backend(torch.empty((32, K), device=device, dtype=torch.bfloat16), w_all_chk, "auto", True) == "triton_splitk"
+        assert _resolve_moe_backend(torch.empty((33, K), device=device, dtype=torch.bfloat16), w_all_chk, "auto", True) == ("deepgemm_masked" if use_dg else "triton_splitk")
+        assert _resolve_moe_backend(torch.empty((49, K), device=device, dtype=torch.bfloat16), w_all_chk, "auto", True) == ("deepgemm_masked" if use_dg else "triton_splitk")
         if use_dg:
             # E_local <= 256 (EP>=4): deepgemm_masked up to M<=2048, deepgemm_contiguous for M>2048
             for m_dg in (72, 512, 1024, 2048):
@@ -1384,6 +1390,64 @@ def _dist_worker_body(rank: int, world_size: int, device: torch.device, group) -
         assert torch.equal(det_ranks[0], det_ranks[rank]), f"rank {rank} symm_p2p combine not bit-identical to rank 0"
         del g_det
 
+        # TBO barrier-safety verification across dual-slot (2*M_global<=max), degraded single-slot (2*M_global>max), and chunked (M_global>max)
+        def _count_barriers(fn):
+            torch.cuda.synchronize(device)
+            with torch.profiler.profile(activities=[torch.profiler.ProfilerActivity.CUDA]) as pf_b:
+                out_b = fn()
+            torch.cuda.synchronize(device)
+            return out_b, sum(e.count for e in pf_b.key_averages() if "barrier" in e.key.lower())
+
+        # Warmup slot 0 and slot 1 before profiling
+        for sl in (0, 1):
+            stw = a2a.dispatch(x_ch[:16], ids_ch[:16], w_ch[:16], num_experts=16, equal_tokens=True)
+            epw = torch.full((world_size * 16, 2560), float(rank + 1), dtype=torch.bfloat16, device=device)
+            _ = a2a.combine(epw, stw, slot=sl)
+
+        # (a) Dual-slot disjoint TBO (M_local=16, M_global=32, 2*M_global=64 <= 128): both u0 and u1 keep 1 barrier each
+        st_u0 = a2a.dispatch(x_ch[:16], ids_ch[:16], w_ch[:16], num_experts=16, equal_tokens=True)
+        st_u1 = a2a.dispatch(x_ch[:16], ids_ch[:16], w_ch[:16], num_experts=16, equal_tokens=True)
+        ep_u0 = torch.full((world_size * 16, 2560), float(rank + 1), dtype=torch.bfloat16, device=device)
+        ep_u1 = torch.full((world_size * 16, 2560), float(10 * (rank + 1)), dtype=torch.bfloat16, device=device)
+        c_u0, b_u0 = _count_barriers(lambda: a2a.combine(ep_u0, st_u0, slot=0))
+        c_u1, b_u1 = _count_barriers(lambda: a2a.combine(ep_u1, st_u1, slot=1))
+        assert b_u0 == 1 and b_u1 == 1, f"Expected 1 barrier each for dual-slot TBO, got b_u0={b_u0}, b_u1={b_u1}"
+        assert torch.all(c_u0 == float(sum(range(1, world_size + 1))))
+        assert torch.all(c_u1 == float(10 * sum(range(1, world_size + 1))))
+
+        # (b) Degraded single-slot TBO (M_local=48, M_global=96 <= 128, 2*M_global=192 > 128): u0 MUST retain tail barrier (2 barriers), u1 uses 1 barrier
+        st_d0 = a2a.dispatch(x_ch[:48], ids_ch[:48], w_ch[:48], num_experts=16, equal_tokens=True)
+        st_d1 = a2a.dispatch(x_ch[:48], ids_ch[:48], w_ch[:48], num_experts=16, equal_tokens=True)
+        ep_d0 = torch.full((world_size * 48, 2560), float(2 * (rank + 1)), dtype=torch.bfloat16, device=device)
+        ep_d1 = torch.full((world_size * 48, 2560), float(3 * (rank + 1)), dtype=torch.bfloat16, device=device)
+        c_d0, b_d0 = _count_barriers(lambda: a2a.combine(ep_d0, st_d0, slot=0))
+        c_d1, b_d1 = _count_barriers(lambda: a2a.combine(ep_d1, st_d1, slot=1))
+        assert b_d0 == 2, f"Degraded single-slot TBO u0 must keep tail barrier (got {b_d0})"
+        assert b_d1 == 1, f"Degraded single-slot TBO u1 expected 1 barrier (got {b_d1})"
+        assert torch.all(c_d0 == float(2 * sum(range(1, world_size + 1))))
+        assert torch.all(c_d1 == float(3 * sum(range(1, world_size + 1))))
+
+        # (c) Chunked TBO (M_local=80, M_global=160 > 128): u0 retains tail barrier on every chunk (including final), u1 skips final tail barrier
+        st_k0 = a2a.dispatch(x_ch[:80], ids_ch[:80], w_ch[:80], num_experts=16, equal_tokens=True)
+        st_k1 = a2a.dispatch(x_ch[:80], ids_ch[:80], w_ch[:80], num_experts=16, equal_tokens=True)
+        ep_k0 = torch.full((world_size * 80, 2560), float(4 * (rank + 1)), dtype=torch.bfloat16, device=device)
+        ep_k1 = torch.full((world_size * 80, 2560), float(5 * (rank + 1)), dtype=torch.bfloat16, device=device)
+        c_k0, b_k0 = _count_barriers(lambda: a2a.combine(ep_k0, st_k0, slot=0))
+        c_k1, b_k1 = _count_barriers(lambda: a2a.combine(ep_k1, st_k1, slot=1))
+        assert b_k0 >= 2 and b_k0 % 2 == 0, f"Chunked TBO u0 must keep tail barrier on every chunk (got {b_k0})"
+        assert b_k1 % 2 == 1, f"Chunked TBO u1 should skip final chunk tail barrier (got {b_k1})"
+        assert torch.all(c_k0 == float(4 * sum(range(1, world_size + 1))))
+        assert torch.all(c_k1 == float(5 * sum(range(1, world_size + 1))))
+
+        # (d) Mis-slotted reuse on same slot without intervening dispatch must stay race-free
+        st_m0 = a2a.dispatch(x_ch[:16], ids_ch[:16], w_ch[:16], num_experts=16, equal_tokens=True)
+        st_m1 = a2a.dispatch(x_ch[:16], ids_ch[:16], w_ch[:16], num_experts=16, equal_tokens=True)
+        c_m0 = a2a.combine(ep_u0, st_m0, slot=0)
+        c_m1, b_m1 = _count_barriers(lambda: a2a.combine(ep_u1, st_m1, slot=0))
+        assert b_m1 >= 2, f"Same-slot TBO without intervening dispatch must fence before overwrite (got {b_m1})"
+        assert torch.all(c_m0 == float(sum(range(1, world_size + 1))))
+        assert torch.all(c_m1 == float(10 * sum(range(1, world_size + 1))))
+
     # Asymmetric (7 vs 0) DP-EP Qwen4_5LatentMoE forward parity (verifies 0-token rank joins A2A without deadlock)
     dp_moe.dp_equal_tokens = None
     x_asym = torch.randn((7 if rank == 0 else 0, 5120), dtype=torch.bfloat16, device=device) * 0.4
@@ -1440,12 +1504,183 @@ def _dist_worker_body(rank: int, world_size: int, device: torch.device, group) -
         _, _, cos_tbo_asym1 = _diff_stats(ya1, ref_moe(xa1))
         assert cos_tbo_asym1 > 0.996, f"rank=1 TBO 0-token asym mb1 cos={cos_tbo_asym1}"
 
-    del g_mlp, g_moe, g_gnorm, g_dp, g_tbo
+    # [10g] R7 TPSP (all_gather_sp, reduce_scatter_sp, DenseMLP sp_input, LatentMoE sp_input + TBO + CG)
+    assert FastAllReduce is Qwen4_5FastAllReduce
+    for T_sp in (0, 1, 2, 5, 17, 64):
+        s0, s1 = sp_slice_bounds(T_sp, world_size, rank)
+        torch.manual_seed(9100 + T_sp)
+        x_full_sp = torch.randn((T_sp, 5120), dtype=torch.bfloat16, device=device) * 0.4
+        x_loc_sp = x_full_sp[s0:s1].contiguous()
+        x_g = ar.all_gather_sp(x_loc_sp, total_tokens=T_sp)
+        assert x_g.shape == (T_sp, 5120)
+        assert torch.equal(x_g, x_full_sp), f"all_gather_sp T={T_sp} mismatch"
+
+        torch.manual_seed(9200 + T_sp + rank)
+        p_rank = torch.randn((T_sp, 5120), dtype=torch.bfloat16, device=device) * 0.2
+        p_sum = p_rank.clone()
+        dist.all_reduce(p_sum, op=dist.ReduceOp.SUM, group=group)
+        p_loc = ar.reduce_scatter_sp(p_rank, total_tokens=T_sp)
+        assert p_loc.shape == (s1 - s0, 5120)
+        if s1 > s0:
+            assert _diff_stats(p_loc, p_sum[s0:s1])[2] >= 0.99999, f"reduce_scatter_sp T={T_sp}"
+
+    # Multi-shape CUDA Graph replay for non-divisible T=17 and T=1 (rank 1 empty!)
+    for T_cg in (1, 17, 32):
+        s0, s1 = sp_slice_bounds(T_cg, world_size, rank)
+        x_in_cg = torch.randn((s1 - s0, 5120), dtype=torch.bfloat16, device=device) * 0.3
+        p_in_cg = torch.randn((T_cg, 5120), dtype=torch.bfloat16, device=device) * 0.3
+        for _ in range(2):
+            ar.all_gather_sp(x_in_cg, total_tokens=T_cg)
+            ar.reduce_scatter_sp(p_in_cg, total_tokens=T_cg)
+        torch.cuda.synchronize(device)
+        g_sp = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(g_sp):
+            ag_cg = ar.all_gather_sp(x_in_cg, total_tokens=T_cg)
+            rs_cg = ar.reduce_scatter_sp(p_in_cg, total_tokens=T_cg)
+        x_new_full = torch.randn((T_cg, 5120), dtype=torch.bfloat16, device=device) * 0.3
+        dist.broadcast(x_new_full, src=0, group=group)
+        x_in_cg.copy_(x_new_full[s0:s1])
+        p_new = torch.randn((T_cg, 5120), dtype=torch.bfloat16, device=device) * 0.3
+        p_in_cg.copy_(p_new)
+        p_new_sum = p_new.clone()
+        dist.all_reduce(p_new_sum, op=dist.ReduceOp.SUM, group=group)
+        g_sp.replay()
+        torch.cuda.synchronize(device)
+        assert torch.equal(ag_cg, x_new_full), f"SP CG all_gather_sp T={T_cg} failed"
+        if s1 > s0:
+            assert _diff_stats(rs_cg, p_new_sum[s0:s1])[2] >= 0.99999, f"SP CG reduce_scatter_sp T={T_cg} failed"
+        del g_sp
+
+    # DenseMLP SP mode vs replicated reference across divisible & non-divisible T
+    for T_dm in (0, 1, 5, 16, 33):
+        s0, s1 = sp_slice_bounds(T_dm, world_size, rank)
+        torch.manual_seed(9300 + T_dm)
+        x_dm_full = torch.randn((T_dm, 5120), dtype=torch.bfloat16, device=device) * 0.4
+        y_dm_ref = ref_mlp(x_dm_full)
+        y_dm_sp = tp_mlp(x_dm_full[s0:s1].contiguous(), sp_input=True, sp_total_tokens=T_dm)
+        assert y_dm_sp.shape == (s1 - s0, 5120)
+        if s1 > s0:
+            assert _diff_stats(y_dm_sp, y_dm_ref[s0:s1])[2] >= 0.9999, f"DenseMLP SP T={T_dm} parity fail"
+
+    # LatentMoE TPSP (sp_input=True) vs replicated EP reference & non-A2A fallback & TBO
+    sp_moe = Qwen4_5LatentMoE(
+        hidden_size=5120,
+        routed_expert_hidden_size=2560,
+        moe_intermediate_size=2560,
+        shared_expert_intermediate_size=1280,
+        num_experts=16,
+        num_experts_per_tok=4,
+        use_triton_mxfp4=True,
+        dtype=torch.bfloat16,
+        device=device,
+        ep_size=world_size,
+        ep_rank=rank,
+        ep_group=group,
+        tp_size=world_size,
+        tp_rank=rank,
+        tp_group=group,
+        fast_all_reduce=ar,
+        sp_size=world_size,
+        sp_rank=rank,
+        sp_group=group,
+        all_to_all_comm=a2a,
+        dp_equal_tokens=None,
+        backend="auto",
+    )
+    sp_moe.load_state_dict(
+        {k: v for k, v in ref_moe.state_dict().items() if not k.startswith(("w13_", "w2_"))},
+        strict=False,
+    )
+    sp_lo, sp_hi = sp_moe.ep_start, sp_moe.ep_end
+    sp_moe.load_mxfp4_weights(
+        w13_u8=ref_moe.w13_u8[sp_lo:sp_hi].clone(),
+        w13_scale=ref_moe.w13_scale[sp_lo:sp_hi].clone(),
+        w2_u8=ref_moe.w2_u8[sp_lo:sp_hi].clone(),
+        w2_scale=ref_moe.w2_scale[sp_lo:sp_hi].clone(),
+    )
+    sp_moe.prepare_weights()
+
+    for T_sp in (0, 1, 5, 16, 33):
+        s0, s1 = sp_slice_bounds(T_sp, world_size, rank)
+        torch.manual_seed(9400 + T_sp)
+        x_sp_full = torch.randn((T_sp, 5120), dtype=torch.bfloat16, device=device) * 0.4
+        y_sp_ref = ref_moe(x_sp_full)
+        y_sp_out = sp_moe(x_sp_full[s0:s1].contiguous(), sp_input=True, sp_total_tokens=T_sp)
+        assert y_sp_out.shape == (s1 - s0, 5120)
+        if s1 > s0:
+            cos_sp = _diff_stats(y_sp_out, y_sp_ref[s0:s1])[2]
+            assert cos_sp >= 0.996, f"TPSP LatentMoE T={T_sp} vs ref_moe cos={cos_sp}"
+        y_sp_ep_ref = sp_moe(
+            x_sp_full[s0:s1].contiguous(),
+            use_triton_mxfp4=False,
+            sp_input=True,
+            sp_total_tokens=T_sp,
+        )
+        if s1 > s0:
+            cos_tpsp = _diff_stats(y_sp_out, y_sp_ep_ref)[2]
+            assert cos_tpsp >= 0.996, f"TPSP Triton vs Ref T={T_sp} cos={cos_tpsp}"
+
+    # Verify TPSP TBO parity (including odd T=17) and non-A2A fallback parity
+    s0_tbo, s1_tbo = sp_slice_bounds(17, world_size, rank)
+    torch.manual_seed(9450)
+    x_tbo_full = torch.randn((17, 5120), dtype=torch.bfloat16, device=device) * 0.4
+    c_sp = sp_moe.forward_route_and_dispatch(
+        x_tbo_full[s0_tbo:s1_tbo].contiguous(),
+        slot=0,
+        sp_input=True,
+        sp_total_tokens=17,
+    )
+    c_sp = sp_moe.forward_routed_compute_and_combine(c_sp, slot=0)
+    y_tbo_sp = sp_moe.forward_finish_combine(c_sp)
+    assert _diff_stats(y_tbo_sp, ref_moe(x_tbo_full)[s0_tbo:s1_tbo])[2] >= 0.996
+
+    # CUDA Graph replay for TPSP LatentMoE on both divisible (16) and non-divisible (17) T
+    for T_mcg in (16, 17):
+        s0_m, s1_m = sp_slice_bounds(T_mcg, world_size, rank)
+        x_mcg = torch.randn((s1_m - s0_m, 5120), dtype=torch.bfloat16, device=device) * 0.4
+        for _ in range(2):
+            sp_moe(x_mcg, sp_input=True, sp_total_tokens=T_mcg)
+        torch.cuda.synchronize(device)
+        g_sp_moe = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(g_sp_moe):
+            y_mcg = sp_moe(x_mcg, sp_input=True, sp_total_tokens=T_mcg)
+        x_new_m = torch.randn((T_mcg, 5120), dtype=torch.bfloat16, device=device) * 0.4
+        dist.broadcast(x_new_m, src=0, group=group)
+        x_mcg.copy_(x_new_m[s0_m:s1_m])
+        g_sp_moe.replay()
+        torch.cuda.synchronize(device)
+        assert _diff_stats(y_mcg, ref_moe(x_new_m)[s0_m:s1_m])[2] >= 0.996
+        del g_sp_moe
+
+    # Test return_packed=True on AllToAll dispatch + paired generation tracking
+    x_pk = torch.randn((4, 2560), dtype=torch.bfloat16, device=device) * 0.3
+    ids_pk = torch.randint(0, 16, (4, 8), dtype=torch.int32, device=device)
+    w_pk = torch.softmax(torch.randn((4, 8), dtype=torch.float32, device=device), dim=-1)
+    st_pk = a2a.dispatch(
+        x_pk, ids_pk, w_pk, num_experts=16, equal_tokens=True, quantize_fp8=True, return_packed=True
+    )
+    assert st_pk.packed_fp8 is not None and st_pk.hidden_fp8 is None
+    assert st_pk.symm_ready_gen >= 1
+    out_pk_c = a2a.combine(x_pk.repeat(world_size, 1), st_pk)
+    assert out_pk_c.shape == (4, 2560)
+
+    # Non-A2A fallback parity for sp_moe
+    orig_a2a = sp_moe.all_to_all_comm
+    sp_moe.all_to_all_comm = None
+    try:
+        y_noa2a = sp_moe(
+            x_tbo_full[s0_tbo:s1_tbo].contiguous(), sp_input=True, sp_total_tokens=17
+        )
+        assert _diff_stats(y_noa2a, ref_moe(x_tbo_full)[s0_tbo:s1_tbo])[2] >= 0.996
+    finally:
+        sp_moe.all_to_all_comm = orig_a2a
+
+    del g_mlp, g_moe, g_gnorm, g_dp, g_tbo, sp_moe
     if rank == 0:
         print(
             f"  PASS Distributed TP/EP={world_size} (fast_comm={ar.active_backend}, a2a={a2a.active_backend}): "
             f"DenseMLP_TP_cos={cos_tp:.6f}, LatentMoE_EP_cos={cos_ep:.6f}, "
-            f"GemmaAR_CG_cos={cos_gnorm_cg:.6f}, A2A_cos={cos_a2a_r:.6f}, DP_EP_MoE({dp_backend})={cos_dp_ep:.6f}"
+            f"GemmaAR_CG_cos={cos_gnorm_cg:.6f}, A2A_cos={cos_a2a_r:.6f}, DP_EP_MoE({dp_backend})={cos_dp_ep:.6f}, +R7_TPSP"
         )
 
 
@@ -1581,9 +1816,20 @@ def _gloo_dist_worker(rank: int, world_size: int, port: int, err_q: mp.Queue) ->
                 exp_r = (xa[:m_z].float() * 2.0 * owners[:, None]).to(torch.bfloat16)
                 cos_r = _diff_stats(comb_r, exp_r)[2]
                 assert cos_r >= 0.9999, f"gloo routed_a2a cos={cos_r}" 
+            for T_gsp in (1, 5, 16):
+                s0_g, s1_g = sp_slice_bounds(T_gsp, world_size, rank)
+                torch.manual_seed(9600 + T_gsp)
+                xg_full = torch.randn((T_gsp, 2560), dtype=torch.bfloat16, device=device) * 0.3
+                xg_ag = ar.all_gather_sp(xg_full[s0_g:s1_g].contiguous(), total_tokens=T_gsp)
+                assert torch.equal(xg_ag, xg_full), f"Gloo all_gather_sp T={T_gsp} mismatch"
+                pg_loc = ar.reduce_scatter_sp(xg_full, total_tokens=T_gsp)
+                if s1_g > s0_g:
+                    assert _diff_stats(pg_loc, (xg_full[s0_g:s1_g].float() * world_size).to(torch.bfloat16))[2] >= 0.99999
+                else:
+                    assert pg_loc.shape == (0, 2560)
             a2a.destroy()
             if rank == 0:
-                print(f"  PASS Gloo CUDA fallback fast_comm + AllToAll (AR cos={cos_gloo_ar:.6f})")
+                print(f"  PASS Gloo CUDA fallback fast_comm + SP + AllToAll (AR cos={cos_gloo_ar:.6f})")
         err_q.put((rank, None))
     except Exception as exc:
         err_q.put((rank, f"{type(exc).__name__}: {exc}"))
@@ -2064,8 +2310,6 @@ def test_r4_combine_bitwise_schedule_and_multigpu(device: torch.device) -> None:
 
 def test_r5_deepgemm_w3x_a2a_and_no_cutlass80(device: torch.device) -> None:
     print("\n=== [10e] Test R5 deepgemm_fp8 (1x128), W_3x has_a2a=True & Zero cutlass_80 ===")
-    import deep_gemm  # type: ignore
-
     dev_idx = int(device.index or 0)
     torch.manual_seed(2026112605)
 
@@ -2073,19 +2317,22 @@ def test_r5_deepgemm_w3x_a2a_and_no_cutlass80(device: torch.device) -> None:
     for dev in (torch.device("cpu"), device):
         q0, sc0 = quant_fp8_1x128_deepgemm_triton(torch.empty((0, 1280), dtype=torch.bfloat16, device=dev))
         assert q0.shape == (0, 1280) and sc0.shape == (0, 3)
-    for M, K in ((1, 1280), (5, 1280), (17, 2560), (512, 5120), (1024, 12800)):
-        x = torch.randn((M, K), dtype=torch.bfloat16, device=device) * 2.0
-        x[:, :128] = 0.0
-        ref_q, ref_sf = deep_gemm.per_token_cast_to_fp8(x, use_ue8m0=True)
-        ref_sc = deep_gemm.get_mn_major_tma_aligned_packed_ue8m0_tensor(ref_sf)
-        tri_q, tri_sc = quant_fp8_1x128_deepgemm_triton(x)
-        assert tri_sc.shape == ref_sc.shape and tri_sc.stride() == ref_sc.stride()
-        assert torch.equal(tri_sc, ref_sc), f"1x128 scale mismatch at ({M},{K})"
-        assert torch.equal(tri_q.view(torch.uint8), ref_q.view(torch.uint8)), f"1x128 q mismatch"
-        if M <= 17:
-            cq, csc = quant_fp8_1x128_deepgemm_triton(x.cpu())
-            assert torch.equal(csc.to(device), tri_sc)
-            assert torch.equal(cq.to(device).view(torch.uint8), tri_q.view(torch.uint8))
+    if has_deepgemm_fp8(dev_idx):
+        import deep_gemm  # type: ignore
+
+        for M, K in ((1, 1280), (5, 1280), (17, 2560), (512, 5120), (1024, 12800)):
+            x = torch.randn((M, K), dtype=torch.bfloat16, device=device) * 2.0
+            x[:, :128] = 0.0
+            ref_q, ref_sf = deep_gemm.per_token_cast_to_fp8(x, use_ue8m0=True)
+            ref_sc = deep_gemm.get_mn_major_tma_aligned_packed_ue8m0_tensor(ref_sf)
+            tri_q, tri_sc = quant_fp8_1x128_deepgemm_triton(x)
+            assert tri_sc.shape == ref_sc.shape and tri_sc.stride() == ref_sc.stride()
+            assert torch.equal(tri_sc, ref_sc), f"1x128 scale mismatch at ({M},{K})"
+            assert torch.equal(tri_q.view(torch.uint8), ref_q.view(torch.uint8)), f"1x128 q mismatch"
+            if M <= 17:
+                cq, csc = quant_fp8_1x128_deepgemm_triton(x.cpu())
+                assert torch.equal(csc.to(device), tri_sc)
+                assert torch.equal(cq.to(device).view(torch.uint8), tri_q.view(torch.uint8))
 
     # 2. Target fused GDN/FullAttn 128-aligned routing + TP4 N=5184 safe BF16 fallback
     for out_f, m_exp in (
@@ -2172,7 +2419,7 @@ def test_r5_deepgemm_w3x_a2a_and_no_cutlass80(device: torch.device) -> None:
         device=device,
         enable_shared_overlap=True,
         dense_linear_mode="auto",
-        backend="deepgemm_masked",
+        backend="deepgemm_masked" if has_deepgemm_fp8_fp4(dev_idx) else "auto",
     )
     _init_latent_moe_weights(moe_r5, seed=5555)
     with torch.no_grad():
@@ -2183,10 +2430,10 @@ def test_r5_deepgemm_w3x_a2a_and_no_cutlass80(device: torch.device) -> None:
     assert moe_r5._fp8_latent_up is not None
     assert moe_r5._fp8_latent_up.weight.data_ptr() == moe_r5.latent_up_proj.weight.data_ptr()
     assert moe_r5.shared_expert._fp8_down.weight.data_ptr() == moe_r5.shared_expert.down_proj.weight.data_ptr()
-    assert moe_r5._fp8_latent_up.w_fp8_row is None and moe_r5._fp8_latent_up.w_trtllm_ll is None
     assert moe_r5.shared_expert._fp8_down.w_dg_fp8 is None and moe_r5.shared_expert._fp8_down.w_mxfp8 is None
     assert moe_r5.shared_expert._fp8_down._resolve_backend(2048, device) == "bf16"
     if has_deepgemm_fp8(dev_idx):
+        assert moe_r5._fp8_latent_up.w_fp8_row is None and moe_r5._fp8_latent_up.w_trtllm_ll is None
         assert moe_r5._fp8_latent_up.w_dg_fp8 is not None and moe_r5._fp8_latent_up.w_mxfp8 is None
     assert "_fp8_latent_up.weight" not in moe_r5.state_dict()
 
@@ -2217,16 +2464,17 @@ def test_r5_deepgemm_w3x_a2a_and_no_cutlass80(device: torch.device) -> None:
         assert _diff_stats(yp, y_nontri)[2] >= 0.998
 
     # Exercise M=1024 deepgemm_masked vs FP8-activation exact ref
-    x1024 = torch.randn((1024, 1280), dtype=torch.bfloat16, device=device) * 0.4
-    ids1024 = torch.stack([torch.randperm(64, device=device)[:10] for _ in range(1024)]).to(torch.int32)
-    w1024 = torch.softmax(torch.randn((1024, 10), device=device, dtype=torch.float32), dim=-1)
-    y_dg_1k = mxfp4_moe_forward(
-        x1024, ids1024, w1024, moe_r5._mxfp4_weights(), ep_size=4, backend="deepgemm_masked"
-    )
-    y_fp8_ref = mxfp4_moe_forward_ref(
-        x1024, ids1024, w1024, moe_r5._mxfp4_weights(), ep_size=4, fp8_activations=True
-    )
-    assert _diff_stats(y_dg_1k, y_fp8_ref)[2] >= 0.9999
+    if has_deepgemm_fp8_fp4(dev_idx):
+        x1024 = torch.randn((1024, 1280), dtype=torch.bfloat16, device=device) * 0.4
+        ids1024 = torch.stack([torch.randperm(64, device=device)[:10] for _ in range(1024)]).to(torch.int32)
+        w1024 = torch.softmax(torch.randn((1024, 10), device=device, dtype=torch.float32), dim=-1)
+        y_dg_1k = mxfp4_moe_forward(
+            x1024, ids1024, w1024, moe_r5._mxfp4_weights(), ep_size=4, backend="deepgemm_masked"
+        )
+        y_fp8_ref = mxfp4_moe_forward_ref(
+            x1024, ids1024, w1024, moe_r5._mxfp4_weights(), ep_size=4, fp8_activations=True
+        )
+        assert _diff_stats(y_dg_1k, y_fp8_ref)[2] >= 0.9999
 
     # Verify W_3x active under has_a2a=True (forward + TBO) + zero-token rank dispatch preserved
     mock_a2a = _MockA2AComm()
@@ -2440,6 +2688,311 @@ def test_r6_small_batch_launch_reduction_and_kernels(device: torch.device) -> No
     print("  PASS R6 1-kernel small-M schedule, 1D/masked situ_glu, 64e9 TP4 protection, fused quant+scatter, W_3x_gates, & zero cutlass_80")
 
 
+def test_r7_tpsp_and_fused_kernels(device: torch.device) -> None:
+    print("\n=== [10g] Test R7 Fused SituAndMul/Packed-Masked/Workspace/Addmm Epilogue & Zero Combine Kernel ===")
+    from rtp_llm.models_py.modules.qwen4_5.alltoall_comm import (
+        _pack_dense_dp_bf16_to_fp8_kernel,
+        _symm_p2p_sum_rows_kernel,
+    )
+    from rtp_llm.models_py.modules.qwen4_5.mxfp4_ops import (
+        _gather_masked_weighted_reduce_kernel,
+        _get_masked_ws_slab,
+        _quant_and_scatter_fp8_to_masked_kernel,
+        _scatter_packed_fp8_to_masked_kernel,
+        _unpack_packed_fp8_payload,
+        mxfp4_moe_deepgemm_masked,
+    )
+
+    assert FastAllReduce is Qwen4_5FastAllReduce
+    assert sp_slice_bounds(0, 4, 0) == (0, 0)
+    assert [sp_slice_bounds(5, 4, r) for r in range(4)] == [(0, 2), (2, 4), (4, 5), (5, 5)]
+    assert [sp_slice_bounds(1, 4, r) for r in range(4)] == [(0, 1), (1, 1), (1, 1), (1, 1)]
+
+    # 1. Fused SituAndMul with scale_gate (Triton & CPU ref, col=0 and col=1)
+    torch.manual_seed(7701)
+    for D_s in (1280, 2560):
+        for M_s in (0, 1, 8, 64):
+            gu = torch.randn((M_s, 2 * D_s), dtype=torch.bfloat16, device=device) * 0.5
+            sg = torch.randn((M_s, 2), dtype=torch.bfloat16, device=device) * 0.8
+            y_tri = situ_and_mul_triton(gu, scale_gate=sg, scale_gate_col=1)
+            y_ref = situ_and_mul_ref(gu, scale_gate=sg, scale_gate_col=1)
+            if M_s > 0:
+                assert _diff_stats(y_tri, y_ref)[2] >= 0.999999
+                base_act = situ_and_mul_triton(gu)
+                unfused = (base_act.float() * torch.sigmoid(sg[:, 1:2].float()).to(base_act.dtype).float()).to(base_act.dtype)
+                assert torch.equal(y_tri, unfused), f"SituAndMul scale_gate not bit-exact for M={M_s}, D={D_s}"
+
+    # 2. Fused _scatter_packed_fp8_to_masked_kernel & _gather_masked_weighted_reduce_kernel(PACKED_META=True, HAS_SCALE_GATE=True)
+    M_pk, L_pk, E_pk, top_k_pk, max_m_pk = 16, 2560, 32, 10, 128
+    x_pk = torch.randn((M_pk, L_pk), dtype=torch.bfloat16, device=device) * 0.5
+    ids_pk = torch.randint(0, E_pk * 2, (M_pk, top_k_pk), dtype=torch.int32, device=device)
+    ids_pk[-1] = -1  # verify dummy padded -1 row skipped cleanly
+    w_pk = torch.softmax(torch.randn((M_pk, top_k_pk), dtype=torch.float32, device=device), dim=-1)
+    w_pk[-1] = 0.0
+    gates_pk = torch.randn((M_pk, 2), dtype=torch.bfloat16, device=device) * 0.7
+
+    num_groups = L_pk // 32
+    num_packs = num_groups // 4
+    sc_off = ((L_pk + 15) // 16) * 16
+    meta_off = sc_off + ((num_groups + 15) // 16) * 16
+    row_bytes = meta_off + ((2 * top_k_pk * 4 + 15) // 16) * 16
+    all_buf = torch.empty((M_pk, row_bytes), dtype=torch.uint8, device=device)
+    _pack_dense_dp_bf16_to_fp8_kernel[(M_pk,)](
+        x_pk, ids_pk, w_pk, all_buf, M_pk, L_pk, num_groups, top_k_pk,
+        row_bytes, sc_off, meta_off, x_pk.stride(0), ids_pk.stride(0), w_pk.stride(0),
+        eps=1e-10, BLOCK_B=512, num_warps=4,
+    )
+    (_, _), ids_unp, w_unp = _unpack_packed_fp8_payload(
+        (all_buf, L_pk, sc_off, meta_off, row_bytes, top_k_pk)
+    )
+    assert torch.equal(ids_unp, ids_pk) and torch.equal(w_unp, w_pk)
+
+    mm_ref = torch.zeros((E_pk,), dtype=torch.int32, device=device)
+    dp_ref = torch.empty((M_pk, top_k_pk), dtype=torch.int32, device=device)
+    aq_ref = torch.zeros((E_pk, max_m_pk, L_pk), dtype=torch.float8_e4m3fn, device=device)
+    asc_ref = torch.zeros((E_pk, num_packs, max_m_pk), dtype=torch.int32, device=device).transpose(1, 2)
+    _quant_and_scatter_fp8_to_masked_kernel[(M_pk,)](
+        x_pk, ids_pk, mm_ref, aq_ref.view(torch.uint8), asc_ref, dp_ref.view(-1),
+        M_pk, TOP_K=top_k_pk, TOP_K_PAD=16, L=L_pk, e_lo=E_pk, E_local=E_pk,
+        stride_xm=x_pk.stride(0), stride_aqe=aq_ref.stride(0), stride_aqm=aq_ref.stride(1),
+        stride_asce=asc_ref.stride(0), stride_asck=asc_ref.stride(2), eps=1e-10, BLOCK_L=512, num_warps=4,
+    )
+
+    mm_pk = torch.zeros((E_pk,), dtype=torch.int32, device=device)
+    dp_pk = torch.empty((M_pk, top_k_pk), dtype=torch.int32, device=device)
+    aq_pk = torch.zeros((E_pk, max_m_pk, L_pk), dtype=torch.float8_e4m3fn, device=device)
+    asc_pk = torch.zeros((E_pk, num_packs, max_m_pk), dtype=torch.int32, device=device).transpose(1, 2)
+    _scatter_packed_fp8_to_masked_kernel[(M_pk,)](
+        all_buf, mm_pk, aq_pk.view(torch.uint8), asc_pk, dp_pk.view(-1),
+        M_pk, sc_off, meta_off, row_bytes, E_pk, E_pk,
+        aq_pk.stride(0), aq_pk.stride(1), asc_pk.stride(0), asc_pk.stride(2),
+        TOP_K=top_k_pk, TOP_K_PAD=16, L=L_pk, BLOCK_L=512, num_warps=4,
+    )
+    assert torch.equal(mm_pk, mm_ref)
+    assert torch.equal(dp_pk < 0, dp_ref < 0)
+    assert torch.all(dp_pk[-1] == -1), 'dummy -1 row must produce dst_pos=-1'
+    per_e_seen = [set() for _ in range(E_pk)]
+    for m_i in range(M_pk):
+        for k_i in range(top_k_pk):
+            le = int(ids_pk[m_i, k_i].item()) - E_pk
+            p_pk = int(dp_pk[m_i, k_i].item())
+            p_rf = int(dp_ref[m_i, k_i].item())
+            if 0 <= le < E_pk:
+                assert 0 <= p_pk < int(mm_pk[le].item()) and p_pk not in per_e_seen[le]
+                per_e_seen[le].add(p_pk)
+                assert torch.equal(aq_pk[le, p_pk].view(torch.uint8), aq_ref[le, p_rf].view(torch.uint8))
+                assert torch.equal(asc_pk[le, p_pk], asc_ref[le, p_rf])
+            else:
+                assert p_pk == -1 and p_rf == -1
+    for e_i in range(E_pk):
+        assert len(per_e_seen[e_i]) == int(mm_pk[e_i].item())
+
+    down_mock = torch.randn((E_pk, max_m_pk, L_pk), dtype=torch.bfloat16, device=device) * 0.2
+    out_g_packed = torch.empty((M_pk, L_pk), dtype=torch.bfloat16, device=device)
+    out_g_std = torch.empty((M_pk, L_pk), dtype=torch.bfloat16, device=device)
+    _gather_masked_weighted_reduce_kernel[(M_pk, 5)](
+        down_mock, all_buf, dp_pk, all_buf, all_buf, gates_pk, out_g_packed,
+        L_pk, E_pk, E_pk, meta_off, row_bytes, down_mock.stride(0), down_mock.stride(1),
+        0, gates_pk.stride(0), out_g_packed.stride(0),
+        scale_gate_col=0, PACKED_META=True, HAS_SCALE_GATE=True, TOP_K=top_k_pk, BLOCK_K=512, num_warps=4,
+    )
+    _gather_masked_weighted_reduce_kernel[(M_pk, 5)](
+        down_mock, ids_pk, dp_pk, w_pk, ids_pk, out_g_std, out_g_std,
+        L_pk, E_pk, E_pk, 0, 0, down_mock.stride(0), down_mock.stride(1),
+        w_pk.stride(0), 0, out_g_std.stride(0),
+        scale_gate_col=0, PACKED_META=False, HAS_SCALE_GATE=False, TOP_K=top_k_pk, BLOCK_K=512, num_warps=4,
+    )
+    exp_g = (out_g_std.float() * torch.sigmoid(gates_pk[:, :1].float()).to(torch.bfloat16).float()).to(torch.bfloat16)
+    ma_g, _, cos_g = _diff_stats(out_g_packed, exp_g)
+    assert cos_g >= 0.999999 and ma_g <= 1e-3, f"gather packed+scale_gate mismatch: ma={ma_g}, cos={cos_g}"
+    assert torch.all(out_g_packed[-1] == 0)
+
+    # Compile & check _symm_p2p_sum_rows_kernel with HAS_SCALE_GATE=True
+    symm_mock = torch.randn((2, 4, L_pk), dtype=torch.bfloat16, device=device)
+    ptrs_dev = torch.tensor([symm_mock[0].data_ptr(), symm_mock[1].data_ptr()], dtype=torch.int64, device=device)
+    symm_out = torch.empty((4, L_pk), dtype=torch.bfloat16, device=device)
+    _symm_p2p_sum_rows_kernel[(4, 5)](
+        ptrs_dev, symm_out, gates_pk[:4], 0, 4, L_pk, L_pk, symm_out.stride(0),
+        gates_pk.stride(0), scale_gate_col=0, HAS_SCALE_GATE=True, WORLD_SIZE=2, BLOCK_L=512, num_warps=4,
+    )
+    symm_exp = ((symm_mock[0].float() + symm_mock[1].float()).to(torch.bfloat16).float() * torch.sigmoid(gates_pk[:4, :1].float()).to(torch.bfloat16).float()).to(torch.bfloat16)
+    assert _diff_stats(symm_out, symm_exp)[2] >= 0.99999
+
+    # Check slab reuse returns same backing memory across calls
+    slab1 = _get_masked_ws_slab(device, 1024 * 1024, cacheable=True)
+    slab2 = _get_masked_ws_slab(device, 512 * 1024, cacheable=True)
+    assert slab1.data_ptr() == slab2.data_ptr()
+
+    # Check SM100 DeepGEMM packed masked dispatch if available
+    if has_deepgemm_fp8_fp4(int(device.index or 0)):
+        w13_bf = torch.randn((E_pk, 2 * 1280, L_pk), dtype=torch.bfloat16, device=device) * 0.04
+        w2_bf = torch.randn((E_pk, L_pk, 1280), dtype=torch.bfloat16, device=device) * 0.04
+        w13_u8, w13_sc = quantize_mxfp4(w13_bf)
+        w2_u8, w2_sc = quantize_mxfp4(w2_bf)
+        mw = prepare_mxfp4_moe_weights(w13_u8=w13_u8, w13_scale=w13_sc, w2_u8=w2_u8, w2_scale=w2_sc)
+        y_dg_pk = mxfp4_moe_deepgemm_masked(
+            None, ids_pk[:0], w_pk[:0], mw, ep_start=E_pk, ep_size=2,
+            prequant_packed=(all_buf, L_pk, sc_off, meta_off, row_bytes, top_k_pk),
+            scale_gate=gates_pk, scale_gate_col=0,
+        )
+        y_dg_std = mxfp4_moe_deepgemm_masked(
+            x_pk, ids_pk, w_pk, mw, ep_start=E_pk, ep_size=2, scale_gate=gates_pk, scale_gate_col=0,
+        )
+        assert _diff_stats(y_dg_pk, y_dg_std)[2] >= 0.9999
+        del w13_bf, w2_bf, w13_u8, w13_sc, w2_u8, w2_sc, mw, y_dg_pk, y_dg_std
+
+    # 2b. Regression for M=512/2048 EP=4 masked scatter kernels (RAW barrier + masked stores)
+    L_lg, E_lg, ep_lg, top_k_lg = 2560, 160, 4, 10
+    sc_off_lg = ((L_lg + 255) // 256) * 256
+    meta_off_lg = sc_off_lg + (((L_lg // 32) + 255) // 256) * 256
+    row_bytes_lg = meta_off_lg + ((top_k_lg * 8 + 255) // 256) * 256
+    num_groups_lg = L_lg // 32
+    num_packs_lg = num_groups_lg // 4
+    total_e_lg = E_lg * ep_lg
+    for M_lg in (512, 2048):
+        x_lg = torch.randn((M_lg, L_lg), dtype=torch.bfloat16, device=device) * 0.4
+        ids_lg = torch.empty((M_lg, top_k_lg), dtype=torch.int32, device=device)
+        for row_i in range(M_lg):
+            ids_lg[row_i] = torch.randperm(total_e_lg, device=device, dtype=torch.int32)[:top_k_lg]
+        ids_lg[:8] = -1
+        ids_lg[8:16] = 0
+        ids_lg[16:24] = total_e_lg - 1
+        w_lg = torch.softmax(torch.randn((M_lg, top_k_lg), dtype=torch.float32, device=device), dim=-1)
+        w_lg[:8] = 0.0
+        all_lg = torch.empty((M_lg, row_bytes_lg), dtype=torch.uint8, device=device)
+        _pack_dense_dp_bf16_to_fp8_kernel[(M_lg,)](
+            x_lg, ids_lg, w_lg, all_lg, M_lg, L_lg, num_groups_lg, top_k_lg,
+            row_bytes_lg, sc_off_lg, meta_off_lg, x_lg.stride(0), ids_lg.stride(0), w_lg.stride(0),
+            eps=1e-10, BLOCK_B=512, num_warps=4,
+        )
+        max_m_lg = ((M_lg + 127) // 128) * 128
+        for block_l in (512, 256):
+            mm_q_lg = torch.zeros((E_lg,), dtype=torch.int32, device=device)
+            dp_q_lg = torch.full((M_lg, top_k_lg), 0x3F800000, dtype=torch.int32, device=device)
+            aq_q_lg = torch.zeros((E_lg, max_m_lg, L_lg), dtype=torch.float8_e4m3fn, device=device)
+            asc_q_lg = torch.zeros((E_lg, num_packs_lg, max_m_lg), dtype=torch.int32, device=device).transpose(1, 2)
+            _quant_and_scatter_fp8_to_masked_kernel[(M_lg,)](
+                x_lg, ids_lg, mm_q_lg, aq_q_lg.view(torch.uint8), asc_q_lg, dp_q_lg.view(-1),
+                M_lg, TOP_K=top_k_lg, TOP_K_PAD=16, L=L_lg, e_lo=E_lg, E_local=E_lg,
+                stride_xm=x_lg.stride(0), stride_aqe=aq_q_lg.stride(0), stride_aqm=aq_q_lg.stride(1),
+                stride_asce=asc_q_lg.stride(0), stride_asck=asc_q_lg.stride(2),
+                eps=1e-10, BLOCK_L=block_l, num_warps=4,
+            )
+            mm_p_lg = torch.zeros((E_lg,), dtype=torch.int32, device=device)
+            dp_p_lg = torch.full((M_lg, top_k_lg), 0x3F800000, dtype=torch.int32, device=device)
+            aq_p_lg = torch.zeros((E_lg, max_m_lg, L_lg), dtype=torch.float8_e4m3fn, device=device)
+            asc_p_lg = torch.zeros((E_lg, num_packs_lg, max_m_lg), dtype=torch.int32, device=device).transpose(1, 2)
+            _scatter_packed_fp8_to_masked_kernel[(M_lg,)](
+                all_lg, mm_p_lg, aq_p_lg.view(torch.uint8), asc_p_lg, dp_p_lg.view(-1),
+                M_lg, sc_off_lg, meta_off_lg, row_bytes_lg, E_lg, E_lg,
+                aq_p_lg.stride(0), aq_p_lg.stride(1), asc_p_lg.stride(0), asc_p_lg.stride(2),
+                TOP_K=top_k_lg, TOP_K_PAD=16, L=L_lg, BLOCK_L=block_l, num_warps=4,
+            )
+            assert torch.equal(mm_q_lg, mm_p_lg)
+            assert torch.equal(dp_p_lg < 0, dp_q_lg < 0)
+            assert torch.all(dp_p_lg[:24] == -1)
+            le_lg = ids_lg - E_lg
+            valid_lg = (le_lg >= 0) & (le_lg < E_lg)
+            le_v = le_lg[valid_lg].long()
+            dp_pv = dp_p_lg[valid_lg].long()
+            dp_qv = dp_q_lg[valid_lg].long()
+            assert torch.all((dp_pv >= 0) & (dp_pv < mm_p_lg[le_v].long()))
+            assert torch.all((dp_qv >= 0) & (dp_qv < mm_q_lg[le_v].long()))
+            assert torch.equal(aq_p_lg[le_v, dp_pv].view(torch.uint8), aq_q_lg[le_v, dp_qv].view(torch.uint8))
+            assert torch.equal(asc_p_lg[le_v, dp_pv], asc_q_lg[le_v, dp_qv])
+            unused_mask = torch.arange(max_m_lg, device=device)[None, :] >= mm_p_lg[:, None]
+            assert torch.all(aq_p_lg.view(torch.uint8)[unused_mask] == 0)
+            assert torch.all(asc_p_lg[unused_mask] == 0)
+            del mm_q_lg, dp_q_lg, aq_q_lg, asc_q_lg, mm_p_lg, dp_p_lg, aq_p_lg, asc_p_lg
+        del x_lg, ids_lg, w_lg, all_lg
+
+    if has_deepgemm_fp8_fp4(int(device.index or 0)):
+        I_lg = 256
+        w13_lg_bf = torch.randn((E_lg, 2 * I_lg, L_lg), dtype=torch.bfloat16, device=device) * 0.04
+        w2_lg_bf = torch.randn((E_lg, L_lg, I_lg), dtype=torch.bfloat16, device=device) * 0.04
+        w13_lg_u8, w13_lg_sc = quantize_mxfp4(w13_lg_bf)
+        w2_lg_u8, w2_lg_sc = quantize_mxfp4(w2_lg_bf)
+        mw_lg = prepare_mxfp4_moe_weights(w13_u8=w13_lg_u8, w13_scale=w13_lg_sc, w2_u8=w2_lg_u8, w2_scale=w2_lg_sc)
+        for M_lg in (512, 2048):
+            x_lg = torch.randn((M_lg, L_lg), dtype=torch.bfloat16, device=device) * 0.4
+            ids_lg = torch.empty((M_lg, top_k_lg), dtype=torch.int32, device=device)
+            for row_i in range(M_lg):
+                ids_lg[row_i] = torch.randperm(total_e_lg, device=device, dtype=torch.int32)[:top_k_lg]
+            ids_lg[:4] = -1
+            w_lg = torch.softmax(torch.randn((M_lg, top_k_lg), dtype=torch.float32, device=device), dim=-1)
+            w_lg[:4] = 0.0
+            all_lg = torch.empty((M_lg, row_bytes_lg), dtype=torch.uint8, device=device)
+            _pack_dense_dp_bf16_to_fp8_kernel[(M_lg,)](
+                x_lg, ids_lg, w_lg, all_lg, M_lg, L_lg, num_groups_lg, top_k_lg,
+                row_bytes_lg, sc_off_lg, meta_off_lg, x_lg.stride(0), ids_lg.stride(0), w_lg.stride(0),
+                eps=1e-10, BLOCK_B=512, num_warps=4,
+            )
+            y_lg_pk = mxfp4_moe_deepgemm_masked(
+                None, ids_lg[:0], w_lg[:0], mw_lg, ep_start=E_lg, ep_size=ep_lg,
+                prequant_packed=(all_lg, L_lg, sc_off_lg, meta_off_lg, row_bytes_lg, top_k_lg),
+            )
+            y_lg_q = mxfp4_moe_deepgemm_masked(
+                x_lg, ids_lg, w_lg, mw_lg, ep_start=E_lg, ep_size=ep_lg,
+            )
+            assert _diff_stats(y_lg_pk, y_lg_q)[2] >= 0.999999
+            assert torch.all(y_lg_pk[:4] == 0)
+            del x_lg, ids_lg, w_lg, all_lg, y_lg_pk, y_lg_q
+        del w13_lg_bf, w2_lg_bf, w13_lg_u8, w13_lg_sc, w2_lg_u8, w2_lg_sc, mw_lg
+
+    # 3. Verify opt-in LatentMoE fused epilogue eliminates _combine_latent_shared_out_kernel and matches unfused cos >= 0.9999
+    prev_fuse_epi = os.environ.get("QWEN4_5_FUSE_MOE_EPILOGUE")
+    os.environ["QWEN4_5_FUSE_MOE_EPILOGUE"] = "1"
+    try:
+        for has_sg in (True, False):
+            for ovl in (False, True):
+                moe_r7 = Qwen4_5LatentMoE(
+                    hidden_size=5120,
+                    routed_expert_hidden_size=1280,
+                    moe_intermediate_size=128,
+                    shared_expert_intermediate_size=128,
+                    num_experts=64,
+                    num_experts_per_tok=8,
+                    shared_expert_gate=has_sg,
+                    dtype=torch.bfloat16,
+                    device=device,
+                    enable_shared_overlap=ovl,
+                    dense_linear_mode="auto",
+                    backend="triton_splitk",
+                )
+                _init_latent_moe_weights(moe_r7, seed=7800 + int(has_sg))
+                moe_r7.prepare_weights()
+                x_r7 = torch.randn((16, 5120), dtype=torch.bfloat16, device=device) * 0.4
+                y_r7 = moe_r7(x_r7)
+                y_r7_ref = moe_r7(x_r7, use_triton_mxfp4=False)
+                assert _diff_stats(y_r7, y_r7_ref)[2] >= 0.999, f"R7 fused epilogue cos fail has_sg={has_sg}, ovl={ovl}"
+                torch.cuda.synchronize(device)
+                with torch.profiler.profile(activities=[torch.profiler.ProfilerActivity.CUDA]) as prof7:
+                    _ = moe_r7(x_r7)
+                torch.cuda.synchronize(device)
+                k7 = [e.key.lower() for e in prof7.key_averages()]
+                assert not any("cutlass_80" in k for k in k7), f"cutlass_80 detected: {k7}"
+                assert not any("_combine_latent_shared_out_kernel" in k for k in k7), (
+                    f"Unfused _combine_latent_shared_out_kernel still launched! {k7}"
+                )
+                for _ in range(2):
+                    moe_r7(x_r7)
+                torch.cuda.synchronize(device)
+                g7 = torch.cuda.CUDAGraph()
+                with torch.cuda.graph(g7):
+                    y_r7_cg = moe_r7(x_r7)
+                g7.replay()
+                torch.cuda.synchronize(device)
+                assert _diff_stats(y_r7_cg, y_r7)[2] >= 0.999999
+                del g7, moe_r7
+
+    finally:
+        if prev_fuse_epi is None:
+            os.environ.pop("QWEN4_5_FUSE_MOE_EPILOGUE", None)
+        else:
+            os.environ["QWEN4_5_FUSE_MOE_EPILOGUE"] = prev_fuse_epi
+    print("  PASS R7 Fused SituAndMul/Packed-Masked/Workspace/Addmm Epilogue & Zero Combine Kernel")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Qwen 4.5-Flash LatentMoE & SM100 MXFP4 test suite")
     parser.add_argument("--distributed", action="store_true", help="Run multi-GPU FastAllReduce/TP/EP tests")
@@ -2503,6 +3056,7 @@ def main() -> int:
         test_r4_combine_bitwise_schedule_and_multigpu(device)
         test_r5_deepgemm_w3x_a2a_and_no_cutlass80(device)
         test_r6_small_batch_launch_reduction_and_kernels(device)
+        test_r7_tpsp_and_fused_kernels(device)
 
     if args.distributed:
         test_distributed_fast_comm_tp_ep(world_size=args.world_size)

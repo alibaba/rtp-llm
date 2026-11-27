@@ -886,6 +886,102 @@ class TestQwen4_5E2E(unittest.TestCase):
             self.assertEqual(leftover, [], f"Leaked shared PLE files: {leftover}")
 
 
+    @torch.no_grad()
+    def test_11_r7_tpsp_sp4_and_dp2_tpsp2_ep4_full_chain_e2e(self) -> None:
+        """Real 4-rank Gloo+GPU TPSP (sp4_tp4_ep4 & dp2_tpsp2_ep4) full-chain parity vs tp1_ep1, YoCo, kept-token lm_head & 0 MoE AR."""
+        import socket
+        import torch.multiprocessing as mp
+
+        cfg = make_mini_qwen4_5_config()
+        g = torch.Generator(device="cpu").manual_seed(202677)
+        refs_in = {
+            "ids17": torch.randint(0, cfg.vocab_size, (1, 17), generator=g, dtype=torch.long),
+            "ids17_dp1": torch.randint(0, cfg.vocab_size, (1, 17), generator=g, dtype=torch.long),
+            "ids_dec": torch.randint(0, cfg.vocab_size, (1, 1), generator=g, dtype=torch.long),
+            "ids_dec_dp1": torch.randint(0, cfg.vocab_size, (1, 1), generator=g, dtype=torch.long),
+            "ids3": torch.randint(0, cfg.vocab_size, (1, 3), generator=g, dtype=torch.long),
+            "ids_b2": torch.randint(0, cfg.vocab_size, (2, 7), generator=g, dtype=torch.long),
+        }
+
+        ref_m = Qwen4_5ForCausalLM(cfg, dtype=torch.bfloat16, device=self.device)
+        ref_m.init_synthetic_weights(seed=202611, ple_mode="gpu_sharded", ple_fp8=True)
+        _stabilize_router_margins(ref_m)
+        ref_m.prepare_weights()
+        ref_m.eval()
+
+        refs_by_dp = {}
+        ids3_d = refs_in["ids3"].to(self.device)
+        ids_b2_d = refs_in["ids_b2"].to(self.device)
+        st3_r = ref_m.create_runtime_state(1, 16, device=self.device, dtype=torch.bfloat16, enable_yoco_decode=True)
+        ref_out3 = ref_m(ids3_d, state=st3_r, logits_to_keep=None, enable_yoco_decode=True).float().cpu().numpy()
+        stb2_r = ref_m.create_runtime_state(2, 32, device=self.device, dtype=torch.bfloat16, enable_yoco_decode=True)
+        ref_out_b2 = ref_m(ids_b2_d, state=stb2_r, logits_to_keep=None, enable_yoco_decode=True).float().cpu().numpy()
+
+        for dp_idx in (0, 1):
+            ids17_d = (refs_in["ids17_dp1"] if dp_idx == 1 else refs_in["ids17"]).to(self.device)
+            ids_dec_d = (refs_in["ids_dec_dp1"] if dp_idx == 1 else refs_in["ids_dec"]).to(self.device)
+            st_r = ref_m.create_runtime_state(1, 64, device=self.device, dtype=torch.bfloat16, enable_yoco_decode=True)
+            out17 = ref_m(ids17_d, state=st_r, logits_to_keep=1, enable_yoco_decode=True).float().cpu().numpy()
+            out_dec = ref_m(ids_dec_d, state=st_r, logits_to_keep=1, enable_yoco_decode=True).float().cpu().numpy()
+            h_in_l0 = ref_m.model._embed_hyper_streams(ids17_d, sp_bounds=None)
+            h_l0, lat_l0, def_l0 = ref_m.model.layers[0](
+                h_in_l0, ids17_d, prev_latent=None, deferred=None,
+                shared_gdn_by_source={}, shared_qsa_by_source={}, source_prefix_ssm=None,
+                state=None, enable_yoco_decode=False,
+            )
+            h_l1, _, _ = ref_m.model.layers[1](
+                h_l0, ids17_d, prev_latent=lat_l0, deferred=def_l0,
+                shared_gdn_by_source={}, shared_qsa_by_source={}, source_prefix_ssm=None,
+                state=None, enable_yoco_decode=False,
+            )
+            refs_by_dp[dp_idx] = {
+                "h_l0": h_l0.view(17, -1).float().cpu().numpy(),
+                "h_l1": h_l1.view(17, -1).float().cpu().numpy(),
+                "out_p17": out17,
+                "out_dec": out_dec,
+                "out_3": ref_out3,
+                "out_b2": ref_out_b2,
+            }
+        del ref_m
+        torch.cuda.empty_cache()
+
+        ctx = mp.get_context("spawn")
+        for pmode in ("sp4_tp4_ep4", "dp2_tpsp2_ep4"):
+            with socket.socket() as sock:
+                sock.bind(("127.0.0.1", 0))
+                port_sp = sock.getsockname()[1]
+            sp_q = ctx.Queue()
+            err_sp = ctx.Queue()
+            procs_sp = [
+                ctx.Process(
+                    target=_gloo_r7_tpsp_worker,
+                    args=(r, 4, port_sp, pmode, refs_in, refs_by_dp, sp_q, err_sp),
+                )
+                for r in range(4)
+            ]
+            for p in procs_sp:
+                p.start()
+            sp_items = {}
+            while len(sp_items) < 4:
+                if not sp_q.empty():
+                    rk, payload = sp_q.get(timeout=120)
+                    sp_items[rk] = payload
+                elif any(not p.is_alive() for p in procs_sp):
+                    break
+            for p in procs_sp:
+                p.join(timeout=150)
+            errs_sp = []
+            while not err_sp.empty():
+                errs_sp.append(err_sp.get())
+            for r, p in enumerate(procs_sp):
+                self.assertEqual(p.exitcode, 0, f"{pmode} worker {r} exit {p.exitcode}: {errs_sp}")
+            self.assertEqual(errs_sp, [])
+            if pmode == "dp2_tpsp2_ep4":
+                dp0 = torch.from_numpy(sp_items[0]["out_p17"])
+                dp1 = torch.from_numpy(sp_items[2]["out_p17"])
+                self.assertGreater((dp0 - dp1).abs().max().item(), 1e-2)
+
+
 @torch.no_grad()
 def _gloo_tbo_and_shm_worker(rank: int, world_size: int, port: int, ckpt_dir: str, err_q) -> None:
     import gc
@@ -1463,6 +1559,160 @@ def run_distributed_ep_test() -> None:
 
     dist.barrier()
     dist.destroy_process_group()
+
+
+@torch.no_grad()
+def _gloo_r7_tpsp_worker(
+    rank: int,
+    world_size: int,
+    port: int,
+    pmode: str,
+    refs_in: dict,
+    refs_by_dp: dict,
+    out_q,
+    err_q,
+) -> None:
+    try:
+        os.environ["MASTER_ADDR"] = "127.0.0.1"
+        os.environ["MASTER_PORT"] = str(port)
+        dist.init_process_group("gloo", rank=rank, world_size=world_size)
+        try:
+            dev = torch.device("cuda:0")
+            torch.cuda.set_device(dev)
+            cfg = make_mini_qwen4_5_config()
+            if pmode == "sp4_tp4_ep4":
+                g0 = dist.new_group([0, 1, 2, 3])
+                kw = dict(
+                    parallel_mode=pmode, tp_size=4, tp_rank=rank, tp_group=g0,
+                    sp_size=4, sp_rank=rank, sp_group=g0,
+                    ep_size=4, ep_rank=rank, ep_group=g0,
+                )
+                dp_r = 0
+            else:
+                tp_groups = [dist.new_group([0, 1]), dist.new_group([2, 3])]
+                dp_groups = [dist.new_group([0, 2]), dist.new_group([1, 3])]
+                ep_group = dist.new_group([0, 1, 2, 3])
+                dp_r, tp_r = rank // 2, rank % 2
+                kw = dict(
+                    parallel_mode=pmode, dp_size=2, dp_rank=dp_r, dp_group=dp_groups[tp_r],
+                    tp_size=2, tp_rank=tp_r, tp_group=tp_groups[dp_r],
+                    sp_size=2, sp_rank=tp_r, sp_group=tp_groups[dp_r],
+                    ep_size=4, ep_rank=rank, ep_group=ep_group,
+                )
+
+            m = Qwen4_5ForCausalLM(cfg, dtype=torch.bfloat16, device=dev, **kw)
+            m.init_synthetic_weights(seed=202611, ple_mode="gpu_sharded", ple_fp8=True)
+            _stabilize_router_margins(m)
+            m.prepare_weights()
+            m.eval()
+
+            sp_ag_calls, sp_rs_calls, moe_ar_calls, full_model_ag = [0], [0], [0], [0]
+            assert m.model.all_to_all_comm is not None
+            orig_mag = m.model._sp_all_gather_tokens
+            m.model._sp_all_gather_tokens = lambda x, tot: (
+                full_model_ag.__setitem__(0, full_model_ag[0] + 1),
+                orig_mag(x, tot),
+            )[1]
+            assert m.model.sp_fast_comm is not None
+            orig_sp_ag = m.model.sp_fast_comm.all_gather_sp
+            orig_sp_rs = m.model.sp_fast_comm.reduce_scatter_sp
+            m.model.sp_fast_comm.all_gather_sp = lambda *a, **kk: (
+                sp_ag_calls.__setitem__(0, sp_ag_calls[0] + 1),
+                orig_sp_ag(*a, **kk),
+            )[1]
+            m.model.sp_fast_comm.reduce_scatter_sp = lambda *a, **kk: (
+                sp_rs_calls.__setitem__(0, sp_rs_calls[0] + 1),
+                orig_sp_rs(*a, **kk),
+            )[1]
+            for lyr in m.model.layers:
+                orig_rm = lyr._run_mlp
+                def _wrap_mlp(*a, _lyr=lyr, _orig=orig_rm, **kk):
+                    fc = getattr(_lyr.mlp, "fast_all_reduce", None)
+                    prev = fc.all_reduce if fc is not None else None
+                    if fc is not None:
+                        fc.all_reduce = lambda *aa, **kkk: (
+                            moe_ar_calls.__setitem__(0, moe_ar_calls[0] + 1),
+                            prev(*aa, **kkk),
+                        )[1]
+                    try:
+                        return _orig(*a, **kk)
+                    finally:
+                        if fc is not None:
+                            fc.all_reduce = prev
+                lyr._run_mlp = _wrap_mlp
+
+            ids17 = (refs_in["ids17_dp1"] if dp_r == 1 else refs_in["ids17"]).to(dev)
+            ids_dec = (refs_in["ids_dec_dp1"] if dp_r == 1 else refs_in["ids_dec"]).to(dev)
+            ids3 = refs_in["ids3"].to(dev)
+            ids_b2 = refs_in["ids_b2"].to(dev)
+
+            # 1. Non-divisible T=17 prefill (logits_to_keep=1 verifies 0 full-seq SP gather)
+            st_p = m.create_runtime_state(1, 64, device=dev, dtype=torch.bfloat16, enable_yoco_decode=True)
+            out_p17_k1 = m(ids17, state=st_p, logits_to_keep=1, enable_yoco_decode=True)
+            assert full_model_ag[0] == 0, f"{pmode} kept-token lm_head triggered full SP gather!"
+            out_dec = m(ids_dec, state=st_p, logits_to_keep=1, enable_yoco_decode=True)
+
+            # YoCo equivalence: full (T=17+1) vs prefill(T=17)+decode(T=1)
+            st_full = m.create_runtime_state(1, 64, device=dev, dtype=torch.bfloat16, enable_yoco_decode=True)
+            out_cat = m(torch.cat([ids17, ids_dec], dim=1), state=st_full, logits_to_keep=1, enable_yoco_decode=True)
+
+            # 2. Small T=3 < sp_size=4 (exercises empty rank M_loc=0)
+            st3 = m.create_runtime_state(1, 16, device=dev, dtype=torch.bfloat16, enable_yoco_decode=True)
+            out_3 = m(ids3, state=st3, logits_to_keep=None, enable_yoco_decode=True)
+
+            # 3. B=2, T=7 multi-request ShortConv SP boundary isolation
+            stb2 = m.create_runtime_state(2, 32, device=dev, dtype=torch.bfloat16, enable_yoco_decode=True)
+            out_b2 = m(ids_b2, state=stb2, logits_to_keep=None, enable_yoco_decode=True)
+            ids_b2_pert = ids_b2.clone()
+            ids_b2_pert[0, -1] = (ids_b2_pert[0, -1] + 1) % cfg.vocab_size
+            stb2_p = m.create_runtime_state(2, 32, device=dev, dtype=torch.bfloat16, enable_yoco_decode=True)
+            out_b2_p = m(ids_b2_pert, state=stb2_p, logits_to_keep=None, enable_yoco_decode=True)
+            assert _cos_sim(out_b2[1], out_b2_p[1]) > 0.99999, "ShortConv/SP request cross-bleed!"
+
+            # 4. Single-layer L0 & L1 hidden parity (captured after comm spy checks)
+            from rtp_llm.models_py.modules.qwen4_5.fast_comm import sp_slice_bounds
+            sp_b = sp_slice_bounds(17, m.sp_size, m.sp_rank)
+            h_in_l0 = m.model._embed_hyper_streams(ids17, sp_bounds=sp_b)
+            h_l0, lat_l0, def_l0 = m.model.layers[0](
+                h_in_l0, ids17, prev_latent=None, deferred=None,
+                shared_gdn_by_source={}, shared_qsa_by_source={}, source_prefix_ssm=None,
+                state=None, enable_yoco_decode=False,
+            )
+            h_l1, _, _ = m.model.layers[1](
+                h_l0, ids17, prev_latent=lat_l0, deferred=def_l0,
+                shared_gdn_by_source={}, shared_qsa_by_source={}, source_prefix_ssm=None,
+                state=None, enable_yoco_decode=False,
+            )
+            h_l0_full = m.model._sp_all_gather_tokens(h_l0, 17)
+            h_l1_full = m.model._sp_all_gather_tokens(h_l1, 17)
+
+            payload = {
+                "h_l0": h_l0_full.float().cpu().numpy(),
+                "h_l1": h_l1_full.float().cpu().numpy(),
+                "out_p17": out_p17_k1.float().cpu().numpy(),
+                "out_dec": out_dec.float().cpu().numpy(),
+                "out_cat": out_cat.float().cpu().numpy(),
+                "out_3": out_3.float().cpu().numpy(),
+                "out_b2": out_b2.float().cpu().numpy(),
+            }
+            assert sp_ag_calls[0] > 0 and sp_rs_calls[0] > 0
+            assert moe_ar_calls[0] == 0, f"Unexpected MoE AllReduce calls in {pmode}: {moe_ar_calls[0]}"
+            dp_ref = refs_by_dp[dp_r]
+            for key in ("h_l0", "h_l1"):
+                c1 = _cos_sim(torch.from_numpy(payload[key]), torch.from_numpy(dp_ref[key]))
+                assert c1 >= 0.9999, f"{pmode} rank={rank} {key} single-layer SP vs tp1_ep1 cos={c1}"
+            for key in ("out_p17", "out_dec", "out_3", "out_b2"):
+                c = _cos_sim(torch.from_numpy(payload[key]), torch.from_numpy(dp_ref[key]))
+                assert c >= 0.999, f"{pmode} rank={rank} {key} vs tp1_ep1 cos={c}"
+            yoco_cos = _cos_sim(out_dec, out_cat)
+            assert yoco_cos >= 0.9995, f"{pmode} YoCo decode vs full prefill cos={yoco_cos}"
+            out_q.put((rank, payload))
+            dist.barrier()
+        finally:
+            dist.destroy_process_group()
+    except BaseException as exc:
+        err_q.put(f"rank {rank} ({pmode}): {exc!r}")
+        raise
 
 
 if __name__ == "__main__":

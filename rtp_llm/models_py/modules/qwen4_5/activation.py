@@ -60,6 +60,8 @@ def situ_and_mul_ref(
     *,
     gate_beta: float = 4.0,
     up_beta: float = 25.0,
+    scale_gate: Optional[torch.Tensor] = None,
+    scale_gate_col: int = 0,
 ) -> torch.Tensor:
     """Pure PyTorch FP32 reference for SiTU-GLU.
 
@@ -83,16 +85,26 @@ def situ_and_mul_ref(
     up_f = up_t.float()
     g = gate_beta * torch.tanh(gate_f / gate_beta) * torch.sigmoid(gate_f)
     u = up_beta * torch.tanh(up_f / up_beta)
-    return (g * u).to(out_dtype)
+    res = (g * u).to(out_dtype)
+    if scale_gate is not None and res.numel() > 0:
+        sg = scale_gate[:, scale_gate_col : scale_gate_col + 1] if scale_gate.ndim >= 2 else scale_gate.unsqueeze(-1)
+        sg = sg.reshape(*res.shape[:-1], 1).to(res.dtype)
+        sig = torch.sigmoid(sg.float()).to(res.dtype)
+        res = (res.float() * sig.float()).to(out_dtype)
+    return res
 
 
 @triton.jit
 def _situ_and_mul_cat_kernel(
     x_ptr,
     out_ptr,
+    scale_gate_ptr,
     D: tl.constexpr,
     stride_x_row: tl.int64,
     stride_out_row: tl.int64,
+    stride_sg_row: tl.int64,
+    scale_gate_col: tl.constexpr,
+    HAS_SCALE_GATE: tl.constexpr,
     gate_beta: tl.constexpr,
     up_beta: tl.constexpr,
     inv_gate_beta: tl.constexpr,
@@ -111,10 +123,14 @@ def _situ_and_mul_cat_kernel(
     sig_gate = tl.div_rn(1.0, 1.0 + libdevice.exp(-gate))
     g = gate_beta * libdevice.tanh(gate * inv_gate_beta) * sig_gate
     u = up_beta * libdevice.tanh(up * inv_up_beta)
-    out = g * u
+    out_val = (g * u).to(out_ptr.dtype.element_ty)
+    if HAS_SCALE_GATE:
+        sg_raw = tl.load(scale_gate_ptr + pid_row * stride_sg_row + scale_gate_col).to(tl.float32)
+        sig_sg = tl.div_rn(1.0, 1.0 + libdevice.exp(-sg_raw)).to(out_ptr.dtype.element_ty)
+        out_val = (out_val.to(tl.float32) * sig_sg.to(tl.float32)).to(out_ptr.dtype.element_ty)
 
     out_row_ptr = out_ptr + pid_row * stride_out_row
-    tl.store(out_row_ptr + offs, out.to(out_ptr.dtype.element_ty), mask=mask)
+    tl.store(out_row_ptr + offs, out_val, mask=mask)
 
 
 @triton.jit
@@ -162,13 +178,22 @@ def situ_and_mul_triton(
     *,
     gate_beta: float = 4.0,
     up_beta: float = 25.0,
+    scale_gate: Optional[torch.Tensor] = None,
+    scale_gate_col: int = 0,
 ) -> torch.Tensor:
-    """Fused Triton kernel for SiTU-GLU activation.
+    """Fused Triton kernel for SiTU-GLU activation (with optional fused sigmoid gate).
 
     Automatically falls back to :func:`situ_and_mul_ref` for non-CUDA tensors.
     """
     if not x.is_cuda or (up is not None and not up.is_cuda):
-        return situ_and_mul_ref(x, up, gate_beta=gate_beta, up_beta=up_beta)
+        return situ_and_mul_ref(
+            x,
+            up,
+            gate_beta=gate_beta,
+            up_beta=up_beta,
+            scale_gate=scale_gate,
+            scale_gate_col=scale_gate_col,
+        )
 
     gate_beta_f = float(gate_beta)
     up_beta_f = float(up_beta)
@@ -189,6 +214,19 @@ def situ_and_mul_triton(
             x_2d = x_2d.contiguous()
         num_rows = x_2d.shape[0]
         out = torch.empty((num_rows, D), dtype=x.dtype, device=x.device)
+        has_sg = scale_gate is not None
+        if has_sg:
+            assert scale_gate is not None
+            sg_2d = scale_gate.reshape(num_rows, -1) if scale_gate.ndim >= 2 else scale_gate.reshape(num_rows, 1)
+            if sg_2d.stride(-1) != 1:
+                sg_2d = sg_2d.contiguous()
+            sg_ptr = sg_2d
+            sg_stride = int(sg_2d.stride(0))
+            sg_col = int(scale_gate_col)
+        else:
+            sg_ptr = x_2d
+            sg_stride = 0
+            sg_col = 0
 
         # BLOCK_D=512 with 4 warps maximizes SM100/SM103 occupancy across D=320..12800.
         BLOCK_D = min(512, triton.next_power_of_2(max(D, 64)))
@@ -197,9 +235,13 @@ def situ_and_mul_triton(
             _situ_and_mul_cat_kernel[grid](
                 x_2d,
                 out,
+                sg_ptr,
                 D,
                 x_2d.stride(0),
                 out.stride(0),
+                sg_stride,
+                scale_gate_col=sg_col,
+                HAS_SCALE_GATE=has_sg,
                 gate_beta=gate_beta_f,
                 up_beta=up_beta_f,
                 inv_gate_beta=inv_gate_beta_f,
@@ -242,7 +284,13 @@ def situ_and_mul_triton(
             BLOCK_D=BLOCK_D,
             num_warps=4,
         )
-    return out.reshape(*orig_shape, D)
+    res = out.reshape(*orig_shape, D)
+    if scale_gate is not None and res.numel() > 0:
+        sg = scale_gate[:, scale_gate_col : scale_gate_col + 1] if scale_gate.ndim >= 2 else scale_gate.unsqueeze(-1)
+        sg = sg.reshape(*res.shape[:-1], 1).to(res.dtype)
+        sig = torch.sigmoid(sg.float()).to(res.dtype)
+        res = (res.float() * sig.float()).to(res.dtype)
+    return res
 
 
 class SituAndMul(nn.Module):
@@ -265,14 +313,26 @@ class SituAndMul(nn.Module):
         up: Optional[torch.Tensor] = None,
         *,
         use_triton: Optional[bool] = None,
+        scale_gate: Optional[torch.Tensor] = None,
+        scale_gate_col: int = 0,
     ) -> torch.Tensor:
         eff_triton = self.use_triton if use_triton is None else bool(use_triton)
         if eff_triton and x.is_cuda and (up is None or up.is_cuda):
             return situ_and_mul_triton(
-                x, up, gate_beta=self.gate_beta, up_beta=self.up_beta
+                x,
+                up,
+                gate_beta=self.gate_beta,
+                up_beta=self.up_beta,
+                scale_gate=scale_gate,
+                scale_gate_col=scale_gate_col,
             )
         return situ_and_mul_ref(
-            x, up, gate_beta=self.gate_beta, up_beta=self.up_beta
+            x,
+            up,
+            gate_beta=self.gate_beta,
+            up_beta=self.up_beta,
+            scale_gate=scale_gate,
+            scale_gate_col=scale_gate_col,
         )
 
 
@@ -1441,6 +1501,8 @@ def situ_glu_fp8_quant_masked_packed(
     group_size: int = 32,
     eps: float = _QUANT_EPS,
     zero_unused_scales: bool = True,
+    out_q: Optional[torch.Tensor] = None,
+    out_sc: Optional[torch.Tensor] = None,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """Fused SiTU-GLU + block-32 UE8M0 FP8 quant for 3D masked MoE ``[E, max_m, 2*D]``."""
     if group_size != 32:
@@ -1459,14 +1521,23 @@ def situ_glu_fp8_quant_masked_packed(
         )
 
     x_c = gate_up if gate_up.stride(-1) == 1 else gate_up.contiguous()
-    q = torch.empty((E, max_m, D), dtype=torch.float8_e4m3fn, device=gate_up.device)
+    q = (
+        out_q
+        if out_q is not None
+        else torch.empty((E, max_m, D), dtype=torch.float8_e4m3fn, device=gate_up.device)
+    )
     num_groups = D // 32
     num_packs = (num_groups + 3) // 4
-    tma_m = ((max_m + 3) // 4) * 4
-    alloc_fn = torch.zeros if zero_unused_scales else torch.empty
-    sc = alloc_fn(
-        (E, num_packs, tma_m), dtype=torch.int32, device=gate_up.device
-    ).transpose(1, 2)[:, :max_m, :]
+    if out_sc is not None:
+        sc = out_sc
+        if zero_unused_scales and sc.numel() > 0:
+            sc.zero_()
+    else:
+        tma_m = ((max_m + 3) // 4) * 4
+        alloc_fn = torch.zeros if zero_unused_scales else torch.empty
+        sc = alloc_fn(
+            (E, num_packs, tma_m), dtype=torch.int32, device=gate_up.device
+        ).transpose(1, 2)[:, :max_m, :]
     if E == 0 or max_m == 0 or D == 0:
         return q, sc
 

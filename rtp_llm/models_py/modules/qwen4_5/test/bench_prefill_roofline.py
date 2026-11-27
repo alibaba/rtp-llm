@@ -8,7 +8,8 @@ Measures on 4x L20A (or configurable world_size) loading the 5L full-width QSA-S
      populated block-boundary KV / QSA Indexer / GDN SSM+Conv / ShortConv / PLE states.
   3. Non-inflated Per-Operator and Whole-Model MFU% & MBU% scorecard via `roofline_utils.py`.
   4. Rank-0 PyTorch Kineto Top-15 kernel & operator breakdown on 0%-hit and 90%-hit Prefill.
-  5. Pluggable parallelisms (`tp4_ep4`, `dp4_ep4`, `dp2_tp2_ep4`, `sp4_tp4_ep4`) and frozen
+  5. Pluggable parallelisms (`tp4_ep4`, `dp4_ep4`, `dp2_tp2_ep4`, `dp2_tpsp2_ep4`, `sp4_tp4_ep4`)
+     plus single-long-request low-TTFT (`B=1 T=20K/32K`) and skewed batch (`1x20K+3x512`) benchmarks, and frozen
      BF16 reference outputs + exact 64-token block-boundary snapshot states (`--save-ref` /
      `--verify-parity`) for cross-wave accuracy gates (`cos_sim >= 0.999` BF16).
 """
@@ -45,8 +46,11 @@ from rtp_llm.models_py.modules.qwen4_5.tools.roofline_utils import (
     DTYPE_PRESETS,
     PARALLEL_MODES,
     HardwareRoofline,
+    WorkloadRooflineSummary,
+    _causal_qsa_kv_sum,
     calibrate_l20a_roofline,
     compute_qwen45_workload_metrics,
+    model_spec_from_arch_config,
 )
 
 
@@ -58,13 +62,18 @@ DEFAULT_CKPT_PATH = "/home/admin/lhc_qwen45_opt/models/Qwen4.5-Flash-5L-fullwidt
 # ---------------------------------------------------------------------------
 
 
+def _normalize_parallel_mode(parallel_mode: str) -> str:
+    pm = str(parallel_mode).strip().lower()
+    return "sp4_tp4_ep4" if pm == "tpsp4_ep4" else pm
+
+
 def _build_parallel_groups(
     parallel_mode: str,
     rank: int,
     world_size: int,
 ) -> Dict[str, Any]:
     """Create DP / TP / SP / EP subgroups and ParallelismConfig for pluggable 4-GPU execution."""
-    pm = parallel_mode.lower()
+    pm = _normalize_parallel_mode(parallel_mode)
     if pm not in PARALLEL_MODES:
         raise ValueError(f"Unsupported parallel_mode={parallel_mode!r}; expected {tuple(PARALLEL_MODES)}")
     dp, tp, ep, sp = PARALLEL_MODES[pm]
@@ -1889,6 +1898,495 @@ def run_tbo_prefill_benchmark(
     }
 
 
+
+
+# ---------------------------------------------------------------------------
+# R7 Helpers: Single-Long TTFT & Skewed / Uneven Batch Benchmarks
+# ---------------------------------------------------------------------------
+
+
+def _parse_skew_cases(raw: str) -> List[Tuple[str, List[Tuple[int, int]]]]:
+    """Parse `name:in1+pfx1,in2+pfx2,...;...` into labeled `(in_len, pfx_len)` request lists."""
+    cases: List[Tuple[str, List[Tuple[int, int]]]] = []
+    for block in raw.split(";"):
+        b = block.strip()
+        if not b:
+            continue
+        if ":" not in b:
+            raise ValueError(f"Invalid skew case {b!r}; expected `name:in1+pfx1,in2+pfx2,...`")
+        name, spec = b.split(":", 1)
+        reqs: List[Tuple[int, int]] = []
+        for item in spec.split(","):
+            it = item.strip()
+            if not it:
+                continue
+            if "+" in it:
+                in_s, pfx_s = it.split("+", 1)
+                reqs.append((int(in_s), int(pfx_s)))
+            else:
+                reqs.append((int(it), 0))
+        if not reqs:
+            raise ValueError(f"Empty request list in skew case {b!r}")
+        cases.append((name.strip(), reqs))
+    return cases
+
+
+def _partition_requests_lpt(
+    reqs: Sequence[Tuple[int, int]],
+    dp_size: int,
+    dp_rank: int,
+) -> Tuple[List[Tuple[int, int]], List[int], List[int], List[int]]:
+    """Greedily balance requests across DP replicas (Longest-Processing-Time first)."""
+    dp = max(1, int(dp_size))
+    if dp == 1:
+        in_sum = sum(r[0] for r in reqs)
+        ctx_sum = sum(r[0] + r[1] for r in reqs)
+        return list(reqs), list(range(len(reqs))), [in_sum], [ctx_sum]
+
+    buckets: List[List[Tuple[int, int, int]]] = [[] for _ in range(dp)]
+    in_loads = [0] * dp
+    ctx_loads = [0] * dp
+    ordered = sorted(enumerate(reqs), key=lambda kv: (-kv[1][0], -(kv[1][0] + kv[1][1]), kv[0]))
+    for orig_idx, (in_l, pfx_l) in ordered:
+        best_d = min(range(dp), key=lambda d: (in_loads[d], ctx_loads[d], d))
+        buckets[best_d].append((orig_idx, in_l, pfx_l))
+        in_loads[best_d] += in_l
+        ctx_loads[best_d] += in_l + pfx_l
+    buckets[dp_rank].sort(key=lambda x: x[0])
+    local_reqs = [(in_l, pfx_l) for _, in_l, pfx_l in buckets[dp_rank]]
+    local_indices = [idx for idx, _, _ in buckets[dp_rank]]
+    return local_reqs, local_indices, in_loads, ctx_loads
+
+
+def _compute_ragged_workload_summary(
+    arch: Any,
+    reqs: Sequence[Tuple[int, int]],
+    *,
+    parallel_mode: str,
+    dtype_mode: str,
+    kv_dtype: str,
+    world_size: int,
+    roofline: HardwareRoofline,
+    elapsed_ms: float,
+    op_times_ms: Optional[Mapping[str, float]] = None,
+) -> Dict[str, Any]:
+    """Compute non-inflated algorithmic + executed FLOP/Byte metrics for uneven `(in, pfx)` batches."""
+    total_in = max(1, sum(r[0] for r in reqs))
+    max_ctx = max((r[0] + r[1] for r in reqs), default=total_in)
+    base = compute_qwen45_workload_metrics(
+        arch,
+        batch_size=1,
+        seq_len_per_step=total_in,
+        avg_ctx=max_ctx,
+        parallel_mode=parallel_mode,
+        dtype_mode=dtype_mode,
+        kv_dtype=kv_dtype,
+        world_size=world_size,
+        is_prefill=True,
+        prefix_len=0,
+        logits_tokens=len(reqs),
+        roofline=roofline,
+        elapsed_ms=elapsed_ms,
+        op_times_ms=op_times_ms,
+    )
+    spec = model_spec_from_arch_config(arch)
+    pm = _normalize_parallel_mode(parallel_mode)
+    _, tp, _, sp = PARALLEL_MODES[pm]
+    kv_b = 1.0 if (str(kv_dtype).lower().startswith("fp8") or str(kv_dtype).lower() == "f8_e4m3") else 2.0
+    idx_kv_b = 2.0
+    n_full_total = spec.n_full_producer + spec.n_full_consumer
+    kv_out = spec.num_key_value_heads * spec.head_dim
+
+    kv_sum_full = sum(_causal_qsa_kv_sum(pfx, in_l, budget=0, is_prefill=True, avg_ctx=pfx + in_l) for in_l, pfx in reqs)
+    kv_sum_sparse = sum(
+        _causal_qsa_kv_sum(pfx, in_l, budget=spec.indexer_budget, is_prefill=True, avg_ctx=pfx + in_l)
+        for in_l, pfx in reqs
+    )
+    idx_flops = n_full_total * 2.0 * (kv_sum_full / max(1, spec.indexer_compress_ratio)) * spec.indexer_n_heads * spec.indexer_head_dim
+    qsa_attn_flops = n_full_total * 4.0 * kv_sum_sparse * spec.num_attention_heads * spec.head_dim
+    kv_write_bytes = spec.n_full_producer * total_in * (
+        2 * kv_out * kv_b + spec.indexer_head_dim * idx_kv_b / max(1, spec.indexer_compress_ratio)
+    )
+    kv_read_bytes = (
+        n_full_total * (kv_sum_full / max(1, spec.indexer_compress_ratio)) * spec.indexer_head_dim * idx_kv_b
+        + n_full_total * kv_sum_sparse * (2 * kv_out * kv_b)
+    )
+    fa_idx_rep = max(1.0, float(tp) / float(sp)) if tp > 1 else 1.0
+    qsa_op = base.operators["full_attn_qsa_core"]
+    qsa_op.algo_flops = idx_flops + qsa_attn_flops
+    qsa_op.algo_act_kv_bytes = kv_write_bytes + kv_read_bytes
+    qsa_op.exec_flops = qsa_attn_flops + idx_flops * fa_idx_rep
+    qsa_op.exec_weight_bytes = qsa_op.algo_weight_bytes * fa_idx_rep
+
+    summary = WorkloadRooflineSummary(
+        batch_size=len(reqs),
+        seq_len_per_step=total_in,
+        total_tokens=total_in,
+        avg_ctx=int(round(sum(r[0] + r[1] for r in reqs) / max(1, len(reqs)))),
+        prefix_len=sum(r[1] for r in reqs),
+        parallel_mode=pm,
+        dtype_mode=base.dtype_mode,
+        kv_dtype=base.kv_dtype,
+        dflash_kv_dtype=base.dflash_kv_dtype,
+        indexer_kv_dtype=base.indexer_kv_dtype,
+        world_size=base.world_size,
+        algo_flops=sum(o.algo_flops for o in base.operators.values()),
+        algo_weight_bytes=sum(o.algo_weight_bytes for o in base.operators.values()),
+        algo_act_kv_bytes=sum(o.algo_act_kv_bytes for o in base.operators.values()),
+        exec_flops=sum(o.exec_flops for o in base.operators.values()),
+        exec_weight_bytes=sum(o.exec_weight_bytes for o in base.operators.values()),
+        comm_bytes=sum(o.comm_bytes for o in base.operators.values()),
+        operators=base.operators,
+        elapsed_ms=elapsed_ms,
+        roofline=roofline,
+    )
+    return summary.to_dict()
+
+
+def run_single_long_ttft_benchmark(
+    arch: Any,
+    kv_cache: LocalKVCache,
+    rtp_model: Qwen4_5RTPModel,
+    pg: Mapping[str, Any],
+    roofline: HardwareRoofline,
+    *,
+    dtype_mode: str,
+    kv_dtype: str = "bf16",
+    prompt_lens: Sequence[int] = (20480, 32768),
+    modes: Sequence[str] = ("0pct", "90pct"),
+    dp_proxy_per_replica: bool = True,
+    allow_dp_empty_ranks: bool = False,
+    warmup: int = 2,
+    iters: int = 6,
+    device: torch.device,
+    kineto_dir: Optional[Path] = None,
+) -> Dict[str, Any]:
+    """Measure single-long-request low-TTFT (`B=1, T=20K/32K`, `0%` & `90%`) across TP/TPSP/DP."""
+    is_rank0 = not (dist.is_available() and dist.is_initialized() and dist.get_rank() != 0)
+    dp_size = max(1, int(pg["dp_size"]))
+    tpb = int(kv_cache.tokens_per_block)
+    rows: List[Dict[str, Any]] = []
+    kineto_ttft: Dict[str, Any] = {}
+
+    for t_tot in prompt_lens:
+        for cmode in modes:
+            c_low = cmode.strip().lower()
+            if c_low == "90pct":
+                pfx_len = max(tpb, (int(round(t_tot * 0.9)) // tpb) * tpb)
+                in_len = max(1, t_tot - pfx_len)
+            else:
+                pfx_len = 0
+                in_len = int(t_tot)
+
+            if dp_size > 1 and not allow_dp_empty_ranks and not dp_proxy_per_replica:
+                srow = {
+                    "cache_mode": c_low,
+                    "total_ctx": t_tot,
+                    "batch_size": 1,
+                    "skipped": (
+                        f"dp_size={dp_size} B=1 leaves empty DP ranks; enable --ttft-dp-proxy "
+                        "or --allow-dp-empty-ranks once zero-token EP runtime support is active"
+                    ),
+                }
+                rows.append(srow)
+                continue
+
+            # Under dp>1 without empty-rank EP runtime support, measure 1 long req per DP replica (B=dp_size)
+            # to quantify true per-replica single-request TTFT without zero-token EP deadlock.
+            use_empty_dp = dp_size > 1 and allow_dp_empty_ranks
+            b_global = 1 if (dp_size == 1 or use_empty_dp) else dp_size
+            lb = (1 if int(pg["dp_rank"]) == 0 else 0) if use_empty_dp else 1
+            scope_lbl = (
+                "b1_zero_token_ep"
+                if use_empty_dp
+                else ("b1_cluster" if dp_size == 1 else f"single_req_per_dp_replica (B={b_global})")
+            )
+
+            _reset_kv_allocator(kv_cache)
+            tbl = (
+                build_block_tables_for_requests(kv_cache, [t_tot])
+                if lb > 0
+                else {t: [] for t in kv_cache.group_tags()}
+            )
+            if pfx_len > 0 and lb > 0:
+                tok_pfx = _make_deterministic_tokens(
+                    [pfx_len], vocab_size=arch.vocab_size, seed=4100 + t_tot + int(pg["dp_rank"]), device=device
+                )
+                off = 0
+                while off < pfx_len:
+                    chk = min(8192, pfx_len - off)
+                    _run_prefill_pass(
+                        rtp_model,
+                        kv_cache,
+                        tbl,
+                        tok_pfx[off : off + chk],
+                        [chk],
+                        [off],
+                        device=device,
+                        compute_last_logits=False,
+                    )
+                    off += chk
+            if dist.is_available() and dist.is_initialized():
+                dist.barrier()
+
+            tok_in = (
+                _make_deterministic_tokens(
+                    [in_len], vocab_size=arch.vocab_size, seed=4200 + t_tot + int(pg["dp_rank"]), device=device
+                )
+                if lb > 0
+                else torch.empty((0,), dtype=torch.int64, device=device)
+            )
+
+            def _run_ttft_step() -> None:
+                _run_prefill_pass(
+                    rtp_model,
+                    kv_cache,
+                    tbl,
+                    tok_in,
+                    [in_len] if lb > 0 else [],
+                    [pfx_len] if lb > 0 else [],
+                    device=device,
+                )
+
+            try:
+                torch.cuda.reset_peak_memory_stats(device)
+                mean_ms, p50_ms = _timed_step_ms(_run_ttft_step, device=device, warmup=warmup, iters=iters)
+                peak_gib = torch.cuda.max_memory_allocated(device) / (1024.0 ** 3)
+                k_res: Dict[str, Any] = {}
+                if kineto_dir is not None and t_tot == prompt_lens[0]:
+                    tr = kineto_dir / f"r0_prefill_ttft_{c_low}_t{t_tot}.json"
+                    k_res = capture_prefill_kineto(
+                        _run_ttft_step, trace_path=tr, tp_size=pg["tp_size"], device=device, rtp_model=rtp_model
+                    )
+                    if k_res:
+                        kineto_ttft[f"{c_low}_t{t_tot}"] = k_res
+                op_times = {k: v["ms"] for k, v in k_res.get("buckets", {}).items()} if k_res else None
+                wl = compute_qwen45_workload_metrics(
+                    arch,
+                    batch_size=b_global,
+                    seq_len_per_step=in_len,
+                    avg_ctx=t_tot,
+                    parallel_mode=pg["parallel_mode"],
+                    dtype_mode=dtype_mode,
+                    kv_dtype=kv_dtype,
+                    world_size=roofline.world_size,
+                    is_prefill=True,
+                    prefix_len=pfx_len,
+                    roofline=roofline,
+                    elapsed_ms=mean_ms,
+                    op_times_ms=op_times,
+                ).to_dict()
+                row: Dict[str, Any] = {
+                    "cache_mode": c_low,
+                    "total_ctx": t_tot,
+                    "prefix_len": pfx_len,
+                    "input_len": in_len,
+                    "batch_size": b_global,
+                    "scope": scope_lbl,
+                    "per_request_ttft_ms": round(mean_ms, 3),
+                    "p50_ms": round(p50_ms, 3),
+                    "new_tok_s": wl.get("tokens_per_s"),
+                    "effective_ctx_tok_s": round((b_global * t_tot) / (mean_ms * 1e-3), 2),
+                    "mfu_bf16_pct": wl.get("mfu_bf16_pct"),
+                    "mfu_aware_pct": wl.get("mfu_aware_pct"),
+                    "mbu_pct": wl.get("mbu_pct"),
+                    "peak_alloc_gib": round(peak_gib, 2),
+                    "workload": wl,
+                }
+            except RuntimeError as exc:
+                if "out of memory" not in str(exc).lower():
+                    raise
+                torch.cuda.empty_cache()
+                row = {"cache_mode": c_low, "total_ctx": t_tot, "batch_size": b_global, "scope": scope_lbl, "oom": str(exc)}
+            rows.append(row)
+            if is_rank0:
+                print(
+                    f"[TTFT {c_low} T={t_tot} ({pfx_len}+{in_len}) {scope_lbl}] "
+                    f"{row.get('per_request_ttft_ms', 'OOM')}ms | new_tok/s={row.get('new_tok_s')} | "
+                    f"MFU_bf16={row.get('mfu_bf16_pct')}%",
+                    flush=True,
+                )
+    return {"rows": rows, "kineto_ttft": kineto_ttft}
+
+
+def run_skewed_batch_benchmark(
+    arch: Any,
+    kv_cache: LocalKVCache,
+    rtp_model: Qwen4_5RTPModel,
+    pg: Mapping[str, Any],
+    roofline: HardwareRoofline,
+    *,
+    dtype_mode: str,
+    kv_dtype: str = "bf16",
+    skew_cases: Sequence[Tuple[str, List[Tuple[int, int]]]],
+    warmup: int = 2,
+    iters: int = 6,
+    device: torch.device,
+    kineto_dir: Optional[Path] = None,
+) -> Dict[str, Any]:
+    """Benchmark imbalanced/skewed mixed-length batches (`1x20K+3x512`, `1x(18K+2K)+3x512`) across parallelisms."""
+    is_rank0 = not (dist.is_available() and dist.is_initialized() and dist.get_rank() != 0)
+    dp_size = max(1, int(pg["dp_size"]))
+    tp_size = max(1, int(pg["tp_size"]))
+    sp_size = max(1, int(pg.get("sp_size", 1)))
+    dp_rank = int(pg["dp_rank"])
+    rows: List[Dict[str, Any]] = []
+    kineto_skew: Dict[str, Any] = {}
+
+    for case_name, reqs in skew_cases:
+        if dp_size > 1 and len(reqs) < dp_size:
+            rows.append(
+                {
+                    "case": case_name,
+                    "requests": reqs,
+                    "skipped": f"requires >= {dp_size} requests for dp_size={dp_size}",
+                }
+            )
+            continue
+
+        local_reqs, local_orig_idx, dp_in_loads, dp_ctx_loads = _partition_requests_lpt(reqs, dp_size, dp_rank)
+        local_in_lens = [r[0] for r in local_reqs]
+        local_pfx_lens = [r[1] for r in local_reqs]
+        local_tot_lens = [r[0] + r[1] for r in local_reqs]
+
+        _reset_kv_allocator(kv_cache)
+        tbl = build_block_tables_for_requests(kv_cache, local_tot_lens)
+        max_global_pfx = max((r[1] for r in reqs), default=0)
+        if max_global_pfx > 0:
+            dummy_tbl = build_block_tables_for_requests(kv_cache, [64])
+            dummy_tok = _make_deterministic_tokens([64], vocab_size=arch.vocab_size, seed=5000 + dp_rank, device=device)
+            pfx_tok_map = {
+                i: _make_deterministic_tokens(
+                    [local_pfx_lens[i]], vocab_size=arch.vocab_size, seed=5100 + local_orig_idx[i], device=device
+                )
+                for i in range(len(local_reqs))
+                if local_pfx_lens[i] > 0
+            }
+            off = 0
+            while off < max_global_pfx:
+                active_i = [i for i, p in enumerate(local_pfx_lens) if off < p]
+                if active_i:
+                    sub_tbl = {t: [tbl[t][i] for i in active_i] for t in tbl}
+                    chks = [min(8192, local_pfx_lens[i] - off) for i in active_i]
+                    sub_ids = torch.cat([pfx_tok_map[i][off : off + chks[j]] for j, i in enumerate(active_i)], dim=0)
+                    _run_prefill_pass(
+                        rtp_model,
+                        kv_cache,
+                        sub_tbl,
+                        sub_ids,
+                        chks,
+                        [off] * len(active_i),
+                        device=device,
+                        compute_last_logits=False,
+                    )
+                else:
+                    # Keep EP=4 collectives synchronized when other DP replicas populate prefix KV
+                    _run_prefill_pass(
+                        rtp_model,
+                        kv_cache,
+                        dummy_tbl,
+                        dummy_tok,
+                        [64],
+                        [0],
+                        device=device,
+                        compute_last_logits=False,
+                    )
+                off += 8192
+        if dist.is_available() and dist.is_initialized():
+            dist.barrier()
+
+        in_tok = torch.cat(
+            [
+                _make_deterministic_tokens(
+                    [local_in_lens[i]], vocab_size=arch.vocab_size, seed=5200 + local_orig_idx[i], device=device
+                )
+                for i in range(len(local_reqs))
+            ],
+            dim=0,
+        )
+
+        def _run_skew_step() -> None:
+            _run_prefill_pass(
+                rtp_model,
+                kv_cache,
+                tbl,
+                in_tok,
+                local_in_lens,
+                local_pfx_lens,
+                device=device,
+            )
+
+        total_new = sum(r[0] for r in reqs)
+        total_ctx = sum(r[0] + r[1] for r in reqs)
+        per_gpu_sp_tokens = [
+            round(tok / float(max(1, sp_size)), 1)
+            for tok in dp_in_loads
+            for _ in range(tp_size)
+        ]
+        dp_mean_in = total_new / float(dp_size)
+        imbalance_max_mean = max(dp_in_loads) / max(1e-6, dp_mean_in)
+        imbalance_max_min = max(dp_in_loads) / max(1, min(dp_in_loads))
+
+        try:
+            torch.cuda.reset_peak_memory_stats(device)
+            mean_ms, p50_ms = _timed_step_ms(_run_skew_step, device=device, warmup=warmup, iters=iters)
+            peak_gib = torch.cuda.max_memory_allocated(device) / (1024.0 ** 3)
+            k_res: Dict[str, Any] = {}
+            if kineto_dir is not None:
+                tr = kineto_dir / f"r0_prefill_skew_{case_name}.json"
+                k_res = capture_prefill_kineto(
+                    _run_skew_step, trace_path=tr, tp_size=pg["tp_size"], device=device, rtp_model=rtp_model
+                )
+                if k_res:
+                    kineto_skew[case_name] = k_res
+            op_times = {k: v["ms"] for k, v in k_res.get("buckets", {}).items()} if k_res else None
+            wl = _compute_ragged_workload_summary(
+                arch,
+                reqs,
+                parallel_mode=pg["parallel_mode"],
+                dtype_mode=dtype_mode,
+                kv_dtype=kv_dtype,
+                world_size=roofline.world_size,
+                roofline=roofline,
+                elapsed_ms=mean_ms,
+                op_times_ms=op_times,
+            )
+            row: Dict[str, Any] = {
+                "case": case_name,
+                "requests": [{"in": r[0], "pfx": r[1]} for r in reqs],
+                "total_new_tokens": total_new,
+                "total_ctx_tokens": total_ctx,
+                "dp_group_in_tokens": dp_in_loads,
+                "dp_group_ctx_tokens": dp_ctx_loads,
+                "per_gpu_sp_in_tokens": per_gpu_sp_tokens,
+                "imbalance_max_over_mean": round(imbalance_max_mean, 3),
+                "imbalance_max_over_min": round(imbalance_max_min, 3),
+                "mean_ms": round(mean_ms, 3),
+                "p50_ms": round(p50_ms, 3),
+                "new_tok_s": round(total_new / (mean_ms * 1e-3), 2),
+                "effective_ctx_tok_s": round(total_ctx / (mean_ms * 1e-3), 2),
+                "mfu_bf16_pct": wl.get("mfu_bf16_pct"),
+                "mfu_aware_pct": wl.get("mfu_aware_pct"),
+                "mbu_pct": wl.get("mbu_pct"),
+                "peak_alloc_gib": round(peak_gib, 2),
+                "workload": wl,
+            }
+        except RuntimeError as exc:
+            if "out of memory" not in str(exc).lower():
+                raise
+            torch.cuda.empty_cache()
+            row = {"case": case_name, "dp_group_in_tokens": dp_in_loads, "oom": str(exc)}
+        rows.append(row)
+        if is_rank0:
+            print(
+                f"[SKEW {case_name} dp_loads={dp_in_loads} skew={imbalance_max_min:.1f}x] "
+                f"{row.get('mean_ms', 'OOM')}ms | new_tok/s={row.get('new_tok_s')} | "
+                f"MFU_bf16={row.get('mfu_bf16_pct')}%",
+                flush=True,
+            )
+    return {"rows": rows, "kineto_skew": kineto_skew}
+
+
 # ---------------------------------------------------------------------------
 # Main CLI
 # ---------------------------------------------------------------------------
@@ -1901,7 +2399,8 @@ def _parse_int_list(raw: str) -> List[int]:
 def main() -> int:
     parser = argparse.ArgumentParser(description="Standalone 4-GPU Prefill Roofline Benchmark for Qwen4.5-Flash 5L")
     parser.add_argument("--ckpt-path", default=DEFAULT_CKPT_PATH)
-    parser.add_argument("--parallel-mode", default="tp4_ep4", choices=tuple(PARALLEL_MODES))
+    pm_choices = tuple(dict.fromkeys([*PARALLEL_MODES.keys(), "tpsp4_ep4"]))
+    parser.add_argument("--parallel-mode", default="tp4_ep4", choices=pm_choices)
     parser.add_argument("--dtype-mode", default="mxfp4", choices=tuple(DTYPE_PRESETS))
     parser.add_argument(
         "--kv-dtype",
@@ -1944,7 +2443,21 @@ def main() -> int:
     parser.add_argument("--benchmark-tbo", action="store_true", default=False)
     parser.add_argument("--tbo-seq-len", type=int, default=2048)
     parser.add_argument("--tbo-batches", default="8,16")
+    parser.add_argument("--benchmark-r7", action="store_true", default=False, help="Enable both --benchmark-ttft and --benchmark-skew")
+    parser.add_argument("--benchmark-ttft", action="store_true", default=False, help="Benchmark B=1 single-long-request TTFT (20K/32K, 0%%/90%%)")
+    parser.add_argument("--ttft-lens", default="20480,32768")
+    parser.add_argument("--ttft-modes", default="0pct,90pct")
+    parser.add_argument("--ttft-dp-proxy", action=argparse.BooleanOptionalAction, default=True, help="Under DP>1, benchmark 1 long req per DP replica if B=1 empty ranks disabled")
+    parser.add_argument("--allow-dp-empty-ranks", action="store_true", default=False)
+    parser.add_argument("--benchmark-skew", action="store_true", default=False, help="Benchmark imbalanced mixed-length prefill batches")
+    parser.add_argument(
+        "--skew-cases",
+        default="0pct_1x20k_3x512:20480+0,512+0,512+0,512+0;90pct_1x18k2k_3x512:2048+18432,512+0,512+0,512+0",
+    )
     args = parser.parse_args()
+    if args.benchmark_r7:
+        args.benchmark_ttft = True
+        args.benchmark_skew = True
 
     local_rank = int(os.environ.get("LOCAL_RANK", "0"))
     torch.cuda.set_device(local_rank)
@@ -1966,11 +2479,19 @@ def main() -> int:
 
     batches_90 = _parse_int_list(args.batches_90pct)
     budgets_0 = _parse_int_list(args.budgets_0pct)
+    ttft_lens = _parse_int_list(args.ttft_lens) if args.benchmark_ttft else []
+    skew_cases = _parse_skew_cases(args.skew_cases) if args.benchmark_skew else []
     max_90_local, _ = _local_batch_for_rank(max(batches_90 or [1]), pg)
+    max_skew_local = max(
+        (max(_partition_requests_lpt(reqs, pg["dp_size"], d)[3][d] for d in range(pg["dp_size"])) + 64)
+        for _, reqs in skew_cases
+    ) if skew_cases else 0
     max_kv_tokens = max(
-        args.prompt_len_0pct,
-        max(budgets_0 or [20480]),
-        max_90_local * (args.prefix_len_90pct + args.suffix_len_90pct),
+        [20480 if (args.save_ref or args.save_stabilized_ref or args.verify_parity or args.verify_stabilized_ref or args.verify_inproc_ref) else 2048]
+        + ([args.prompt_len_0pct, max(budgets_0 or [20480])] if not args.skip_0pct else [])
+        + ([max_90_local * (args.prefix_len_90pct + args.suffix_len_90pct)] if not args.skip_90pct else [])
+        + ttft_lens
+        + ([max_skew_local] if max_skew_local > 0 else [])
     )
     kv_low = str(args.kv_dtype).strip().lower()
     is_fp8_kv = kv_low.startswith("fp8") or kv_low == "f8_e4m3"
@@ -2052,6 +2573,44 @@ def main() -> int:
             kineto_dir=k_dir,
         )
 
+    ttft_res: Dict[str, Any] = {}
+    if args.benchmark_ttft and ttft_lens:
+        ttft_modes = [x.strip() for x in args.ttft_modes.split(",") if x.strip()]
+        ttft_res = run_single_long_ttft_benchmark(
+            arch,
+            kv_cache,
+            rtp_model,
+            pg,
+            hr,
+            dtype_mode=args.dtype_mode,
+            kv_dtype=kv_dt,
+            prompt_lens=ttft_lens,
+            modes=ttft_modes,
+            dp_proxy_per_replica=bool(args.ttft_dp_proxy),
+            allow_dp_empty_ranks=bool(args.allow_dp_empty_ranks),
+            warmup=args.warmup,
+            iters=args.iters,
+            device=device,
+            kineto_dir=k_dir,
+        )
+
+    skew_res: Dict[str, Any] = {}
+    if args.benchmark_skew and skew_cases:
+        skew_res = run_skewed_batch_benchmark(
+            arch,
+            kv_cache,
+            rtp_model,
+            pg,
+            hr,
+            dtype_mode=args.dtype_mode,
+            kv_dtype=kv_dt,
+            skew_cases=skew_cases,
+            warmup=args.warmup,
+            iters=args.iters,
+            device=device,
+            kineto_dir=k_dir,
+        )
+
     tbo_res: Dict[str, Any] = {}
     tbo_batches = _parse_int_list(args.tbo_batches)
     if args.benchmark_tbo and tbo_batches:
@@ -2084,6 +2643,8 @@ def main() -> int:
             "parity": parity_res,
             "prefill_0pct": sweep_0,
             "prefill_90pct": sweep_90,
+            "ttft_benchmark": ttft_res,
+            "skew_benchmark": skew_res,
             "tbo_probe": tbo_res,
         }
         if args.out_json:

@@ -1499,6 +1499,51 @@ def _select_top_tokens(
     )
 
 
+def _cp_all_gather_dim0(
+    local_buf: torch.Tensor,
+    *,
+    cp_size: int,
+    cp_group: Any,
+    fast_all_reduce: Any = None,
+) -> torch.Tensor:
+    """Gather `[M_loc, *tail]` -> `[cp_size * M_loc, *tail]` across `cp_group`."""
+    local_c = local_buf if local_buf.is_contiguous() else local_buf.contiguous()
+    if (
+        fast_all_reduce is not None
+        and getattr(fast_all_reduce, "group", None) is cp_group
+        and hasattr(fast_all_reduce, "all_gather")
+    ):
+        return fast_all_reduce.all_gather(local_c, dim=0)
+    if not local_c.is_cuda:
+        chunks = [torch.empty_like(local_c) for _ in range(cp_size)]
+        torch.distributed.all_gather(chunks, local_c, group=cp_group)
+        return torch.cat(chunks, dim=0)
+    try:
+        backend = str(torch.distributed.get_backend(cp_group)).lower()
+    except Exception:
+        backend = ""
+    if "gloo" in backend:
+        cpu_in = local_c.detach().cpu()
+        chunks_cpu = [torch.empty_like(cpu_in) for _ in range(cp_size)]
+        torch.distributed.all_gather(chunks_cpu, cpu_in, group=cp_group)
+        return torch.cat(chunks_cpu, dim=0).to(device=local_c.device, dtype=local_c.dtype)
+    gathered = torch.empty(
+        (cp_size * int(local_c.shape[0]), *local_c.shape[1:]),
+        dtype=local_c.dtype,
+        device=local_c.device,
+    )
+    torch.distributed.all_gather_into_tensor(
+        gathered.view(cp_size, *local_c.shape),
+        local_c,
+        group=cp_group,
+    )
+    return gathered
+
+
+def _cp_use_batch_shard(bsz: int, seq_len: int, cp_size: int) -> bool:
+    return bsz >= cp_size and (seq_len <= 32 or (bsz % cp_size) == 0)
+
+
 def qsa_select_causal_from_projected(
     indexer: Qwen4ExpQSAIndexer,
     q_unrot: torch.Tensor,
@@ -1512,16 +1557,75 @@ def qsa_select_causal_from_projected(
     positions: Optional[torch.Tensor] = None,
     rotary_dim: int = 64,
     rope_theta: float = 10000.0,
+    sp_size: int = 1,
+    sp_rank: int = 0,
+    sp_group: Any = None,
+    fast_all_reduce: Any = None,
 ) -> torch.Tensor:
     """Select causal QSA tokens ``[B, S, max_selected]`` for standalone/cold prefill.
 
     Supports both ``indexer.k_norm_gamma`` (source layer) and an overridden
-    ``k_norm_gamma`` (YoCo consumer scoring against source raw keys), and uses
-    the parameterized ``H_IDX: tl.constexpr`` Triton prefill scorer on CUDA.
+    ``k_norm_gamma`` (YoCo consumer scoring against source raw keys), uses the
+    parameterized ``H_IDX: tl.constexpr`` Triton prefill scorer on CUDA, and
+    shards query scoring + Top-K across ``sp_group`` (CP-Indexer) when enabled.
     """
     bsz, seq_len, n_heads, head_dim = q_unrot.shape
     ratio = indexer.compress_ratio
     device = q_unrot.device
+
+    cp_s = max(1, int(sp_size))
+    cp_r = int(sp_rank)
+    can_cp = (
+        cp_s > 1
+        and sp_group is not None
+        and 0 <= cp_r < cp_s
+        and torch.distributed.is_available()
+        and torch.distributed.is_initialized()
+        and bsz > 0
+        and seq_len > 0
+        and ((bsz >= cp_s and (seq_len <= 32 or (bsz % cp_s) == 0)) or seq_len >= cp_s)
+    )
+    if can_cp and _cp_use_batch_shard(bsz, seq_len, cp_s):
+        max_sel = indexer.max_selected
+        b_chunk = (bsz + cp_s - 1) // cp_s
+        b_start = cp_r * b_chunk
+        b_end = min(bsz, b_start + b_chunk)
+        b_loc = max(0, b_end - b_start)
+        if b_loc > 0:
+            pos_sub = (
+                positions[b_start:b_end]
+                if (positions is not None and positions.ndim >= 2 and int(positions.shape[0]) >= b_end)
+                else positions
+            )
+            sel_loc = qsa_select_causal_from_projected(
+                indexer,
+                q_unrot[b_start:b_end],
+                raw_keys[b_start:b_end],
+                cos_all[b_start:b_end] if cos_all is not None else None,
+                sin_all[b_start:b_end] if sin_all is not None else None,
+                past_raw_keys=past_raw_keys[b_start:b_end] if past_raw_keys is not None else None,
+                k_norm_gamma=k_norm_gamma,
+                q_norm_gamma=q_norm_gamma,
+                positions=pos_sub,
+                rotary_dim=rotary_dim,
+                rope_theta=rope_theta,
+                sp_size=1,
+            )
+            if b_loc == b_chunk:
+                loc_flat = sel_loc.contiguous().reshape(b_chunk * seq_len, max_sel)
+            else:
+                loc_pad = torch.empty((b_chunk, seq_len, max_sel), dtype=torch.int32, device=device)
+                loc_pad[:b_loc].copy_(sel_loc)
+                loc_flat = loc_pad.reshape(b_chunk * seq_len, max_sel)
+        else:
+            loc_flat = torch.empty((b_chunk * seq_len, max_sel), dtype=torch.int32, device=device)
+        gathered = _cp_all_gather_dim0(
+            loc_flat,
+            cp_size=cp_s,
+            cp_group=sp_group,
+            fast_all_reduce=fast_all_reduce,
+        )
+        return gathered.view(cp_s * b_chunk, seq_len, max_sel)[:bsz]
 
     all_raw = (
         torch.cat([past_raw_keys, raw_keys], dim=1)
@@ -1529,95 +1633,146 @@ def qsa_select_causal_from_projected(
         else raw_keys
     )
     past_len = int(all_raw.shape[1]) - seq_len
+    use_cp_s = can_cp and not _cp_use_batch_shard(bsz, seq_len, cp_s)
     use_fast_rope = positions is not None
-    if use_fast_rope:
-        pos_q = positions.unsqueeze(0).expand(bsz, seq_len) if positions.ndim == 1 else positions
-        q_rot = _qsa_norm_and_rope_fast(
-            q_unrot,
-            pos_q,
-            rotary_dim,
-            rope_theta,
-            q_norm_gamma=q_norm_gamma,
-            norm_eps=indexer.norm_eps,
-        )
+    if use_cp_s:
+        s_pad = ((seq_len + cp_s - 1) // cp_s) * cp_s
+        s_chunk = s_pad // cp_s
+        q_slice = q_unrot[:, cp_r:seq_len:cp_s]
+        q_rows = int(q_slice.shape[1])
+        if use_fast_rope:
+            pos_q_all = positions.unsqueeze(0).expand(bsz, seq_len) if positions.ndim == 1 else positions
+            pos_q = pos_q_all[:, cp_r:seq_len:cp_s]
+            q_rot = _qsa_norm_and_rope_fast(
+                q_slice,
+                pos_q,
+                rotary_dim,
+                rope_theta,
+                q_norm_gamma=q_norm_gamma,
+                norm_eps=indexer.norm_eps,
+            )
+        else:
+            assert cos_all is not None and sin_all is not None
+            q_in = (
+                exact_head_rms_norm(q_slice.contiguous(), q_norm_gamma, indexer.norm_eps)
+                if q_norm_gamma is not None
+                else q_slice.contiguous()
+            )
+            q_rot = apply_partial_rope(
+                q_in,
+                cos_all[:, past_len + cp_r : past_len + seq_len : cp_s].unsqueeze(2),
+                sin_all[:, past_len + cp_r : past_len + seq_len : cp_s].unsqueeze(2),
+            )
+        q_vis_pos = past_len + cp_r + torch.arange(q_rows, dtype=torch.int32, device=device) * cp_s
     else:
-        assert cos_all is not None and sin_all is not None
-        q_in = (
-            exact_head_rms_norm(q_unrot, q_norm_gamma, indexer.norm_eps)
-            if q_norm_gamma is not None
-            else q_unrot
-        )
-        q_rot = apply_partial_rope(
-            q_in, cos_all[:, past_len:].unsqueeze(2), sin_all[:, past_len:].unsqueeze(2)
-        )
+        q_rows = seq_len
+        if use_fast_rope:
+            pos_q = positions.unsqueeze(0).expand(bsz, seq_len) if positions.ndim == 1 else positions
+            q_rot = _qsa_norm_and_rope_fast(
+                q_unrot,
+                pos_q,
+                rotary_dim,
+                rope_theta,
+                q_norm_gamma=q_norm_gamma,
+                norm_eps=indexer.norm_eps,
+            )
+        else:
+            assert cos_all is not None and sin_all is not None
+            q_in = (
+                exact_head_rms_norm(q_unrot, q_norm_gamma, indexer.norm_eps)
+                if q_norm_gamma is not None
+                else q_unrot
+            )
+            q_rot = apply_partial_rope(
+                q_in, cos_all[:, past_len:].unsqueeze(2), sin_all[:, past_len:].unsqueeze(2)
+            )
+        q_vis_pos = past_len + torch.arange(seq_len, dtype=torch.int32, device=device)
 
     num_blocks = int(all_raw.shape[1]) // ratio
-    q_vis_pos = past_len + torch.arange(seq_len, dtype=torch.int32, device=device)
-    visible_1d = (q_vis_pos + 1).unsqueeze(0).expand(bsz, seq_len).reshape(-1)
+    visible_1d = (q_vis_pos + 1).unsqueeze(0).expand(bsz, q_rows).reshape(-1)
     if num_blocks == 0:
-        empty_scores = torch.empty((bsz * seq_len, 0), dtype=torch.float32, device=device)
-        return _select_top_tokens(
+        empty_scores = torch.empty((bsz * q_rows, 0), dtype=torch.float32, device=device)
+        sel_local = _select_top_tokens(
             empty_scores,
             visible_1d,
             compress_ratio=ratio,
             token_budget=indexer.token_budget,
             scores_are_masked=False,
-        ).view(bsz, seq_len, indexer.max_selected)
-
-    gamma = k_norm_gamma if k_norm_gamma is not None else indexer.k_norm_gamma
-    groups = all_raw[:, : num_blocks * ratio].unflatten(1, (num_blocks, ratio))
-    pooled = groups.float().mean(dim=2).to(all_raw.dtype)
-    if use_fast_rope:
-        starts_pos = (torch.arange(num_blocks, dtype=torch.int32, device=device) * ratio).unsqueeze(0).expand(bsz, num_blocks)
-        block_keys = _qsa_norm_and_rope_fast(
-            pooled.unsqueeze(2),
-            starts_pos,
-            rotary_dim,
-            rope_theta,
-            q_norm_gamma=gamma,
-            norm_eps=indexer.norm_eps,
-        ).squeeze(2)
+        ).view(bsz, q_rows, indexer.max_selected)
     else:
-        assert cos_all is not None and sin_all is not None
-        pooled = exact_head_rms_norm(pooled, gamma, indexer.norm_eps)
-        starts = torch.arange(num_blocks, device=device) * ratio
-        block_keys = apply_partial_rope(
-            pooled, cos_all.index_select(1, starts), sin_all.index_select(1, starts)
-        )
+        gamma = k_norm_gamma if k_norm_gamma is not None else indexer.k_norm_gamma
+        groups = all_raw[:, : num_blocks * ratio].unflatten(1, (num_blocks, ratio))
+        pooled = groups.float().mean(dim=2).to(all_raw.dtype)
+        if use_fast_rope:
+            starts_pos = (
+                (torch.arange(num_blocks, dtype=torch.int32, device=device) * ratio)
+                .unsqueeze(0)
+                .expand(bsz, num_blocks)
+            )
+            block_keys = _qsa_norm_and_rope_fast(
+                pooled.unsqueeze(2),
+                starts_pos,
+                rotary_dim,
+                rope_theta,
+                q_norm_gamma=gamma,
+                norm_eps=indexer.norm_eps,
+            ).squeeze(2)
+        else:
+            assert cos_all is not None and sin_all is not None
+            pooled = exact_head_rms_norm(pooled, gamma, indexer.norm_eps)
+            starts = torch.arange(num_blocks, device=device) * ratio
+            block_keys = apply_partial_rope(
+                pooled, cos_all.index_select(1, starts), sin_all.index_select(1, starts)
+            )
 
-    bytes_per_query = max(1, bsz * num_blocks * (n_heads + 1) * 4)
-    chunk_size = max(1, _MAX_SCORE_WORKSPACE_BYTES // bytes_per_query)
-    if seq_len <= chunk_size:
-        scores = qsa_prefill_score(q_rot, block_keys)
-        return _select_top_tokens(
-            scores.reshape(bsz * seq_len, num_blocks),
-            visible_1d,
-            compress_ratio=ratio,
-            token_budget=indexer.token_budget,
-            scores_are_masked=False,
-        ).view(bsz, seq_len, indexer.max_selected)
+        bytes_per_query = max(1, bsz * num_blocks * (n_heads + 1) * 4)
+        chunk_size = max(1, _MAX_SCORE_WORKSPACE_BYTES // bytes_per_query)
+        if q_rows <= chunk_size:
+            scores = qsa_prefill_score(q_rot, block_keys)
+            sel_local = _select_top_tokens(
+                scores.reshape(bsz * q_rows, num_blocks),
+                visible_1d,
+                compress_ratio=ratio,
+                token_budget=indexer.token_budget,
+                scores_are_masked=False,
+            ).view(bsz, q_rows, indexer.max_selected)
+        else:
+            sel_local = torch.empty(
+                (bsz, q_rows, indexer.max_selected), dtype=torch.int32, device=device
+            )
+            for start in range(0, q_rows, chunk_size):
+                end = min(start + chunk_size, q_rows)
+                sub_scores = qsa_prefill_score(q_rot[:, start:end], block_keys)
+                sub_vis = (
+                    (q_vis_pos[start:end] + 1)
+                    .unsqueeze(0)
+                    .expand(bsz, end - start)
+                    .reshape(-1)
+                )
+                sub_sel = _select_top_tokens(
+                    sub_scores.reshape(bsz * (end - start), num_blocks),
+                    sub_vis,
+                    compress_ratio=ratio,
+                    token_budget=indexer.token_budget,
+                    scores_are_masked=False,
+                ).view(bsz, end - start, indexer.max_selected)
+                sel_local[:, start:end].copy_(sub_sel)
 
-    out = torch.empty(
-        (bsz, seq_len, indexer.max_selected), dtype=torch.int32, device=device
-    )
-    for start in range(0, seq_len, chunk_size):
-        end = min(start + chunk_size, seq_len)
-        sub_scores = qsa_prefill_score(q_rot[:, start:end], block_keys)
-        sub_vis = (
-            (past_len + 1 + torch.arange(start, end, dtype=torch.int32, device=device))
-            .unsqueeze(0)
-            .expand(bsz, end - start)
-            .reshape(-1)
-        )
-        sub_sel = _select_top_tokens(
-            sub_scores.reshape(bsz * (end - start), num_blocks),
-            sub_vis,
-            compress_ratio=ratio,
-            token_budget=indexer.token_budget,
-            scores_are_masked=False,
-        ).view(bsz, end - start, indexer.max_selected)
-        out[:, start:end].copy_(sub_sel)
-    return out
+    if not use_cp_s:
+        return sel_local
+    max_sel = indexer.max_selected
+    if q_rows == s_chunk:
+        loc_buf = sel_local.contiguous()
+    else:
+        loc_buf = torch.empty((bsz, s_chunk, max_sel), dtype=torch.int32, device=device)
+        loc_buf[:, :q_rows].copy_(sel_local)
+    gathered = _cp_all_gather_dim0(
+        loc_buf.reshape(bsz * s_chunk, max_sel),
+        cp_size=cp_s,
+        cp_group=sp_group,
+        fast_all_reduce=fast_all_reduce,
+    ).view(cp_s, bsz, s_chunk, max_sel)
+    return gathered.permute(1, 2, 0, 3).reshape(bsz, s_pad, max_sel)[:, :seq_len, :].contiguous()
 
 
 def _qsa_norm_and_rope_fast(
@@ -1700,6 +1855,10 @@ def score_and_select_qsa_paged(
     is_cuda_graph: bool = False,
     q_norm_gamma: Optional[torch.Tensor] = None,
     norm_eps: float = 1e-6,
+    sp_size: int = 1,
+    sp_rank: int = 0,
+    sp_group: Any = None,
+    fast_all_reduce: Any = None,
 ) -> torch.Tensor:
     """Zero-sync paged QSA scoring + token selection for prefill reuse & decode.
 
@@ -1713,7 +1872,114 @@ def score_and_select_qsa_paged(
         Selected token indices ``[B, S, token_budget + compress_ratio - 1]`` int32.
     """
     bsz, seq_len, n_heads, head_dim = q_unrot_bf16.shape
-    pos_2d = positions.unsqueeze(1) if positions.ndim == 1 else positions
+    if positions.ndim == 1:
+        if bsz == 1 and seq_len > 1 and int(positions.numel()) == seq_len:
+            pos_2d = positions.unsqueeze(0)
+        else:
+            pos_2d = positions.unsqueeze(1)
+    else:
+        pos_2d = positions
+    vis_2d = (
+        visible_lens_dev.unsqueeze(1)
+        if visible_lens_dev.ndim == 1
+        else visible_lens_dev
+    )
+    if vis_2d.dtype != torch.int32:
+        vis_2d = vis_2d.to(dtype=torch.int32)
+    if max_ctx_len is None:
+        kv_entries_per_block = int(kv_pool.shape[1])
+        max_ctx_len = int(kv_table.shape[1]) * kv_entries_per_block
+
+    cp_s = max(1, int(sp_size))
+    cp_r = int(sp_rank)
+    can_cp = (
+        cp_s > 1
+        and sp_group is not None
+        and 0 <= cp_r < cp_s
+        and torch.distributed.is_available()
+        and torch.distributed.is_initialized()
+        and bsz > 0
+        and seq_len > 0
+        and ((bsz >= cp_s and (seq_len <= 32 or (bsz % cp_s) == 0)) or seq_len >= cp_s)
+    )
+    if can_cp:
+        max_sel = token_budget + compress_ratio - 1
+        dev = q_unrot_bf16.device
+        if _cp_use_batch_shard(bsz, seq_len, cp_s):
+            b_chunk = (bsz + cp_s - 1) // cp_s
+            b_start = cp_r * b_chunk
+            b_end = min(bsz, b_start + b_chunk)
+            b_loc = max(0, b_end - b_start)
+            if b_loc > 0:
+                pos_sub = pos_2d[b_start:b_end] if int(pos_2d.shape[0]) >= b_end else pos_2d
+                vis_sub = vis_2d[b_start:b_end] if int(vis_2d.shape[0]) >= b_end else vis_2d
+                sel_loc = score_and_select_qsa_paged(
+                    q_unrot_bf16[b_start:b_end],
+                    pos_sub,
+                    kv_pool,
+                    kv_table[b_start:b_end],
+                    vis_sub,
+                    compress_ratio=compress_ratio,
+                    token_budget=token_budget,
+                    rotary_dim=rotary_dim,
+                    rope_theta=rope_theta,
+                    max_ctx_len=max_ctx_len,
+                    is_cuda_graph=is_cuda_graph,
+                    q_norm_gamma=q_norm_gamma,
+                    norm_eps=norm_eps,
+                    sp_size=1,
+                )
+                if b_loc == b_chunk:
+                    loc_flat = sel_loc.contiguous().reshape(b_chunk * seq_len, max_sel)
+                else:
+                    loc_pad = torch.empty((b_chunk, seq_len, max_sel), dtype=torch.int32, device=dev)
+                    loc_pad[:b_loc].copy_(sel_loc)
+                    loc_flat = loc_pad.reshape(b_chunk * seq_len, max_sel)
+            else:
+                loc_flat = torch.empty((b_chunk * seq_len, max_sel), dtype=torch.int32, device=dev)
+            gathered = _cp_all_gather_dim0(
+                loc_flat,
+                cp_size=cp_s,
+                cp_group=sp_group,
+                fast_all_reduce=fast_all_reduce,
+            )
+            return gathered.view(cp_s * b_chunk, seq_len, max_sel)[:bsz]
+
+        s_pad = ((seq_len + cp_s - 1) // cp_s) * cp_s
+        s_chunk = s_pad // cp_s
+        q_loc = q_unrot_bf16[:, cp_r:seq_len:cp_s].contiguous()
+        q_rows = int(q_loc.shape[1])
+        pos_loc = pos_2d[:, cp_r:seq_len:cp_s].contiguous() if int(pos_2d.shape[1]) >= seq_len else pos_2d
+        vis_loc = vis_2d[:, cp_r:seq_len:cp_s].contiguous() if int(vis_2d.shape[1]) >= seq_len else vis_2d
+        sel_loc = score_and_select_qsa_paged(
+            q_loc,
+            pos_loc,
+            kv_pool,
+            kv_table,
+            vis_loc,
+            compress_ratio=compress_ratio,
+            token_budget=token_budget,
+            rotary_dim=rotary_dim,
+            rope_theta=rope_theta,
+            max_ctx_len=max_ctx_len,
+            is_cuda_graph=is_cuda_graph,
+            q_norm_gamma=q_norm_gamma,
+            norm_eps=norm_eps,
+            sp_size=1,
+        )
+        if q_rows == s_chunk:
+            loc_buf = sel_loc.contiguous()
+        else:
+            loc_buf = torch.empty((bsz, s_chunk, max_sel), dtype=torch.int32, device=dev)
+            loc_buf[:, :q_rows].copy_(sel_loc)
+        gathered = _cp_all_gather_dim0(
+            loc_buf.reshape(bsz * s_chunk, max_sel),
+            cp_size=cp_s,
+            cp_group=sp_group,
+            fast_all_reduce=fast_all_reduce,
+        ).view(cp_s, bsz, s_chunk, max_sel)
+        return gathered.permute(1, 2, 0, 3).reshape(bsz, s_pad, max_sel)[:, :seq_len, :].contiguous()
+
     q_rot = _qsa_norm_and_rope_fast(
         q_unrot_bf16,
         pos_2d,
@@ -1723,18 +1989,7 @@ def score_and_select_qsa_paged(
         norm_eps=norm_eps,
     )
 
-    vis_2d = (
-        visible_lens_dev.unsqueeze(1)
-        if visible_lens_dev.ndim == 1
-        else visible_lens_dev
-    )
-    if vis_2d.dtype != torch.int32:
-        vis_2d = vis_2d.to(dtype=torch.int32)
     ctx_lens = torch.div(vis_2d, compress_ratio, rounding_mode="floor")
-
-    if max_ctx_len is None:
-        kv_entries_per_block = int(kv_pool.shape[1])
-        max_ctx_len = int(kv_table.shape[1]) * kv_entries_per_block
 
     block_logits = qsa_paged_score(
         q_rot,

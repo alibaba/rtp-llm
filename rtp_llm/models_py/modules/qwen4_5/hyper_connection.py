@@ -20,7 +20,80 @@ import triton.language as tl
 
 from rtp_llm.models_py.modules.qwen4_5.short_conv import _triton_int_spec, triton_fast_launch
 
+from rtp_llm.models_py.modules.qwen4_5.short_conv import _causal_dwconv1d_decode_opaque_k4_kernel
+
 _HC_TRITON_CACHE: dict = {}
+
+# Eager-only stream-keyed static scratch for strictly internal 'normed' tensors
+# (never returned to callers) plus caller-owned HCStaticWorkspace for intermediate layer slots.
+_HC_STATIC_WS_MAX_BYTES = 16 * 1024 * 1024
+_HC_INTERNAL_NORMED_POOL: dict = {}
+
+
+def _hc_alloc_from_pool(
+    pool: dict,
+    shape: tuple,
+    dtype: torch.dtype,
+    device: torch.device,
+    tag: str,
+    n_slots: int,
+) -> torch.Tensor:
+    numel = 1
+    for s in shape:
+        numel *= int(s)
+    if (
+        numel == 0
+        or device.type != "cuda"
+        or torch.is_grad_enabled()
+        or torch.cuda.is_current_stream_capturing()
+    ):
+        return torch.empty(shape, dtype=dtype, device=device)
+    nbytes = numel * torch.empty((), dtype=dtype).element_size()
+    if nbytes > _HC_STATIC_WS_MAX_BYTES:
+        return torch.empty(shape, dtype=dtype, device=device)
+    dev_idx = device.index if device.index is not None else torch.cuda.current_device()
+    stream_id = int(torch.cuda.current_stream(device).cuda_stream)
+    key = (dev_idx, stream_id, tag, dtype)
+    entry = pool.get(key)
+    if entry is None:
+        bufs = [torch.empty((numel,), dtype=dtype, device=device) for _ in range(n_slots)]
+        entry = [bufs, 0]
+        pool[key] = entry
+    bufs, idx = entry
+    buf = bufs[idx]
+    if int(buf.numel()) < numel:
+        buf = torch.empty((numel,), dtype=dtype, device=device)
+        bufs[idx] = buf
+    entry[1] = (idx + 1) % n_slots
+    return buf[:numel].view(*shape)
+
+
+class HCStaticWorkspace:
+    """Per-model/per-caller static workspace for intermediate HC state tensors (2x2 ping-pong safe)."""
+
+    _SLOTS = {"combined": 4, "out": 4, "latent": 4, "inj": 4}
+
+    def __init__(self) -> None:
+        self._pool: dict = {}
+
+    def empty(self, shape: tuple, dtype: torch.dtype, device: torch.device, tag: str) -> torch.Tensor:
+        return _hc_alloc_from_pool(self._pool, shape, dtype, device, tag, self._SLOTS.get(tag, 4))
+
+
+def _hc_static_empty(
+    shape: tuple,
+    dtype: torch.dtype,
+    device: torch.device,
+    tag: str,
+    ws: Optional[HCStaticWorkspace] = None,
+) -> torch.Tensor:
+    """Allocate from ws when provided, from internal 1-slot pool for strictly dead 'normed', or fresh."""
+    if ws is not None:
+        return ws.empty(shape, dtype, device, tag)
+    if tag == "normed":
+        return _hc_alloc_from_pool(_HC_INTERNAL_NORMED_POOL, shape, dtype, device, "normed", 1)
+    return torch.empty(shape, dtype=dtype, device=device)
+
 
 
 # ---------------------------------------------------------------------------
@@ -213,6 +286,53 @@ def _hc_combine_and_norm_split5120_shared_sub_kernel(
             n1 = n1 + tl.load(B_PTR + c1).to(tl.float32)
         tl.store(NORM_PTR + res_base + c0, n0)
         tl.store(NORM_PTR + res_base + c1, n1)
+
+
+@triton.jit
+def _hc_combine_and_norm_branch5120_kernel(
+    RES_PTR,
+    SUB_PTR,
+    INJ_PTR,
+    W_PTR,
+    B_PTR,
+    COMB_PTR,
+    NORM_PTR,
+    HIDDEN: tl.constexpr,
+    HC_COUNT: tl.constexpr,
+    SINGLE_STREAM: tl.constexpr,
+    EPS: tl.constexpr,
+    HAS_BIAS: tl.constexpr,
+):
+    """4096+1024 branch-parallel HC combine+norm (zero padding waste, high occupancy at small B)."""
+    row = tl.program_id(0).to(tl.int64)
+    br = tl.program_id(1).to(tl.int64)
+    o0 = tl.arange(0, 4096)
+    o1 = 4096 + tl.arange(0, 1024)
+    c0 = br * HIDDEN + o0
+    c1 = br * HIDDEN + o1
+    res_base = row * (HC_COUNT * HIDDEN)
+    in0 = (row * HIDDEN + o0) if SINGLE_STREAM else (res_base + c0)
+    in1 = (row * HIDDEN + o1) if SINGLE_STREAM else (res_base + c1)
+    inj = tl.load(INJ_PTR + row * HC_COUNT + br).to(tl.float32)
+    r0 = tl.load(RES_PTR + in0).to(tl.float32)
+    r1 = tl.load(RES_PTR + in1).to(tl.float32)
+    s0 = tl.load(SUB_PTR + row * HIDDEN + o0).to(tl.float32)
+    s1 = tl.load(SUB_PTR + row * HIDDEN + o1).to(tl.float32)
+    res_ty = RES_PTR.dtype.element_ty
+    cb0 = (r0 + s0 * inj).to(res_ty)
+    cb1 = (r1 + s1 * inj).to(res_ty)
+    tl.store(COMB_PTR + res_base + c0, cb0)
+    tl.store(COMB_PTR + res_base + c1, cb1)
+    f0 = cb0.to(tl.float32)
+    f1 = cb1.to(tl.float32)
+    inv_rms = 1.0 / tl.sqrt((tl.sum(f0 * f0, axis=0) + tl.sum(f1 * f1, axis=0)) / HIDDEN + EPS)
+    n0 = f0 * inv_rms * (1.0 + tl.load(W_PTR + c0).to(tl.float32))
+    n1 = f1 * inv_rms * (1.0 + tl.load(W_PTR + c1).to(tl.float32))
+    if HAS_BIAS:
+        n0 = n0 + tl.load(B_PTR + c0).to(tl.float32)
+        n1 = n1 + tl.load(B_PTR + c1).to(tl.float32)
+    tl.store(NORM_PTR + res_base + c0, n0)
+    tl.store(NORM_PTR + res_base + c1, n1)
 
 
 @triton.jit(do_not_specialize=["TPB", "MAX_BLOCKS", "NUM_BLOCKS"])
@@ -447,6 +567,250 @@ def _hc_sconv_decode_opaque_combine_norm_split5120_kernel(
 
 
 @triton.jit
+def _hc_dflash_gconv_combine_norm_kernel(
+    RES_PTR,
+    RAW_SUB_PTR,
+    GCONV_DELTA_PTR,
+    GCONV_BASE_PTR,
+    INJ_PTR,
+    W_PTR,
+    B_PTR,
+    COMB_PTR,
+    NORM_PTR,
+    X_STRIDE_ROW: tl.int64,
+    DELTA_STRIDE_ROW: tl.int64,
+    DELTA_STRIDE_TAP: tl.int64,
+    BASE_STRIDE_TAP: tl.int64,
+    CLIP_VAL: tl.float32,
+    HAS_CLIP: tl.constexpr,
+    TAPS: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
+    GROUP_SIZE: tl.constexpr,
+    HIDDEN: tl.constexpr,
+    HC_COUNT: tl.constexpr,
+    SINGLE_STREAM: tl.constexpr,
+    EPS: tl.constexpr,
+    HAS_BIAS: tl.constexpr,
+    BLOCK: tl.constexpr,
+):
+    """Single-pass DFlashGroupedConv.finish + HC combine + per-branch GemmaRMSNorm+bias."""
+    row = tl.program_id(0).to(tl.int64)
+    branch = tl.program_id(1).to(tl.int64)
+    offs = tl.arange(0, BLOCK)
+    mask = offs < HIDDEN
+    groups = offs // GROUP_SIZE
+    pos_in_blk = row % BLOCK_SIZE
+
+    acc = tl.zeros((BLOCK,), dtype=tl.float32)
+    for tap in tl.static_range(0, TAPS):
+        src_row = row - tap
+        valid = pos_in_blk >= tap
+        safe_row = tl.where(valid, src_row, 0)
+        x_val = tl.load(
+            RAW_SUB_PTR + safe_row * X_STRIDE_ROW + offs,
+            mask=mask & valid,
+            other=0.0,
+        ).to(tl.float32)
+        base_val = tl.load(
+            GCONV_BASE_PTR + tap * BASE_STRIDE_TAP + offs,
+            mask=mask,
+            other=0.0,
+        ).to(tl.float32)
+        delta_val = tl.load(
+            GCONV_DELTA_PTR + row * DELTA_STRIDE_ROW + tap * DELTA_STRIDE_TAP + groups,
+            mask=mask,
+            other=0.0,
+        ).to(tl.float32)
+        acc += (base_val + delta_val) * x_val
+
+    if HAS_CLIP:
+        acc = tl.minimum(tl.maximum(acc, -CLIP_VAL), CLIP_VAL)
+    sub_f = acc.to(RES_PTR.dtype.element_ty).to(tl.float32)
+
+    col = branch * HIDDEN + offs
+    res_offset = row * (HC_COUNT * HIDDEN) + col
+    res_in_offset = (row * HIDDEN + offs) if SINGLE_STREAM else res_offset
+    res = tl.load(RES_PTR + res_in_offset, mask=mask, other=0.0).to(tl.float32)
+    inj = tl.load(INJ_PTR + row * HC_COUNT + branch).to(tl.float32)
+    comb = (res + sub_f * inj).to(RES_PTR.dtype.element_ty)
+    tl.store(COMB_PTR + res_offset, comb, mask=mask)
+
+    comb_f = tl.where(mask, comb.to(tl.float32), 0.0)
+    inv_rms = 1.0 / tl.sqrt(tl.sum(comb_f * comb_f, axis=0) / HIDDEN + EPS)
+    w = tl.load(W_PTR + col, mask=mask, other=0.0).to(tl.float32)
+    normed = comb_f * inv_rms * (1.0 + w)
+    if HAS_BIAS:
+        b = tl.load(B_PTR + col, mask=mask, other=0.0).to(tl.float32)
+        normed = normed + b
+    tl.store(NORM_PTR + res_offset, normed, mask=mask)
+
+
+@triton.jit
+def _hc_dflash_gconv_combine_norm_split5120_kernel(
+    RES_PTR,
+    RAW_SUB_PTR,
+    GCONV_DELTA_PTR,
+    GCONV_BASE_PTR,
+    INJ_PTR,
+    W_PTR,
+    B_PTR,
+    COMB_PTR,
+    NORM_PTR,
+    X_STRIDE_ROW: tl.int64,
+    DELTA_STRIDE_ROW: tl.int64,
+    DELTA_STRIDE_TAP: tl.int64,
+    BASE_STRIDE_TAP: tl.int64,
+    CLIP_VAL: tl.float32,
+    HAS_CLIP: tl.constexpr,
+    TAPS: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
+    GROUP_SIZE: tl.constexpr,
+    HIDDEN: tl.constexpr,
+    HC_COUNT: tl.constexpr,
+    SINGLE_STREAM: tl.constexpr,
+    EPS: tl.constexpr,
+    HAS_BIAS: tl.constexpr,
+):
+    """4096+1024 split DFlashGroupedConv.finish + HC 4-stream combine+norm."""
+    row = tl.program_id(0).to(tl.int64)
+    o0 = tl.arange(0, 4096).to(tl.int64)
+    o1 = 4096 + tl.arange(0, 1024).to(tl.int64)
+    g0 = o0 // GROUP_SIZE
+    g1 = o1 // GROUP_SIZE
+    pos_in_blk = row % BLOCK_SIZE
+
+    acc0 = tl.zeros((4096,), dtype=tl.float32)
+    acc1 = tl.zeros((1024,), dtype=tl.float32)
+    for tap in tl.static_range(0, TAPS):
+        src_row = row - tap
+        valid = pos_in_blk >= tap
+        safe_row = tl.where(valid, src_row, 0)
+        x0 = tl.load(RAW_SUB_PTR + safe_row * X_STRIDE_ROW + o0, mask=valid, other=0.0).to(tl.float32)
+        x1 = tl.load(RAW_SUB_PTR + safe_row * X_STRIDE_ROW + o1, mask=valid, other=0.0).to(tl.float32)
+        b0 = tl.load(GCONV_BASE_PTR + tap * BASE_STRIDE_TAP + o0).to(tl.float32)
+        b1 = tl.load(GCONV_BASE_PTR + tap * BASE_STRIDE_TAP + o1).to(tl.float32)
+        d0 = tl.load(GCONV_DELTA_PTR + row * DELTA_STRIDE_ROW + tap * DELTA_STRIDE_TAP + g0).to(tl.float32)
+        d1 = tl.load(GCONV_DELTA_PTR + row * DELTA_STRIDE_ROW + tap * DELTA_STRIDE_TAP + g1).to(tl.float32)
+        acc0 += (b0 + d0) * x0
+        acc1 += (b1 + d1) * x1
+
+    if HAS_CLIP:
+        acc0 = tl.minimum(tl.maximum(acc0, -CLIP_VAL), CLIP_VAL)
+        acc1 = tl.minimum(tl.maximum(acc1, -CLIP_VAL), CLIP_VAL)
+    res_ty = RES_PTR.dtype.element_ty
+    sub0_f = acc0.to(res_ty).to(tl.float32)
+    sub1_f = acc1.to(res_ty).to(tl.float32)
+
+    res_base = row * (HC_COUNT * HIDDEN)
+    for br in tl.static_range(HC_COUNT):
+        c0 = br * HIDDEN + o0
+        c1 = br * HIDDEN + o1
+        in0 = (row * HIDDEN + o0) if SINGLE_STREAM else (res_base + c0)
+        in1 = (row * HIDDEN + o1) if SINGLE_STREAM else (res_base + c1)
+        inj = tl.load(INJ_PTR + row * HC_COUNT + br).to(tl.float32)
+        r0 = tl.load(RES_PTR + in0).to(tl.float32)
+        r1 = tl.load(RES_PTR + in1).to(tl.float32)
+        cb0 = (r0 + sub0_f * inj).to(res_ty)
+        cb1 = (r1 + sub1_f * inj).to(res_ty)
+        tl.store(COMB_PTR + res_base + c0, cb0)
+        tl.store(COMB_PTR + res_base + c1, cb1)
+        f0 = cb0.to(tl.float32)
+        f1 = cb1.to(tl.float32)
+        inv_rms = 1.0 / tl.sqrt((tl.sum(f0 * f0, axis=0) + tl.sum(f1 * f1, axis=0)) / HIDDEN + EPS)
+        w0 = tl.load(W_PTR + c0).to(tl.float32)
+        w1 = tl.load(W_PTR + c1).to(tl.float32)
+        n0 = f0 * inv_rms * (1.0 + w0)
+        n1 = f1 * inv_rms * (1.0 + w1)
+        if HAS_BIAS:
+            n0 = n0 + tl.load(B_PTR + c0).to(tl.float32)
+            n1 = n1 + tl.load(B_PTR + c1).to(tl.float32)
+        tl.store(NORM_PTR + res_base + c0, n0)
+        tl.store(NORM_PTR + res_base + c1, n1)
+
+
+@triton.jit
+def _hc_mix_reduce_with_down_inject_kernel(
+    LOGITS_PTR,
+    NORMED_PTR,
+    OUT_PTR,
+    RAW_PTR,
+    LATENT_PTR,
+    INJ_PTR,
+    RAW_STRIDE: tl.constexpr,
+    LOWRANK: tl.constexpr,
+    HIDDEN: tl.constexpr,
+    HC_COUNT: tl.constexpr,
+    HAS_LATENT: tl.constexpr,
+    HAS_INJ: tl.constexpr,
+    BLOCK: tl.constexpr,
+    BLOCK_L: tl.constexpr,
+    BLOCK_H: tl.constexpr,
+):
+    """Fused hc_mix_reduce + (pid_1 == 0) down/inject epilogue when prev_mix and not is_head."""
+    row = tl.program_id(0).to(tl.int64)
+    pid_col = tl.program_id(1)
+    col = pid_col.to(tl.int64) * BLOCK + tl.arange(0, BLOCK)
+    mask = col < HIDDEN
+    acc = tl.zeros((BLOCK,), dtype=tl.float32)
+    row_base = row * (HC_COUNT * HIDDEN)
+    for branch in tl.static_range(HC_COUNT):
+        offset = row_base + branch * HIDDEN + col
+        logits = tl.load(LOGITS_PTR + offset, mask=mask, other=0.0).to(tl.float32)
+        normed = tl.load(NORMED_PTR + offset, mask=mask, other=0.0).to(tl.float32)
+        acc += tl.sigmoid(logits) * normed
+    out = acc * (1.0 / HC_COUNT)
+    tl.store(OUT_PTR + row * HIDDEN + col, out, mask=mask)
+
+    if pid_col == 0:
+        inv_hc: tl.constexpr = 1.0 / HC_COUNT
+        row_raw = RAW_PTR + row * RAW_STRIDE
+        if HAS_LATENT:
+            l_offs = tl.arange(0, BLOCK_L)
+            l_mask = l_offs < LOWRANK
+            raw_l = tl.load(row_raw + l_offs, mask=l_mask, other=0.0).to(tl.float32)
+            scaled_l = raw_l * inv_hc
+            latent = scaled_l * tl.sigmoid(scaled_l)
+            tl.store(LATENT_PTR + row * LOWRANK + l_offs, latent, mask=l_mask)
+        if HAS_INJ:
+            h_offs = tl.arange(0, BLOCK_H)
+            h_mask = h_offs < HC_COUNT
+            h_base = LOWRANK if HAS_LATENT else 0
+            raw_h = tl.load(row_raw + h_base + h_offs, mask=h_mask, other=0.0).to(tl.float32)
+            inj = 2.0 * tl.sigmoid(raw_h * inv_hc)
+            tl.store(INJ_PTR + row * HC_COUNT + h_offs, inj, mask=h_mask)
+
+
+@triton.jit(do_not_specialize=["ROWS"])
+def _hc_down_silu_epilogue_kernel(
+    RAW_PTR,
+    LATENT_PTR,
+    ROWS,
+    LOWRANK: tl.constexpr,
+    HC_COUNT: tl.constexpr,
+    RAW_STRIDE: tl.constexpr,
+    BLOCK_R: tl.constexpr,
+    BLOCK_L: tl.constexpr,
+):
+    """Single-launch SiLU(raw[..., :LOWRANK] / HC_COUNT) for emits_latent-only final mixer."""
+    r_offs = tl.program_id(0).to(tl.int64) * BLOCK_R + tl.arange(0, BLOCK_R)
+    r_mask = r_offs < ROWS
+    l_offs = tl.arange(0, BLOCK_L)
+    l_mask = r_mask[:, None] & (l_offs[None, :] < LOWRANK)
+    raw_l = tl.load(
+        RAW_PTR + r_offs[:, None] * RAW_STRIDE + l_offs[None, :],
+        mask=l_mask,
+        other=0.0,
+    ).to(tl.float32)
+    scaled = raw_l * (1.0 / HC_COUNT)
+    latent = scaled * tl.sigmoid(scaled)
+    tl.store(
+        LATENT_PTR + r_offs[:, None] * LOWRANK + l_offs[None, :],
+        latent,
+        mask=l_mask,
+    )
+
+
+@triton.jit
 def _hc_mix_reduce_kernel(
     LOGITS_PTR,
     NORMED_PTR,
@@ -601,6 +965,9 @@ def grouped_gemma_rmsnorm_bias_triton(
     bias: Optional[torch.Tensor],
     hc_count: int,
     eps: float = 1e-6,
+    *,
+    normed_tag: str = "normed_ext",
+    ws: Optional[HCStaticWorkspace] = None,
 ) -> torch.Tensor:
     """Fused Triton per-branch GemmaRMSNorm (1.0 + weight) + optional affine bias."""
     if not x.is_cuda:
@@ -620,11 +987,8 @@ def grouped_gemma_rmsnorm_bias_triton(
     else:
         raise ValueError(f"Last dim {x_width} is not divisible by hc_count={hc_count}")
     rows = x_c.numel() // x_width
-    out = (
-        torch.empty((*x_c.shape[:-1], width), dtype=x_c.dtype, device=x_c.device)
-        if single_stream
-        else torch.empty_like(x_c)
-    )
+    out_shape = (*x_c.shape[:-1], width) if single_stream else tuple(x_c.shape)
+    out = _hc_static_empty(out_shape, x_c.dtype, x_c.device, normed_tag, ws=ws)
     if rows == 0:
         return out
     has_bias = bias is not None
@@ -678,6 +1042,8 @@ def hc_combine_triton(
     block_output: torch.Tensor,
     residual: torch.Tensor,
     inject_w: torch.Tensor,
+    *,
+    ws: Optional[HCStaticWorkspace] = None,
 ) -> torch.Tensor:
     """Fused Triton injection of block_output into hc_count residual streams."""
     if not residual.is_cuda:
@@ -698,11 +1064,8 @@ def hc_combine_triton(
             f"residual width {res_width} != hc_count ({hc_count}) * hidden_size ({hidden_size})"
         )
     rows = res_c.numel() // res_width
-    dst = (
-        torch.empty((*res_c.shape[:-1], width), dtype=res_c.dtype, device=res_c.device)
-        if single_stream
-        else torch.empty_like(res_c)
-    )
+    dst_shape = (*res_c.shape[:-1], width) if single_stream else tuple(res_c.shape)
+    dst = _hc_static_empty(dst_shape, res_c.dtype, res_c.device, "combined", ws=ws)
     if rows == 0:
         return dst
     block = 512 if hidden_size >= 512 else max(128, triton.next_power_of_2(hidden_size))
@@ -724,14 +1087,17 @@ def hc_combine_and_norm_triton(
     norm_weight: torch.Tensor,
     norm_bias: Optional[torch.Tensor],
     eps: float = 1e-6,
+    *,
+    normed_tag: str = "normed_ext",
+    ws: Optional[HCStaticWorkspace] = None,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """Single-pass fused combine + per-branch GemmaRMSNorm+bias."""
     hc_count = int(prev_inject_w.shape[-1])
     hidden_size = int(block_output.shape[-1])
     if not residual.is_cuda or hidden_size > 8192:
-        combined = hc_combine_triton(block_output, residual, prev_inject_w)
+        combined = hc_combine_triton(block_output, residual, prev_inject_w, ws=ws)
         normed = grouped_gemma_rmsnorm_bias_triton(
-            combined, norm_weight, norm_bias, hc_count, eps
+            combined, norm_weight, norm_bias, hc_count, eps, normed_tag=normed_tag, ws=ws
         )
         return combined, normed
 
@@ -752,20 +1118,29 @@ def hc_combine_and_norm_triton(
         )
     rows = res_c.numel() // res_width
     out_shape = (*res_c.shape[:-1], width)
-    combined = torch.empty(out_shape, dtype=res_c.dtype, device=res_c.device)
-    normed = torch.empty(out_shape, dtype=res_c.dtype, device=res_c.device)
+    combined = _hc_static_empty(out_shape, res_c.dtype, res_c.device, "combined", ws=ws)
+    normed = _hc_static_empty(out_shape, res_c.dtype, res_c.device, normed_tag, ws=(None if normed_tag == "normed" else ws))
     if rows == 0:
         return combined, normed
 
     has_b = norm_bias is not None
     ptr_or = res_c.data_ptr() | sub_c.data_ptr() | inj_c.data_ptr() | w_c.data_ptr() | b_c.data_ptr() | combined.data_ptr() | normed.data_ptr()
-    if hidden_size == 5120 and hc_count == 4 and rows >= 1024:
-        ckey = (res_c.device.index, 2, res_c.dtype, sub_c.dtype, inj_c.dtype, w_c.dtype, b_c.dtype, single_stream, float(eps), has_b)
+    if hidden_size == 5120 and hc_count == 4:
+        if rows >= 1024:
+            ckey = (res_c.device.index, 2, res_c.dtype, sub_c.dtype, inj_c.dtype, w_c.dtype, b_c.dtype, single_stream, float(eps), has_b)
+            triton_fast_launch(
+                _HC_TRITON_CACHE, ckey, _hc_combine_and_norm_split5120_shared_sub_kernel,
+                rows, 1, 1, ptr_or, (res_c, sub_c, inj_c, w_c, b_c, combined, normed),
+                {"HIDDEN": hidden_size, "HC_COUNT": hc_count, "SINGLE_STREAM": single_stream, "EPS": eps, "HAS_BIAS": has_b},
+                num_warps=4,
+            )
+            return combined, normed
+        ckey = (res_c.device.index, 34, res_c.dtype, sub_c.dtype, inj_c.dtype, w_c.dtype, b_c.dtype, single_stream, float(eps), has_b)
         triton_fast_launch(
-            _HC_TRITON_CACHE, ckey, _hc_combine_and_norm_split5120_shared_sub_kernel,
-            rows, 1, 1, ptr_or, (res_c, sub_c, inj_c, w_c, b_c, combined, normed),
+            _HC_TRITON_CACHE, ckey, _hc_combine_and_norm_branch5120_kernel,
+            rows, hc_count, 1, ptr_or, (res_c, sub_c, inj_c, w_c, b_c, combined, normed),
             {"HIDDEN": hidden_size, "HC_COUNT": hc_count, "SINGLE_STREAM": single_stream, "EPS": eps, "HAS_BIAS": has_b},
-            num_warps=4,
+            num_warps=8,
         )
         return combined, normed
 
@@ -797,6 +1172,8 @@ def hc_sconv_decode_opaque_combine_norm_triton(
     conv_residual: bool = False,
     conv_use_silu: bool = False,
     clamp_val: Optional[float] = None,
+    normed_tag: str = "normed_ext",
+    ws: Optional[HCStaticWorkspace] = None,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """Single-launch T=1 K=4 paged opaque ShortConv(+clamp+pool roll) + HC combine+norm."""
     hc_count = int(prev_inject_w.shape[-1])
@@ -814,8 +1191,8 @@ def hc_sconv_decode_opaque_combine_norm_triton(
     single_stream = hc_count > 1 and res_width == hidden_size
     rows = res_c.numel() // res_width
     out_shape = (*res_c.shape[:-1], width)
-    combined = torch.empty(out_shape, dtype=res_c.dtype, device=res_c.device)
-    normed = torch.empty(out_shape, dtype=res_c.dtype, device=res_c.device)
+    combined = _hc_static_empty(out_shape, res_c.dtype, res_c.device, "combined", ws=ws)
+    normed = _hc_static_empty(out_shape, res_c.dtype, res_c.device, normed_tag, ws=(None if normed_tag == "normed" else ws))
     if rows == 0:
         return combined, normed
 
@@ -835,6 +1212,48 @@ def hc_sconv_decode_opaque_combine_norm_triton(
         | combined.data_ptr() | normed.data_ptr()
     )
     if hidden_size == 5120 and hc_count == 4:
+        if rows <= 64 and sub_c.dtype == res_c.dtype:
+            sconv_sub = _hc_alloc_from_pool(
+                _HC_INTERNAL_NORMED_POOL, (rows, hidden_size), sub_c.dtype, sub_c.device, "sconv_sub", 1
+            )
+            sc_rt = (
+                sub_c, cw_c, pool_2d, sconv_sub, block_table, seq_before,
+                sxb, spb, sbt0, sbt1, int(page_size), int(block_table.shape[1]), int(pool_2d.shape[0]), 0,
+            )
+            sc_ptr_or = (
+                sub_c.data_ptr() | cw_c.data_ptr() | pool_2d.data_ptr() | sconv_sub.data_ptr()
+                | block_table.data_ptr() | seq_before.data_ptr()
+            )
+            sc_ckey = (
+                res_c.device.index, 35, sub_c.dtype, cw_c.dtype, pool_2d.dtype, sconv_sub.dtype,
+                block_table.dtype, seq_before.dtype,
+                _triton_int_spec(sxb), _triton_int_spec(spb), _triton_int_spec(sbt0), _triton_int_spec(sbt1),
+                hidden_size, conv_residual, conv_use_silu, False, has_c, cval, 512,
+            )
+            triton_fast_launch(
+                _HC_TRITON_CACHE, sc_ckey, _causal_dwconv1d_decode_opaque_k4_kernel,
+                rows, triton.cdiv(hidden_size, 512), 1, sc_ptr_or, sc_rt,
+                {
+                    "C": hidden_size, "RESIDUAL": conv_residual, "USE_SILU": conv_use_silu,
+                    "ROUND_PRE_ACT": False, "HAS_CLAMP": has_c, "CLAMP_VAL": cval, "BLOCK_C": 512,
+                },
+                num_warps=4,
+            )
+            cn_ptr_or = (
+                res_c.data_ptr() | sconv_sub.data_ptr() | inj_c.data_ptr() | w_c.data_ptr()
+                | b_c.data_ptr() | combined.data_ptr() | normed.data_ptr()
+            )
+            cn_ckey = (
+                res_c.device.index, 34, res_c.dtype, sconv_sub.dtype, inj_c.dtype,
+                w_c.dtype, b_c.dtype, single_stream, float(eps), has_bias,
+            )
+            triton_fast_launch(
+                _HC_TRITON_CACHE, cn_ckey, _hc_combine_and_norm_branch5120_kernel,
+                rows, hc_count, 1, cn_ptr_or, (res_c, sconv_sub, inj_c, w_c, b_c, combined, normed),
+                {"HIDDEN": hidden_size, "HC_COUNT": hc_count, "SINGLE_STREAM": single_stream, "EPS": float(eps), "HAS_BIAS": has_bias},
+                num_warps=8,
+            )
+            return combined, normed
         ckey = (
             res_c.device.index, 20, res_c.dtype, sub_c.dtype, inj_c.dtype, w_c.dtype, b_c.dtype, cw_c.dtype, pool_2d.dtype,
             block_table.dtype, seq_before.dtype,
@@ -849,7 +1268,7 @@ def hc_sconv_decode_opaque_combine_norm_triton(
                 "EPS": float(eps), "HAS_BIAS": has_bias, "CONV_RESIDUAL": conv_residual,
                 "CONV_USE_SILU": conv_use_silu, "HAS_CLAMP": has_c, "CLAMP_VAL": cval,
             },
-            num_warps=4,
+            num_warps=32,
         )
         return combined, normed
 
@@ -877,6 +1296,8 @@ def hc_mix_reduce_triton(
     gate_logits: torch.Tensor,
     normed: torch.Tensor,
     hc_count: int,
+    *,
+    ws: Optional[HCStaticWorkspace] = None,
 ) -> torch.Tensor:
     """Fused (sigmoid(gate_logits) * normed).mean(dim=-2) across HC branches."""
     if not gate_logits.is_cuda:
@@ -890,10 +1311,12 @@ def hc_mix_reduce_triton(
     width = int(logits_c.shape[-1])
     hidden_size = width // hc_count
     rows = logits_c.numel() // width
-    out = torch.empty(
+    out = _hc_static_empty(
         (*logits_c.shape[:-1], hidden_size),
-        device=logits_c.device,
-        dtype=normed_c.dtype,
+        normed_c.dtype,
+        logits_c.device,
+        "out",
+        ws=ws,
     )
     if rows == 0:
         return out
@@ -912,6 +1335,8 @@ def hc_mix_reduce_triton(
 def hc_head_mix_triton(
     gate_logits: torch.Tensor,
     normed: torch.Tensor,
+    *,
+    ws: Optional[HCStaticWorkspace] = None,
 ) -> torch.Tensor:
     """Fused Layer-0 head mix: sigmoid(gate_logits) * normed[..., :hidden_size]."""
     hidden_size = int(gate_logits.shape[-1])
@@ -924,7 +1349,13 @@ def hc_head_mix_triton(
     normed_c = normed.contiguous()
     hc_width = int(normed_c.shape[-1])
     rows = logits_c.numel() // hidden_size
-    out = torch.empty_like(logits_c)
+    out = _hc_static_empty(
+        tuple(logits_c.shape),
+        logits_c.dtype,
+        logits_c.device,
+        "out",
+        ws=ws,
+    )
     if rows == 0:
         return out
     block = 512 if hidden_size >= 512 else max(128, triton.next_power_of_2(hidden_size))
@@ -943,6 +1374,8 @@ def hc_down_inject_epilogue_triton(
     down_inject_raw: torch.Tensor,
     hc_lowrank: int,
     hc_count: int,
+    *,
+    ws: Optional[HCStaticWorkspace] = None,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """Split fused [..., lowrank + hc_count] GEMM output into (latent, inject_w)."""
     prefix = down_inject_raw.shape[:-1]
@@ -957,8 +1390,8 @@ def hc_down_inject_epilogue_triton(
     raw_c = down_inject_raw.contiguous()
     raw_stride = int(raw_c.shape[-1])
     rows = raw_c.numel() // raw_stride
-    latent = torch.empty((*prefix, hc_lowrank), device=raw_c.device, dtype=raw_c.dtype)
-    inject_w = torch.empty((*prefix, hc_count), device=raw_c.device, dtype=raw_c.dtype)
+    latent = _hc_static_empty((*prefix, hc_lowrank), raw_c.dtype, raw_c.device, "latent", ws=ws)
+    inject_w = _hc_static_empty((*prefix, hc_count), raw_c.dtype, raw_c.device, "inj", ws=ws)
     if rows == 0:
         return latent, inject_w
 
@@ -979,6 +1412,8 @@ def hc_down_inject_epilogue_triton(
 def hc_inject_epilogue_triton(
     inject_raw: torch.Tensor,
     hc_count: int,
+    *,
+    ws: Optional[HCStaticWorkspace] = None,
 ) -> torch.Tensor:
     """Compute 2.0 * sigmoid(raw[..., :hc_count] / hc_count) directly from padded GEMM output."""
     prefix = inject_raw.shape[:-1]
@@ -990,7 +1425,7 @@ def hc_inject_epilogue_triton(
     raw_c = inject_raw.contiguous()
     raw_stride = int(raw_c.shape[-1])
     rows = raw_c.numel() // raw_stride
-    inject_w = torch.empty((*prefix, hc_count), device=raw_c.device, dtype=raw_c.dtype)
+    inject_w = _hc_static_empty((*prefix, hc_count), raw_c.dtype, raw_c.device, "inj", ws=ws)
     if rows == 0:
         return inject_w
 
@@ -1005,6 +1440,209 @@ def hc_inject_epilogue_triton(
         num_warps=4,
     )
     return inject_w
+
+
+def hc_dflash_gconv_combine_norm_triton(
+    raw_sub: torch.Tensor,
+    gconv_delta: torch.Tensor,
+    gconv_base: torch.Tensor,
+    gconv_block_size: int,
+    gconv_group_size: int,
+    gconv_taps: int,
+    residual: torch.Tensor,
+    prev_inject_w: torch.Tensor,
+    norm_weight: torch.Tensor,
+    norm_bias: Optional[torch.Tensor],
+    eps: float = 1e-6,
+    *,
+    clip_value: Optional[float] = None,
+    normed_tag: str = "normed_ext",
+    ws: Optional[HCStaticWorkspace] = None,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Single-pass DFlashGroupedConv.finish + HC combine + GemmaRMSNorm+bias."""
+    hc_count = int(prev_inject_w.shape[-1])
+    hidden_size = int(raw_sub.shape[-1])
+    sub_c = raw_sub if raw_sub.stride(-1) == 1 else raw_sub.contiguous()
+    delta_c = gconv_delta if gconv_delta.stride(-1) == 1 else gconv_delta.contiguous()
+    base_c = gconv_base if gconv_base.is_contiguous() else gconv_base.contiguous()
+    res_c = residual if residual.is_contiguous() else residual.contiguous()
+    inj_c = prev_inject_w if prev_inject_w.is_contiguous() else prev_inject_w.contiguous()
+    w_c = norm_weight if norm_weight.is_contiguous() else norm_weight.contiguous()
+    has_bias = norm_bias is not None
+    b_c = (norm_bias if norm_bias.is_contiguous() else norm_bias.contiguous()) if has_bias else w_c
+
+    res_width = int(res_c.shape[-1])
+    width = hc_count * hidden_size
+    if res_width == width:
+        single_stream = False
+    elif hc_count > 1 and res_width == hidden_size:
+        single_stream = True
+    else:
+        raise ValueError(
+            f"residual width {res_width} != hc_count ({hc_count}) * hidden_size ({hidden_size})"
+        )
+    rows = res_c.numel() // res_width
+    out_shape = (*res_c.shape[:-1], width)
+    combined = _hc_static_empty(out_shape, res_c.dtype, res_c.device, "combined", ws=ws)
+    normed = _hc_static_empty(out_shape, res_c.dtype, res_c.device, normed_tag, ws=(None if normed_tag == "normed" else ws))
+    if rows == 0:
+        return combined, normed
+
+    if not res_c.is_cuda or hidden_size > 8192:
+        raise RuntimeError("hc_dflash_gconv_combine_norm_triton requires CUDA and hidden_size <= 8192")
+
+    sub_2d = sub_c.reshape(rows, hidden_size)
+    x_s0 = int(sub_2d.stride(0))
+    delta_3d = delta_c.reshape(rows, int(gconv_taps), int(delta_c.shape[-1]))
+    d_s0 = int(delta_3d.stride(0))
+    d_s1 = int(delta_3d.stride(1))
+    b_s0 = int(base_c.stride(0))
+    has_clip = clip_value is not None
+    cval = float(clip_value) if has_clip else 0.0
+    rt_args = (
+        res_c, sub_2d, delta_3d, base_c, inj_c, w_c, b_c, combined, normed,
+        x_s0, d_s0, d_s1, b_s0, cval,
+    )
+    ptr_or = (
+        res_c.data_ptr() | sub_2d.data_ptr() | delta_3d.data_ptr() | base_c.data_ptr()
+        | inj_c.data_ptr() | w_c.data_ptr() | b_c.data_ptr() | combined.data_ptr() | normed.data_ptr()
+    )
+    if (
+        hidden_size == 5120
+        and hc_count == 4
+        and (4096 % int(gconv_group_size)) == 0
+        and rows >= 64
+    ):
+        ckey = (
+            res_c.device.index, 32, res_c.dtype, sub_2d.dtype, delta_3d.dtype, base_c.dtype,
+            inj_c.dtype, w_c.dtype, b_c.dtype,
+            _triton_int_spec(x_s0), _triton_int_spec(d_s0), _triton_int_spec(d_s1), _triton_int_spec(b_s0),
+            single_stream, float(eps), has_bias, has_clip,
+            int(gconv_taps), int(gconv_block_size), int(gconv_group_size),
+        )
+        triton_fast_launch(
+            _HC_TRITON_CACHE, ckey, _hc_dflash_gconv_combine_norm_split5120_kernel,
+            rows, 1, 1, ptr_or, rt_args,
+            {
+                "HAS_CLIP": has_clip, "TAPS": int(gconv_taps),
+                "BLOCK_SIZE": int(gconv_block_size), "GROUP_SIZE": int(gconv_group_size),
+                "HIDDEN": hidden_size, "HC_COUNT": hc_count, "SINGLE_STREAM": single_stream,
+                "EPS": float(eps), "HAS_BIAS": has_bias,
+            },
+            num_warps=4,
+        )
+        return combined, normed
+
+    block = max(128, triton.next_power_of_2(hidden_size))
+    ckey = (
+        res_c.device.index, 33, res_c.dtype, sub_2d.dtype, delta_3d.dtype, base_c.dtype,
+        inj_c.dtype, w_c.dtype, b_c.dtype,
+        _triton_int_spec(x_s0), _triton_int_spec(d_s0), _triton_int_spec(d_s1), _triton_int_spec(b_s0),
+        hidden_size, hc_count, single_stream, float(eps), has_bias, has_clip,
+        int(gconv_taps), int(gconv_block_size), int(gconv_group_size), block,
+    )
+    triton_fast_launch(
+        _HC_TRITON_CACHE, ckey, _hc_dflash_gconv_combine_norm_kernel,
+        rows, hc_count, 1, ptr_or, rt_args,
+        {
+            "HAS_CLIP": has_clip, "TAPS": int(gconv_taps),
+            "BLOCK_SIZE": int(gconv_block_size), "GROUP_SIZE": int(gconv_group_size),
+            "HIDDEN": hidden_size, "HC_COUNT": hc_count, "SINGLE_STREAM": single_stream,
+            "EPS": float(eps), "HAS_BIAS": has_bias, "BLOCK": block,
+        },
+        num_warps=4,
+    )
+    return combined, normed
+
+
+def hc_mix_reduce_with_down_inject_triton(
+    gate_logits: torch.Tensor,
+    normed: torch.Tensor,
+    down_inject_raw: torch.Tensor,
+    hc_lowrank: int,
+    hc_count: int,
+    *,
+    has_latent: bool = True,
+    has_inj: bool = True,
+    ws: Optional[HCStaticWorkspace] = None,
+) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor]]:
+    """Fused hc_mix_reduce + down/inject epilogue when prev_mix=True and not is_head."""
+    logits_c = gate_logits if gate_logits.is_contiguous() else gate_logits.contiguous()
+    normed_c = normed if normed.is_contiguous() else normed.contiguous()
+    raw_c = down_inject_raw if down_inject_raw.is_contiguous() else down_inject_raw.contiguous()
+    prefix = raw_c.shape[:-1]
+    width = int(logits_c.shape[-1])
+    hidden_size = width // hc_count
+    raw_stride = int(raw_c.shape[-1])
+    rows = logits_c.numel() // width
+
+    out = _hc_static_empty((*logits_c.shape[:-1], hidden_size), normed_c.dtype, logits_c.device, "out", ws=ws)
+    latent = (
+        _hc_static_empty((*prefix, hc_lowrank), raw_c.dtype, raw_c.device, "latent", ws=ws)
+        if has_latent
+        else None
+    )
+    inject_w = (
+        _hc_static_empty((*prefix, hc_count), raw_c.dtype, raw_c.device, "inj", ws=ws)
+        if has_inj
+        else None
+    )
+    if rows == 0:
+        return out, latent, inject_w
+
+    latent_arg = latent if latent is not None else out
+    inj_arg = inject_w if inject_w is not None else out
+    block = 512 if hidden_size >= 512 else max(128, triton.next_power_of_2(hidden_size))
+    block_l = max(16, triton.next_power_of_2(hc_lowrank)) if has_latent else 16
+    block_h = max(16, triton.next_power_of_2(hc_count))
+    ckey = (
+        logits_c.device.index, 30, logits_c.dtype, normed_c.dtype, raw_c.dtype,
+        hidden_size, hc_count, hc_lowrank, raw_stride, has_latent, has_inj, block, block_l, block_h,
+    )
+    ptr_or = (
+        logits_c.data_ptr() | normed_c.data_ptr() | out.data_ptr()
+        | raw_c.data_ptr() | latent_arg.data_ptr() | inj_arg.data_ptr()
+    )
+    triton_fast_launch(
+        _HC_TRITON_CACHE, ckey, _hc_mix_reduce_with_down_inject_kernel,
+        rows, triton.cdiv(hidden_size, block), 1, ptr_or,
+        (logits_c, normed_c, out, raw_c, latent_arg, inj_arg),
+        {
+            "RAW_STRIDE": raw_stride, "LOWRANK": hc_lowrank, "HIDDEN": hidden_size,
+            "HC_COUNT": hc_count, "HAS_LATENT": has_latent, "HAS_INJ": has_inj,
+            "BLOCK": block, "BLOCK_L": block_l, "BLOCK_H": block_h,
+        },
+        num_warps=4,
+    )
+    return out, latent, inject_w
+
+
+def hc_down_silu_epilogue_triton(
+    down_raw: torch.Tensor,
+    hc_lowrank: int,
+    hc_count: int,
+) -> torch.Tensor:
+    """Single-launch SiLU(raw[..., :hc_lowrank] / hc_count) directly from padded GEMM output."""
+    prefix = down_raw.shape[:-1]
+    if not down_raw.is_cuda:
+        return F.silu(down_raw[..., :hc_lowrank].float() / hc_count).to(down_raw.dtype)
+    raw_c = down_raw if down_raw.is_contiguous() else down_raw.contiguous()
+    raw_stride = int(raw_c.shape[-1])
+    rows = raw_c.numel() // raw_stride
+    latent = _hc_static_empty((*prefix, hc_lowrank), raw_c.dtype, raw_c.device, "latent")
+    if rows == 0:
+        return latent
+    block_r = 1 if rows <= 8 else (8 if rows <= 128 else 16)
+    block_l = max(16, triton.next_power_of_2(hc_lowrank))
+    ckey = (raw_c.device.index, 31, raw_c.dtype, hc_lowrank, hc_count, raw_stride, block_r, block_l)
+    triton_fast_launch(
+        _HC_TRITON_CACHE, ckey, _hc_down_silu_epilogue_kernel,
+        triton.cdiv(rows, block_r), 1, 1, raw_c.data_ptr() | latent.data_ptr(),
+        (raw_c, latent, rows),
+        {"LOWRANK": hc_lowrank, "HC_COUNT": hc_count, "RAW_STRIDE": raw_stride, "BLOCK_R": block_r, "BLOCK_L": block_l},
+        num_warps=4,
+    )
+    return latent
 
 
 def _aligned_hc_out_dim(n: int, *, hidden_size: int = 0) -> int:
@@ -1162,23 +1800,58 @@ class Qwen4_5HyperConnection(nn.Module):
         normed: torch.Tensor,
         residual: torch.Tensor,
         prev_latent: Optional[torch.Tensor],
+        *,
+        ws: Optional[HCStaticWorkspace] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor]]:
+        # Fast fused path: when prev_mix=True and not is_head, gate_logits depends only on
+        # prev_latent, so down/inject epilogue fuses directly into _hc_mix_reduce_with_down_inject.
+        if (
+            self.prev_mix
+            and not self.is_head
+            and normed.is_cuda
+            and (self.emits_latent or self.use_combine)
+        ):
+            if prev_latent is None:
+                raise ValueError(
+                    "prev_latent must be provided when prev_mix=True and is_head=False"
+                )
+            if self.emits_latent and self.use_combine:
+                raw = F.linear(normed, self._get_fused_down_inject_weight())
+            elif self.emits_latent:
+                raw = F.linear(normed, self._get_padded_down_weight())
+            else:
+                raw = F.linear(normed, self._get_padded_inject_weight())
+            gate_logits = F.linear(prev_latent, self.input_mix_weight_up)
+            mixed, latent, inject_w = hc_mix_reduce_with_down_inject_triton(
+                gate_logits,
+                normed,
+                raw,
+                self.hc_lowrank,
+                self.hc_count,
+                has_latent=self.emits_latent,
+                has_inj=self.use_combine,
+                ws=ws,
+            )
+            return mixed, residual, inject_w, latent
+
         # 1. Down & inject projections (SM100-aligned fused GEMM when both exist)
         if self.emits_latent and self.use_combine:
             w_fused = self._get_fused_down_inject_weight()
             raw = F.linear(normed, w_fused)
             latent, inject_w = hc_down_inject_epilogue_triton(
-                raw, self.hc_lowrank, self.hc_count
+                raw, self.hc_lowrank, self.hc_count, ws=ws
             )
         else:
             latent = None
             inject_w = None
             if self.emits_latent:
-                raw_down = F.linear(normed, self._get_padded_down_weight())[..., : self.hc_lowrank]
-                latent = F.silu(raw_down.float() / self.hc_count).to(normed.dtype)
+                raw_down = F.linear(normed, self._get_padded_down_weight())
+                latent = hc_down_silu_epilogue_triton(
+                    raw_down, self.hc_lowrank, self.hc_count
+                )
             if self.use_combine:
                 raw_inj = F.linear(normed, self._get_padded_inject_weight())
-                inject_w = hc_inject_epilogue_triton(raw_inj, self.hc_count)
+                inject_w = hc_inject_epilogue_triton(raw_inj, self.hc_count, ws=ws)
 
         # 2. hc_prev_mix gate latent selection
         if not self.prev_mix or self.is_head:
@@ -1193,9 +1866,9 @@ class Qwen4_5HyperConnection(nn.Module):
         # 3. Up projection + sigmoid gate mix
         gate_logits = F.linear(gate_latent, self.input_mix_weight_up)
         if self.is_head:
-            mixed = hc_head_mix_triton(gate_logits, normed)
+            mixed = hc_head_mix_triton(gate_logits, normed, ws=ws)
         else:
-            mixed = hc_mix_reduce_triton(gate_logits, normed, self.hc_count)
+            mixed = hc_mix_reduce_triton(gate_logits, normed, self.hc_count, ws=ws)
 
         return mixed, residual, inject_w, latent
 
@@ -1212,16 +1885,42 @@ class Qwen4_5HyperConnection(nn.Module):
         self,
         hyper_input: torch.Tensor,
         prev_latent: Optional[torch.Tensor] = None,
+        *,
+        ws: Optional[HCStaticWorkspace] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor]]:
         """Read-side hyper-connection mix returning (mixed, residual, inject_w, next_latent)."""
-        normed = grouped_gemma_rmsnorm_bias_triton(
-            hyper_input,
-            self.hc_norm_weight,
-            self.hc_norm_bias,
-            self.hc_count,
-            self.eps,
-        )
-        return self._project_and_mix_from_normed(normed, hyper_input, prev_latent)
+        if not hyper_input.is_cuda or self.hidden_size > 8192:
+            normed = grouped_gemma_rmsnorm_bias_triton(
+                hyper_input,
+                self.hc_norm_weight,
+                self.hc_norm_bias,
+                self.hc_count,
+                self.eps,
+                normed_tag="normed",
+            )
+            return self._project_and_mix_from_normed(normed, hyper_input, prev_latent, ws=ws)
+
+        x_c = hyper_input.contiguous()
+        w_c = self.hc_norm_weight.contiguous()
+        b_c = self.hc_norm_bias.contiguous() if self.hc_norm_bias is not None else w_c
+        x_w = int(x_c.shape[-1])
+        width = self.hc_count * self.hidden_size
+        single_stream = self.hc_count > 1 and x_w == self.hidden_size
+        normed = _hc_static_empty((*x_c.shape[:-1], width), x_c.dtype, x_c.device, "normed")
+        rows = x_c.numel() // x_w
+        if rows > 0:
+            has_b = self.hc_norm_bias is not None
+            block = max(128, triton.next_power_of_2(self.hidden_size))
+            num_warps = 8 if block >= 4096 else 4
+            ckey = (x_c.device.index, 0, x_c.dtype, w_c.dtype, b_c.dtype, normed.dtype, width, self.hidden_size, x_w, single_stream, float(self.eps), has_b, block, num_warps)
+            triton_fast_launch(
+                _HC_TRITON_CACHE, ckey, _grouped_gemma_rmsnorm_bias_kernel,
+                rows, self.hc_count, 1, x_c.data_ptr() | w_c.data_ptr() | b_c.data_ptr() | normed.data_ptr(),
+                (x_c, w_c, b_c, normed),
+                {"WIDTH": width, "GROUP_SIZE": self.hidden_size, "X_STRIDE": x_w, "SINGLE_STREAM": single_stream, "EPS": self.eps, "HAS_BIAS": has_b, "BLOCK": block},
+                num_warps=num_warps,
+            )
+        return self._project_and_mix_from_normed(normed, hyper_input, prev_latent, ws=ws)
 
     def combine(
         self,
@@ -1238,6 +1937,8 @@ class Qwen4_5HyperConnection(nn.Module):
         residual: torch.Tensor,
         prev_inject_w: torch.Tensor,
         prev_latent: Optional[torch.Tensor] = None,
+        *,
+        ws: Optional[HCStaticWorkspace] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor]]:
         """Fused previous-block combine + current-block GemmaRMSNorm+bias + mix_with_latent."""
         combined, normed = hc_combine_and_norm_triton(
@@ -1247,8 +1948,44 @@ class Qwen4_5HyperConnection(nn.Module):
             self.hc_norm_weight,
             self.hc_norm_bias,
             self.eps,
+            normed_tag="normed",
+            ws=ws,
         )
-        return self._project_and_mix_from_normed(normed, combined, prev_latent)
+        return self._project_and_mix_from_normed(normed, combined, prev_latent, ws=ws)
+
+    def combine_dflash_gconv_and_mix_with_latent(
+        self,
+        raw_sub: torch.Tensor,
+        gconv_delta: torch.Tensor,
+        gconv_base: torch.Tensor,
+        gconv_block_size: int,
+        gconv_group_size: int,
+        gconv_taps: int,
+        residual: torch.Tensor,
+        prev_inject_w: torch.Tensor,
+        prev_latent: Optional[torch.Tensor] = None,
+        *,
+        clip_value: Optional[float] = None,
+        ws: Optional[HCStaticWorkspace] = None,
+    ) -> Tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor]]:
+        """Single-pass DFlashGroupedConv.finish + HC combine+norm + mix_with_latent."""
+        combined, normed = hc_dflash_gconv_combine_norm_triton(
+            raw_sub,
+            gconv_delta,
+            gconv_base,
+            gconv_block_size,
+            gconv_group_size,
+            gconv_taps,
+            residual,
+            prev_inject_w,
+            self.hc_norm_weight,
+            self.hc_norm_bias,
+            self.eps,
+            clip_value=clip_value,
+            normed_tag="normed",
+            ws=ws,
+        )
+        return self._project_and_mix_from_normed(normed, combined, prev_latent, ws=ws)
 
     def forward(
         self,
