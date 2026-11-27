@@ -419,21 +419,19 @@ class Qwen3NextAttention(Qwen3Attention):
             params_dtype=params_dtype,
             rms_norm_eps=rms_norm_eps,
         )
-        gate_quant, gate_prefix = quant_config, f"{prefix}.gate"
-        if getattr(quant_config, "quant_type", None) in ("awq", "gptq"):
-            from rtp_llm.models_py.quant_methods.unquantized import UnquantizedLinearMethod
-
-            # HF has no separate gate key: Q and gate are encoded by ONE
-            # checkpoint projection, even when exported as floating exceptions.
-            gate_prefix = f"{prefix}.q_proj"
-            if isinstance(self.qkv_proj.quant_method, UnquantizedLinearMethod):
-                gate_quant = None
+        # The gate is the other half of the physical q_proj, not a separate
+        # checkpoint key. An exclusion on the fused QKV owner covers it too.
+        gate_prefix = f"{prefix}.q_proj"
+        if quant_config is not None and quant_config.is_layer_ignored(
+            self.qkv_proj.prefix
+        ):
+            gate_prefix = self.qkv_proj.prefix
         self.gate = ColumnParallelLinear(
             input_size=hidden_size,
             output_size=num_heads * head_dim,
             tp_size=tp_size,
             tp_rank=tp_rank,
-            quant_config=gate_quant,
+            quant_config=quant_config,
             prefix=gate_prefix,
             bias=False,
             params_dtype=params_dtype,

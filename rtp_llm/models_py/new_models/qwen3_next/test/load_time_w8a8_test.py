@@ -17,6 +17,7 @@ from rtp_llm.models_py.new_models.qwen3_next.test.main_checkpoint_test import (
     _load_config,
 )
 from rtp_llm.models_py.quant_methods.base import QuantizationConfig
+from rtp_llm.models_py.quant_methods.unquantized import UnquantizedLinearMethod
 from rtp_llm.models_py.quant_methods.w8a8_load_source import W8A8LoadSource
 from rtp_llm.models_py.weight_mapper import get_all_weights
 from rtp_llm.ops import HybridAttentionType
@@ -70,6 +71,85 @@ def _checkpoint(linear):
 
 
 class Qwen35LoadTimeW8A8Test(unittest.TestCase):
+    def test_float_qkv_exception_in_online_and_prequantized_checkpoints(self):
+        cfg, raw = _checkpoint(False)
+        prefix = "model.language_model.layers.0.self_attn."
+        physical = [prefix + key for key in ("q_proj", "k_proj", "v_proj")]
+        q_gate = raw[prefix + "q_proj.weight"].reshape(2, 2, 2, 4)
+        for encoded, ignored in (
+            (False, physical),
+            (False, [prefix + "qkv_proj"]),
+            (True, physical),
+        ):
+            with self.subTest(encoded=encoded), tempfile.TemporaryDirectory() as path:
+                source = CompressedW8A8Int8PerChannelQuantConfig(
+                    is_quanted=encoded, ignore_patterns=ignored
+                )
+                cfg.quant_config = source
+                quant = QuantizationConfig(source.get_method(), source)
+                tensors = {}
+                for key, weight in raw.items():
+                    if (
+                        encoded
+                        and is_recipe_weight(key)
+                        and key.removesuffix(".weight") not in physical
+                    ):
+                        tensors[key], tensors[scale_name_for(key)] = (
+                            quantize_weight_per_output_channel(weight)
+                        )
+                    else:
+                        tensors[key] = weight
+                save_file(tensors, str(Path(path) / "model.safetensors"))
+                options = replace(
+                    _load_config(quant_config=quant), compute_dtype=torch.bfloat16
+                )
+                model = NewModelLoader(cfg, options, model_path=path).load()
+                attn = model.layers[0].self_attn
+                torch.testing.assert_close(
+                    attn.gate.weight, q_gate[:, 1].reshape(4, 4), rtol=0, atol=0
+                )
+                torch.testing.assert_close(
+                    attn.qkv_proj.weight[:4], q_gate[:, 0].reshape(4, 4), rtol=0, atol=0
+                )
+                self.assertEqual(attn.o_proj.weight.dtype, torch.int8)
+
+    def test_fp8_exclusions_follow_the_physical_q_projection(self):
+        cfg = _config()
+        prefix = "model.layers.0.self_attn."
+        qkv = [prefix + key for key in ("q_proj", "k_proj", "v_proj")]
+
+        def owner(ignored):
+            opts = replace(
+                _load_config(
+                    quant_config=QuantizationConfig("fp8_online", ignored_layers=ignored)
+                ),
+                compute_dtype=torch.bfloat16,
+            )
+            return Qwen3NextForCausalLM(cfg, opts)
+
+        raw = {k: v.bfloat16() for k, v in _dense_weights().items()}
+        with tempfile.TemporaryDirectory() as path:
+            checkpoint = str(Path(path) / "model.safetensors")
+            save_file(raw, checkpoint)
+            for ignored in (qkv, [prefix + "qkv_proj"], []):
+                with self.subTest(ignored=ignored):
+                    model = owner(ignored)
+                    model.load_weights(get_all_weights([checkpoint]))
+                    NewModelLoader._validate_loaded_weights(model)
+                    attn = model.layers[0].self_attn
+                    self.assertEqual(
+                        isinstance(attn.gate.quant_method, UnquantizedLinearMethod),
+                        bool(ignored),
+                    )
+                    self.assertIs(
+                        type(attn.gate.quant_method), type(attn.qkv_proj.quant_method)
+                    )
+                    self.assertNotIsInstance(
+                        attn.o_proj.quant_method, UnquantizedLinearMethod
+                    )
+        with self.assertRaisesRegex(ValueError, "partially match fused layer"):
+            owner(qkv[:1])
+
     def test_real_model_hybrid_attention_shared_and_routed_experts_both_tp_ranks(self):
         for linear in (False, True):
             cfg, raw = _checkpoint(linear)
