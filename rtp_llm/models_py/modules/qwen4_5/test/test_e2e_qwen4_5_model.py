@@ -946,7 +946,7 @@ class TestQwen4_5E2E(unittest.TestCase):
         torch.cuda.empty_cache()
 
         ctx = mp.get_context("spawn")
-        for pmode in ("sp4_tp4_ep4", "dp2_tpsp2_ep4"):
+        for pmode in ("sp4_tp4_ep4", "dp2_tpsp2_ep4", "dp2_tpsp2_ep4_dp_attn"):
             with socket.socket() as sock:
                 sock.bind(("127.0.0.1", 0))
                 port_sp = sock.getsockname()[1]
@@ -976,10 +976,99 @@ class TestQwen4_5E2E(unittest.TestCase):
             for r, p in enumerate(procs_sp):
                 self.assertEqual(p.exitcode, 0, f"{pmode} worker {r} exit {p.exitcode}: {errs_sp}")
             self.assertEqual(errs_sp, [])
-            if pmode == "dp2_tpsp2_ep4":
+            if pmode.startswith("dp2_tpsp2_ep4"):
                 dp0 = torch.from_numpy(sp_items[0]["out_p17"])
                 dp1 = torch.from_numpy(sp_items[2]["out_p17"])
                 self.assertGreater((dp0 - dp1).abs().max().item(), 1e-2)
+
+    @unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
+    @torch.no_grad()
+    def test_12_r8_sp_gather_kept_tokens_triton_parity_and_cg(self) -> None:
+        """Verify R8 Triton _gather_sp_kept_tokens bitwise parity across ranks, empty rank, strided & CG."""
+        import types
+        import torch.distributed as dist
+        from rtp_llm.models_py.modules.qwen4_5.fast_comm import sp_slice_bounds
+
+        dev = torch.device("cuda:0")
+        cases = [
+            (16, 128, 1, 5120, False),
+            (64, 8, 8, 5120, False),
+            (3, 2, 1, 256, False),   # exercises empty rank s1 == s0
+            (8, 16, 3, 5120, True),  # strided slice input
+        ]
+        orig_ar = dist.all_reduce
+        try:
+            dist.all_reduce = lambda t, op=None, group=None: t
+            for bsz, seq_len, keep_tail, hid_dim, make_strided in cases:
+                full_h = torch.randn((bsz, seq_len, hid_dim), dtype=torch.bfloat16, device=dev) * 0.25
+                if make_strided:
+                    base = torch.randn((bsz * seq_len, hid_dim * 2), dtype=torch.bfloat16, device=dev) * 0.25
+                    flat_src = base[:, ::2]
+                    full_h = flat_src.reshape(bsz, seq_len, hid_dim)
+                else:
+                    flat_src = full_h.view(-1, hid_dim)
+                ref_kept = full_h[:, seq_len - keep_tail :, :].clone()
+                acc = torch.zeros_like(ref_kept)
+                for rk in range(4):
+                    s0, s1 = sp_slice_bounds(bsz * seq_len, 4, rk)
+                    loc = flat_src[s0:s1]
+                    fake_self = types.SimpleNamespace(
+                        sp_size=4,
+                        sp_rank=rk,
+                        sp_group=None,
+                        model=types.SimpleNamespace(sp_fast_comm=None),
+                    )
+                    part = Qwen4_5ForCausalLM._gather_sp_kept_tokens(
+                        fake_self, loc, batch_size=bsz, seq_len=seq_len, keep_tail=keep_tail
+                    )
+                    acc.add_(part)
+                self.assertTrue(
+                    torch.equal(acc, ref_kept),
+                    f"R8 _gather_sp_kept_tokens mismatch for {(bsz, seq_len, keep_tail, hid_dim, make_strided)}",
+                )
+
+            # CUDA Graph capture + replay
+            bsz, seq_len, keep_tail, hid_dim = 16, 128, 1, 5120
+            src_cg = torch.randn((bsz, seq_len, hid_dim), dtype=torch.bfloat16, device=dev) * 0.25
+            s0, s1 = sp_slice_bounds(bsz * seq_len, 4, 1)
+            loc_cg = src_cg.view(-1, hid_dim)[s0:s1].contiguous()
+            fake_cg = types.SimpleNamespace(
+                sp_size=4, sp_rank=1, sp_group=None, model=types.SimpleNamespace(sp_fast_comm=None)
+            )
+            eager_out = Qwen4_5ForCausalLM._gather_sp_kept_tokens(
+                fake_cg, loc_cg, batch_size=bsz, seq_len=seq_len, keep_tail=keep_tail
+            ).clone()
+            torch.cuda.synchronize()
+            g = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(g):
+                cg_out = Qwen4_5ForCausalLM._gather_sp_kept_tokens(
+                    fake_cg, loc_cg, batch_size=bsz, seq_len=seq_len, keep_tail=keep_tail
+                )
+            g.replay()
+            torch.cuda.synchronize()
+            self.assertTrue(torch.equal(cg_out, eager_out))
+            # Verify _is_sp_active policy across dp_attn + tp_size/sp_size combinations
+            from rtp_llm.models_py.model_desc.qwen4_5 import Qwen4_5DecoderLayer, Qwen4_5Model
+
+            orig_init = dist.is_initialized
+            try:
+                dist.is_initialized = lambda: True
+                dummy_grp = object()
+                for sp_s, tp_s, dp_a, grp, expected in (
+                    (1, 1, True, None, False),       # pure dp4_ep4
+                    (1, 2, True, None, False),       # dp2_tp2_ep4
+                    (4, 4, False, dummy_grp, True),  # sp4_tp4_ep4
+                    (2, 2, True, dummy_grp, True),   # dp2_tpsp2_ep4 with dp_attn=True
+                    (2, 2, False, dummy_grp, True),  # dp2_tpsp2_ep4 with dp_attn=False
+                    (4, 1, True, dummy_grp, False),  # invalid dp_attn=True with sp_size > tp_size
+                ):
+                    ns = types.SimpleNamespace(sp_size=sp_s, tp_size=tp_s, dp_attn=dp_a, sp_group=grp)
+                    self.assertEqual(Qwen4_5Model._is_sp_active(ns), expected)
+                    self.assertEqual(Qwen4_5DecoderLayer._is_sp_active(ns), expected)
+            finally:
+                dist.is_initialized = orig_init
+        finally:
+            dist.all_reduce = orig_ar
 
 
 @torch.no_grad()
@@ -1593,14 +1682,20 @@ def _gloo_r7_tpsp_worker(
                 dp_groups = [dist.new_group([0, 2]), dist.new_group([1, 3])]
                 ep_group = dist.new_group([0, 1, 2, 3])
                 dp_r, tp_r = rank // 2, rank % 2
+                eff_pm = "dp2_tpsp2_ep4"
                 kw = dict(
-                    parallel_mode=pmode, dp_size=2, dp_rank=dp_r, dp_group=dp_groups[tp_r],
+                    parallel_mode=eff_pm, dp_size=2, dp_rank=dp_r, dp_group=dp_groups[tp_r],
                     tp_size=2, tp_rank=tp_r, tp_group=tp_groups[dp_r],
                     sp_size=2, sp_rank=tp_r, sp_group=tp_groups[dp_r],
                     ep_size=4, ep_rank=rank, ep_group=ep_group,
                 )
+                if pmode == "dp2_tpsp2_ep4_dp_attn":
+                    kw["dp_attn"] = True
 
             m = Qwen4_5ForCausalLM(cfg, dtype=torch.bfloat16, device=dev, **kw)
+            assert m.model._is_sp_active() and m.model.layers[0]._is_sp_active(), (
+                f"Expected SP active for {pmode}"
+            )
             m.init_synthetic_weights(seed=202611, ple_mode="gpu_sharded", ple_fp8=True)
             _stabilize_router_margins(m)
             m.prepare_weights()

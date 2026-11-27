@@ -54,7 +54,57 @@ from rtp_llm.models_py.modules.qwen4_5.ple import (
     DEFAULT_PLE_WEIGHT_SCALE,
     Qwen4_5PLELayer,
 )
-from rtp_llm.models_py.modules.qwen4_5.short_conv import Qwen4_5ShortConv, ShortConvStaticWorkspace
+from rtp_llm.models_py.modules.qwen4_5.short_conv import (
+    Qwen4_5ShortConv,
+    ShortConvStaticWorkspace,
+    triton_fast_launch,
+)
+
+try:
+    import triton
+    import triton.language as tl
+
+    _HAS_TRITON = True
+except ImportError:
+    triton = None  # type: ignore[assignment]
+    tl = None  # type: ignore[assignment]
+    _HAS_TRITON = False
+
+_SP_SCATTER_KC: dict = {}
+
+if _HAS_TRITON:
+
+    @triton.jit(
+        do_not_specialize=["S0", "S1", "SEQ_LEN", "KEEP_TAIL", "TAIL_OFF", "HID_STRIDE", "OUT_STRIDE"]
+    )
+    def _sp_scatter_kept_tokens_kernel(
+        HID_PTR,
+        OUT_PTR,
+        HID_STRIDE: tl.int64,
+        OUT_STRIDE: tl.int64,
+        S0,
+        S1,
+        SEQ_LEN,
+        KEEP_TAIL,
+        TAIL_OFF,
+        HID_DIM: tl.constexpr,
+        BLOCK_H: tl.constexpr,
+    ):
+        idx = tl.program_id(0).to(tl.int64)
+        col_blk = tl.program_id(1).to(tl.int64)
+        b = idx // KEEP_TAIL
+        t = idx % KEEP_TAIL
+        g = b * SEQ_LEN + TAIL_OFF + t
+        offs = col_blk * BLOCK_H + tl.arange(0, BLOCK_H)
+        mask = offs < HID_DIM
+        in_bounds = (g >= S0) & (g < S1)
+        src_row = tl.where(in_bounds, g - S0, 0)
+        val = tl.load(
+            HID_PTR + src_row * HID_STRIDE + offs,
+            mask=mask & in_bounds,
+            other=0.0,
+        )
+        tl.store(OUT_PTR + idx * OUT_STRIDE + offs, val, mask=mask)
 from rtp_llm.models_py.modules.qwen4_5.yoco import YoCoSharingPlan
 
 
@@ -1002,10 +1052,13 @@ class Qwen4_5DecoderLayer(nn.Module):
             self.self_attn.o_proj = _wrap_fn(self.self_attn.o_proj)
 
     def _is_sp_active(self) -> bool:
+        # Allow intra-DP TP+SP hybrid modes (e.g. dp2_tpsp2_ep4 where dp_attn=True
+        # may be passed alongside intra-DP sp_size <= tp_size), while still
+        # disabling SP for pure DP (sp_size <= 1 or tp_size < sp_size).
         return bool(
             self.sp_size > 1
-            and not self.dp_attn
             and self.sp_group is not None
+            and (not self.dp_attn or self.tp_size >= self.sp_size)
             and dist.is_available()
             and dist.is_initialized()
         )
@@ -2293,10 +2346,13 @@ class Qwen4_5Model(nn.Module):
                     raise ValueError(f"Unsupported ple_mode={ple_mode!r}")
 
     def _is_sp_active(self) -> bool:
+        # Allow intra-DP TP+SP hybrid modes (e.g. dp2_tpsp2_ep4 where dp_attn=True
+        # may be passed alongside intra-DP sp_size <= tp_size), while still
+        # disabling SP for pure DP (sp_size <= 1 or tp_size < sp_size).
         return bool(
             self.sp_size > 1
-            and not self.dp_attn
             and self.sp_group is not None
+            and (not self.dp_attn or self.tp_size >= self.sp_size)
             and dist.is_available()
             and dist.is_initialized()
         )
@@ -2926,18 +2982,58 @@ class Qwen4_5ForCausalLM(nn.Module):
         total_tokens = batch_size * seq_len
         s0, s1 = sp_slice_bounds(total_tokens, self.sp_size, self.sp_rank)
         hid_dim = int(hidden_loc.shape[-1])
-        kept_full = hidden_loc.new_zeros((batch_size, keep_tail, hid_dim))
-        if s1 > s0:
-            tail_offset = seq_len - keep_tail
-            for b in range(batch_size):
-                req_tail_lo = b * seq_len + tail_offset
-                req_tail_hi = (b + 1) * seq_len
-                lo = max(s0, req_tail_lo)
-                hi = min(s1, req_tail_hi)
-                if lo < hi:
-                    kept_full[b, lo - req_tail_lo : hi - req_tail_lo, :].copy_(
-                        hidden_loc[lo - s0 : hi - s0, :]
-                    )
+        tail_offset = seq_len - keep_tail
+        rows = batch_size * keep_tail
+        if (
+            rows > 0
+            and hid_dim > 0
+            and _HAS_TRITON
+            and hidden_loc.is_cuda
+            and not (torch.is_grad_enabled() and hidden_loc.requires_grad)
+        ):
+            kept_full = hidden_loc.new_empty((batch_size, keep_tail, hid_dim))
+            kept_2d = kept_full.view(rows, hid_dim)
+            hid_2d = hidden_loc.reshape(-1, hid_dim)
+            if hid_2d.stride(-1) != 1:
+                hid_2d = hid_2d.contiguous()
+            src_2d = hid_2d if (s1 > s0 and hid_2d.shape[0] > 0) else kept_2d
+            block_h = 512 if hid_dim >= 512 else max(128, triton.next_power_of_2(hid_dim))
+            dev_idx = kept_full.device.index if kept_full.device.index is not None else torch.cuda.current_device()
+            ckey = (dev_idx, src_2d.dtype, kept_2d.dtype, hid_dim, block_h)
+            triton_fast_launch(
+                _SP_SCATTER_KC,
+                ckey,
+                _sp_scatter_kept_tokens_kernel,
+                rows,
+                triton.cdiv(hid_dim, block_h),
+                1,
+                src_2d.data_ptr() | kept_2d.data_ptr(),
+                (
+                    src_2d,
+                    kept_2d,
+                    int(src_2d.stride(0)),
+                    int(kept_2d.stride(0)),
+                    int(s0),
+                    int(s1),
+                    int(seq_len),
+                    int(keep_tail),
+                    int(tail_offset),
+                ),
+                {"HID_DIM": hid_dim, "BLOCK_H": block_h},
+                num_warps=4,
+            )
+        else:
+            kept_full = hidden_loc.new_zeros((batch_size, keep_tail, hid_dim))
+            if s1 > s0:
+                for b in range(batch_size):
+                    req_tail_lo = b * seq_len + tail_offset
+                    req_tail_hi = (b + 1) * seq_len
+                    lo = max(s0, req_tail_lo)
+                    hi = min(s1, req_tail_hi)
+                    if lo < hi:
+                        kept_full[b, lo - req_tail_lo : hi - req_tail_lo, :].copy_(
+                            hidden_loc[lo - s0 : hi - s0, :]
+                        )
         sp_fc = getattr(self.model, "sp_fast_comm", None)
         if (
             sp_fc is not None

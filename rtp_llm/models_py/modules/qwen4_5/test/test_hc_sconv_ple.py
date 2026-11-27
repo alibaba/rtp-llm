@@ -1785,6 +1785,58 @@ def test_r7_fused_hc_epilogues_branch5120_workspaces_and_sp_shortconv() -> None:
     print("  PASS: R7 fused HC epilogues, branch5120, static workspaces & 4-rank SP ShortConv verified.")
 
 
+@torch.no_grad()
+def test_r8_hc_splitk_and_dflash_branch5120() -> None:
+    import torch.nn.functional as F
+
+    print("[Test R8] HC Triton Split-K down_inject + DFlash2 branch5120...")
+    device = torch.device("cuda:0")
+    dtype = torch.bfloat16
+    hc = Qwen4_5HyperConnection(
+        hidden_size=5120, hc_count=4, hc_lowrank=128, dtype=dtype, device=device
+    ).eval()
+    ws = HCStaticWorkspace()
+    for M in (1, 8, 16, 32, 64, 128, 256, 512):
+        hi = torch.randn((M, 4 * 5120), dtype=dtype, device=device) * 0.25
+        prev_l = torch.randn((M, 128), dtype=dtype, device=device) * 0.25
+        m_ws, r_ws, ij_ws, lt_ws = hc.mix_with_latent(hi, prev_latent=prev_l, ws=ws)
+        m_no, r_no, ij_no, lt_no = hc.mix_with_latent(hi, prev_latent=prev_l, ws=None)
+        m_ref, _, ij_ref, lt_ref = hc.mix_with_latent_ref(hi, prev_latent=prev_l)
+        for a, b in ((m_ws, m_no), (r_ws, r_no), (ij_ws, ij_no), (lt_ws, lt_no)):
+            assert float((a - b).abs().max().item()) == 0.0, f"M={M} ws vs no_ws mismatch"
+        for name, a, b in (("mixed", m_ws, m_ref), ("inj", ij_ws, ij_ref), ("latent", lt_ws, lt_ref)):
+            cos = F.cosine_similarity(a.float().reshape(-1), b.float().reshape(-1), dim=0).item()
+            assert cos >= 0.9999, f"R8 HC Split-K M={M} {name} cos={cos}"
+
+    # Verify CUDA Graph capture + replay and 0 splitKreduce / 0 cutlass_80 at M=16
+    hi16 = torch.randn((16, 4 * 5120), dtype=dtype, device=device) * 0.25
+    pl16 = torch.randn((16, 128), dtype=dtype, device=device) * 0.25
+    sub16 = torch.randn((16, 5120), dtype=dtype, device=device) * 0.25
+    ij16 = torch.rand((16, 4), dtype=dtype, device=device)
+    _ = hc.combine_and_mix_with_latent(sub16, hi16, ij16, prev_latent=pl16, ws=ws)
+    torch.cuda.synchronize()
+    g = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(g):
+        cm_cg, cr_cg, cij_cg, clt_cg = hc.combine_and_mix_with_latent(sub16, hi16, ij16, prev_latent=pl16, ws=ws)
+    g.replay()
+    torch.cuda.synchronize()
+    cm_ref, cr_ref, cij_ref, clt_ref = hc.combine_and_mix_with_latent_ref(sub16, hi16, ij16, prev_latent=pl16)
+    for a, b in ((cm_cg, cm_ref), (cr_cg, cr_ref), (cij_cg, cij_ref), (clt_cg, clt_ref)):
+        assert F.cosine_similarity(a.float().reshape(-1), b.float().reshape(-1), dim=0).item() >= 0.9999
+
+    with torch.profiler.profile(activities=[torch.profiler.ProfilerActivity.CUDA]) as prof:
+        _ = hc.mix_with_latent(hi16, prev_latent=pl16, ws=ws)
+        torch.cuda.synchronize()
+    cnames = [
+        str(getattr(e, "name", "")).lower()
+        for e in prof.events()
+        if e.device_type == torch.profiler.DeviceType.CUDA and getattr(e, "device_time_total", 0) > 0
+    ]
+    assert not any("splitkreduce" in nm for nm in cnames), f"Unexpected splitKreduce: {cnames}"
+    assert not any("cutlass_80" in nm for nm in cnames), f"Unexpected cutlass_80: {cnames}"
+    print("  PASS: R8 HC Split-K & DFlash2 branch5120 verified (0 splitKreduce, 0 cutlass_80).")
+
+
 def main() -> int:
     print(
         f"Device: {torch.cuda.get_device_name(0)} "
@@ -1802,6 +1854,7 @@ def main() -> int:
     test_r5_ple_u64_hc_split5120_and_strided_shortconv()
     test_r6_fast_launch_opaque_decode_and_ple_snap_aligned()
     test_r7_fused_hc_epilogues_branch5120_workspaces_and_sp_shortconv()
+    test_r8_hc_splitk_and_dflash_branch5120()
     run_benchmarks()
     print(f"\nALL TESTS & BENCHMARKS PASSED in {time.perf_counter() - t0:.2f}s!")
     return 0

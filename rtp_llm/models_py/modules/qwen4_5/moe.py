@@ -482,6 +482,193 @@ def _gates_2col_gemv_kernel(
     if C == 2:
         tl.store(ob + 1, tl.sum(acc1, axis=0).to(out_ptr.dtype.element_ty))
 
+
+@triton.jit
+def _qwen45_router_splitk_gemm_kernel(
+    x_ptr,
+    w_ptr,
+    part_ptr,
+    M,
+    K: tl.constexpr,
+    E: tl.constexpr,
+    stride_xm: tl.int64,
+    stride_wn: tl.int64,
+    stride_ps: tl.int64,
+    stride_pm: tl.int64,
+    SPLIT_K: tl.constexpr,
+    BLOCK_M: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    BLOCK_K: tl.constexpr,
+):
+    """Compute Split-K partial BF16->FP32 router logits ``[SPLIT_K, M, E]`` without splitKreduce."""
+    pid_n = tl.program_id(0)
+    pid_sk = tl.program_id(1)
+    offs_m = tl.arange(0, BLOCK_M)
+    offs_n = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
+    mask_m = offs_m < M
+    mask_n = offs_n < E
+    k_per = tl.cdiv(K, SPLIT_K)
+    k_start = pid_sk * k_per
+    k_end = tl.minimum(K, k_start + k_per)
+
+    acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
+    for k0 in range(k_start, k_end, BLOCK_K):
+        offs_k = k0 + tl.arange(0, BLOCK_K)
+        mk = offs_k < k_end
+        xv = tl.load(
+            x_ptr + offs_m[:, None] * stride_xm + offs_k[None, :],
+            mask=mask_m[:, None] & mk[None, :],
+            other=0.0,
+        )
+        wv = tl.load(
+            w_ptr + offs_n[None, :] * stride_wn + offs_k[:, None],
+            mask=mask_n[None, :] & mk[:, None],
+            other=0.0,
+        )
+        acc = tl.dot(xv, wv, acc=acc)
+
+    tl.store(
+        part_ptr + pid_sk * stride_ps + offs_m[:, None] * stride_pm + offs_n[None, :],
+        acc,
+        mask=mask_m[:, None] & mask_n[None, :],
+    )
+
+
+@triton.jit
+def _qwen45_router_splitk_reduce_topk_kernel(
+    part_ptr,
+    bias_ptr,
+    ids_ptr,
+    weights_ptr,
+    E,
+    stride_ps: tl.int64,
+    stride_pm: tl.int64,
+    SPLIT_K: tl.constexpr,
+    E_PAD: tl.constexpr,
+    TOP_K: tl.constexpr,
+    TOP_K_PAD: tl.constexpr,
+    HAS_BIAS: tl.constexpr,
+    NORMALIZE: tl.constexpr,
+    ROUND_BF16: tl.constexpr,
+):
+    """Sum Split-K router partials in registers and fuse sigmoid + bias + topk + renormalize."""
+    row = tl.program_id(0).to(tl.int64)
+    offs_e = tl.arange(0, E_PAD)
+    mask_e = offs_e < E
+    acc = tl.zeros((E_PAD,), dtype=tl.float32)
+    for sk in tl.static_range(SPLIT_K):
+        acc += tl.load(
+            part_ptr + sk * stride_ps + row * stride_pm + offs_e,
+            mask=mask_e,
+            other=0.0,
+        )
+
+    raw = acc.to(tl.bfloat16).to(tl.float32) if ROUND_BF16 else acc
+    scores = tl.where(mask_e, tl.div_rn(1.0, 1.0 + libdevice.exp(-raw)), 0.0)
+    if HAS_BIAS:
+        bias = tl.load(bias_ptr + offs_e, mask=mask_e, other=0.0).to(tl.float32)
+        sel = tl.where(mask_e, scores + bias, -3.4e38)
+    else:
+        sel = tl.where(mask_e, scores, -3.4e38)
+
+    slots = tl.arange(0, TOP_K_PAD)
+    chosen_w = tl.zeros((TOP_K_PAD,), dtype=tl.float32)
+    ids_base = ids_ptr + row * TOP_K
+    for i in tl.static_range(TOP_K):
+        best_val = tl.max(sel, axis=0)
+        best_idx = tl.min(tl.where(sel == best_val, offs_e, 2147483647), axis=0)
+        best_score = tl.sum(tl.where(offs_e == best_idx, scores, 0.0), axis=0)
+        chosen_w = tl.where(slots == i, best_score, chosen_w)
+        tl.store(ids_base + i, best_idx)
+        sel = tl.where(offs_e == best_idx, -3.4e38, sel)
+
+    if NORMALIZE:
+        denom = tl.sum(chosen_w, axis=0) + 1e-8
+        chosen_w = tl.div_rn(chosen_w, denom)
+    if ROUND_BF16:
+        chosen_w = chosen_w.to(tl.bfloat16).to(tl.float32)
+
+    tl.store(weights_ptr + row * TOP_K + slots, chosen_w, mask=slots < TOP_K)
+
+
+_FLASHINFER_MM_BF16 = None
+_FLASHINFER_TGV_CHECKED = False
+
+
+def _get_flashinfer_mm_bf16(device: torch.device) -> Any:
+    global _FLASHINFER_MM_BF16, _FLASHINFER_TGV_CHECKED
+    if os.environ.get("QWEN4_5_BF16_TGV", "1") == "0":
+        return None
+    if not _FLASHINFER_TGV_CHECKED:
+        _FLASHINFER_TGV_CHECKED = True
+        try:
+            import flashinfer
+
+            fn = getattr(flashinfer, "mm_bf16", None)
+            _FLASHINFER_MM_BF16 = fn
+        except Exception:
+            _FLASHINFER_MM_BF16 = None
+    if _FLASHINFER_MM_BF16 is None or device.type != "cuda":
+        return None
+    try:
+        cap_major, _ = torch.cuda.get_device_capability(device)
+        if cap_major < 10:
+            return None
+    except Exception:
+        return None
+    return _FLASHINFER_MM_BF16
+
+
+def _can_bf16_tgv(x: torch.Tensor, w: torch.Tensor) -> Optional[Tuple[Any, int, int, int]]:
+    """Return ``(mm_fn, M, K, N)`` if shape/dtype/device match low-M SM100+ TGV fast path."""
+    mm_fn = _get_flashinfer_mm_bf16(x.device)
+    if (
+        mm_fn is not None
+        and x.is_cuda
+        and w.is_cuda
+        and x.dtype == torch.bfloat16
+        and w.dtype == torch.bfloat16
+        and w.is_contiguous()
+        and not (torch.is_grad_enabled() and (x.requires_grad or w.requires_grad))
+    ):
+        K = int(w.shape[1])
+        N = int(w.shape[0])
+        M = int(x.numel() // K) if K > 0 and x.shape[-1] == K else 0
+        if 1 <= M <= 8 and K >= 1280 and N >= 1024 and (K % 16) == 0 and (N % 8) == 0:
+            return mm_fn, M, K, N
+    return None
+
+
+def _run_bf16_tgv(x: torch.Tensor, w: torch.Tensor, spec: Tuple[Any, int, int, int]) -> torch.Tensor:
+    mm_fn, M, K, N = spec
+    x_2d = x.reshape(M, K)
+    if not x_2d.is_contiguous():
+        x_2d = x_2d.contiguous()
+    with _cuda_device_ctx(x.device):
+        out_2d = mm_fn(x_2d, w.t(), pdl=True, backend="tgv")
+    return out_2d.reshape(*x.shape[:-1], N) if x.ndim != 2 else out_2d
+
+
+def _bf16_linear_tgv_or_torch(x: torch.Tensor, w: torch.Tensor) -> torch.Tensor:
+    """Run zero-splitKreduce FlashInfer TGV GEMM on SM100+ for M<=8 wide BF16 projections."""
+    spec = _can_bf16_tgv(x, w)
+    if spec is not None:
+        return _run_bf16_tgv(x, w, spec)
+    return F.linear(x, w)
+
+
+def _dense_linear_or_tgv(
+    x: torch.Tensor, w: torch.Tensor, fp8_mod: Optional[SM100FP8Linear]
+) -> torch.Tensor:
+    """Dispatch to low-M BF16 TGV when active or ``fp8_mod`` resolves to BF16, else ``fp8_mod``/``F.linear``."""
+    spec = _can_bf16_tgv(x, w)
+    if spec is not None and (fp8_mod is None or fp8_mod._resolve_backend(spec[1], x.device) == "bf16"):
+        return _run_bf16_tgv(x, w, spec)
+    if fp8_mod is not None:
+        return fp8_mod(x)
+    return F.linear(x, w)
+
+
 class Qwen4_5DenseMLP(nn.Module):
     """Dense gated MLP with SiTU-GLU activation and optional TP=4 sharding.
 
@@ -710,7 +897,7 @@ class Qwen4_5DenseMLP(nn.Module):
     def _finish_down_and_reduce(
         self, act: torch.Tensor, *, skip_allreduce: bool
     ) -> torch.Tensor:
-        out = self._fp8_down(act) if self._fp8_down is not None else self.down_proj(act)
+        out = _dense_linear_or_tgv(act, self.down_proj.weight, self._fp8_down)
         if self.tp_size > 1 and not skip_allreduce:
             if self.fast_all_reduce is not None:
                 orig_shape = out.shape
@@ -754,24 +941,12 @@ class Qwen4_5DenseMLP(nn.Module):
         if hidden_states.numel() == 0:
             return torch.empty_like(hidden_states)
         if self._gate_up_weight is not None and (use_triton is None or use_triton):
-            gate_up = (
-                self._fp8_gate_up(hidden_states)
-                if self._fp8_gate_up is not None
-                else F.linear(hidden_states, self._gate_up_weight)
-            )
+            gate_up = _dense_linear_or_tgv(hidden_states, self._gate_up_weight, self._fp8_gate_up)
             return self.forward_from_gate_up(
                 gate_up, use_triton=use_triton, skip_allreduce=skip_allreduce
             )
-        gate = (
-            self._fp8_gate(hidden_states)
-            if self._fp8_gate is not None
-            else self.gate_proj(hidden_states)
-        )
-        up = (
-            self._fp8_up(hidden_states)
-            if self._fp8_up is not None
-            else self.up_proj(hidden_states)
-        )
+        gate = _dense_linear_or_tgv(hidden_states, self.gate_proj.weight, self._fp8_gate)
+        up = _dense_linear_or_tgv(hidden_states, self.up_proj.weight, self._fp8_up)
         act = self.act_fn(gate, up, use_triton=use_triton)
         return self._finish_down_and_reduce(act, skip_allreduce=skip_allreduce)
 
@@ -1114,6 +1289,8 @@ class Qwen4_5LatentMoE(nn.Module):
             self.register_buffer("w2_u8", None)
             self.register_buffer("w2_scale", None)
 
+        if self.all_to_all_comm is not None and hasattr(self.all_to_all_comm, "reset_step_equal_cache"):
+            self.all_to_all_comm.reset_step_equal_cache()
         if self.enable_shared_overlap and device is not None:
             dev = torch.device(device)
             if dev.type == "cuda":
@@ -1434,15 +1611,84 @@ class Qwen4_5LatentMoE(nn.Module):
           6. ``topk_weights = topk_weights / (topk_weights.sum(-1, keepdim=True) + 1e-8)``
           7. ``topk_weights = topk_weights.to(routed.dtype).float()``
         """
+        needs_grad = torch.is_grad_enabled() and (
+            routed.requires_grad or self.gate.weight.requires_grad
+        )
+        run_triton = (
+            (self.use_triton_mxfp4 if use_triton is None else bool(use_triton))
+            and not needs_grad
+        )
+        M_r = int(routed.shape[0])
+        if (
+            run_triton
+            and routed.is_cuda
+            and routed.dtype == torch.bfloat16
+            and self.gate.weight.is_cuda
+            and self.gate.weight.dtype == torch.bfloat16
+            and self.gate.weight.stride(-1) == 1
+            and self.router_precision != "fp32"
+            and 1 <= M_r <= 64
+            and self.latent_dim >= 1024
+            and (self.latent_dim % 64) == 0
+            and self.num_experts <= 2048
+            and self.top_k <= 16
+            and os.environ.get("QWEN4_5_TRITON_SPLITK_ROUTER", "1") != "0"
+        ):
+            routed_2d = routed if routed.stride(-1) == 1 else routed.contiguous()
+            topk_ids = torch.empty((M_r, self.top_k), dtype=torch.int32, device=routed_2d.device)
+            topk_weights = torch.empty((M_r, self.top_k), dtype=torch.float32, device=routed_2d.device)
+            sk_n = 10 if (self.latent_dim % 640) == 0 else 8
+            bn = 32 if M_r >= 8 else 64
+            bm = 16 if M_r <= 16 else (32 if M_r <= 32 else 64)
+            nw = 2 if (M_r >= 8 and bn == 32) else 4
+            part = torch.empty(
+                (sk_n, M_r, self.num_experts), dtype=torch.float32, device=routed_2d.device
+            )
+            bias_t = self.expert_bias if self.expert_bias is not None else routed_2d
+            with _cuda_device_ctx(routed_2d.device):
+                _qwen45_router_splitk_gemm_kernel[(triton.cdiv(self.num_experts, bn), sk_n)](
+                    routed_2d,
+                    self.gate.weight,
+                    part,
+                    M_r,
+                    self.latent_dim,
+                    self.num_experts,
+                    routed_2d.stride(0),
+                    self.gate.weight.stride(0),
+                    part.stride(0),
+                    part.stride(1),
+                    SPLIT_K=sk_n,
+                    BLOCK_M=bm,
+                    BLOCK_N=bn,
+                    BLOCK_K=64,
+                    num_warps=nw,
+                    num_stages=3,
+                )
+                _qwen45_router_splitk_reduce_topk_kernel[(M_r,)](
+                    part,
+                    bias_t,
+                    topk_ids,
+                    topk_weights,
+                    self.num_experts,
+                    part.stride(0),
+                    part.stride(1),
+                    SPLIT_K=sk_n,
+                    E_PAD=self._router_e_pad,
+                    TOP_K=self.top_k,
+                    TOP_K_PAD=self._router_topk_pad,
+                    HAS_BIAS=(self.expert_bias is not None),
+                    NORMALIZE=self.normalize_topk_scores,
+                    ROUND_BF16=True,
+                    num_warps=4,
+                )
+            return topk_ids, topk_weights
+
         if self.router_precision == "fp32":
             logits = F.linear(routed.float(), self.gate.weight.float())
         else:
             # Default "fp32_logits": linear in input dtype, cast logits to FP32.
             logits = F.linear(routed, self.gate.weight)
 
-        run_triton = (
-            self.use_triton_mxfp4 if use_triton is None else bool(use_triton)
-        )
         if (
             run_triton
             and logits.is_cuda
@@ -1527,23 +1773,11 @@ class Qwen4_5LatentMoE(nn.Module):
         self, x: torch.Tensor, *, run_triton: bool
     ) -> torch.Tensor:
         if self._latent_down_gate_weight is not None:
-            dg = (
-                self._fp8_latent_down_gate(x)
-                if self._fp8_latent_down_gate is not None
-                else F.linear(x, self._latent_down_gate_weight)
-            )
+            dg = _dense_linear_or_tgv(x, self._latent_down_gate_weight, self._fp8_latent_down_gate)
             return self._run_latent_norm_mul_sigmoid(dg, run_triton=run_triton)
-        routed = (
-            self._fp8_latent_down(x)
-            if self._fp8_latent_down is not None
-            else F.linear(x, self.latent_down_proj.weight)
-        )
+        routed = _dense_linear_or_tgv(x, self.latent_down_proj.weight, self._fp8_latent_down)
         routed = self.pre_moe_latent_layernorm(routed, use_triton=run_triton)
-        l_gate = (
-            self._fp8_latent_gate(x)
-            if self._fp8_latent_gate is not None
-            else F.linear(x, self.latent_gate_proj.weight)
-        )
+        l_gate = _dense_linear_or_tgv(x, self.latent_gate_proj.weight, self._fp8_latent_gate)
         return routed * torch.sigmoid(l_gate)
 
     def _effective_sp_size(self, sp_input: bool) -> int:
@@ -1554,6 +1788,37 @@ class Qwen4_5LatentMoE(nn.Module):
         if self.tp_size > 1:
             return self.tp_size
         return self.ep_size if self.ep_size > 1 else 1
+
+    def _resolve_a2a_equal_tokens(
+        self,
+        r_disp: torch.Tensor,
+        eq_tok: Optional[bool],
+        *,
+        sp_input: bool,
+        slot: int = -1,
+    ) -> Optional[bool]:
+        if (
+            eq_tok is None
+            and sp_input
+            and self.sp_size > 1
+            and self.all_to_all_comm is not None
+            and hasattr(self.all_to_all_comm, "resolve_step_equal_tokens")
+        ):
+            sig = (
+                self.sp_size,
+                self.tp_size,
+                self.ep_size,
+                self.hidden_size,
+                self.num_experts,
+            )
+            return self.all_to_all_comm.resolve_step_equal_tokens(
+                int(r_disp.shape[0]),
+                r_disp.device,
+                caller_id=id(self),
+                step_sig=sig,
+                slot=slot,
+            )
+        return eq_tok
 
     def _prepare_sp_dispatch(
         self,
@@ -1579,10 +1844,14 @@ class Qwen4_5LatentMoE(nn.Module):
             (eff_sp == self.ep_size and self.dp_equal_tokens is not False)
             or self.dp_equal_tokens is True
         )
-        if can_pad_equal and T_sp > 0:
+        can_pad_sp_chunk = can_pad_equal or (
+            eff_sp > 1 and self.dp_equal_tokens is not False
+        )
+        if can_pad_sp_chunk and T_sp > 0:
             chunk = (T_sp + eff_sp - 1) // eff_sp
+            eq_ret = True if can_pad_equal else self.dp_equal_tokens
             if local_T == chunk:
-                return routed, topk_ids, topk_weights, True, None
+                return routed, topk_ids, topk_weights, eq_ret, None
             if local_T < chunk:
                 routed_p = torch.zeros(
                     (chunk, self.latent_dim), dtype=routed.dtype, device=routed.device
@@ -1597,7 +1866,7 @@ class Qwen4_5LatentMoE(nn.Module):
                     routed_p[:local_T].copy_(routed)
                     ids_p[:local_T].copy_(topk_ids)
                     w_p[:local_T].copy_(topk_weights)
-                return routed_p, ids_p, w_p, True, local_T
+                return routed_p, ids_p, w_p, eq_ret, local_T
         return routed, topk_ids, topk_weights, self.dp_equal_tokens, None
 
     def _fallback_sp_ep_non_a2a(
@@ -1821,6 +2090,9 @@ class Qwen4_5LatentMoE(nn.Module):
                 "flashinfer_noswap",
             )
             want_packed = want_fp8_a2a and resolved_b == "deepgemm_masked"
+            eq_tok = self._resolve_a2a_equal_tokens(
+                r_disp, eq_tok, sp_input=sp_input, slot=-1
+            )
             a2a_state = self.all_to_all_comm.dispatch(
                 r_disp,
                 ids_disp,
@@ -1941,11 +2213,7 @@ class Qwen4_5LatentMoE(nn.Module):
         if return_pre_up:
             return routed
 
-        routed = (
-            self._fp8_latent_up(routed)
-            if self._fp8_latent_up is not None
-            else F.linear(routed, self.latent_up_proj.weight)
-        )
+        routed = _dense_linear_or_tgv(routed, self.latent_up_proj.weight, self._fp8_latent_up)
         if apply_scale_gate:
             sg_logits = self._project_gate_no_cutlass80(
                 x,
@@ -2023,7 +2291,7 @@ class Qwen4_5LatentMoE(nn.Module):
         if not x.is_contiguous():
             x = x.contiguous()
         assert self._latent_down_gate_shared_gu_weight is not None
-        all_up = F.linear(x, self._latent_down_gate_shared_gu_weight)
+        all_up = _bf16_linear_tgv_or_torch(x, self._latent_down_gate_shared_gu_weight)
         dg = all_up[:, : 2 * self.latent_dim]
         sgu = all_up[:, 2 * self.latent_dim :]
         routed_norm = self._run_latent_norm_mul_sigmoid(dg, run_triton=run_triton)
@@ -2039,7 +2307,7 @@ class Qwen4_5LatentMoE(nn.Module):
         if w_fused is None:
             w_fused = self._w3x_and_gates_weight
         if w_fused is not None and self._w3x_gates_cols > 0 and w_fused.device == x.device:
-            all_up = F.linear(x, w_fused)
+            all_up = _bf16_linear_tgv_or_torch(x, w_fused)
             base_g = self._w3x_base_g
             dg = all_up[:, : 2 * self.latent_dim]
             sgu = all_up[:, 2 * self.latent_dim : base_g]
@@ -2503,6 +2771,9 @@ class Qwen4_5LatentMoE(nn.Module):
             )
             want_packed = want_fp8_a2a and resolved_b == "deepgemm_masked"
             eq_tok = sp_eq if equal_tokens is None else equal_tokens
+            eq_tok = self._resolve_a2a_equal_tokens(
+                r_disp, eq_tok, sp_input=sp_input, slot=slot
+            )
             dispatch_handle = self.all_to_all_comm.dispatch_async(
                 r_disp,
                 ids_disp,
@@ -2687,11 +2958,7 @@ class Qwen4_5LatentMoE(nn.Module):
                 torch.addmm(s2d, r2d, w_up_t, beta=1.0, alpha=1.0, out=s2d)
                 return s2d.reshape(ctx.orig_shape)
             return torch.addmm(s2d, r2d, w_up_t, beta=1.0, alpha=1.0).reshape(ctx.orig_shape)
-        routed = (
-            self._fp8_latent_up(routed)
-            if self._fp8_latent_up is not None
-            else F.linear(routed, self.latent_up_proj.weight)
-        )
+        routed = _dense_linear_or_tgv(routed, self.latent_up_proj.weight, self._fp8_latent_up)
         return self._combine_latent_and_shared(
             ctx.x, routed, shared, run_triton=ctx.run_triton, precomputed_gates=ctx.gates
         ).reshape(ctx.orig_shape)

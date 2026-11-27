@@ -3314,11 +3314,13 @@ class _DFlash2PagedFMHADispatcher(FMHAImplBase):
             ),
             {"num_warps": 4},
         )
-        total_pages = int(self._fi_kv_indptr_buf[batch_size].item())
+        # Pass pre-sized _fi_kv_indices_buf without [:total_pages] to avoid
+        # a blocking GPU->CPU .item() cudaStreamSynchronize before FlashInfer plan();
+        # FlashInfer reads strictly kv_indices[0:kv_indptr[batch_size]].
         return (
             self._fi_qo_indptr_buf[: batch_size + 1],
             self._fi_kv_indptr_buf[: batch_size + 1],
-            self._fi_kv_indices_buf[:total_pages],
+            self._fi_kv_indices_buf,
             self._fi_last_page_len_buf[:batch_size],
             head_num,
             kv_head_num,
@@ -5250,10 +5252,19 @@ class Qwen4_5DSparkModel(DSparkProposerMixin, GptModelBase):
                 **df_ar_kw,
             )
 
+        # Under sp4_tp4_ep4 (dp_size=1, dp_attn=False, tp_size == eff_ep_size),
+        # DFlash2 runs replicated tokens across ranks, so keeping EP A2A would
+        # duplicate 4x routed work. Skipping A2A selects TP+EP fast_all_reduce
+        # (1x MoE work, 0 A2A barriers, d_cos~1.000004), while dp2_tpsp2_ep4
+        # (dp_size>1 / tp!=ep) retains EP A2A.
         if (
             all_to_all_comm is None
             and eff_ep_size > 1
-            and (self.dp_attn or self.sp_size > 1 or self.dp_size > 1)
+            and (
+                self.dp_attn
+                or self.dp_size > 1
+                or (self.sp_size > 1 and self.tp_size != eff_ep_size)
+            )
             and ep_group is not None
         ):
             all_to_all_comm = resolve_qwen4_5_all_to_all(

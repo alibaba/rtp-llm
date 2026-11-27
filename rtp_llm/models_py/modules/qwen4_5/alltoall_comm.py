@@ -20,6 +20,7 @@ from __future__ import annotations
 import logging
 import os
 import threading
+from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Any, List, Optional, Tuple
 
@@ -43,7 +44,7 @@ logger = logging.getLogger(__name__)
 
 _DEFAULT_HIDDEN_DIM = 2560
 _DEFAULT_TOP_K = 10
-_DEFAULT_MAX_TOKENS_PER_RANK = 2048
+_DEFAULT_MAX_TOKENS_PER_RANK = 8192
 _SUPPORTED_A2A_BACKENDS = ("auto", "symm_mem", "nccl")
 
 _A2A_CACHE_LOCK = threading.Lock()
@@ -419,6 +420,7 @@ class Qwen4_5AllToAllComm:
         self.dtype = dtype
 
         env_mt = os.environ.get("QWEN4_5_A2A_MAX_TOKENS")
+        self._max_tokens_explicit = (max_tokens_per_rank is not None) or bool(env_mt)
         self.max_tokens_per_rank = int(
             max_tokens_per_rank
             if max_tokens_per_rank is not None
@@ -448,6 +450,8 @@ class Qwen4_5AllToAllComm:
         self._unclosed_slot_gen: list[int] = [-1, -1]
         self._m_local_dev: Optional[torch.Tensor] = None
         self._m_vec_dev: Optional[torch.Tensor] = None
+        self._eq_step_cache: dict[int, Tuple[Tuple[Any, ...], set[int], bool]] = {}
+        self._eq_scope_depth: int = 0
         self._pack_ws: Optional[torch.Tensor] = None
         self._destroyed: bool = False
 
@@ -541,27 +545,40 @@ class Qwen4_5AllToAllComm:
 
         import torch.distributed._symmetric_memory as symm_mem
 
-        hdl = None
-        buf = None
-        local_buf_ok = False
-        max_rows = self.world_size * self.max_tokens_per_rank
-        try:
-            torch.cuda.set_device(self.device)
-            buf = symm_mem.empty(
-                (max_rows, self.hidden_dim), dtype=self.dtype, device=self.device
-            )
-            hdl = symm_mem.rendezvous(buf, str(group_name))
-            local_buf_ok = hdl is not None
-        except Exception as exc:
-            logger.info("AllToAll symm_mem rendezvous failed (%s)", exc)
+        candidates = [self.max_tokens_per_rank]
+        if not self._max_tokens_explicit:
+            for c in (4096, 2048):
+                if c < self.max_tokens_per_rank:
+                    candidates.append(c)
 
-        if not _agree_bool(local_buf_ok, self.group, self.device):
-            return False
+        elem_bytes = 2 if self.dtype in (torch.bfloat16, torch.float16) else 4
+        for mt in candidates:
+            hdl = None
+            buf = None
+            local_buf_ok = False
+            max_rows = self.world_size * mt
+            needed_bytes = max_rows * self.hidden_dim * elem_bytes
+            try:
+                torch.cuda.set_device(self.device)
+                free_bytes, _ = torch.cuda.mem_get_info(self.device)
+                if self._max_tokens_explicit or mt <= 2048 or free_bytes >= needed_bytes * 4 + (512 * 1024 * 1024):
+                    buf = symm_mem.empty(
+                        (max_rows, self.hidden_dim), dtype=self.dtype, device=self.device
+                    )
+                    hdl = symm_mem.rendezvous(buf, str(group_name))
+                    local_buf_ok = hdl is not None
+            except Exception as exc:
+                logger.info("AllToAll symm_mem rendezvous failed for mt=%d (%s)", mt, exc)
+                buf = None
+                hdl = None
 
-        self._symm_buf = buf
-        self._symm_hdl = hdl
-        self._symm_max_rows = max_rows
-        return True
+            if _agree_bool(local_buf_ok, self.group, self.device):
+                self.max_tokens_per_rank = mt
+                self._symm_buf = buf
+                self._symm_hdl = hdl
+                self._symm_max_rows = max_rows
+                return True
+        return False
 
     def can_symm_p2p_combine(
         self,
@@ -596,6 +613,68 @@ class Qwen4_5AllToAllComm:
         buf = torch.empty((alloc,), dtype=torch.uint8, device=device)
         self._pack_ws = buf
         return buf[:nbytes]
+
+    @staticmethod
+    def _is_cg_capturing_or_warmup() -> bool:
+        return (
+            torch.cuda.is_current_stream_capturing()
+            or os.environ.get("RTP_LLM_CUDA_GRAPH_WARMUP_FORWARD") == "1"
+        )
+
+    def _probe_equal_tokens(self, m_local: int, device: torch.device) -> bool:
+        if self._is_cg_capturing_or_warmup():
+            return True
+        m_dev = torch.device("cpu") if self._is_gloo else device
+        if self._m_local_dev is None or self._m_local_dev.device != m_dev:
+            self._m_local_dev = torch.empty((1,), dtype=torch.int64, device=m_dev)
+            self._m_vec_dev = torch.empty((self.world_size,), dtype=torch.int64, device=m_dev)
+        assert self._m_vec_dev is not None
+        self._m_local_dev.fill_(m_local)
+        dist.all_gather_into_tensor(self._m_vec_dev, self._m_local_dev, group=self.group)
+        counts_cpu = self._m_vec_dev.tolist()
+        return all(c == counts_cpu[0] for c in counts_cpu) and counts_cpu[0] > 0
+
+    def reset_step_equal_cache(self) -> None:
+        """Invalidate cached per-step equal_tokens decisions (e.g. when a new model is built)."""
+        self._eq_step_cache.clear()
+
+    @contextmanager
+    def step_equal_tokens_scope(self):
+        """Enable per-step equal_tokens layer caching strictly inside an explicit forward scope."""
+        prev_depth = self._eq_scope_depth
+        if prev_depth == 0:
+            self._eq_step_cache.clear()
+        self._eq_scope_depth = prev_depth + 1
+        try:
+            yield
+        finally:
+            self._eq_scope_depth = prev_depth
+            if prev_depth == 0:
+                self._eq_step_cache.clear()
+
+    def resolve_step_equal_tokens(
+        self,
+        m_local: int,
+        device: torch.device,
+        *,
+        caller_id: int,
+        step_sig: Tuple[Any, ...],
+        slot: int = -1,
+    ) -> Optional[bool]:
+        """Probe equal_tokens once inside step_equal_tokens_scope(); probe live outside scope."""
+        if self.world_size <= 1 or self.group is None:
+            return True
+        if self._is_cg_capturing_or_warmup():
+            return True
+        if self._eq_scope_depth <= 0 or os.environ.get("QWEN4_5_A2A_STEP_CACHE", "1") == "0":
+            return self._probe_equal_tokens(m_local, device)
+        entry = self._eq_step_cache.get(slot)
+        if entry is not None and entry[0] == step_sig and caller_id not in entry[1]:
+            entry[1].add(caller_id)
+            return entry[2]
+        eq_val = self._probe_equal_tokens(m_local, device)
+        self._eq_step_cache[slot] = (step_sig, {caller_id}, eq_val)
+        return eq_val
 
     def dispatch(
         self,
@@ -648,22 +727,7 @@ class Qwen4_5AllToAllComm:
         )
 
         if equal_tokens is None:
-            capturing = (
-                torch.cuda.is_current_stream_capturing()
-                or os.environ.get("RTP_LLM_CUDA_GRAPH_WARMUP_FORWARD") == "1"
-            )
-            if capturing:
-                equal_tokens = True
-            else:
-                m_dev = torch.device("cpu") if self._is_gloo else x_c.device
-                if self._m_local_dev is None or self._m_local_dev.device != m_dev:
-                    self._m_local_dev = torch.empty((1,), dtype=torch.int64, device=m_dev)
-                    self._m_vec_dev = torch.empty((self.world_size,), dtype=torch.int64, device=m_dev)
-                assert self._m_vec_dev is not None
-                self._m_local_dev.fill_(M_local)
-                dist.all_gather_into_tensor(self._m_vec_dev, self._m_local_dev, group=self.group)
-                counts_cpu = self._m_vec_dev.tolist()
-                equal_tokens = all(c == counts_cpu[0] for c in counts_cpu) and counts_cpu[0] > 0
+            equal_tokens = self._probe_equal_tokens(M_local, x_c.device)
 
         if equal_tokens:
             return self._dispatch_dense_equal(
@@ -1504,6 +1568,8 @@ class Qwen4_5AllToAllComm:
         self._tbo_events = None
         self._m_local_dev = None
         self._m_vec_dev = None
+        self._eq_step_cache.clear()
+        self._eq_scope_depth = 0
         self._pack_ws = None
         self.active_backend = "nccl" if self.world_size > 1 else "noop"
 

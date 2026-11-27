@@ -24,6 +24,7 @@ import copy
 import logging
 import math
 import os
+import sys
 import threading
 from collections import OrderedDict
 from collections.abc import Mapping
@@ -388,7 +389,7 @@ def _pin_stage_copy_to_device(cpu_flat: torch.Tensor, device: torch.device) -> t
         rings = {}
         _PINNED_DMA_LOCAL.rings = rings
     entry = rings.get(dev_idx)
-    n_slots = 8
+    n_slots = 16
     if entry is None:
         slots: List[Tuple[Optional[torch.Tensor], Optional[torch.cuda.Event]]] = [(None, None) for _ in range(n_slots)]
         idx = 0
@@ -1627,6 +1628,152 @@ if _HAS_TRITON:
         tl.store(base_ptr + phys.to(tl.int64) * base_sb + offs, val, mask=mask)
 
     @triton.jit
+    def _prefill_sp_gather_opaque_batched_triton(
+        tile_e_ptr,
+        tile_slot_ptr,
+        tile_blk_ptr,
+        tile_off_ptr,
+        ptrs_base_ptr,
+        ptrs_sphys_ptr,
+        base_sb_ptr,
+        sphys_s0_ptr,
+        num_blocks_ptr,
+        n_elems_ptr,
+        send_ptr,
+        BLOCK_SIZE: tl.constexpr,
+    ):
+        """Batched Triton gather of local SP prefill opaque snapshots into packed send buffer."""
+        tile_idx = tl.program_id(0).to(tl.int64)
+        e = tl.load(tile_e_ptr + tile_idx).to(tl.int64)
+        slot = tl.load(tile_slot_ptr + tile_idx).to(tl.int64)
+        blk = tl.load(tile_blk_ptr + tile_idx).to(tl.int64)
+        out_off = tl.load(tile_off_ptr + tile_idx).to(tl.int64)
+        n_elems = tl.load(n_elems_ptr + e).to(tl.int32)
+        offs = blk * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+        mask = offs < n_elems
+        sphys_ptr = tl.load(ptrs_sphys_ptr + e).to(tl.pointer_type(tl.int32))
+        sphys_s0 = tl.load(sphys_s0_ptr + e).to(tl.int64)
+        phys = tl.load(sphys_ptr + slot * sphys_s0).to(tl.int32)
+        num_blocks = tl.load(num_blocks_ptr + e).to(tl.int32)
+        valid = (phys > 0) & (phys < num_blocks)
+        safe_phys = tl.where(valid, phys, 0).to(tl.int64)
+        base_ptr = tl.load(ptrs_base_ptr + e).to(tl.pointer_type(tl.int32))
+        base_sb = tl.load(base_sb_ptr + e).to(tl.int64)
+        val = tl.load(base_ptr + safe_phys * base_sb + offs, mask=(mask & valid), other=0)
+        tl.store(send_ptr + out_off + offs, val, mask=mask)
+
+    @triton.jit
+    def _prefill_sp_scatter_opaque_batched_triton(
+        tile_e_ptr,
+        tile_slot_ptr,
+        tile_blk_ptr,
+        tile_rank_ptr,
+        tile_off_ptr,
+        ptrs_base_ptr,
+        ptrs_sphys_ptr,
+        base_sb_ptr,
+        sphys_s0_ptr,
+        num_blocks_ptr,
+        n_elems_ptr,
+        all_ptr,
+        all_s0: tl.int64,
+        BLOCK_SIZE: tl.constexpr,
+    ):
+        """Batched Triton scatter of remote SP prefill opaque snapshots into local persistent pools."""
+        tile_idx = tl.program_id(0).to(tl.int64)
+        e = tl.load(tile_e_ptr + tile_idx).to(tl.int64)
+        slot = tl.load(tile_slot_ptr + tile_idx).to(tl.int64)
+        sphys_ptr = tl.load(ptrs_sphys_ptr + e).to(tl.pointer_type(tl.int32))
+        sphys_s0 = tl.load(sphys_s0_ptr + e).to(tl.int64)
+        phys = tl.load(sphys_ptr + slot * sphys_s0).to(tl.int32)
+        num_blocks = tl.load(num_blocks_ptr + e).to(tl.int32)
+        if phys <= 0 or phys >= num_blocks:
+            return
+        blk = tl.load(tile_blk_ptr + tile_idx).to(tl.int64)
+        r_i = tl.load(tile_rank_ptr + tile_idx).to(tl.int64)
+        in_off = tl.load(tile_off_ptr + tile_idx).to(tl.int64)
+        n_elems = tl.load(n_elems_ptr + e).to(tl.int32)
+        offs = blk * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+        mask = offs < n_elems
+        base_ptr = tl.load(ptrs_base_ptr + e).to(tl.pointer_type(tl.int32))
+        base_sb = tl.load(base_sb_ptr + e).to(tl.int64)
+        val = tl.load(all_ptr + r_i * all_s0 + in_off + offs, mask=mask)
+        tl.store(base_ptr + phys.to(tl.int64) * base_sb + offs, val, mask=mask)
+
+    @triton.jit
+    def _tx_sp_batch_pack_triton(
+        tile_e_ptr,
+        tile_blk_ptr,
+        ptrs_commit_ptr,
+        commit_sb_ptr,
+        n_elems_ptr,
+        unit_off_ptr,
+        send_ptr,
+        lo_m: tl.int64,
+        cnt_m: tl.int64,
+        live_bs: tl.int64,
+        BLOCK_SIZE: tl.constexpr,
+    ):
+        """Pack local [lo_m, hi_m) commit & undo rows across all SP records into contiguous AllGather buffer."""
+        tile_idx = tl.program_id(0).to(tl.int64)
+        idx = tl.program_id(1).to(tl.int64)
+        half = tl.program_id(2).to(tl.int64)
+        e = tl.load(tile_e_ptr + tile_idx).to(tl.int64)
+        blk = tl.load(tile_blk_ptr + tile_idx).to(tl.int64)
+        n_elems = tl.load(n_elems_ptr + e).to(tl.int32)
+        offs = blk * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+        mask = offs < n_elems
+        c_ptr = tl.load(ptrs_commit_ptr + e).to(tl.pointer_type(tl.int32))
+        c_sb = tl.load(commit_sb_ptr + e).to(tl.int64)
+        u_off = tl.load(unit_off_ptr + e).to(tl.int64)
+        row_c = half * live_bs + lo_m + idx
+        out_off = u_off * cnt_m + (half * cnt_m + idx) * n_elems.to(tl.int64) + offs
+        val = tl.load(c_ptr + row_c * c_sb + offs, mask=mask)
+        tl.store(send_ptr + out_off, val, mask=mask)
+
+    @triton.jit
+    def _tx_sp_batch_unpack_triton(
+        tile_e_ptr,
+        tile_blk_ptr,
+        ptrs_commit_ptr,
+        commit_sb_ptr,
+        n_elems_ptr,
+        unit_off_ptr,
+        r_lo_ptr,
+        r_hi_ptr,
+        all_ptr,
+        all_s0: tl.int64,
+        live_bs: tl.int64,
+        eff_rk: tl.int64,
+        BLOCK_SIZE: tl.constexpr,
+    ):
+        """Unpack remote SP rank commit & undo rows back into stage commit_u8 buffers."""
+        tile_idx = tl.program_id(0).to(tl.int64)
+        idx = tl.program_id(1).to(tl.int64)
+        p2 = tl.program_id(2).to(tl.int64)
+        r_i = p2 // 2
+        if r_i == eff_rk:
+            return
+        lo_r = tl.load(r_lo_ptr + r_i).to(tl.int64)
+        hi_r = tl.load(r_hi_ptr + r_i).to(tl.int64)
+        cnt_r = hi_r - lo_r
+        if idx >= cnt_r:
+            return
+        half = p2 % 2
+        e = tl.load(tile_e_ptr + tile_idx).to(tl.int64)
+        blk = tl.load(tile_blk_ptr + tile_idx).to(tl.int64)
+        n_elems = tl.load(n_elems_ptr + e).to(tl.int32)
+        offs = blk * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+        mask = offs < n_elems
+        c_ptr = tl.load(ptrs_commit_ptr + e).to(tl.pointer_type(tl.int32))
+        c_sb = tl.load(commit_sb_ptr + e).to(tl.int64)
+        u_off = tl.load(unit_off_ptr + e).to(tl.int64)
+        row_c = half * live_bs + lo_r + idx
+        in_off = u_off * cnt_r + (half * cnt_r + idx) * n_elems.to(tl.int64) + offs
+        val = tl.load(all_ptr + r_i * all_s0 + in_off, mask=mask)
+        tl.store(c_ptr + row_c * c_sb + offs, val, mask=mask)
+
+    @triton.jit
     def _prepare_gdn_ssm_lazy_commit_batched_triton(
         sample_kv_ptr,
         ptrs_bt_ptr,
@@ -2464,6 +2611,10 @@ class Qwen4_5PrefillHandle:
         plan: "_RaggedPrefillPlan",
         flat_pos: Optional[torch.Tensor],
         is_cuda_graph: bool = False,
+        is_auto_cg_dynamic_pfx: bool = False,
+        static_vis_q: Optional[torch.Tensor] = None,
+        cg_max_ctx_tokens: Optional[int] = None,
+        sp_sync_all_blocks_override: Optional[bool] = None,
     ) -> None:
         self.arch_cfg = arch_cfg
         self.full_inputs = full_attn_inputs
@@ -2472,13 +2623,32 @@ class Qwen4_5PrefillHandle:
         self.plan = plan
         self.flat_pos = flat_pos
         self.is_cuda_graph = bool(is_cuda_graph)
+        self.is_auto_cg_dynamic_pfx = bool(is_auto_cg_dynamic_pfx)
+        self.static_vis_q = static_vis_q
+        self.cg_max_ctx_tokens = cg_max_ctx_tokens
+        self.sp_sync_all_blocks_override = sp_sync_all_blocks_override
         self.init_bufs: Dict[Any, torch.Tensor] = {}
+        self.snap_phys_bufs: Dict[Tuple[int, int, int, int, int], torch.Tensor] = {}
+        self.sp_snap_phys_bufs: Dict[Tuple[int, int, int, int, int], torch.Tensor] = {}
 
     def support_cuda_graph(self) -> bool:
         return True
 
     def prepare_cuda_graph(self, attn_inputs_or_by_tag: Any) -> None:
         self.full_inputs = _select_group_for_tag(attn_inputs_or_by_tag, FULL_ATTN_KV_TAG)
+
+
+def _model_a2a_step_scope(model: Any) -> Any:
+    """Return explicit per-step equal_tokens cache scope when the model carries A2A comm."""
+    a2a = getattr(model, "all_to_all_comm", None)
+    if a2a is None:
+        for lyr in getattr(model, "layers", ()):
+            mlp = getattr(lyr, "mlp", None)
+            a2a = getattr(mlp, "all_to_all_comm", None) if mlp is not None else None
+            if a2a is not None:
+                break
+    scope_fn = getattr(a2a, "step_equal_tokens_scope", None) if a2a is not None else None
+    return scope_fn() if callable(scope_fn) else nullcontext()
 
 
 def _run_runtime_mlp(
@@ -2527,7 +2697,12 @@ class _RaggedSPSubPlan:
     tile_req_32: torch.Tensor
     tile_t0_32: torch.Tensor
     sub_req_idx_dev: torch.Tensor
+    sub_reqs_contiguous: bool = False
+    halo_bounds: List[Tuple[int, int]] = field(default_factory=list)
     snap_cache: Dict[int, Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, bool, bool]] = field(
+        default_factory=dict
+    )
+    snap_slot_cache: Dict[int, Tuple[Optional[Tuple[int, int]], torch.Tensor]] = field(
         default_factory=dict
     )
 
@@ -2579,6 +2754,11 @@ class _RaggedPrefillPlan:
     sp_sync_cache: Dict[Tuple[int, bool, int], Tuple[List[Optional[torch.Tensor]], List[int]]] = field(
         default_factory=dict
     )
+    sp_sync_host_cache: Dict[Tuple[int, bool, int], List[List[int]]] = field(
+        default_factory=dict
+    )
+    snap_rel_pages_cache: Dict[int, torch.Tensor] = field(default_factory=dict)
+    sp_prefill_sync_meta_cache: Dict[Any, Any] = field(default_factory=dict)
 
 
 class Qwen4_5PagedStateBridge:
@@ -2599,6 +2779,7 @@ class Qwen4_5PagedStateBridge:
         dp_group: Any = None,
         dp_attn: bool = False,
         fast_all_reduce: Any = None,
+        sp_fast_comm: Any = None,
     ) -> None:
         self.cfg = arch_cfg
         self.tp_size = max(1, int(tp_size))
@@ -2613,13 +2794,21 @@ class Qwen4_5PagedStateBridge:
         self.dp_attn = bool(dp_attn)
         self.fast_all_reduce = fast_all_reduce
         self.sp_fast_comm = (
-            fast_all_reduce
+            sp_fast_comm
             if (
-                fast_all_reduce is not None
+                sp_fast_comm is not None
                 and self.sp_group is not None
-                and getattr(fast_all_reduce, "group", None) is self.sp_group
+                and getattr(sp_fast_comm, "group", None) is self.sp_group
             )
-            else None
+            else (
+                fast_all_reduce
+                if (
+                    fast_all_reduce is not None
+                    and self.sp_group is not None
+                    and getattr(fast_all_reduce, "group", None) is self.sp_group
+                )
+                else None
+            )
         )
         self._ragged_plan_cache: "OrderedDict[Any, _RaggedPrefillPlan]" = OrderedDict()
         self._prefill_init_scratch: Dict[Any, torch.Tensor] = {}
@@ -2658,18 +2847,19 @@ class Qwen4_5PagedStateBridge:
 
     def _cp_indexer_kwargs(self) -> Dict[str, Any]:
         if (
-            self.dp_attn
-            or not torch.distributed.is_available()
+            not torch.distributed.is_available()
             or not torch.distributed.is_initialized()
         ):
             return {}
-        if self.sp_size > 1 and self.sp_group is not None:
+        if self.sp_size > 1 and self.sp_group is not None and (not self.dp_attn or self.tp_size >= self.sp_size):
             return {
                 "sp_size": self.sp_size,
                 "sp_rank": self.sp_rank,
                 "sp_group": self.sp_group,
                 "fast_all_reduce": self.fast_all_reduce,
             }
+        if self.dp_attn:
+            return {}
         if self.tp_size > 1 and self.tp_group is not None:
             return {
                 "sp_size": self.tp_size,
@@ -3024,9 +3214,9 @@ class Qwen4_5PagedStateBridge:
 
     def _resolve_sp_dist(self) -> Tuple[int, int, Any, Any]:
         if (
-            self.dp_attn
-            or self.sp_size <= 1
+            self.sp_size <= 1
             or self.sp_group is None
+            or (self.dp_attn and self.tp_size < self.sp_size)
             or not torch.distributed.is_available()
             or not torch.distributed.is_initialized()
         ):
@@ -3162,18 +3352,19 @@ class Qwen4_5PagedStateBridge:
         eff_sp, _, _, _ = self._resolve_sp_dist()
         use_sp = bool(sp_active) if sp_active is not None else (eff_sp > 1)
         empty_in = torch.empty((0, self.cfg.hidden_size), dtype=dtype, device=device)
-        for layer in model.layers:
-            mlp = getattr(layer, "mlp", None)
-            if mlp is not None and (
-                int(getattr(mlp, "ep_size", 1) or 1) > 1
-                or getattr(mlp, "all_to_all_comm", None) is not None
-            ):
-                _ = _run_runtime_mlp(
-                    layer,
-                    empty_in,
-                    sp_input=use_sp,
-                    sp_total_tokens=(0 if use_sp else None),
-                )
+        with _model_a2a_step_scope(model):
+            for layer in model.layers:
+                mlp = getattr(layer, "mlp", None)
+                if mlp is not None and (
+                    int(getattr(mlp, "ep_size", 1) or 1) > 1
+                    or getattr(mlp, "all_to_all_comm", None) is not None
+                ):
+                    _ = _run_runtime_mlp(
+                        layer,
+                        empty_in,
+                        sp_input=use_sp,
+                        sp_total_tokens=(0 if use_sp else None),
+                    )
 
     def _build_ragged_prefill_plan(
         self,
@@ -3395,6 +3586,23 @@ class Qwen4_5PagedStateBridge:
         plan.snap_cache[tpb] = res
         return res
 
+    @classmethod
+    def _get_snap_rel_pages(
+        cls, plan: _RaggedPrefillPlan, tpb: int, device: torch.device
+    ) -> torch.Tensor:
+        cached = plan.snap_rel_pages_cache.get(tpb)
+        if cached is not None:
+            return cached
+        _ = cls._get_snap_schedule(plan, tpb, device)
+        _, s_reqs_h, s_pages_h, _, _, _, _ = plan.snap_host_cache[tpb]
+        if tpb > 0:
+            rel_h = [pg - (plan.active_pfx[rq] // tpb) for pg, rq in zip(s_pages_h, s_reqs_h)]
+        else:
+            rel_h = list(s_pages_h)
+        rel_dev = _copy_i32_list_to_dev(rel_h, device).to(torch.int64)
+        plan.snap_rel_pages_cache[tpb] = rel_dev
+        return rel_dev
+
     @staticmethod
     def _build_ragged_sp_subplan(
         plan: _RaggedPrefillPlan,
@@ -3469,6 +3677,15 @@ class Qwen4_5PagedStateBridge:
             spans.append((a, a + len(lst)))
         packed_dev = _copy_i32_list_to_dev(flat_host, device)
         cu_d, treq_d, tr16_d, tt16_d, tr32_d, tt32_d, sub_req_d = [packed_dev[a:b] for (a, b) in spans]
+        sub_req_contig = (
+            bool(sub_reqs)
+            and sub_reqs == list(range(sub_reqs[0], sub_reqs[0] + len(sub_reqs)))
+        )
+        halo_bounds = (
+            [sp_slice_bounds(plan.total_tokens, sp_size, r_i) for r_i in range(sp_size)]
+            if has_straddle
+            else []
+        )
         sub_plan = _RaggedSPSubPlan(
             sp_size=sp_size,
             sp_rank=sp_rank,
@@ -3490,6 +3707,8 @@ class Qwen4_5PagedStateBridge:
             tile_req_32=tr32_d,
             tile_t0_32=tt32_d,
             sub_req_idx_dev=sub_req_d.to(torch.int64),
+            sub_reqs_contiguous=sub_req_contig,
+            halo_bounds=halo_bounds,
         )
         plan.sp_subplan_cache[key] = sub_plan
         return sub_plan
@@ -3515,8 +3734,8 @@ class Qwen4_5PagedStateBridge:
         aligned_32 = True
         req_to_sub = {ri: sb for sb, ri in enumerate(sub_plan.sub_reqs)}
         cu_g = plan.cu_seqlens_host
-        sub_by_req: Dict[int, List[Tuple[int, int, int, int]]] = {ri: [] for ri in sub_plan.sub_reqs}
-        for g_tok, g_req, g_pg in zip(s_toks_h, s_reqs_h, s_pages_h):
+        sub_by_req: Dict[int, List[Tuple[int, int, int, int, int]]] = {ri: [] for ri in sub_plan.sub_reqs}
+        for g_slot_i, (g_tok, g_req, g_pg) in enumerate(zip(s_toks_h, s_reqs_h, s_pages_h)):
             if sub_plan.s0 <= g_tok < sub_plan.s1 and g_req in req_to_sub:
                 rs = cu_g[g_req]
                 loc_off = max(sub_plan.s0, rs) - rs
@@ -3528,19 +3747,21 @@ class Qwen4_5PagedStateBridge:
                         aligned_16 = False
                     if (loc_end & 31) != 0:
                         aligned_32 = False
-                sub_by_req[g_req].append((g_tok - sub_plan.s0, g_req, g_pg, loc_end))
+                sub_by_req[g_req].append((g_tok - sub_plan.s0, g_req, g_pg, loc_end, g_slot_i))
         g_reqs_list: List[int] = []
+        sub_slot_h: List[int] = []
         for sub_bi, g_req in enumerate(sub_plan.sub_reqs):
-            for (l_tok, _, g_pg, l_end) in sub_by_req[g_req]:
+            for (l_tok, _, g_pg, l_end, g_slot_i) in sub_by_req[g_req]:
                 sub_toks.append(l_tok)
                 sub_reqs.append(sub_bi)
                 g_reqs_list.append(g_req)
                 sub_pages.append(g_pg)
                 sub_ends.append(l_end)
+                sub_slot_h.append(g_slot_i)
             sub_rss.append(len(sub_toks))
         flat_h: List[int] = []
         spans: List[Tuple[int, int]] = []
-        for lst in (sub_toks, sub_reqs, g_reqs_list, sub_pages, sub_ends, sub_rss):
+        for lst in (sub_toks, sub_reqs, g_reqs_list, sub_pages, sub_ends, sub_rss, sub_slot_h):
             a = len(flat_h)
             flat_h.extend(lst)
             pad = (-len(lst)) & 3
@@ -3548,7 +3769,17 @@ class Qwen4_5PagedStateBridge:
                 flat_h.extend([0] * pad)
             spans.append((a, a + len(lst)))
         p_dev = _copy_i32_list_to_dev(flat_h, device)
-        st_d, sr_d, gr_d, pg_d, se_d, rss_d = [p_dev[a:b] for (a, b) in spans]
+        st_d, sr_d, gr_d, pg_d, se_d, rss_d, slot_d = [p_dev[a:b] for (a, b) in spans]
+        slice_ab: Optional[Tuple[int, int]] = (
+            (0, 0)
+            if not sub_slot_h
+            else (
+                (sub_slot_h[0], sub_slot_h[0] + len(sub_slot_h))
+                if sub_slot_h == list(range(sub_slot_h[0], sub_slot_h[0] + len(sub_slot_h)))
+                else None
+            )
+        )
+        sub_plan.snap_slot_cache[tpb] = (slice_ab, slot_d.to(torch.int64))
         res = (
             st_d,
             sr_d,
@@ -3569,10 +3800,14 @@ class Qwen4_5PagedStateBridge:
         tpb: int,
         bt_act: torch.Tensor,
         device: torch.device,
+        *,
+        s_phys_override: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, bool, bool]:
         st_d, sr_d, gr_i64, pg_i64, se_d, rss_d, aligned_16, aligned_32 = self._get_sp_snap_base(
             plan, sub_plan, tpb, device
         )
+        if s_phys_override is not None:
+            return st_d, sr_d, se_d, rss_d, s_phys_override, aligned_16, aligned_32
         max_cols = int(bt_act.shape[1]) if bt_act.ndim >= 2 else 0
         if max_cols <= 0 or int(st_d.numel()) == 0:
             s_phys = torch.zeros_like(st_d)
@@ -3595,14 +3830,40 @@ class Qwen4_5PagedStateBridge:
         sp_comm: Any,
         *,
         clamp_val: Optional[float] = None,
+        s_phys_override: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Run SP-sharded ShortConv prefill with request-bounded 3-tok halo & snapshot writes."""
         halo_w = max(0, int(sconv.kernel_size) - 1)
         ch = int(x_loc.shape[-1])
         eff_init: Optional[torch.Tensor] = None
-        if init_full is not None and sub_plan.sub_bsz > 0:
-            eff_init = init_full.index_select(0, sub_plan.sub_req_idx_dev)
-            if sub_plan.loc_start > 0:
+        full_from_owner = -1
+        bounds = sub_plan.halo_bounds
+        if (
+            sub_plan.has_straddle
+            and halo_w > 0
+            and sub_plan.loc_start >= halo_w
+            and sub_plan.sub_bsz > 0
+            and (sub_plan.s0 - sub_plan.req0_start) >= halo_w
+            and bounds
+        ):
+            for owner_rk, (b0, b1) in enumerate(bounds):
+                if b0 <= (sub_plan.s0 - halo_w) and b1 == sub_plan.s0:
+                    full_from_owner = owner_rk
+                    break
+        need_init_base = not (full_from_owner >= 0 and sub_plan.sub_bsz == 1)
+        if need_init_base and init_full is not None and sub_plan.sub_bsz > 0:
+            if sub_plan.sub_reqs_contiguous:
+                r0 = sub_plan.sub_reqs[0]
+                r1 = r0 + sub_plan.sub_bsz
+                sub_view = init_full if (r0 == 0 and r1 == int(init_full.shape[0])) else init_full[r0:r1]
+                eff_init = sub_view.clone() if (sub_plan.loc_start > 0 and full_from_owner < 0) else (
+                    torch.empty_like(sub_view) if (sub_plan.loc_start > 0 and sub_plan.sub_bsz == 1) else (
+                        sub_view.clone() if sub_plan.loc_start > 0 else sub_view
+                    )
+                )
+            else:
+                eff_init = init_full.index_select(0, sub_plan.sub_req_idx_dev)
+            if sub_plan.loc_start > 0 and full_from_owner < 0:
                 if sub_plan.loc_start >= halo_w:
                     eff_init[0].zero_()
                 elif halo_w > 0:
@@ -3610,12 +3871,13 @@ class Qwen4_5PagedStateBridge:
                     eff_init[0, :, :keep] = init_full[sub_plan.sub_reqs[0], :, sub_plan.loc_start :]
                     eff_init[0, :, keep:].zero_()
         if sub_plan.has_straddle and halo_w > 0:
-            from rtp_llm.models_py.modules.qwen4_5.fast_comm import sp_slice_bounds
-
-            tail_x = torch.zeros((halo_w, ch), dtype=x_loc.dtype, device=x_loc.device)
-            take = min(sub_plan.n_loc, halo_w)
-            if take > 0:
-                tail_x[halo_w - take :].copy_(x_loc[sub_plan.n_loc - take :])
+            if sub_plan.n_loc >= halo_w and x_loc.is_contiguous():
+                tail_x = x_loc[sub_plan.n_loc - halo_w :]
+            else:
+                tail_x = torch.zeros((halo_w, ch), dtype=x_loc.dtype, device=x_loc.device)
+                take = min(sub_plan.n_loc, halo_w)
+                if take > 0:
+                    tail_x[halo_w - take :].copy_(x_loc[sub_plan.n_loc - take :])
             gathered = self._sp_all_gather_dim0(
                 tail_x,
                 total_tokens=sp_size * halo_w,
@@ -3625,21 +3887,32 @@ class Qwen4_5PagedStateBridge:
                 sp_comm=sp_comm,
             ).view(sp_size, halo_w, ch)
             if sub_plan.loc_start > 0 and sub_plan.sub_bsz > 0:
-                if eff_init is None:
-                    eff_init = torch.zeros((sub_plan.sub_bsz, ch, halo_w), dtype=x_loc.dtype, device=x_loc.device)
-                bounds = [sp_slice_bounds(plan.total_tokens, sp_size, r) for r in range(sp_size)]
-                for j in range(halo_w):
-                    tg = sub_plan.s0 - halo_w + j
-                    if tg >= sub_plan.req0_start:
-                        for owner_rk, (b0, b1) in enumerate(bounds):
-                            if b0 <= tg < b1:
-                                eff_init[0, :, j].copy_(gathered[owner_rk, halo_w - (b1 - tg)])
-                                break
+                if full_from_owner >= 0 and sub_plan.sub_bsz == 1:
+                    eff_init = gathered[full_from_owner : full_from_owner + 1].transpose(1, 2)
+                elif full_from_owner >= 0:
+                    if eff_init is None:
+                        eff_init = torch.zeros((sub_plan.sub_bsz, ch, halo_w), dtype=x_loc.dtype, device=x_loc.device)
+                    eff_init[0].copy_(gathered[full_from_owner].transpose(0, 1))
+                else:
+                    if eff_init is None:
+                        eff_init = torch.zeros((sub_plan.sub_bsz, ch, halo_w), dtype=x_loc.dtype, device=x_loc.device)
+                    for j in range(halo_w):
+                        tg = sub_plan.s0 - halo_w + j
+                        if tg >= sub_plan.req0_start:
+                            for owner_rk, (b0, b1) in enumerate(bounds):
+                                if b0 <= tg < b1:
+                                    eff_init[0, :, j].copy_(gathered[owner_rk, halo_w - (b1 - tg)])
+                                    break
         if sub_plan.n_loc == 0:
             return x_loc
         if cache is not None and bt_act is not None:
             s_tok, s_req, s_end, r_sstart, s_phys, _, a32 = self._get_sp_snap_schedule(
-                plan, sub_plan, int(cache.seq_size_per_block), bt_act, x_loc.device
+                plan,
+                sub_plan,
+                int(cache.seq_size_per_block),
+                bt_act,
+                x_loc.device,
+                s_phys_override=s_phys_override,
             )
             pool_bf16, _ = _view_opaque_pool_2d(cache.kv_cache_base, x_loc.dtype)
             return causal_dwconv1d_ragged_prefill_with_snapshots_triton(
@@ -3777,16 +4050,345 @@ class Qwen4_5PagedStateBridge:
                 if r0 <= gtok < r1:
                     per_r_slots[r_i].append(idx_s)
                     break
-        per_r_dev: List[Optional[torch.Tensor]] = []
+        plan.sp_sync_host_cache[ck] = per_r_slots
+        flat_slots: List[int] = []
+        slot_spans: List[Optional[Tuple[int, int]]] = []
         counts: List[int] = []
         for slots in per_r_slots:
             counts.append(len(slots))
-            per_r_dev.append(
-                _copy_i32_list_to_dev(slots, device).to(torch.int64) if slots else None
-            )
+            if slots:
+                a = len(flat_slots)
+                flat_slots.extend(slots)
+                pad = (-len(slots)) & 3
+                if pad:
+                    flat_slots.extend([0] * pad)
+                slot_spans.append((a, a + len(slots)))
+            else:
+                slot_spans.append(None)
+        packed_slots = _copy_i32_list_to_dev(flat_slots, device).to(torch.int64) if flat_slots else None
+        per_r_dev: List[Optional[torch.Tensor]] = [
+            (packed_slots[sp[0] : sp[1]] if (sp is not None and packed_slots is not None) else None)
+            for sp in slot_spans
+        ]
         res = (per_r_dev, counts)
         plan.sp_sync_cache[ck] = res
         return res
+
+    def _get_or_build_prefill_sp_sync_meta(
+        self,
+        specs: Sequence[Tuple[Any, int, torch.Tensor, int, torch.Tensor]],
+        plan: _RaggedPrefillPlan,
+        sync_all_blocks: bool,
+        sp_size: int,
+        sp_rank: int,
+        device: torch.device,
+    ) -> Optional[Dict[str, Any]]:
+        if not specs or not _HAS_TRITON or device.type != "cuda":
+            return None
+        ck = (
+            int(sp_size),
+            int(sp_rank),
+            bool(sync_all_blocks),
+            tuple(
+                (p.data_ptr(), int(p.shape[0]), int(tpb_c), int(nb))
+                for p, tpb_c, _, nb, _ in specs
+            ),
+        )
+        hit = plan.sp_prefill_sync_meta_cache.get(ck)
+        if hit is None:
+            if torch.cuda.is_current_stream_capturing():
+                return None
+            active_entries: List[Tuple[int, torch.Tensor, int, int, List[List[int]], int]] = []
+            for e_raw_idx, (pool_raw, tpb_c, _, need_bytes, _) in enumerate(specs):
+                self._get_sp_sync_slots(plan, tpb_c, sync_all_blocks, sp_size, device)
+                s_ck = (int(tpb_c), bool(sync_all_blocks), int(sp_size))
+                per_r_slots_h = plan.sp_sync_host_cache[s_ck]
+                if not any(per_r_slots_h):
+                    continue
+                num_blocks = int(pool_raw.shape[0])
+                if num_blocks <= 0 or (need_bytes % 4) != 0:
+                    return None
+                base_i32 = self._opaque_2d_aligned_view(pool_raw, num_blocks, need_bytes, torch.int32)
+                if base_i32 is None:
+                    return None
+                active_entries.append((e_raw_idx, base_i32, num_blocks, need_bytes // 4, per_r_slots_h, int(base_i32.stride(0))))
+            if not active_entries:
+                return {"empty": True}
+
+            block_sz = 1024
+            ptrs_base_h: List[int] = []
+            base_sb_h: List[int] = []
+            num_blocks_h: List[int] = []
+            n_elems_h: List[int] = []
+            orig_indices: List[int] = []
+            sample_base_i32 = active_entries[0][1]
+
+            rank_i32 = [0] * sp_size
+            g_e: List[int] = []
+            g_slot: List[int] = []
+            g_blk: List[int] = []
+            g_off: List[int] = []
+            s_e: List[int] = []
+            s_slot: List[int] = []
+            s_blk: List[int] = []
+            s_rank: List[int] = []
+            s_off: List[int] = []
+
+            for e_i, (orig_idx, base_i32, num_blks, n_elems, per_r_slots_h, base_sb) in enumerate(active_entries):
+                orig_indices.append(orig_idx)
+                ptrs_base_h.append(base_i32.data_ptr())
+                base_sb_h.append(base_sb)
+                num_blocks_h.append(num_blks)
+                n_elems_h.append(n_elems)
+                n_blks = int(triton.cdiv(n_elems, block_sz))
+                for r_i in range(sp_size):
+                    for slot_idx in per_r_slots_h[r_i]:
+                        off_i32 = rank_i32[r_i]
+                        rank_i32[r_i] += n_elems
+                        if r_i == sp_rank:
+                            for blk in range(n_blks):
+                                g_e.append(e_i)
+                                g_slot.append(slot_idx)
+                                g_blk.append(blk)
+                                g_off.append(off_i32)
+                        else:
+                            for blk in range(n_blks):
+                                s_e.append(e_i)
+                                s_slot.append(slot_idx)
+                                s_blk.append(blk)
+                                s_rank.append(r_i)
+                                s_off.append(off_i32)
+
+            max_bytes = max(rank_i32) * 4 if rank_i32 else 0
+            if max_bytes <= 0:
+                return {"empty": True}
+            max_aligned_i32 = ((max_bytes + 15) // 16) * 4
+
+            segs_32 = [num_blocks_h, n_elems_h, g_e, g_slot, g_blk, g_off, s_e, s_slot, s_blk, s_rank, s_off]
+            flat_32: List[int] = []
+            spans_32: List[Tuple[int, int]] = []
+            for lst in segs_32:
+                s0_l = len(flat_32)
+                flat_32.extend(lst)
+                pad = (-len(lst)) & 3
+                if pad:
+                    flat_32.extend([0] * pad)
+                spans_32.append((s0_l, s0_l + len(lst)))
+            dev_32 = _copy_i32_list_to_dev(flat_32, device)
+            v32 = [dev_32[a:b] for (a, b) in spans_32]
+
+            ne = len(active_entries)
+            arr_base_64 = array.array("q", ptrs_base_h + base_sb_h)
+            dev_base_64 = _pin_stage_copy_to_device(torch.frombuffer(arr_base_64, dtype=torch.int64), device)
+            ptr_or_static = (
+                int(dev_base_64.data_ptr())
+                | int(v32[0].data_ptr())
+                | int(v32[1].data_ptr())
+            )
+            if g_e:
+                ptr_or_static |= int(v32[2].data_ptr()) | int(v32[3].data_ptr()) | int(v32[4].data_ptr()) | int(v32[5].data_ptr())
+            if s_e:
+                ptr_or_static |= int(v32[6].data_ptr()) | int(v32[7].data_ptr()) | int(v32[8].data_ptr()) | int(v32[9].data_ptr()) | int(v32[10].data_ptr())
+
+            hit = {
+                "empty": False,
+                "num_e": ne,
+                "orig_indices": orig_indices,
+                "block_sz": block_sz,
+                "max_aligned_i32": max_aligned_i32,
+                "sample_base": sample_base_i32,
+                "ptrs_base": dev_base_64[0:ne],
+                "base_sb": dev_base_64[ne : 2 * ne],
+                "num_blocks": v32[0],
+                "n_elems": v32[1],
+                "num_gather": len(g_e),
+                "g_e": v32[2],
+                "g_slot": v32[3],
+                "g_blk": v32[4],
+                "g_off": v32[5],
+                "num_scatter": len(s_e),
+                "s_e": v32[6],
+                "s_slot": v32[7],
+                "s_blk": v32[8],
+                "s_rank": v32[9],
+                "s_off": v32[10],
+                "ptr_or_static": ptr_or_static,
+                "_refs": tuple(e[1] for e in active_entries) + (dev_32, dev_base_64),
+                "last_sphys_sig": None,
+                "last_sphys_dev64": None,
+                "last_sphys_ptr_or": 0,
+            }
+            plan.sp_prefill_sync_meta_cache[ck] = hit
+
+        if hit.get("empty"):
+            return hit
+
+        orig_indices = hit["orig_indices"]
+        ne = int(hit["num_e"])
+        sphys_tensors = [specs[idx][4] for idx in orig_indices]
+        if any((not sp_t.is_cuda or sp_t.dtype != torch.int32 or sp_t.ndim != 1) for sp_t in sphys_tensors):
+            return None
+        sphys_sig = tuple((sp_t.data_ptr(), int(sp_t.stride(0))) for sp_t in sphys_tensors)
+        if hit["last_sphys_sig"] != sphys_sig:
+            if torch.cuda.is_current_stream_capturing():
+                return None
+            arr_sp_64 = array.array(
+                "q",
+                [p for p, _ in sphys_sig] + [s for _, s in sphys_sig],
+            )
+            dev_sp_64 = _pin_stage_copy_to_device(torch.frombuffer(arr_sp_64, dtype=torch.int64), device)
+            hit["last_sphys_sig"] = sphys_sig
+            hit["last_sphys_dev64"] = dev_sp_64
+            hit["ptrs_sphys"] = dev_sp_64[0:ne]
+            hit["sphys_s0"] = dev_sp_64[ne : 2 * ne]
+            hit["last_sphys_ptr_or"] = int(dev_sp_64.data_ptr())
+        return hit
+
+    def _compute_snap_phys(
+        self,
+        plan: _RaggedPrefillPlan,
+        tpb_c: int,
+        bt_act: torch.Tensor,
+        prefill_handle: Optional[Qwen4_5PrefillHandle],
+        device: torch.device,
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, bool, bool]:
+        max_cols = int(bt_act.shape[1]) if bt_act.ndim >= 2 else 0
+        s0 = int(bt_act.stride(0))
+        s1 = int(bt_act.stride(1)) if bt_act.ndim >= 2 else 0
+        ck = (tpb_c, bt_act.data_ptr(), max_cols, s0, s1)
+        s_toks, s_reqs, s_pages, s_ends, r_sstart, s_reqs_i64, a16, a32 = self._get_snap_schedule(
+            plan, tpb_c, device
+        )
+        if max_cols <= 0:
+            vals_phys = torch.zeros_like(s_toks)
+        else:
+            if prefill_handle is not None and prefill_handle.is_auto_cg_dynamic_pfx and tpb_c > 0:
+                s_rel = self._get_snap_rel_pages(plan, tpb_c, device)
+                pfx_base_src = (
+                    plan.start_pos_i64
+                    if plan.bsz == 1
+                    else plan.start_pos_i64.index_select(0, s_reqs_i64)
+                )
+                pfx_blks = torch.div(pfx_base_src, tpb_c, rounding_mode="floor")
+                clamped_pages = (s_rel + pfx_blks).clamp(max=max_cols - 1)
+            else:
+                clamped_pages = s_pages.clamp(max=max_cols - 1)
+            vals_phys = bt_act[s_reqs_i64, clamped_pages].to(torch.int32)
+        if prefill_handle is not None:
+            buf = prefill_handle.snap_phys_bufs.get(ck)
+            if buf is None or buf.shape != vals_phys.shape or buf.device != device:
+                buf = vals_phys.clone() if vals_phys.data_ptr() == 0 or max_cols > 0 else vals_phys
+                prefill_handle.snap_phys_bufs[ck] = buf
+            else:
+                buf.copy_(vals_phys)
+            s_phys = buf
+        else:
+            s_phys = vals_phys
+        return (s_toks, s_reqs, s_ends, r_sstart, s_phys, a16, a32)
+
+    def _compute_sp_snap_phys(
+        self,
+        plan: _RaggedPrefillPlan,
+        sub_plan: _RaggedSPSubPlan,
+        tpb_c: int,
+        bt_act: torch.Tensor,
+        s_phys_all: torch.Tensor,
+        prefill_handle: Optional[Qwen4_5PrefillHandle],
+        device: torch.device,
+    ) -> torch.Tensor:
+        if tpb_c not in sub_plan.snap_slot_cache:
+            _ = self._get_sp_snap_base(plan, sub_plan, tpb_c, device)
+        slice_ab, slot_i64 = sub_plan.snap_slot_cache[tpb_c]
+        if slice_ab is not None:
+            return s_phys_all[slice_ab[0] : slice_ab[1]]
+        max_cols = int(bt_act.shape[1]) if bt_act.ndim >= 2 else 0
+        s0 = int(bt_act.stride(0))
+        s1 = int(bt_act.stride(1)) if bt_act.ndim >= 2 else 0
+        ck = (tpb_c, bt_act.data_ptr(), max_cols, s0, s1)
+        if prefill_handle is not None:
+            out_sub = prefill_handle.sp_snap_phys_bufs.get(ck)
+            if out_sub is None or out_sub.shape != slot_i64.shape or out_sub.device != device:
+                out_sub = s_phys_all.index_select(0, slot_i64)
+                prefill_handle.sp_snap_phys_bufs[ck] = out_sub
+            else:
+                torch.index_select(s_phys_all, 0, slot_i64, out=out_sub)
+            return out_sub
+        return s_phys_all.index_select(0, slot_i64)
+
+    def _prewarm_prefill_sp_sync_meta(
+        self,
+        model: Qwen4_5Model,
+        kv_cache: Any,
+        attn_inputs: Any,
+        plan: _RaggedPrefillPlan,
+        sub_plan: _RaggedSPSubPlan,
+        prefill_handle: Optional[Qwen4_5PrefillHandle],
+        *,
+        sync_all_blocks: bool,
+        sp_size: int,
+        sp_rank: int,
+        device: torch.device,
+    ) -> None:
+        if kv_cache is None or sp_size <= 1 or plan.total_tokens <= 0:
+            return
+        dtype_bytes = _dtype_itemsize(model.embed_tokens.weight.dtype)
+        specs: List[Tuple[Any, int, torch.Tensor, int, torch.Tensor]] = []
+        bt_cache: Dict[str, torch.Tensor] = {}
+
+        def _bt_for(tag_name: str) -> torch.Tensor:
+            bt_v = bt_cache.get(tag_name)
+            if bt_v is None:
+                bt_v = _block_table_for_tag(attn_inputs, tag_name)
+                if plan.active_reqs and len(plan.active_reqs) < plan.bsz:
+                    assert plan.act_idx_dev is not None
+                    bt_v = bt_v.index_select(0, plan.act_idx_dev)
+                bt_cache[tag_name] = bt_v
+            return bt_v
+
+        snap_cache_local: Dict[Tuple[int, int, int, int, int], torch.Tensor] = {}
+
+        def _sp_phys(cache: Any, bt_act: torch.Tensor) -> torch.Tensor:
+            tpb_c = int(cache.seq_size_per_block)
+            max_cols = int(bt_act.shape[1]) if bt_act.ndim >= 2 else 0
+            bs0 = int(bt_act.stride(0))
+            bs1 = int(bt_act.stride(1)) if bt_act.ndim >= 2 else 0
+            ck = (tpb_c, bt_act.data_ptr(), max_cols, bs0, bs1)
+            hit_s = snap_cache_local.get(ck)
+            if hit_s is not None:
+                return hit_s
+            _, _, _, _, s_phys_all, _, _ = self._compute_snap_phys(plan, tpb_c, bt_act, prefill_handle, device)
+            snap_cache_local[ck] = s_phys_all
+            return s_phys_all
+
+        for layer in model.layers:
+            lid = layer.layer_idx
+            lc = {str(c.tag): c for c in kv_cache.get_layer_cache_groups(lid)}
+            if layer.ple is not None and PLE_STATE_TAG in lc and PLE_NGRAM_CTX_TAG in lc:
+                c_st, c_ctx = lc[PLE_STATE_TAG], lc[PLE_NGRAM_CTX_TAG]
+                bt_st, bt_ctx = _bt_for(PLE_STATE_TAG), _bt_for(PLE_NGRAM_CTX_TAG)
+                specs.append((c_st.kv_cache_base, int(c_st.seq_size_per_block), bt_st, self.cfg.hc_count * self.cfg.hidden_size * max(0, self.cfg.ple_conv_kernel_size - 1) * dtype_bytes, _sp_phys(c_st, bt_st)))
+                specs.append((c_ctx.kv_cache_base, int(c_ctx.seq_size_per_block), bt_ctx, max(0, self.cfg.ngram_size - 1) * 8, _sp_phys(c_ctx, bt_ctx)))
+            if layer.attn_output_sconv is not None:
+                tag_out = LINEAR_ATTN_OUTPUT_SCONV_TAG if layer.layer_type == "linear_attention" else FULL_ATTN_OUTPUT_SCONV_TAG
+                if tag_out in lc:
+                    c_ao = lc[tag_out]
+                    bt_ao = _bt_for(tag_out)
+                    specs.append((c_ao.kv_cache_base, int(c_ao.seq_size_per_block), bt_ao, self.cfg.hidden_size * max(0, layer.attn_output_sconv.kernel_size - 1) * dtype_bytes, _sp_phys(c_ao, bt_ao)))
+            if layer.ffn_output_sconv is not None and FFN_OUTPUT_SCONV_TAG in lc:
+                c_fo = lc[FFN_OUTPUT_SCONV_TAG]
+                bt_fo = _bt_for(FFN_OUTPUT_SCONV_TAG)
+                specs.append((c_fo.kv_cache_base, int(c_fo.seq_size_per_block), bt_fo, self.cfg.hidden_size * max(0, layer.ffn_output_sconv.kernel_size - 1) * dtype_bytes, _sp_phys(c_fo, bt_fo)))
+        if not specs:
+            return
+        eff_sync_all = bool(sync_all_blocks)
+        if not eff_sync_all:
+            total_est = 0
+            for _, tpb_c, _, nb, _ in specs:
+                _, _, _, s_ends_h, _, _, _ = plan.snap_host_cache[tpb_c]
+                total_est += plan.bsz * nb
+            if total_est <= 8 * 1024 * 1024:
+                eff_sync_all = True
+        _ = self._get_or_build_prefill_sp_sync_meta(specs, plan, eff_sync_all, sp_size, sp_rank, device)
 
     def _sync_sp_prefill_snapshots(
         self,
@@ -3810,6 +4412,96 @@ class Qwen4_5PagedStateBridge:
             total_est += cnt * need_bytes
         if not sync_all_blocks and total_est <= 8 * 1024 * 1024:
             sync_all_blocks = True
+
+        meta = self._get_or_build_prefill_sp_sync_meta(
+            specs, plan, sync_all_blocks, sp_size, sp_rank, device
+        )
+        if meta is not None:
+            if meta.get("empty"):
+                return
+            max_aligned_i32 = int(meta["max_aligned_i32"])
+            num_gather = int(meta["num_gather"])
+            num_scatter = int(meta["num_scatter"])
+            send_buf = torch.empty((max_aligned_i32,), dtype=torch.int32, device=device)
+            ptr_or_base = int(meta["ptr_or_static"]) | int(meta["last_sphys_ptr_or"])
+            if num_gather > 0:
+                ckey_g = (
+                    device.index,
+                    "pre_sp_gath",
+                    meta["num_e"],
+                    _triton_int_spec(num_gather),
+                    meta["block_sz"],
+                )
+                triton_fast_launch(
+                    _RUNTIME_TRITON_CACHE,
+                    ckey_g,
+                    _prefill_sp_gather_opaque_batched_triton,
+                    num_gather,
+                    1,
+                    1,
+                    ptr_or_base | send_buf.data_ptr(),
+                    (
+                        meta["g_e"],
+                        meta["g_slot"],
+                        meta["g_blk"],
+                        meta["g_off"],
+                        meta["ptrs_base"],
+                        meta["ptrs_sphys"],
+                        meta["base_sb"],
+                        meta["sphys_s0"],
+                        meta["num_blocks"],
+                        meta["n_elems"],
+                        send_buf,
+                    ),
+                    {"BLOCK_SIZE": meta["block_sz"]},
+                    num_warps=4,
+                )
+            all_bf16 = self._sp_all_gather_dim0(
+                send_buf.view(torch.bfloat16).unsqueeze(0),
+                total_tokens=sp_size,
+                sp_size=sp_size,
+                sp_rank=sp_rank,
+                sp_group=sp_group,
+                sp_comm=sp_comm,
+            )
+            if num_scatter > 0:
+                all_buf = all_bf16.contiguous().view(torch.int32).reshape(sp_size, max_aligned_i32)
+                all_s0 = int(all_buf.stride(0))
+                ckey_s = (
+                    device.index,
+                    "pre_sp_scat",
+                    meta["num_e"],
+                    _triton_int_spec(num_scatter),
+                    _triton_int_spec(all_s0),
+                    meta["block_sz"],
+                )
+                triton_fast_launch(
+                    _RUNTIME_TRITON_CACHE,
+                    ckey_s,
+                    _prefill_sp_scatter_opaque_batched_triton,
+                    num_scatter,
+                    1,
+                    1,
+                    ptr_or_base | all_buf.data_ptr(),
+                    (
+                        meta["s_e"],
+                        meta["s_slot"],
+                        meta["s_blk"],
+                        meta["s_rank"],
+                        meta["s_off"],
+                        meta["ptrs_base"],
+                        meta["ptrs_sphys"],
+                        meta["base_sb"],
+                        meta["sphys_s0"],
+                        meta["num_blocks"],
+                        meta["n_elems"],
+                        all_buf,
+                        all_s0,
+                    ),
+                    {"BLOCK_SIZE": meta["block_sz"]},
+                    num_warps=4,
+                )
+            return
 
         by_rank_slices: List[List[Tuple[torch.Tensor, torch.Tensor, torch.Tensor, int]]] = [[] for _ in range(sp_size)]
         rank_bytes = [0] * sp_size
@@ -4014,6 +4706,8 @@ class Qwen4_5PagedStateBridge:
         if hit is not None:
             self._dec_sp_meta_cache.move_to_end(key)
             return hit
+        if torch.cuda.is_current_stream_capturing():
+            return None
 
         ptrs_base_h: List[int] = []
         ptrs_bt_h: List[int] = []
@@ -5366,6 +6060,36 @@ class Qwen4_5PagedStateBridge:
         capture_layer_ids: Sequence[int] = (),
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
         """Vectorized Decode path ([B, 1]) backed directly by paged ``KVCache`` pools."""
+        with _model_a2a_step_scope(model):
+            return self._run_decode_batch_impl(
+                model,
+                input_ids_2d,
+                positions_2d,
+                kv_cache,
+                attention_inputs,
+                writers,
+                seq_lens_before=seq_lens_before,
+                seq_lens_before_dev=seq_lens_before_dev,
+                decode_attn_handle=decode_attn_handle,
+                enable_yoco_decode=enable_yoco_decode,
+                capture_layer_ids=capture_layer_ids,
+            )
+
+    def _run_decode_batch_impl(
+        self,
+        model: Qwen4_5Model,
+        input_ids_2d: torch.Tensor,
+        positions_2d: torch.Tensor,
+        kv_cache: Any,
+        attention_inputs: Any,
+        writers: Mapping[str, Any],
+        *,
+        seq_lens_before: Optional[List[int]] = None,
+        seq_lens_before_dev: Optional[torch.Tensor] = None,
+        decode_attn_handle: Optional[Any] = None,
+        enable_yoco_decode: Optional[bool] = None,
+        capture_layer_ids: Sequence[int] = (),
+    ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
         if (
             seq_lens_before_dev is not None
             and isinstance(
@@ -6091,6 +6815,36 @@ class Qwen4_5PagedStateBridge:
         capture_layer_ids: Sequence[int] = (),
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
         """Whole-batch packed ragged prefill preserving exact block-boundary snapshots."""
+        with _model_a2a_step_scope(model):
+            return self._run_prefill_ragged_impl(
+                model,
+                flat_input_ids,
+                flat_positions,
+                input_lengths,
+                prefix_lengths,
+                kv_cache,
+                attention_inputs,
+                writers,
+                prefill_handle=prefill_handle,
+                enable_yoco_decode=enable_yoco_decode,
+                capture_layer_ids=capture_layer_ids,
+            )
+
+    def _run_prefill_ragged_impl(
+        self,
+        model: Qwen4_5Model,
+        flat_input_ids: torch.Tensor,
+        flat_positions: Optional[torch.Tensor],
+        input_lengths: Sequence[int],
+        prefix_lengths: Sequence[int],
+        kv_cache: Any,
+        attention_inputs: Any,
+        writers: Mapping[str, Any],
+        *,
+        prefill_handle: Optional[Qwen4_5PrefillHandle] = None,
+        enable_yoco_decode: Optional[bool] = None,
+        capture_layer_ids: Sequence[int] = (),
+    ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
         device = flat_input_ids.device
         dtype = model.embed_tokens.weight.dtype
         yoco_on = (
@@ -6165,19 +6919,28 @@ class Qwen4_5PagedStateBridge:
             hit = _snap_phys_cache.get(ck)
             if hit is not None:
                 return hit
-            s_toks, s_reqs, s_pages, s_ends, r_sstart, s_reqs_i64, a16, a32 = self._get_snap_schedule(
-                plan, tpb_c, device
-            )
-            if max_cols <= 0:
-                s_phys = torch.zeros_like(s_toks)
-            else:
-                clamped_pages = s_pages.clamp(max=max_cols - 1)
-                s_phys = bt_act[s_reqs_i64, clamped_pages].to(torch.int32)
-            res_s = (s_toks, s_reqs, s_ends, r_sstart, s_phys, a16, a32)
+            res_s = self._compute_snap_phys(plan, tpb_c, bt_act, prefill_handle, device)
             _snap_phys_cache[ck] = res_s
             return res_s
 
-        use_static_init = is_cg or total_tokens <= 1024
+        _sp_snap_phys_cache: Dict[Tuple[int, int, int, int, int], torch.Tensor] = {}
+
+        def _sp_snap_phys_for(cache: Any, bt_act: torch.Tensor) -> torch.Tensor:
+            tpb_c = int(cache.seq_size_per_block)
+            max_cols = int(bt_act.shape[1]) if bt_act.ndim >= 2 else 0
+            bs0 = int(bt_act.stride(0))
+            bs1 = int(bt_act.stride(1)) if bt_act.ndim >= 2 else 0
+            ck = (tpb_c, bt_act.data_ptr(), max_cols, bs0, bs1)
+            hit_sp = _sp_snap_phys_cache.get(ck)
+            if hit_sp is not None:
+                return hit_sp
+            _, _, _, _, s_phys_all, _, _ = _snap_phys_for(cache, bt_act)
+            assert sub_plan is not None
+            s_phys_sub = self._compute_sp_snap_phys(plan, sub_plan, tpb_c, bt_act, s_phys_all, prefill_handle, device)
+            _sp_snap_phys_cache[ck] = s_phys_sub
+            return s_phys_sub
+
+        use_static_init = is_cg or plan.bsz <= 16
         init_scratch_store = prefill_handle.init_bufs if prefill_handle is not None else self._prefill_init_scratch
         dev_idx_k = device.index if device.index is not None else -1
 
@@ -6250,6 +7013,12 @@ class Qwen4_5PagedStateBridge:
         sdpa_mask_cache: Dict[Tuple[int, int], torch.Tensor] = {}
 
         def _get_vis_q(b_v: int, t_pfx_v: int, t_in_v: int) -> torch.Tensor:
+            if (
+                prefill_handle is not None
+                and prefill_handle.static_vis_q is not None
+                and tuple(prefill_handle.static_vis_q.shape) == (b_v, t_in_v)
+            ):
+                return prefill_handle.static_vis_q
             vk = (b_v, t_pfx_v, t_in_v)
             hit = vis_q_cache.get(vk)
             if hit is None:
@@ -6374,11 +7143,13 @@ class Qwen4_5PagedStateBridge:
                         else:
                             sub_init_ctx = init_ctx
                             sub_init_conv = init_conv
+                        s_phys_st_ov = _sp_snap_phys_for(c_st, bt_st)
+                        s_phys_ctx_ov = _sp_snap_phys_for(c_ctx, bt_ctx)
                         s_tok_st, s_req_st, s_end_st, r_ss_st, s_phys_st, a16_st, _ = self._get_sp_snap_schedule(
-                            plan, sub_plan, int(c_st.seq_size_per_block), bt_st, device
+                            plan, sub_plan, int(c_st.seq_size_per_block), bt_st, device, s_phys_override=s_phys_st_ov
                         )
                         _, _, _, _, s_phys_ctx, _, _ = self._get_sp_snap_schedule(
-                            plan, sub_plan, int(c_ctx.seq_size_per_block), bt_ctx, device
+                            plan, sub_plan, int(c_ctx.seq_size_per_block), bt_ctx, device, s_phys_override=s_phys_ctx_ov
                         )
                         hyper_hidden, ple_hc_normed = layer.ple.forward_packed_prefill_with_hc(
                             hyper_hidden,
@@ -6976,7 +7747,12 @@ class Qwen4_5PagedStateBridge:
                             else:
                                 assert idx_kv_pool is not None and bt_idx_kv_act is not None
                                 vis_q = _get_vis_q(bsz_u, t_pfx, t_in)
-                                max_ctx_p = max(1, t_tot // idx.compress_ratio)
+                                cap_ctx_u = (
+                                    prefill_handle.cg_max_ctx_tokens
+                                    if (prefill_handle is not None and prefill_handle.cg_max_ctx_tokens is not None)
+                                    else t_tot
+                                )
+                                max_ctx_p = max(1, cap_ctx_u // idx.compress_ratio)
                                 pref_selected = score_and_select_qsa_paged(
                                     q_idx_u,
                                     pos_u,
@@ -7003,7 +7779,7 @@ class Qwen4_5PagedStateBridge:
                                         page_size=int(kv_c.seq_size_per_block),
                                         kv_heads=sa.num_kv_heads,
                                         head_dim=sa.head_dim,
-                                        max_ctx_len=t_tot,
+                                        max_ctx_len=cap_ctx_u,
                                         kv_scale=getattr(kv_c, "kv_scale_base", None),
                                         assume_unique_selected=(idx.compress_ratio == 4),
                                     )
@@ -7211,7 +7987,12 @@ class Qwen4_5PagedStateBridge:
                             if kv_cache is not None:
                                 src_idx_kv_pool, src_bt_idx_kv_act = source_idx_prefill[src_lid]
                                 vis_q = _get_vis_q(bsz_u, t_pfx, t_in)
-                                max_ctx_p = max(1, t_tot // idx.compress_ratio)
+                                cap_ctx_u = (
+                                    prefill_handle.cg_max_ctx_tokens
+                                    if (prefill_handle is not None and prefill_handle.cg_max_ctx_tokens is not None)
+                                    else t_tot
+                                )
+                                max_ctx_p = max(1, cap_ctx_u // idx.compress_ratio)
                                 cons_selected = score_and_select_qsa_paged(
                                     q_idx_u,
                                     pos_u,
@@ -7243,6 +8024,11 @@ class Qwen4_5PagedStateBridge:
                                 )
                             if t_pfx > 0 and kv_cache is not None and src_lid in source_kv_prefill:
                                 src_kv_c, src_bt_act = source_kv_prefill[src_lid]
+                                cap_ctx_c = (
+                                    prefill_handle.cg_max_ctx_tokens
+                                    if (prefill_handle is not None and prefill_handle.cg_max_ctx_tokens is not None)
+                                    else t_tot
+                                )
                                 out_u = qsa_sparse_paged_prefill_attention(
                                     q_u_bhtd,
                                     src_kv_c.kv_cache_base,
@@ -7251,7 +8037,7 @@ class Qwen4_5PagedStateBridge:
                                     page_size=int(src_kv_c.seq_size_per_block),
                                     kv_heads=sa.num_kv_heads,
                                     head_dim=sa.head_dim,
-                                    max_ctx_len=t_tot,
+                                    max_ctx_len=cap_ctx_c,
                                     kv_scale=getattr(src_kv_c, "kv_scale_base", None),
                                     assume_unique_selected=(idx.compress_ratio == 4),
                                 )
@@ -7436,6 +8222,7 @@ class Qwen4_5PagedStateBridge:
                             eff_grp,
                             eff_comm,
                             clamp_val=self.cfg.clip_attn_output,
+                            s_phys_override=_sp_snap_phys_for(c_ao, bt_ao),
                         )
                     else:
                         s_tok, s_req, s_end, r_sstart, s_phys, _, a32 = _snap_phys_for(c_ao, bt_ao)
@@ -7541,6 +8328,7 @@ class Qwen4_5PagedStateBridge:
                             eff_grp,
                             eff_comm,
                             clamp_val=self.cfg.clip_mlp_output,
+                            s_phys_override=_sp_snap_phys_for(c_fo, bt_fo),
                         )
                     else:
                         s_tok, s_req, s_end, r_sstart, s_phys, _, a32 = _snap_phys_for(c_fo, bt_fo)
@@ -7607,7 +8395,11 @@ class Qwen4_5PagedStateBridge:
                 self._sync_sp_prefill_snapshots(
                     sp_snap_sync_specs,
                     plan,
-                    sync_all_blocks=bool(writers),
+                    sync_all_blocks=(
+                        bool(prefill_handle.sp_sync_all_blocks_override)
+                        if (prefill_handle is not None and prefill_handle.sp_sync_all_blocks_override is not None)
+                        else bool(writers)
+                    ),
                     sp_size=eff_sp,
                     sp_rank=eff_rk,
                     sp_group=eff_grp,
@@ -7660,6 +8452,34 @@ class Qwen4_5PagedStateBridge:
         capture_layer_ids: Sequence[int] = (),
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
         """CUDA-graph-safe fused batched [B, V] target verification with static staged OPAQUE_STATE."""
+        with _model_a2a_step_scope(model):
+            return self._run_target_verify_batch_gpu_impl(
+                model,
+                input_ids_2d,
+                positions_2d,
+                kv_cache,
+                attention_inputs,
+                seq_lens_before_dev=seq_lens_before_dev,
+                verify_handle=verify_handle,
+                tx_stage=tx_stage,
+                enable_yoco_decode=enable_yoco_decode,
+                capture_layer_ids=capture_layer_ids,
+            )
+
+    def _run_target_verify_batch_gpu_impl(
+        self,
+        model: Qwen4_5Model,
+        input_ids_2d: torch.Tensor,
+        positions_2d: torch.Tensor,
+        kv_cache: Any,
+        attention_inputs: Any,
+        *,
+        seq_lens_before_dev: torch.Tensor,
+        verify_handle: Qwen4_5TargetVerifyHandle,
+        tx_stage: "_Qwen4_5OpaqueTxStage",
+        enable_yoco_decode: Optional[bool] = None,
+        capture_layer_ids: Sequence[int] = (),
+    ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
         device = input_ids_2d.device
         dtype = model.embed_tokens.weight.dtype
         bsz, verify_w = int(input_ids_2d.shape[0]), int(input_ids_2d.shape[1])
@@ -8981,6 +9801,114 @@ class _Qwen4_5OpaqueTxManager:
                     dst.view(torch.uint8).reshape(-1).copy_(buf[off : off + nb])
                     off += nb
 
+    def _get_or_build_sp_batch_commit_meta(
+        self,
+        sp_recs: Sequence[_TxUndoRecord],
+        ranges: Sequence[Tuple[int, int]],
+        aligned_b: int,
+        eff_sp: int,
+        eff_rk: int,
+        dev: torch.device,
+    ) -> Optional[Dict[str, Any]]:
+        if not sp_recs or not _HAS_TRITON or dev.type != "cuda":
+            return None
+        key = (
+            dev.index if dev.index is not None else -1,
+            int(eff_sp),
+            int(eff_rk),
+            tuple(ranges),
+            tuple((r.commit_u8.data_ptr(), int(r.commit_u8.shape[1]), int(r.commit_u8.stride(0))) for r in sp_recs),
+        )
+        hit = self._sp_batch_commit_meta_cache.get(key)
+        if hit is not None:
+            self._sp_batch_commit_meta_cache.move_to_end(key)
+            return hit
+        if torch.cuda.is_current_stream_capturing():
+            return None
+
+        block_sz = 1024
+        ptrs_c_h: List[int] = []
+        c_sb_h: List[int] = []
+        n_elems_h: List[int] = []
+        unit_off_h: List[int] = []
+        tile_e_h: List[int] = []
+        tile_blk_h: List[int] = []
+        c_refs: List[torch.Tensor] = []
+        u_cur = 0
+        for e_i, rec in enumerate(sp_recs):
+            cu8 = rec.commit_u8
+            nb = int(cu8.shape[1])
+            sb_u8 = int(cu8.stride(0))
+            if (nb % 4) != 0 or (sb_u8 % 4) != 0 or (cu8.data_ptr() % 4) != 0:
+                return None
+            n_elems = nb // 4
+            ptrs_c_h.append(cu8.data_ptr())
+            c_sb_h.append(sb_u8 // 4)
+            n_elems_h.append(n_elems)
+            unit_off_h.append(u_cur)
+            u_cur += 2 * n_elems
+            n_blks = int(triton.cdiv(n_elems, block_sz))
+            for blk in range(n_blks):
+                tile_e_h.append(e_i)
+                tile_blk_h.append(blk)
+            c_refs.append(cu8)
+
+        if not tile_e_h:
+            return None
+        r_lo_h = [lo_r for lo_r, _ in ranges]
+        r_hi_h = [hi_r for _, hi_r in ranges]
+        segs_32 = [tile_e_h, tile_blk_h, n_elems_h, unit_off_h, r_lo_h, r_hi_h]
+        flat_32: List[int] = []
+        spans_32: List[Tuple[int, int]] = []
+        for lst in segs_32:
+            s0_l = len(flat_32)
+            flat_32.extend(lst)
+            pad = (-len(lst)) & 3
+            if pad:
+                flat_32.extend([0] * pad)
+            spans_32.append((s0_l, s0_l + len(lst)))
+        dev_32 = _copy_i32_list_to_dev(flat_32, dev)
+        v32 = [dev_32[a:b] for (a, b) in spans_32]
+
+        ne = len(sp_recs)
+        arr_64 = array.array("q", ptrs_c_h + c_sb_h)
+        dev_64 = _pin_stage_copy_to_device(torch.frombuffer(arr_64, dtype=torch.int64), dev)
+        aligned_i32 = aligned_b // 4
+        max_remote_cnt = max(
+            (hi_r - lo_r for r_i, (lo_r, hi_r) in enumerate(ranges) if r_i != eff_rk and hi_r > lo_r),
+            default=0,
+        )
+        ptr_or = (
+            int(v32[0].data_ptr())
+            | int(v32[1].data_ptr())
+            | int(v32[2].data_ptr())
+            | int(v32[3].data_ptr())
+            | int(v32[4].data_ptr())
+            | int(v32[5].data_ptr())
+            | int(dev_64.data_ptr())
+        )
+        meta = {
+            "num_e": ne,
+            "num_tiles": len(tile_e_h),
+            "block_sz": block_sz,
+            "aligned_i32": aligned_i32,
+            "max_remote_cnt": max_remote_cnt,
+            "tile_e": v32[0],
+            "tile_blk": v32[1],
+            "n_elems": v32[2],
+            "unit_off": v32[3],
+            "r_lo": v32[4],
+            "r_hi": v32[5],
+            "ptrs_commit": dev_64[0:ne],
+            "commit_sb": dev_64[ne : 2 * ne],
+            "ptr_or": ptr_or,
+            "_refs": tuple(c_refs) + (dev_32, dev_64),
+        }
+        self._sp_batch_commit_meta_cache[key] = meta
+        if len(self._sp_batch_commit_meta_cache) > 64:
+            self._sp_batch_commit_meta_cache.popitem(last=False)
+        return meta
+
     def _sp_sync_batch_commit_after_tx(
         self,
         stage: _Qwen4_5OpaqueTxStage,
@@ -9012,8 +9940,97 @@ class _Qwen4_5OpaqueTxManager:
         if max_b <= 0:
             return
         aligned_b = ((max_b + 15) // 16) * 16
-        send_buf = torch.zeros((aligned_b,), dtype=torch.uint8, device=dev)
         lo_m, hi_m = ranges[eff_rk]
+        meta = self._get_or_build_sp_batch_commit_meta(
+            sp_recs, ranges, aligned_b, eff_sp, eff_rk, dev
+        )
+        if meta is not None:
+            aligned_i32 = int(meta["aligned_i32"])
+            num_tiles = int(meta["num_tiles"])
+            send_buf = torch.empty((aligned_i32,), dtype=torch.int32, device=dev)
+            cnt_m = max(0, hi_m - lo_m)
+            if cnt_m > 0:
+                ckey_p = (
+                    dev.index,
+                    "tx_sp_pack",
+                    meta["num_e"],
+                    _triton_int_spec(num_tiles),
+                    _triton_int_spec(cnt_m),
+                    meta["block_sz"],
+                )
+                triton_fast_launch(
+                    _RUNTIME_TRITON_CACHE,
+                    ckey_p,
+                    _tx_sp_batch_pack_triton,
+                    num_tiles,
+                    cnt_m,
+                    2,
+                    int(meta["ptr_or"]) | send_buf.data_ptr(),
+                    (
+                        meta["tile_e"],
+                        meta["tile_blk"],
+                        meta["ptrs_commit"],
+                        meta["commit_sb"],
+                        meta["n_elems"],
+                        meta["unit_off"],
+                        send_buf,
+                        lo_m,
+                        cnt_m,
+                        live_bs,
+                    ),
+                    {"BLOCK_SIZE": meta["block_sz"]},
+                    num_warps=4,
+                )
+            all_bf16 = self.bridge._sp_all_gather_dim0(
+                send_buf.view(torch.bfloat16).unsqueeze(0),
+                total_tokens=eff_sp,
+                sp_size=eff_sp,
+                sp_rank=eff_rk,
+                sp_group=eff_grp,
+                sp_comm=eff_comm,
+            )
+            max_remote_cnt = int(meta["max_remote_cnt"])
+            if max_remote_cnt > 0:
+                all_buf = all_bf16.contiguous().view(torch.int32).reshape(eff_sp, aligned_i32)
+                all_s0 = int(all_buf.stride(0))
+                ckey_u = (
+                    dev.index,
+                    "tx_sp_unpk",
+                    meta["num_e"],
+                    _triton_int_spec(num_tiles),
+                    _triton_int_spec(max_remote_cnt),
+                    eff_sp,
+                    _triton_int_spec(all_s0),
+                    meta["block_sz"],
+                )
+                triton_fast_launch(
+                    _RUNTIME_TRITON_CACHE,
+                    ckey_u,
+                    _tx_sp_batch_unpack_triton,
+                    num_tiles,
+                    max_remote_cnt,
+                    eff_sp * 2,
+                    int(meta["ptr_or"]) | all_buf.data_ptr(),
+                    (
+                        meta["tile_e"],
+                        meta["tile_blk"],
+                        meta["ptrs_commit"],
+                        meta["commit_sb"],
+                        meta["n_elems"],
+                        meta["unit_off"],
+                        meta["r_lo"],
+                        meta["r_hi"],
+                        all_buf,
+                        all_s0,
+                        live_bs,
+                        eff_rk,
+                    ),
+                    {"BLOCK_SIZE": meta["block_sz"]},
+                    num_warps=4,
+                )
+            return
+
+        send_buf = torch.zeros((aligned_b,), dtype=torch.uint8, device=dev)
         if hi_m > lo_m:
             off = 0
             for rec in sp_recs:
@@ -9053,6 +10070,7 @@ class _Qwen4_5OpaqueTxManager:
         self._undo_records: List[_TxUndoRecord] = []
         self._committed = False
         self._batched_undo_meta: Optional[Dict[str, Any]] = None
+        self._sp_batch_commit_meta_cache: "OrderedDict[Any, Dict[str, Any]]" = OrderedDict()
 
     def acquire_stage(
         self,
@@ -9974,8 +10992,12 @@ class Qwen4_5RTPModel(_RtpGptModelBase):
             dp_group=self.dp_group,
             dp_attn=self.dp_attn,
             fast_all_reduce=self.fast_all_reduce,
+            sp_fast_comm=getattr(self.model, "sp_fast_comm", None),
         )
         self.tx_manager = _Qwen4_5OpaqueTxManager(self.bridge, self.arch_config)
+        self._auto_prefill_cg_hits: Dict[Any, int] = {}
+        self._auto_prefill_cg_entries: "OrderedDict[Any, Dict[str, Any]]" = OrderedDict()
+        self._auto_prefill_cg_pool: Any = None
 
     @classmethod
     def from_causal_lm(
@@ -10036,7 +11058,7 @@ class Qwen4_5RTPModel(_RtpGptModelBase):
             if isinstance(attn_by_tag, Mapping) and len(attn_by_tag) > 0
             else getattr(inputs, "attention_inputs", None)
         )
-        if attn_inputs is None:
+        if attn_inputs is None or (isinstance(attn_inputs, Mapping) and len(attn_inputs) == 0):
             return None
         primary = _select_group_for_tag(attn_inputs, FULL_ATTN_KV_TAG)
         is_target_verify = bool(getattr(primary, "is_target_verify", False))
@@ -10064,13 +11086,6 @@ class Qwen4_5RTPModel(_RtpGptModelBase):
             }
             for tpb_c in distinct_tpbs:
                 _ = self.bridge._get_snap_schedule(plan, tpb_c, flat_ids.device)
-            eff_sp_p, eff_rk_p, _, _ = self.bridge._resolve_sp_dist()
-            if eff_sp_p > 1 and plan.total_tokens > 0:
-                sub_plan_p = self.bridge._build_ragged_sp_subplan(plan, eff_sp_p, eff_rk_p, flat_ids.device)
-                for tpb_c in distinct_tpbs:
-                    _ = self.bridge._get_sp_snap_base(plan, sub_plan_p, tpb_c, flat_ids.device)
-                    _ = self.bridge._get_sp_sync_slots(plan, tpb_c, True, eff_sp_p, flat_ids.device)
-                    _ = self.bridge._get_sp_sync_slots(plan, tpb_c, False, eff_sp_p, flat_ids.device)
             pos_ext = getattr(inputs, "combo_position_ids", None)
             if pos_ext is None or (isinstance(pos_ext, torch.Tensor) and pos_ext.numel() == 0):
                 pos_ext = getattr(primary, "combo_position_ids", None)
@@ -10079,7 +11094,7 @@ class Qwen4_5RTPModel(_RtpGptModelBase):
                 if isinstance(pos_ext, torch.Tensor) and pos_ext.numel() > 0
                 else plan.tok_abs_pos_i64
             )
-            return Qwen4_5PrefillHandle(
+            pre_handle = Qwen4_5PrefillHandle(
                 self.arch_config,
                 primary,
                 in_lens=in_lens,
@@ -10088,6 +11103,33 @@ class Qwen4_5RTPModel(_RtpGptModelBase):
                 flat_pos=flat_pos,
                 is_cuda_graph=True,
             )
+            eff_sp_p, eff_rk_p, _, _ = self.bridge._resolve_sp_dist()
+            if eff_sp_p > 1 and plan.total_tokens > 0:
+                sub_plan_p = self.bridge._build_ragged_sp_subplan(plan, eff_sp_p, eff_rk_p, flat_ids.device)
+                for tpb_c in distinct_tpbs:
+                    _ = self.bridge._get_sp_snap_base(plan, sub_plan_p, tpb_c, flat_ids.device)
+                    _ = self.bridge._get_sp_sync_slots(plan, tpb_c, True, eff_sp_p, flat_ids.device)
+                    _ = self.bridge._get_sp_sync_slots(plan, tpb_c, False, eff_sp_p, flat_ids.device)
+                has_cs_writer = (
+                    isinstance(attn_inputs, Mapping)
+                    and any(getattr(g, "cache_store_writer", None) is not None for g in attn_inputs.values())
+                ) or (
+                    not isinstance(attn_inputs, Mapping)
+                    and getattr(attn_inputs, "cache_store_writer", None) is not None
+                )
+                self.bridge._prewarm_prefill_sp_sync_meta(
+                    self.model,
+                    self.kv_cache,
+                    attn_inputs,
+                    plan,
+                    sub_plan_p,
+                    pre_handle,
+                    sync_all_blocks=has_cs_writer,
+                    sp_size=eff_sp_p,
+                    sp_rank=eff_rk_p,
+                    device=flat_ids.device,
+                )
+            return pre_handle
         if not is_target_verify and not is_prefill and is_cuda_graph:
             eff_sp_d, _, _, _ = self.bridge._resolve_sp_dist()
             bsz_d = int(flat_ids.numel())
@@ -10301,6 +11343,382 @@ class Qwen4_5RTPModel(_RtpGptModelBase):
             return torch.cat(chunks, dim=0)
         return torch.tensor(seq_lens_before, device=device, dtype=torch.int64).unsqueeze(1)
 
+    def _collect_auto_cg_kv_state(
+        self, attn_inputs: Any, bsz: int
+    ) -> Optional[Tuple[Tuple[Tuple[int, int], ...], Dict[str, Tuple[torch.Tensor, int]], Set[int]]]:
+        pool_ptrs: List[Tuple[int, int]] = []
+        tag_info: Dict[str, Tuple[torch.Tensor, int]] = {}
+        distinct_tpbs: Set[int] = set()
+        for lid in range(len(self.model.layers)):
+            for c in self.kv_cache.get_layer_cache_groups(lid):
+                sc_base = getattr(c, "kv_scale_base", None)
+                pool_ptrs.append((int(c.kv_cache_base.data_ptr()), int(sc_base.data_ptr()) if sc_base is not None else 0))
+                tag = str(c.tag)
+                tpb_c = max(1, int(c.seq_size_per_block))
+                distinct_tpbs.add(tpb_c)
+                if tag not in tag_info:
+                    bt = _block_table_for_tag(attn_inputs, tag)
+                    if not bt.is_cuda or bt.dtype != torch.int32 or bt.ndim != 2 or int(bt.shape[0]) < bsz:
+                        return None
+                    tag_info[tag] = (bt, tpb_c)
+        return tuple(pool_ptrs), tag_info, distinct_tpbs
+
+    @staticmethod
+    def _update_auto_prefill_cg_buffers(
+        entry: Dict[str, Any],
+        flat_ids: torch.Tensor,
+        flat_pos: Optional[torch.Tensor],
+        pfx_lens: Sequence[int],
+        tag_info: Mapping[str, Tuple[torch.Tensor, int]],
+    ) -> None:
+        bsz = int(entry["bsz"])
+        in_len = int(entry["in_len"])
+        entry["static_ids"].copy_(flat_ids)
+        pfx_t = _copy_i32_list_to_dev(pfx_lens, flat_ids.device)
+        entry["static_prefix_i32"].copy_(pfx_t)
+        entry["static_start_pos_i64"].copy_(entry["static_prefix_i32"])
+        torch.add(
+            entry["static_prefix_i32"].view(bsz, 1),
+            entry["base_offsets_0_i32"],
+            out=entry["static_tok_abs_pos_i32"].view(bsz, in_len),
+        )
+        entry["static_tok_abs_pos_i64"].copy_(entry["static_tok_abs_pos_i32"])
+        if flat_pos is not None:
+            entry["static_pos"].copy_(flat_pos)
+        else:
+            torch.add(
+                entry["static_start_pos_i64"].view(bsz, 1),
+                entry["base_offsets_0"],
+                out=entry["static_pos"].view(bsz, in_len),
+            )
+        torch.add(
+            entry["static_prefix_i32"].view(bsz, 1),
+            entry["base_offsets_1"],
+            out=entry["static_vis_q"],
+        )
+        for tag, (bt, _) in tag_info.items():
+            s_bt = entry["static_bts"][tag]
+            cap_cols = int(s_bt.shape[1])
+            in_cols = int(bt.shape[1])
+            n_copy = min(cap_cols, in_cols)
+            if n_copy > 0:
+                s_bt[:, :n_copy].copy_(bt[:bsz, :n_copy])
+            if n_copy < cap_cols:
+                s_bt[:, n_copy:].zero_()
+
+    def release_auto_prefill_cg(self) -> None:
+        """Reset and drop captured Auto-Prefill CUDA graphs cleanly before PG teardown."""
+        entries = getattr(self, "_auto_prefill_cg_entries", None)
+        if entries:
+            for ent in list(entries.values()):
+                g = ent.get("graph") if isinstance(ent, dict) else None
+                if g is not None:
+                    try:
+                        g.reset()
+                    except Exception:
+                        pass
+            entries.clear()
+        if hasattr(self, "_auto_prefill_cg_pool"):
+            self._auto_prefill_cg_pool = None
+
+    def __del__(self) -> None:
+        if sys is not None and not getattr(sys, "is_finalizing", lambda: True)():
+            try:
+                self.release_auto_prefill_cg()
+            except Exception:
+                pass
+
+    def _maybe_run_auto_prefill_cg(
+        self,
+        flat_ids: torch.Tensor,
+        flat_pos: Optional[torch.Tensor],
+        in_lens: Sequence[int],
+        pfx_lens: Sequence[int],
+        attn_inputs: Any,
+        writers: Mapping[str, Any],
+        enable_yoco_decode: Optional[bool],
+        cap_ids: Sequence[int],
+        device: torch.device,
+    ) -> Optional[Any]:
+        if os.environ.get("QWEN4_5_AUTO_PREFILL_CG", "1") == "0":
+            return None
+        mxfp4_backend = os.environ.get("QWEN4_5_MXFP4_BACKEND", "auto").strip().lower()
+        if mxfp4_backend == "ref":
+            return None
+        strict_bf16 = os.environ.get("QWEN4_5_MXFP4_STRICT_BF16", "0").strip()
+        if (
+            device.type != "cuda"
+            or not _HAS_TRITON
+            or self.kv_cache is None
+            or torch.cuda.is_current_stream_capturing()
+            or self.dp_size != 1
+            or not self.arch_config.has_qsa
+        ):
+            return None
+        bsz = len(in_lens)
+        if bsz <= 0 or bsz > 4 or len(pfx_lens) != bsz:
+            return None
+        if len(set(in_lens)) != 1 or len(set(pfx_lens)) != 1 or int(in_lens[0]) <= 0:
+            return None
+        if not all(int(p) > 0 for p in pfx_lens):
+            return None
+        min_tok = int(os.environ.get("QWEN4_5_AUTO_PREFILL_CG_MIN_TOKENS", "32"))
+        max_tok = int(os.environ.get("QWEN4_5_AUTO_PREFILL_CG_MAX_TOKENS", "512"))
+        total_tok = int(flat_ids.numel())
+        if total_tok < min_tok or total_tok > max_tok:
+            return None
+        eff_sp, eff_rk, _, _ = self.bridge._resolve_sp_dist()
+        if eff_sp > 1 and total_tok < eff_sp:
+            return None
+        in_len = int(in_lens[0])
+        t_pfx = int(pfx_lens[0])
+        t_tot = t_pfx + in_len
+        if t_tot > 131072:
+            return None
+        if any(bool(getattr(g, "is_s_padded", False)) for _, g in _iter_attention_groups(attn_inputs)):
+            return None
+
+        kv_state = self._collect_auto_cg_kv_state(attn_inputs, bsz)
+        if kv_state is None:
+            return None
+        pool_ptrs, tag_info, distinct_tpbs = kv_state
+        lcm_tpb = 64
+        for tpb_c in distinct_tpbs:
+            lcm_tpb = math.lcm(lcm_tpb, int(tpb_c))
+        ctx_bucket = 128
+        while ctx_bucket < t_tot:
+            ctx_bucket *= 2
+        if ctx_bucket > 131072:
+            return None
+
+        dev_idx = int(device.index if device.index is not None else -1)
+        cg_key = (
+            dev_idx,
+            tuple(int(x) for x in in_lens),
+            tuple(int(p) % lcm_tpb for p in pfx_lens),
+            ctx_bucket,
+            bool(writers) if eff_sp > 1 else False,
+            enable_yoco_decode,
+            tuple(int(x) for x in cap_ids),
+            mxfp4_backend,
+            strict_bf16,
+        )
+
+        entry = self._auto_prefill_cg_entries.get(cg_key)
+        if entry is not None:
+            can_replay = entry["pool_ptrs"] == pool_ptrs and all(
+                int(bt.shape[1]) <= int(entry["static_bts"][tag].shape[1])
+                for tag, (bt, _) in tag_info.items()
+            )
+            if can_replay:
+                self._update_auto_prefill_cg_buffers(entry, flat_ids, flat_pos, pfx_lens, tag_info)
+                entry["graph"].replay()
+                if writers:
+                    for lid_p in range(len(self.model.layers)):
+                        publish_qwen4_5_layer_caches(self.kv_cache, lid_p, writers)
+                self._auto_prefill_cg_entries.move_to_end(cg_key)
+                s_aux = entry["static_aux"]
+                return self._wrap_outputs(
+                    entry["static_out"].clone(),
+                    s_aux.clone() if s_aux is not None else None,
+                )
+            self._auto_prefill_cg_entries.pop(cg_key, None)
+
+        min_hits = int(os.environ.get("QWEN4_5_AUTO_PREFILL_CG_MIN_HITS", "2"))
+        prev_hits = self._auto_prefill_cg_hits.get(cg_key, 0)
+        if prev_hits < 0:
+            return None
+        hits = prev_hits + 1
+        self._auto_prefill_cg_hits[cg_key] = hits
+        if hits < min_hits:
+            return None
+
+        # Capture guarded CUDA graph with bucketed static block tables & dynamic prefix offset
+        try:
+            from rtp_llm.models_py.modules.qwen4_5.qsa_bridge import _select_top_tokens
+
+            static_ids = torch.empty_like(flat_ids)
+            static_pos = torch.empty((total_tok,), dtype=torch.int64, device=device)
+            static_vis_q = torch.empty((bsz, in_len), dtype=torch.int32, device=device)
+            base_offsets_0 = torch.arange(in_len, dtype=torch.int64, device=device).view(1, in_len)
+            base_offsets_1 = base_offsets_0.to(torch.int32) + 1
+            plan = self.bridge._build_ragged_prefill_plan(in_lens, pfx_lens, device, freeze=True)
+            in_len_cpu = torch.tensor(in_lens, dtype=torch.int32)
+            pfx_len_cpu = torch.tensor(pfx_lens, dtype=torch.int32)
+            seq_len_cpu = in_len_cpu + pfx_len_cpu
+            static_bts: Dict[str, torch.Tensor] = {}
+            wrapped_ai: Dict[str, LocalPyAttentionInputs] = {}
+            for tag, (bt, tpb_c) in tag_info.items():
+                cap_cols = max(int(bt.shape[1]), (ctx_bucket + tpb_c - 1) // tpb_c + 1)
+                s_bt = torch.zeros((bsz, cap_cols), dtype=torch.int32, device=device)
+                static_bts[tag] = s_bt
+                wrapped_ai[tag] = LocalPyAttentionInputs(
+                    is_prefill=True,
+                    input_lengths=in_len_cpu,
+                    sequence_lengths=seq_len_cpu,
+                    prefix_lengths=pfx_len_cpu,
+                    kv_cache_block_id=s_bt,
+                    kv_cache_block_id_device=s_bt,
+                    kv_cache_kernel_block_id=s_bt,
+                    kv_cache_kernel_block_id_device=s_bt,
+                    is_cuda_graph=True,
+                    total_tokens=total_tok,
+                )
+            for tpb_c in distinct_tpbs:
+                _ = self.bridge._get_snap_schedule(plan, tpb_c, device)
+                _ = self.bridge._get_snap_rel_pages(plan, tpb_c, device)
+            if eff_sp > 1 and plan.total_tokens > 0:
+                sub_plan_p = self.bridge._build_ragged_sp_subplan(plan, eff_sp, eff_rk, device)
+                for tpb_c in distinct_tpbs:
+                    _ = self.bridge._get_sp_snap_base(plan, sub_plan_p, tpb_c, device)
+                    _ = self.bridge._get_sp_sync_slots(plan, tpb_c, True, eff_sp, device)
+                    _ = self.bridge._get_sp_sync_slots(plan, tpb_c, False, eff_sp, device)
+
+            # Pre-compile exact QSA TopK specialization for bucketed cols before capture
+            seen_qsa: Set[Tuple[int, int]] = set()
+            qsa_rows = (bsz * (in_len if eff_sp <= 1 else (in_len + eff_sp - 1) // eff_sp))
+            for lyr in self.model.layers:
+                sa_m = getattr(lyr, "self_attn", None)
+                idx_m = getattr(sa_m, "indexer", None) if sa_m is not None else None
+                if idx_m is not None:
+                    qk = (int(idx_m.compress_ratio), int(idx_m.token_budget))
+                    if qk not in seen_qsa:
+                        seen_qsa.add(qk)
+                        cols_p = max(1, ctx_bucket // qk[0])
+                        _ = _select_top_tokens(
+                            torch.zeros((qsa_rows, cols_p), dtype=torch.float32, device=device),
+                            torch.zeros((qsa_rows,), dtype=torch.int32, device=device),
+                            compress_ratio=qk[0],
+                            token_budget=qk[1],
+                            scores_are_masked=True,
+                        )
+
+            static_handle = Qwen4_5PrefillHandle(
+                self.arch_config,
+                wrapped_ai[FULL_ATTN_KV_TAG],
+                in_lens=tuple(int(x) for x in in_lens),
+                pfx_lens=tuple(int(x) for x in pfx_lens),
+                plan=plan,
+                flat_pos=static_pos,
+                is_cuda_graph=True,
+                is_auto_cg_dynamic_pfx=True,
+                static_vis_q=static_vis_q,
+                cg_max_ctx_tokens=ctx_bucket,
+                sp_sync_all_blocks_override=bool(writers),
+            )
+            new_entry: Dict[str, Any] = {
+                "bsz": bsz,
+                "in_len": in_len,
+                "pool_ptrs": pool_ptrs,
+                "static_ids": static_ids,
+                "static_pos": static_pos,
+                "static_prefix_i32": plan.prefix_i32,
+                "static_start_pos_i64": plan.start_pos_i64,
+                "static_tok_abs_pos_i32": plan.tok_abs_pos_i32,
+                "static_tok_abs_pos_i64": plan.tok_abs_pos_i64,
+                "static_vis_q": static_vis_q,
+                "base_offsets_0": base_offsets_0,
+                "base_offsets_0_i32": base_offsets_0.to(torch.int32),
+                "base_offsets_1": base_offsets_1,
+                "static_bts": static_bts,
+            }
+            self._update_auto_prefill_cg_buffers(new_entry, flat_ids, flat_pos, pfx_lens, tag_info)
+            if eff_sp > 1 and plan.total_tokens > 0:
+                self.bridge._prewarm_prefill_sp_sync_meta(
+                    self.model,
+                    self.kv_cache,
+                    wrapped_ai,
+                    plan,
+                    sub_plan_p,
+                    static_handle,
+                    sync_all_blocks=bool(writers),
+                    sp_size=eff_sp,
+                    sp_rank=eff_rk,
+                    device=device,
+                )
+
+            if self._auto_prefill_cg_pool is None:
+                self._auto_prefill_cg_pool = torch.cuda.graph_pool_handle()
+            eff_ep_size = int(getattr(self.model, "ep_size", 1) or 1)
+            eff_ep_group = getattr(self.model, "ep_group", None)
+            need_consensus = (
+                torch.distributed.is_available()
+                and torch.distributed.is_initialized()
+                and (self.tp_size > 1 or self.sp_size > 1 or eff_ep_size > 1)
+            )
+            cons_grp = (
+                eff_ep_group
+                if eff_ep_size > 1
+                else (self.tp_group if self.tp_group is not None else self.sp_group)
+            )
+            graph = torch.cuda.CUDAGraph()
+            cap_exc: Optional[BaseException] = None
+            res_cap: Any = None
+            try:
+                with torch.cuda.graph(graph, pool=self._auto_prefill_cg_pool):
+                    res_cap = self.bridge.run_prefill_ragged(
+                        self.model,
+                        static_ids,
+                        static_pos,
+                        in_lens,
+                        pfx_lens,
+                        self.kv_cache,
+                        wrapped_ai,
+                        {},
+                        prefill_handle=static_handle,
+                        enable_yoco_decode=enable_yoco_decode,
+                        capture_layer_ids=cap_ids,
+                    )
+            except (RuntimeError, torch.AcceleratorError) as exc:
+                cap_exc = exc
+                try:
+                    graph.reset()
+                except Exception:
+                    pass
+                del graph
+                if not need_consensus:
+                    raise
+            if need_consensus:
+                ok_t = torch.tensor([0 if cap_exc is not None else 1], dtype=torch.int32, device=device)
+                torch.distributed.all_reduce(ok_t, op=torch.distributed.ReduceOp.MIN, group=cons_grp)
+                if int(ok_t.item()) == 0:
+                    if cap_exc is None:
+                        try:
+                            graph.reset()
+                        except Exception:
+                            pass
+                        del graph
+                    self._auto_prefill_cg_hits[cg_key] = -1
+                    return None
+            if cap_exc is not None:
+                raise cap_exc
+            graph.replay()
+            if isinstance(res_cap, tuple):
+                static_out, static_aux = res_cap[0], res_cap[1]
+            else:
+                static_out, static_aux = res_cap, None
+            new_entry["graph"] = graph
+            new_entry["static_out"] = static_out
+            new_entry["static_aux"] = static_aux
+            new_entry["static_handle"] = static_handle
+            new_entry["wrapped_ai"] = wrapped_ai
+
+            if writers:
+                for lid_p in range(len(self.model.layers)):
+                    publish_qwen4_5_layer_caches(self.kv_cache, lid_p, writers)
+
+            max_graphs = int(os.environ.get("QWEN4_5_AUTO_PREFILL_CG_MAX_GRAPHS", "16"))
+            self._auto_prefill_cg_entries[cg_key] = new_entry
+            while len(self._auto_prefill_cg_entries) > max(1, max_graphs):
+                self._auto_prefill_cg_entries.popitem(last=False)
+            return self._wrap_outputs(
+                static_out.clone(),
+                static_aux.clone() if static_aux is not None else None,
+            )
+        except (RuntimeError, torch.AcceleratorError):
+            self._auto_prefill_cg_hits[cg_key] = -1
+            return None
+
     @torch.no_grad()
     def forward(
         self,
@@ -10315,16 +11733,59 @@ class Qwen4_5RTPModel(_RtpGptModelBase):
             attn_inputs: Any = attn_by_tag
         else:
             attn_inputs = getattr(inputs, "attention_inputs", None)
-        if attn_inputs is None:
+        flat_ids = inputs.input_ids.reshape(-1)
+        device = flat_ids.device
+        cap_ids = self._mtp_aux_capture_layer_ids
+        is_empty_attn = attn_inputs is None or (
+            isinstance(attn_inputs, Mapping) and len(attn_inputs) == 0
+        )
+
+        def _empty_dp_outputs() -> Any:
+            dtype_e = self.model.embed_tokens.weight.dtype
+            eff_sp_e, _, _, _ = self.bridge._resolve_sp_dist()
+            self.bridge._run_empty_ep_collectives(
+                self.model, dtype_e, device, sp_active=(eff_sp_e > 1)
+            )
+            empty_h = torch.empty(
+                (0, self.arch_config.hidden_size), dtype=dtype_e, device=device
+            )
+            empty_aux = (
+                torch.empty(
+                    (0, len(cap_ids) * self.arch_config.hidden_size),
+                    dtype=dtype_e,
+                    device=device,
+                )
+                if cap_ids
+                else None
+            )
+            return self._wrap_outputs(empty_h, empty_aux)
+
+        if is_empty_attn:
+            if int(flat_ids.numel()) == 0:
+                if self.kv_cache is None and self.dp_size <= 1:
+                    hidden_e = torch.zeros(
+                        (0, self.arch_config.hidden_size),
+                        dtype=self.model.embed_tokens.weight.dtype,
+                        device=device,
+                    )
+                    aux_e = (
+                        torch.zeros(
+                            (0, len(cap_ids) * self.arch_config.hidden_size),
+                            dtype=hidden_e.dtype,
+                            device=device,
+                        )
+                        if cap_ids
+                        else None
+                    )
+                    return self._wrap_outputs(hidden_e, aux_e)
+                with (torch.cuda.device(device) if device.type == "cuda" else nullcontext()):
+                    return _empty_dp_outputs()
             raise RuntimeError("PyModelInputs.attention_inputs is required")
 
         # Pick primary attention group (prefer "full" if present)
         primary = _select_group_for_tag(attn_inputs, FULL_ATTN_KV_TAG)
         is_target_verify = bool(getattr(primary, "is_target_verify", False))
         is_prefill = bool(getattr(primary, "is_prefill", False)) and not is_target_verify
-        flat_ids = inputs.input_ids.reshape(-1)
-        device = flat_ids.device
-        cap_ids = self._mtp_aux_capture_layer_ids
 
         if self.kv_cache is None and not is_prefill:
             hidden = torch.zeros(
@@ -10351,31 +11812,11 @@ class Qwen4_5RTPModel(_RtpGptModelBase):
             prepare_qwen4_5_cache_store_writers(
                 attn_inputs, self.kv_cache, layer_count=len(self.model.layers)
             )
-            if is_prefill and self.kv_cache is not None and has_cs_writer
+            if is_prefill and self.kv_cache is not None and has_cs_writer and int(flat_ids.numel()) > 0
             else {}
         )
 
         dev_ctx = torch.cuda.device(device) if device.type == "cuda" else nullcontext()
-        def _empty_dp_outputs() -> Any:
-            dtype_e = self.model.embed_tokens.weight.dtype
-            eff_sp_e, _, _, _ = self.bridge._resolve_sp_dist()
-            self.bridge._run_empty_ep_collectives(
-                self.model, dtype_e, device, sp_active=(eff_sp_e > 1)
-            )
-            empty_h = torch.empty(
-                (0, self.arch_config.hidden_size), dtype=dtype_e, device=device
-            )
-            empty_aux = (
-                torch.empty(
-                    (0, len(cap_ids) * self.arch_config.hidden_size),
-                    dtype=dtype_e,
-                    device=device,
-                )
-                if cap_ids
-                else None
-            )
-            return self._wrap_outputs(empty_h, empty_aux)
-
         with dev_ctx:
             if is_target_verify:
                 if not _HAS_TRITON or device.type != "cuda" or self.kv_cache is None:
@@ -10444,6 +11885,8 @@ class Qwen4_5RTPModel(_RtpGptModelBase):
                 return self._wrap_outputs(res)
 
             if is_prefill:
+                if int(flat_ids.numel()) == 0:
+                    return _empty_dp_outputs()
                 pre_handle = fmha_impl if isinstance(fmha_impl, Qwen4_5PrefillHandle) else None
                 if pre_handle is not None:
                     in_lens = pre_handle.in_lens
@@ -10465,6 +11908,20 @@ class Qwen4_5RTPModel(_RtpGptModelBase):
                         if isinstance(pos_ext, torch.Tensor) and pos_ext.numel() > 0
                         else None
                     )
+                if pre_handle is None:
+                    cg_out = self._maybe_run_auto_prefill_cg(
+                        flat_ids,
+                        flat_pos,
+                        in_lens,
+                        pfx_lens,
+                        attn_inputs,
+                        writers,
+                        enable_yoco_decode,
+                        cap_ids,
+                        device,
+                    )
+                    if cg_out is not None:
+                        return cg_out
                 res = self.bridge.run_prefill_ragged(
                     self.model,
                     flat_ids,

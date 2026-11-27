@@ -1760,6 +1760,198 @@ def run_b300_benchmarks() -> None:
     print(f"  [Packed Prefill T=1024] GDN Normal(L0) forward_packed_prefill: median={med_packed:.4f} ms")
 
 
+
+
+@torch.no_grad()
+def _r8_ple_exact_halo_worker(rank: int, world_size: int, init_file: str, q: object) -> None:
+    import os
+    import torch.distributed as dist
+    from rtp_llm.models_py.modules.qwen4_5.fast_comm import sp_slice_bounds
+    from rtp_llm.models_py.modules.qwen4_5.ple import DEFAULT_PLE_WEIGHT_SCALE, Qwen4_5PLELayer
+
+    os.environ["RANK"] = str(rank)
+    os.environ["WORLD_SIZE"] = str(world_size)
+    dist.init_process_group(backend="gloo", init_method=f"file://{init_file}", rank=rank, world_size=world_size)
+    try:
+        device = torch.device("cuda:0")
+        torch.cuda.set_device(device)
+        dtype = torch.bfloat16
+        H, hc, ple_dim, total_shards, shard_rows = 128, 4, 160, 8, 256
+        vocab_sizes = [64] * 20
+
+        def _make_ple(use_sp: bool) -> Qwen4_5PLELayer:
+            torch.manual_seed(4801)
+            ple = Qwen4_5PLELayer(
+                hidden_size=H,
+                hc_count=hc,
+                ple_embed_dim=ple_dim,
+                ngram_size=3,
+                heads_per_ngram=10,
+                ngram_heads_vocab_sizes=vocab_sizes,
+                split_ngram_parts=total_shards,
+                dtype=dtype,
+                device=device,
+                sp_size=(world_size if use_sp else 1),
+                sp_rank=(rank if use_sp else 0),
+                sp_group=(dist.group.WORLD if use_sp else None),
+            )
+            shards = [torch.empty((shard_rows, ple.head_dim), dtype=dtype, device=device) for _ in range(total_shards)]
+            for idx_s, sh in enumerate(shards):
+                torch.manual_seed(9800 + idx_s)
+                sh.normal_(0.0, 0.05)
+            ple.set_ngram_table(shards, weight_scale=DEFAULT_PLE_WEIGHT_SCALE, pin_cpu=False, enable_cpu_uva=False)
+            return ple
+
+        ple_sp = _make_ple(True)
+        ple_ref = _make_ple(False)
+        for case_idx, T_tot in enumerate((12, 14)):
+            torch.manual_seed(4850 + case_idx)
+            h_full = torch.randn((T_tot, hc * H), dtype=dtype, device=device) * 0.25
+            ids_full = torch.randint(10, 200, (T_tot,), dtype=torch.int64, device=device)
+            init_ctx = torch.randint(10, 200, (1, 2), dtype=torch.int64, device=device)
+            init_conv = torch.randn((1, hc * H, 3), dtype=dtype, device=device) * 0.1
+            cu_g = torch.tensor([0, T_tot], dtype=torch.int32, device=device)
+            treq_g = torch.zeros((T_tot,), dtype=torch.int32, device=device)
+            tr_g = torch.zeros((1,), dtype=torch.int32, device=device)
+            tt0_g = torch.zeros((1,), dtype=torch.int32, device=device)
+            out_ref, _ = ple_ref.forward_packed_prefill_with_hc(
+                h_full, ids_full, cu_g, treq_g, tr_g, tt0_g,
+                prev_ngram_ctx=init_ctx, init_conv_state=init_conv, block_t=16,
+            )
+
+            s0, s1 = sp_slice_bounds(T_tot, world_size, rank)
+            loc_len = s1 - s0
+            sub_ctx = init_ctx.clone()
+            sub_conv = init_conv.clone()
+            if s0 == 1:
+                sub_ctx[0, 0] = sub_ctx[0, 1]
+                sub_ctx[0, 1] = ids_full[0]
+            elif s0 >= 2:
+                sub_ctx[0, 0] = ids_full[s0 - 2]
+                sub_ctx[0, 1] = ids_full[s0 - 1]
+            if s0 >= 3:
+                sub_conv.zero_()
+            elif s0 > 0:
+                keep = 3 - s0
+                sub_conv[0, :, :keep] = init_conv[0, :, s0:]
+                sub_conv[0, :, keep:].zero_()
+
+            cu_l = torch.tensor([0, loc_len], dtype=torch.int32, device=device)
+            treq_l = torch.zeros((loc_len,), dtype=torch.int32, device=device)
+            tr_l = torch.zeros((1,), dtype=torch.int32, device=device)
+            tt0_l = torch.zeros((1,), dtype=torch.int32, device=device)
+            out_loc, _ = ple_sp.forward_packed_prefill_with_hc(
+                h_full[s0:s1].contiguous(),
+                ids_full[s0:s1].contiguous(),
+                cu_l, treq_l, tr_l, tt0_l,
+                prev_ngram_ctx=sub_ctx,
+                init_conv_state=sub_conv,
+                block_t=16,
+                sp_tokens_sharded=True,
+                sp_total_tokens=T_tot,
+                sp_halo_exchange=True,
+                sp_halo_loc_start=s0,
+                sp_halo_req0_start=0,
+            )
+            d = float((out_loc.float() - out_ref[s0:s1].float()).abs().max().item())
+            assert d < 2e-2, f"R8 PLE exact halo T={T_tot} r{rank} diff={d}"
+        if rank == 0:
+            q.put(("ok", True))
+    except Exception:
+        import traceback
+        q.put((f"rank={rank} err", traceback.format_exc()))
+        raise
+    finally:
+        dist.destroy_process_group()
+
+
+@torch.no_grad()
+def test_r8_gdn_prefill_fast_launch_and_ple_halo_parity() -> None:
+    import multiprocessing as mp
+    import os
+    import tempfile
+    from rtp_llm.models_py.modules.qwen4_5.gdn import _GDN_TRITON_CACHE
+
+    print("\n=== [R8 GDN & PLE] triton_fast_launch Cache Hit + Boundary Zero-Copy SP Halo ===")
+    device = torch.device("cuda")
+    dtype = torch.bfloat16
+    torch.manual_seed(4800)
+
+    cfg = make_config(hidden_size=5120)
+    plan = YoCoSharingPlan.from_config(cfg)
+    gdn = Qwen4_5GatedDeltaNet.from_config(cfg, layer_idx=0, sharing_plan=plan).to(device=device, dtype=dtype).eval()
+    init_realistic_weights(gdn)
+
+    lens = [49, 65, 64]
+    (
+        cu_list, cu, t_req, t_t0, c_req, c_t0, r_c_start,
+        s_tok, s_req, r_s_start, s_end, s_phys, snap_meta, num_pool_blks,
+    ) = _build_ragged_meta_for_test(lens, block_t=32, chunk_size=64, tpb=64, device=device)
+    B = len(lens)
+    N = cu_list[-1]
+    h = torch.randn((N, cfg.hidden_size), device=device, dtype=dtype) * 0.25
+    init_conv = torch.randn((B, gdn.conv_dim, 3), device=device, dtype=dtype) * 0.1
+    init_ssm = torch.randn((B, gdn.num_v_heads, 64, 64), device=device, dtype=torch.float32) * 0.05
+
+    _GDN_TRITON_CACHE.clear()
+    conv_p1 = torch.zeros((num_pool_blks, gdn.conv_dim * 3), device=device, dtype=dtype)
+    ssm_p1 = torch.zeros((num_pool_blks, gdn.num_v_heads, 64, 64), device=device, dtype=torch.float32)
+    out1, _ = gdn.forward_packed_prefill(
+        h, cu, t_req, t_t0, c_req, c_t0, r_c_start,
+        init_conv_state=init_conv, init_ssm_state=init_ssm,
+        snap_tok_idx=s_tok, snap_req_idx=s_req,
+        conv_dst_pool=conv_p1, conv_snap_phys=s_phys,
+        req_snap_start=r_s_start, snap_local_end=s_end,
+        ssm_dst_pool=ssm_p1, ssm_snap_phys=s_phys,
+    )
+    cache_sz_1 = len(_GDN_TRITON_CACHE)
+    assert cache_sz_1 >= 4, f"Expected >=4 triton_fast_launch cache entries, got {cache_sz_1}"
+
+    conv_p2 = torch.zeros_like(conv_p1)
+    ssm_p2 = torch.zeros_like(ssm_p1)
+    out2, _ = gdn.forward_packed_prefill(
+        h, cu, t_req, t_t0, c_req, c_t0, r_c_start,
+        init_conv_state=init_conv, init_ssm_state=init_ssm,
+        snap_tok_idx=s_tok, snap_req_idx=s_req,
+        conv_dst_pool=conv_p2, conv_snap_phys=s_phys,
+        req_snap_start=r_s_start, snap_local_end=s_end,
+        ssm_dst_pool=ssm_p2, ssm_snap_phys=s_phys,
+    )
+    assert len(_GDN_TRITON_CACHE) == cache_sz_1
+    assert float((out1 - out2).abs().max().item()) == 0.0
+    assert float((conv_p1 - conv_p2).abs().max().item()) == 0.0
+    assert float((ssm_p1 - ssm_p2).abs().max().item()) == 0.0
+
+    for bi, _ln in enumerate(lens):
+        st = gdn.create_state(1, device, dtype)
+        st.conv_state.copy_(init_conv[bi : bi + 1])
+        st.ssm_state.copy_(init_ssm[bi : bi + 1])
+        y_ref, _ = gdn(h[cu_list[bi] : cu_list[bi + 1]].unsqueeze(0), state=st)
+        d, _ = report_diff(f"R8 GDN ragged req={bi}", out1[cu_list[bi] : cu_list[bi + 1]], y_ref.squeeze(0))
+        assert d < 1e-2
+    for bi, bnd, phys in snap_meta:
+        st_b = gdn.create_state(1, device, dtype)
+        st_b.conv_state.copy_(init_conv[bi : bi + 1])
+        st_b.ssm_state.copy_(init_ssm[bi : bi + 1])
+        _ = gdn(h[cu_list[bi] : cu_list[bi] + bnd].unsqueeze(0), state=st_b)
+        assert float((conv_p1[phys].view_as(st_b.conv_state[0]).float() - st_b.conv_state[0].float()).abs().max().item()) < 1e-2
+        assert float((ssm_p1[phys].float() - st_b.ssm_state[0].float()).abs().max().item()) < 1e-2
+
+    ctx = mp.get_context("spawn")
+    q = ctx.Queue()
+    with tempfile.TemporaryDirectory() as tmpd:
+        init_file = os.path.join(tmpd, "r8_ple_sp_init")
+        procs = [ctx.Process(target=_r8_ple_exact_halo_worker, args=(rk, 4, init_file, q)) for rk in range(4)]
+        for p in procs:
+            p.start()
+        for p in procs:
+            p.join(timeout=60)
+            assert p.exitcode == 0, f"R8 PLE SP worker exit={p.exitcode}"
+    msg = q.get(timeout=5)
+    assert msg == ("ok", True), f"R8 PLE worker err: {msg}"
+    print("  [R8 GDN & PLE PASS] triton_fast_launch ragged+snap & N==halo_w SP zero-copy halo verified.")
+
+
 def main() -> None:
     t0 = time.time()
     test_yoco_sharing_plan_and_param_shapes()
@@ -1772,6 +1964,7 @@ def main() -> None:
     test_r5_gdn_verify_readout_stage1_and_fused_projections()
     test_r6_gdn_decode_opaque_and_direct_chunk64_snaps()
     test_r7_ple_sp_and_sharded_table()
+    test_r8_gdn_prefill_fast_launch_and_ple_halo_parity()
     run_b300_benchmarks()
     print(f"\nALL TESTS & BENCHMARKS PASSED in {time.time() - t0:.2f}s")
 

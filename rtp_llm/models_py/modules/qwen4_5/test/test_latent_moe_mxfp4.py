@@ -1676,11 +1676,163 @@ def _dist_worker_body(rank: int, world_size: int, device: torch.device, group) -
         sp_moe.all_to_all_comm = orig_a2a
 
     del g_mlp, g_moe, g_gnorm, g_dp, g_tbo, sp_moe
+
+    # R8: Qwen4_5AllToAllComm defaults max_tokens_per_rank=8192 (and preserves explicit override)
+    assert a2a.max_tokens_per_rank == 64 and a2a._max_tokens_explicit
+    if os.environ.get("QWEN4_5_A2A_MAX_TOKENS") is None:
+        a2a_def = Qwen4_5AllToAllComm(
+            group=group, hidden_dim=2560, top_k=2, device=device, eager_init=False
+        )
+        assert a2a_def.max_tokens_per_rank == 8192 and not a2a_def._max_tokens_explicit
+        a2a_def.init_workspace()
+        if a2a_def.active_backend == "symm_mem":
+            assert a2a_def.max_tokens_per_rank == 8192, (
+                f"Expected default symm_mem max_tokens_per_rank=8192, got {a2a_def.max_tokens_per_rank}"
+            )
+        # R8: Out-of-scope calls always probe live (zero cross-model stale cache);
+        # step_equal_tokens_scope() caches L1..L3 in-scope and clears cleanly on exit/exception.
+        probe_calls = 0
+        orig_probe = a2a_def._probe_equal_tokens
+        def _counted_probe(m_loc: int, dev: torch.device) -> bool:
+            nonlocal probe_calls
+            probe_calls += 1
+            return orig_probe(m_loc, dev)
+        a2a_def._probe_equal_tokens = _counted_probe  # type: ignore[method-assign]
+        sig_dp = (2, 2, 4, 2560, 640)
+
+        # Out-of-scope Defect 2a regression: caller 1001 [8,8] -> independent caller 2001 [8,4]
+        assert a2a_def.resolve_step_equal_tokens(8, device, caller_id=1001, step_sig=sig_dp) is True
+        assert a2a_def.resolve_step_equal_tokens(8 if rank == 0 else 4, device, caller_id=2001, step_sig=sig_dp) is False
+        assert probe_calls == 2, f"Out-of-scope calls must probe live, got {probe_calls}"
+
+        # In-scope: 3 layers -> 1 probe per forward pass, nested scope & exception cleanup
+        layer_ids = [101, 102, 103]
+        with a2a_def.step_equal_tokens_scope():
+            for cid in layer_ids:
+                assert a2a_def.resolve_step_equal_tokens(4, device, caller_id=cid, step_sig=sig_dp) is True
+            assert probe_calls == 3, f"Expected 3 probes after 1st scoped pass, got {probe_calls}"
+            with a2a_def.step_equal_tokens_scope():
+                m_skew = 4 if rank == 0 else 8
+                for cid in layer_ids:
+                    assert a2a_def.resolve_step_equal_tokens(m_skew, device, caller_id=cid, step_sig=sig_dp) is False
+            assert probe_calls == 4, f"Expected 4 probes after nested skewed pass, got {probe_calls}"
+            for cid in layer_ids:
+                assert a2a_def.resolve_step_equal_tokens(6, device, caller_id=cid, step_sig=sig_dp) is True
+            assert probe_calls == 5, f"Expected 5 probes after 3rd scoped pass, got {probe_calls}"
+        assert len(a2a_def._eq_step_cache) == 0 and a2a_def._eq_scope_depth == 0
+
+        try:
+            with a2a_def.step_equal_tokens_scope():
+                assert a2a_def.resolve_step_equal_tokens(4, device, caller_id=301, step_sig=sig_dp) is True
+                raise RuntimeError("abort step")
+        except RuntimeError:
+            pass
+        assert len(a2a_def._eq_step_cache) == 0 and a2a_def._eq_scope_depth == 0
+        assert a2a_def.resolve_step_equal_tokens(4 if rank == 0 else 2, device, caller_id=302, step_sig=sig_dp) is False
+        assert probe_calls == 7
+        a2a_def._probe_equal_tokens = orig_probe  # type: ignore[method-assign]
+
+        a2a_def.destroy()
+        del a2a_def
+
+    # R8: fast_comm.all_gather 4-slot disjoint Eager/CG ping-pong + mixed multi-CG transitions + NCCL upper bound
+    def _ref_ag(t: torch.Tensor, dim: int) -> torch.Tensor:
+        t_c = t if t.is_contiguous() else t.contiguous()
+        chunks = [torch.empty_like(t_c) for _ in range(world_size)]
+        dist.all_gather(chunks, t_c, group=group)
+        return torch.cat(chunks, dim=dim)
+
+    for ag_dim in (0, -1):
+        for ag_m in (3, 16):
+            ag_d = 512 if ag_dim == 0 else 128
+            # Consecutive Eager ping-pong (slots 2 <-> 3, 1 barrier/call)
+            for step in range(6):
+                torch.manual_seed(8100 + rank * 100 + step + (0 if ag_dim == 0 else 50))
+                x_ag = torch.randn((ag_m, ag_d), dtype=torch.bfloat16, device=device) * 0.5
+                y_ag = ar.all_gather(x_ag, dim=ag_dim)
+                assert torch.equal(y_ag, _ref_ag(x_ag, ag_dim)), (
+                    f"Eager ping-pong mismatch dim={ag_dim} M={ag_m} step={step}"
+                )
+
+        # Capture 3 distinct CUDA Graphs (K=1, K=2, K=3 calls) and replay in mixed order with Eager
+        ag_d = 512 if ag_dim == 0 else 128
+        ag_m_cg = 16
+        in_k1 = [torch.randn((ag_m_cg, ag_d), dtype=torch.bfloat16, device=device)]
+        in_k2 = [torch.randn((ag_m_cg, ag_d), dtype=torch.bfloat16, device=device) for _ in range(2)]
+        in_k3 = [torch.randn((ag_m_cg, ag_d), dtype=torch.bfloat16, device=device) for _ in range(3)]
+        for t_list in (in_k1, in_k2, in_k3):
+            for t_i in t_list:
+                ar.all_gather(t_i, dim=ag_dim)
+        torch.cuda.synchronize(device)
+
+        g_k1 = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(g_k1):
+            out_k1 = [ar.all_gather(in_k1[0], dim=ag_dim)]
+        g_k2 = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(g_k2):
+            out_k2 = [ar.all_gather(t_i, dim=ag_dim) for t_i in in_k2]
+        g_k3 = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(g_k3):
+            out_k3 = [ar.all_gather(t_i, dim=ag_dim) for t_i in in_k3]
+
+        seq = [("k1", g_k1, in_k1, out_k1), ("k2", g_k2, in_k2, out_k2), ("k3", g_k3, in_k3, out_k3),
+               ("k2", g_k2, in_k2, out_k2), ("k1", g_k1, in_k1, out_k1), ("k3", g_k3, in_k3, out_k3)]
+        for idx_s, (tag, g_obj, ins, outs) in enumerate(seq):
+            # Interleaved Eager call between graphs
+            torch.manual_seed(8200 + rank * 37 + idx_s)
+            x_eag = torch.randn((5, ag_d), dtype=torch.bfloat16, device=device)
+            y_eag = ar.all_gather(x_eag, dim=ag_dim)
+            assert torch.equal(y_eag, _ref_ag(x_eag, ag_dim)), f"Mixed Eager mismatch at {idx_s}"
+
+            for j, t_in in enumerate(ins):
+                torch.manual_seed(8300 + rank * 71 + idx_s * 7 + j)
+                t_in.copy_(torch.randn_like(t_in))
+            g_obj.replay()
+            torch.cuda.synchronize(device)
+            for j, (t_in, t_out) in enumerate(zip(ins, outs)):
+                assert torch.equal(t_out, _ref_ag(t_in, ag_dim)), (
+                    f"Multi-CG mixed replay mismatch {tag} dim={ag_dim} step={idx_s} call={j}"
+                )
+        del g_k1, g_k2, g_k3
+
+    if ar._ag_symm_hdl is not None and ar._ag_symm_slot_bytes > 0:
+        # Payload exceeding _ag_symm_slot_bytes routes to NCCL fallback cleanly
+        slot_b = int(ar._ag_symm_slot_bytes)
+        d_lg = 2048
+        m_lg = (slot_b // (d_lg * 2)) + 2
+        x_lg_ag = torch.randn((m_lg, d_lg), dtype=torch.bfloat16, device=device)
+        y_lg_ag = ar.all_gather(x_lg_ag, dim=0)
+        assert torch.equal(y_lg_ag, _ref_ag(x_lg_ag, 0)), "NCCL upper-bound fallback mismatch"
+
+        # Verify barrier count reduction: Eager K=4 -> 4 barriers; CG K=4 -> 6 barriers (2+1+2+1)
+        x_cnt = [torch.randn((16, 256), dtype=torch.bfloat16, device=device) for _ in range(4)]
+        for t_i in x_cnt:
+            ar.all_gather(t_i, dim=0)
+        torch.cuda.synchronize(device)
+        with torch.profiler.profile(activities=[torch.profiler.ProfilerActivity.CUDA]) as p_eag:
+            for t_i in x_cnt:
+                ar.all_gather(t_i, dim=0)
+        torch.cuda.synchronize(device)
+        n_bar_eag = sum(e.count for e in p_eag.key_averages() if "barrier_kernel" in e.key)
+        assert n_bar_eag == 4, f"Expected 4 Eager barriers for K=4, got {n_bar_eag}"
+
+        g_cnt = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(g_cnt):
+            _out_cnt = [ar.all_gather(t_i, dim=0) for t_i in x_cnt]
+        g_cnt.replay()
+        torch.cuda.synchronize(device)
+        with torch.profiler.profile(activities=[torch.profiler.ProfilerActivity.CUDA]) as p_cg:
+            g_cnt.replay()
+        torch.cuda.synchronize(device)
+        n_bar_cg = sum(e.count for e in p_cg.key_averages() if "barrier_kernel" in e.key)
+        assert n_bar_cg == 6, f"Expected 6 CG barriers for K=4 (2+1+2+1), got {n_bar_cg}"
+        del g_cnt
+
     if rank == 0:
         print(
             f"  PASS Distributed TP/EP={world_size} (fast_comm={ar.active_backend}, a2a={a2a.active_backend}): "
             f"DenseMLP_TP_cos={cos_tp:.6f}, LatentMoE_EP_cos={cos_ep:.6f}, "
-            f"GemmaAR_CG_cos={cos_gnorm_cg:.6f}, A2A_cos={cos_a2a_r:.6f}, DP_EP_MoE({dp_backend})={cos_dp_ep:.6f}, +R7_TPSP"
+            f"GemmaAR_CG_cos={cos_gnorm_cg:.6f}, A2A_cos={cos_a2a_r:.6f}, DP_EP_MoE({dp_backend})={cos_dp_ep:.6f}, +R7_TPSP+R8_AG_4SLOT"
         )
 
 
@@ -2993,6 +3145,223 @@ def test_r7_tpsp_and_fused_kernels(device: torch.device) -> None:
     print("  PASS R7 Fused SituAndMul/Packed-Masked/Workspace/Addmm Epilogue & Zero Combine Kernel")
 
 
+
+def test_r8_splitk_router_bf16_tgv_and_dp_tpsp(device: torch.device) -> None:
+    print("\n=== [15] Test R8 Split-K Router, Low-M BF16 TGV & DP+TPSP Dispatch ===")
+
+    # 1. Split-K Triton Router (M=1..64): exact topk_ids & topk_weights parity, 0 splitKreduce, 0 cutlass_80, CG safe
+    prev_sk_router = os.environ.get("QWEN4_5_TRITON_SPLITK_ROUTER")
+    os.environ["QWEN4_5_TRITON_SPLITK_ROUTER"] = "1"
+    try:
+        for use_bias in (True, False):
+            moe_rt = Qwen4_5LatentMoE(
+                hidden_size=5120,
+                routed_expert_hidden_size=2560,
+                moe_intermediate_size=128,
+                shared_expert_intermediate_size=320,
+                num_experts=640,
+                num_experts_per_tok=10,
+                moe_router_enable_expert_bias=use_bias,
+                dtype=torch.bfloat16,
+                device=device,
+                dense_linear_mode="auto",
+                backend="triton_splitk",
+            )
+            _init_latent_moe_weights(moe_rt, seed=8400 + int(use_bias))
+            moe_rt.prepare_weights()
+            for M_r in (1, 8, 16, 32, 64):
+                routed_in = torch.randn((M_r, 2560), dtype=torch.bfloat16, device=device) * 0.4
+                ids_fast, w_fast = moe_rt.route(routed_in, use_triton=True)
+                os.environ["QWEN4_5_TRITON_SPLITK_ROUTER"] = "0"
+                ids_leg, w_leg = moe_rt.route(routed_in, use_triton=True)
+                os.environ["QWEN4_5_TRITON_SPLITK_ROUTER"] = "1"
+                ids_ref, w_ref = moe_rt.route(routed_in, use_triton=False)
+                if not torch.equal(ids_fast, ids_ref):
+                    assert not use_bias or torch.equal(ids_fast, ids_leg), (
+                        f"Router topk_ids mismatch M={M_r} bias={use_bias}: fast={ids_fast} ref={ids_ref} leg={ids_leg}"
+                    )
+                    assert _diff_stats(w_fast.sort(dim=-1).values, w_ref.sort(dim=-1).values)[2] >= 0.99999
+                else:
+                    max_abs, _, cos = _diff_stats(w_fast, w_ref)
+                    assert cos >= 0.999999 and max_abs <= 1e-4, (
+                        f"Router weights mismatch M={M_r} bias={use_bias}: max_abs={max_abs}, cos={cos}"
+                    )
+                if M_r in (1, 8, 32, 64):
+                    torch.cuda.synchronize(device)
+                    with torch.profiler.profile(activities=[torch.profiler.ProfilerActivity.CUDA]) as pr:
+                        moe_rt.route(routed_in, use_triton=True)
+                    torch.cuda.synchronize(device)
+                    kr = [e.key.lower() for e in pr.key_averages()]
+                    assert not any("splitkreduce" in k for k in kr), f"splitKreduce in router M={M_r}: {kr}"
+                    assert not any("cutlass_80" in k for k in kr), f"cutlass_80 in router M={M_r}: {kr}"
+
+            # CUDA Graph capture+replay + input mutation on router
+            for M_cg in (1, 8, 32):
+                r_cg = torch.randn((M_cg, 2560), dtype=torch.bfloat16, device=device) * 0.4
+                for _ in range(2):
+                    moe_rt.route(r_cg, use_triton=True)
+                torch.cuda.synchronize(device)
+                g_rt = torch.cuda.CUDAGraph()
+                with torch.cuda.graph(g_rt):
+                    ids_cg, w_cg = moe_rt.route(r_cg, use_triton=True)
+                r_mut = torch.randn((M_cg, 2560), dtype=torch.bfloat16, device=device) * 0.4
+                r_cg.copy_(r_mut)
+                g_rt.replay()
+                torch.cuda.synchronize(device)
+                ids_eag, w_eag = moe_rt.route(r_mut, use_triton=True)
+                assert torch.equal(ids_cg, ids_eag) and torch.equal(w_cg, w_eag)
+                ids_exp, w_exp = moe_rt.route(r_mut, use_triton=False)
+                if use_bias:
+                    assert torch.equal(ids_cg, ids_exp) and _diff_stats(w_cg, w_exp)[2] >= 0.999999
+                else:
+                    assert _diff_stats(w_cg.sort(dim=-1).values, w_exp.sort(dim=-1).values)[2] >= 0.999999
+                del g_rt
+
+            # Toggle fallback check
+            os.environ["QWEN4_5_TRITON_SPLITK_ROUTER"] = "0"
+            r_fb = torch.randn((16, 2560), dtype=torch.bfloat16, device=device) * 0.4
+            ids_fb, w_fb = moe_rt.route(r_fb, use_triton=True)
+            ids_rf, w_rf = moe_rt.route(r_fb, use_triton=False)
+            if use_bias:
+                assert torch.equal(ids_fb, ids_rf) and _diff_stats(w_fb, w_rf)[2] >= 0.999999
+            else:
+                assert _diff_stats(w_fb.sort(dim=-1).values, w_rf.sort(dim=-1).values)[2] >= 0.999999
+            os.environ["QWEN4_5_TRITON_SPLITK_ROUTER"] = "1"
+            del moe_rt
+    finally:
+        if prev_sk_router is None:
+            os.environ.pop("QWEN4_5_TRITON_SPLITK_ROUTER", None)
+        else:
+            os.environ["QWEN4_5_TRITON_SPLITK_ROUTER"] = prev_sk_router
+
+    # 2. Low-M BF16 TGV (M=1, 8): Qwen4_5DenseMLP + Qwen4_5LatentMoE (5120->5768 w3x_gates + 2560->5120 latent_up)
+    prev_tgv = os.environ.get("QWEN4_5_BF16_TGV")
+    os.environ["QWEN4_5_BF16_TGV"] = "1"
+    try:
+        mlp = Qwen4_5DenseMLP(
+            hidden_size=5120,
+            intermediate_size=3200,
+            dtype=torch.bfloat16,
+            device=device,
+            dense_linear_mode="auto",
+        )
+        moe_real = Qwen4_5LatentMoE(
+            hidden_size=5120,
+            routed_expert_hidden_size=2560,
+            moe_intermediate_size=128,
+            shared_expert_intermediate_size=320,
+            num_experts=640,
+            num_experts_per_tok=10,
+            dtype=torch.bfloat16,
+            device=device,
+            dense_linear_mode="auto",
+            backend="triton_splitk",
+        )
+        _init_latent_moe_weights(moe_real, seed=8500)
+        moe_real.prepare_weights()
+        assert moe_real._w3x_and_gates_fast is not None
+        assert int(moe_real._w3x_and_gates_fast.shape[0]) == 5768
+
+        for mod_name, mod in (("DenseMLP", mlp), ("LatentMoE", moe_real)):
+            for M_t in (1, 8, 16):
+                x_t = torch.randn((M_t, 5120), dtype=torch.bfloat16, device=device) * 0.4
+                os.environ["QWEN4_5_BF16_TGV"] = "1"
+                y_tgv = mod(x_t)
+                os.environ["QWEN4_5_BF16_TGV"] = "0"
+                y_ref = mod(x_t)
+                os.environ["QWEN4_5_BF16_TGV"] = "1"
+                cos_t = _diff_stats(y_tgv, y_ref)[2]
+                assert cos_t >= 0.9999, f"{mod_name} TGV vs F.linear M={M_t} cos={cos_t}"
+                if M_t <= 8:
+                    torch.cuda.synchronize(device)
+                    with torch.profiler.profile(activities=[torch.profiler.ProfilerActivity.CUDA]) as pt:
+                        mod(x_t)
+                    torch.cuda.synchronize(device)
+                    kt = [e.key.lower() for e in pt.key_averages()]
+                    assert not any("cutlass_80" in k for k in kt), f"cutlass_80 in {mod_name} M={M_t}: {kt}"
+                    assert not any("splitkreduce" in k for k in kt), (
+                        f"splitKreduce in {mod_name} M={M_t}: {kt}"
+                    )
+                    for _ in range(2):
+                        mod(x_t)
+                    torch.cuda.synchronize(device)
+                    g_t = torch.cuda.CUDAGraph()
+                    with torch.cuda.graph(g_t):
+                        y_cg = mod(x_t)
+                    x_mut = torch.randn((M_t, 5120), dtype=torch.bfloat16, device=device) * 0.4
+                    x_t.copy_(x_mut)
+                    g_t.replay()
+                    torch.cuda.synchronize(device)
+                    assert _diff_stats(y_cg, mod(x_mut))[2] >= 0.9999
+                    del g_t
+
+        # 3. _prepare_sp_dispatch safety for dp2_tpsp2_ep4 (eff_sp=2 < ep_size=4)
+        moe_real.sp_size = 2
+        moe_real.tp_size = 2
+        moe_real.sp_rank = 1
+        moe_real.ep_size = 4
+        r_sp = torch.randn((50, 2560), dtype=torch.bfloat16, device=device)
+        i_sp = torch.zeros((50, 10), dtype=torch.int32, device=device)
+        w_sp = torch.ones((50, 10), dtype=torch.float32, device=device)
+        # dp_equal_tokens=None must pad chunk to 51 but NOT synthesize equal_tokens=True when dp_size>1
+        moe_real.dp_equal_tokens = None
+        rp, ip, wp, eq_out, orig_t = moe_real._prepare_sp_dispatch(
+            r_sp, i_sp, w_sp, sp_input=True, sp_total_tokens=101
+        )
+        assert int(rp.shape[0]) == 51 and eq_out is None and orig_t == 50
+        assert torch.all(ip[50] == -1) and torch.all(wp[50] == 0)
+        # dp_equal_tokens=True preserves equal_tokens=True with padding
+        moe_real.dp_equal_tokens = True
+        rp2, _, _, eq_out2, orig_t2 = moe_real._prepare_sp_dispatch(
+            r_sp, i_sp, w_sp, sp_input=True, sp_total_tokens=101
+        )
+        assert int(rp2.shape[0]) == 51 and eq_out2 is True and orig_t2 == 50
+        # dp_equal_tokens=False must not pad or alter eq_out
+        moe_real.dp_equal_tokens = False
+        rp3, _, _, eq_out3, orig_t3 = moe_real._prepare_sp_dispatch(
+            r_sp, i_sp, w_sp, sp_input=True, sp_total_tokens=101
+        )
+        assert int(rp3.shape[0]) == 50 and eq_out3 is False and orig_t3 is None
+        del mlp, moe_real
+    finally:
+        if prev_tgv is None:
+            os.environ.pop("QWEN4_5_BF16_TGV", None)
+        else:
+            os.environ["QWEN4_5_BF16_TGV"] = prev_tgv
+
+    # 4. Autograd preservation check (Defect 2b): requires_grad falls back to F.linear / PyTorch router
+    from rtp_llm.models_py.modules.qwen4_5.moe import _bf16_linear_tgv_or_torch
+
+    with torch.inference_mode(False), torch.enable_grad():
+        x_g = torch.randn((4, 5120), dtype=torch.bfloat16, device=device, requires_grad=True)
+        w_g = torch.randn((5768, 5120), dtype=torch.bfloat16, device=device, requires_grad=True)
+        y_g = _bf16_linear_tgv_or_torch(x_g, w_g)
+        assert y_g.requires_grad, "TGV wrapper must preserve requires_grad for autograd tensors"
+        y_g.sum().backward()
+        assert x_g.grad is not None and w_g.grad is not None
+
+        moe_g = Qwen4_5LatentMoE(
+            hidden_size=5120,
+            routed_expert_hidden_size=2560,
+            moe_intermediate_size=128,
+            shared_expert_intermediate_size=320,
+            num_experts=640,
+            num_experts_per_tok=10,
+            dtype=torch.bfloat16,
+            device=device,
+            init_mxfp4_weights=False,
+            backend="triton_splitk",
+        )
+        r_g = torch.randn((8, 2560), dtype=torch.bfloat16, device=device, requires_grad=True)
+        _, rw_g = moe_g.route(r_g, use_triton=True)
+        assert rw_g.requires_grad, "Router must preserve requires_grad on routed/weight tensors"
+        rw_g.sum().backward()
+        assert r_g.grad is not None and moe_g.gate.weight.grad is not None
+        del moe_g
+
+    print("  PASS R8 Split-K Router, Low-M BF16 TGV (5768/6400/5120), Autograd & DP+TPSP Dispatch")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Qwen 4.5-Flash LatentMoE & SM100 MXFP4 test suite")
     parser.add_argument("--distributed", action="store_true", help="Run multi-GPU FastAllReduce/TP/EP tests")
@@ -3057,6 +3426,7 @@ def main() -> int:
         test_r5_deepgemm_w3x_a2a_and_no_cutlass80(device)
         test_r6_small_batch_launch_reduction_and_kernels(device)
         test_r7_tpsp_and_fused_kernels(device)
+        test_r8_splitk_router_bf16_tgv_and_dp_tpsp(device)
 
     if args.distributed:
         test_distributed_fast_comm_tp_ep(world_size=args.world_size)

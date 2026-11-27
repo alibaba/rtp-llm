@@ -2688,44 +2688,33 @@ def gdn_chunk_prefill_ragged_with_snapshots_triton(
         else None
     )
 
-    _gdn_chunk_prep_wy_ragged_kernel[(num_v_heads, num_chunks)](
-        k,
-        v,
-        g,
-        beta,
-        cu_seqlens,
-        chunk_req,
-        chunk_t0,
-        g_cum,
-        w_buf,
-        u_buf,
-        k.stride(0),
-        k.stride(1),
-        k.stride(2),
-        v.stride(0),
-        v.stride(1),
-        v.stride(2),
-        g.stride(0),
-        g.stride(1),
-        beta.stride(0),
-        beta.stride(1),
-        g_cum.stride(0),
-        g_cum.stride(1),
-        g_cum.stride(2),
-        w_buf.stride(0),
-        w_buf.stride(1),
-        w_buf.stride(2),
-        w_buf.stride(3),
-        u_buf.stride(0),
-        u_buf.stride(1),
-        u_buf.stride(2),
-        u_buf.stride(3),
+    nw_wy = 1 if num_v_heads * num_chunks >= 1024 else (2 if num_chunks >= 8 else 4)
+    ns_wy = 1 if (num_v_heads * num_chunks >= 1024 or (bsz >= 4 and num_chunks >= 128)) else 2
+    rt_wy = (
+        k, v, g, beta, cu_seqlens, chunk_req, chunk_t0, g_cum, w_buf, u_buf,
+        k.stride(0), k.stride(1), k.stride(2), v.stride(0), v.stride(1), v.stride(2),
+        g.stride(0), g.stride(1), beta.stride(0), beta.stride(1),
+        g_cum.stride(0), g_cum.stride(1), g_cum.stride(2),
+        w_buf.stride(0), w_buf.stride(1), w_buf.stride(2), w_buf.stride(3),
+        u_buf.stride(0), u_buf.stride(1), u_buf.stride(2), u_buf.stride(3),
         float(l2_eps),
-        GQA_RATIO=gqa_ratio,
-        D_K=64,
-        D_V=64,
-        num_warps=(1 if num_v_heads * num_chunks >= 1024 else (2 if num_chunks >= 8 else 4)),
-        num_stages=(1 if (num_v_heads * num_chunks >= 1024 or (bsz >= 4 and num_chunks >= 128)) else 2),
+    )
+    ptr_wy = (
+        k.data_ptr() | v.data_ptr() | g.data_ptr() | beta.data_ptr()
+        | cu_seqlens.data_ptr() | chunk_req.data_ptr() | chunk_t0.data_ptr()
+        | g_cum.data_ptr() | w_buf.data_ptr() | u_buf.data_ptr()
+    )
+    ck_wy = (
+        device.index, 100, k.dtype, v.dtype, g.dtype, beta.dtype, cu_seqlens.dtype,
+        g_cum.dtype, w_buf.dtype, u_buf.dtype,
+        tuple(_triton_int_spec(v_s) for v_s in rt_wy[10:31]),
+        float(l2_eps), gqa_ratio, nw_wy, ns_wy,
+    )
+    triton_fast_launch(
+        _GDN_TRITON_CACHE, ck_wy, _gdn_chunk_prep_wy_ragged_kernel,
+        num_v_heads, num_chunks, 1, ptr_wy, rt_wy,
+        {"GQA_RATIO": gqa_ratio, "D_K": 64, "D_V": 64},
+        num_warps=nw_wy, num_stages=ns_wy,
     )
 
     has_init = initial_state is not None
@@ -2768,105 +2757,79 @@ def gdn_chunk_prefill_ragged_with_snapshots_triton(
             else (32 if (bsz * num_v_heads <= 512 and num_chunks >= 32) else 64)
         )
         ns_s2 = 3 if (not has_snaps or bsz * num_v_heads <= 64) else 2
-    _gdn_chunk_state_recurrence_ragged_kernel[(bsz, num_v_heads, 64 // block_dv_s2)](
-        k,
-        g_cum,
-        w_buf,
-        u_buf,
-        cu_seqlens,
-        req_chunk_start,
-        init_arg,
-        h_all,
-        v_new_all,
-        fs_arg,
-        rss_arg,
-        sle_arg,
-        sp_arg,
-        dst_arg,
-        k.stride(0),
-        k.stride(1),
-        k.stride(2),
-        g_cum.stride(0),
-        g_cum.stride(1),
-        g_cum.stride(2),
-        w_buf.stride(0),
-        w_buf.stride(1),
-        w_buf.stride(2),
-        w_buf.stride(3),
-        u_buf.stride(0),
-        u_buf.stride(1),
-        u_buf.stride(2),
-        u_buf.stride(3),
+    nw_s2 = 2 if (block_dv_s2 < 64 or bsz >= 4) else 4
+    dst_rows_s2 = int(ssm_dst_pool.shape[0]) if has_snaps and ssm_dst_pool is not None else 0
+    rt_s2 = (
+        k, g_cum, w_buf, u_buf, cu_seqlens, req_chunk_start, init_arg, h_all, v_new_all,
+        fs_arg, rss_arg, sle_arg, sp_arg, dst_arg,
+        k.stride(0), k.stride(1), k.stride(2),
+        g_cum.stride(0), g_cum.stride(1), g_cum.stride(2),
+        w_buf.stride(0), w_buf.stride(1), w_buf.stride(2), w_buf.stride(3),
+        u_buf.stride(0), u_buf.stride(1), u_buf.stride(2), u_buf.stride(3),
         initial_state.stride(0) if has_init else 0,
         initial_state.stride(1) if has_init else 0,
         initial_state.stride(2) if has_init else 0,
         initial_state.stride(3) if has_init else 0,
-        h_all.stride(0),
-        h_all.stride(1),
-        h_all.stride(2),
-        h_all.stride(3),
-        v_new_all.stride(0),
-        v_new_all.stride(1),
-        v_new_all.stride(2),
-        v_new_all.stride(3),
+        h_all.stride(0), h_all.stride(1), h_all.stride(2), h_all.stride(3),
+        v_new_all.stride(0), v_new_all.stride(1), v_new_all.stride(2), v_new_all.stride(3),
         final_states.stride(0) if output_final_states else 0,
         final_states.stride(1) if output_final_states else 0,
         final_states.stride(2) if output_final_states else 0,
         final_states.stride(3) if output_final_states else 0,
-        dst_stride_blk,
-        int(ssm_dst_pool.shape[0]) if has_snaps and ssm_dst_pool is not None else 0,
-        num_v_heads,
-        float(l2_eps),
-        GQA_RATIO=gqa_ratio,
-        D_K=64,
-        D_V=64,
-        HAS_INIT_STATE=has_init,
-        STORE_FINAL_STATE=output_final_states,
-        HAS_SNAPS=has_snaps,
-        SKIP_INVALID_PHYS=skip_invalid_phys,
-        DIRECT_CHUNK_SNAP=direct_chunk_snap,
-        BLOCK_DV=block_dv_s2,
-        num_warps=2 if (block_dv_s2 < 64 or bsz >= 4) else 4,
-        num_stages=ns_s2,
+        dst_stride_blk, dst_rows_s2, num_v_heads, float(l2_eps),
+    )
+    ptr_s2 = (
+        k.data_ptr() | g_cum.data_ptr() | w_buf.data_ptr() | u_buf.data_ptr()
+        | cu_seqlens.data_ptr() | req_chunk_start.data_ptr() | init_arg.data_ptr()
+        | h_all.data_ptr() | v_new_all.data_ptr() | fs_arg.data_ptr()
+        | rss_arg.data_ptr() | sle_arg.data_ptr() | sp_arg.data_ptr() | dst_arg.data_ptr()
+    )
+    ck_s2 = (
+        device.index, 101, k.dtype, g_cum.dtype, w_buf.dtype, u_buf.dtype,
+        cu_seqlens.dtype, init_arg.dtype, h_all.dtype, v_new_all.dtype, fs_arg.dtype,
+        rss_arg.dtype, sp_arg.dtype, dst_arg.dtype,
+        tuple(_triton_int_spec(v_s) for v_s in rt_s2[14:47]),
+        float(l2_eps), gqa_ratio, has_init, output_final_states, has_snaps,
+        skip_invalid_phys, direct_chunk_snap, block_dv_s2, nw_s2, ns_s2,
+    )
+    triton_fast_launch(
+        _GDN_TRITON_CACHE, ck_s2, _gdn_chunk_state_recurrence_ragged_kernel,
+        bsz, num_v_heads, 64 // block_dv_s2, ptr_s2, rt_s2,
+        {
+            "GQA_RATIO": gqa_ratio, "D_K": 64, "D_V": 64,
+            "HAS_INIT_STATE": has_init, "STORE_FINAL_STATE": output_final_states,
+            "HAS_SNAPS": has_snaps, "SKIP_INVALID_PHYS": skip_invalid_phys,
+            "DIRECT_CHUNK_SNAP": direct_chunk_snap, "BLOCK_DV": block_dv_s2,
+        },
+        num_warps=nw_s2, num_stages=ns_s2,
     )
 
-    _gdn_chunk_output_ragged_kernel[(num_v_heads, num_chunks)](
-        q,
-        k,
-        g_cum,
-        h_all,
-        v_new_all,
-        cu_seqlens,
-        chunk_req,
-        chunk_t0,
-        out,
-        q.stride(0),
-        q.stride(1),
-        q.stride(2),
-        k.stride(0),
-        k.stride(1),
-        k.stride(2),
-        g_cum.stride(0),
-        g_cum.stride(1),
-        g_cum.stride(2),
-        h_all.stride(0),
-        h_all.stride(1),
-        h_all.stride(2),
-        h_all.stride(3),
-        v_new_all.stride(0),
-        v_new_all.stride(1),
-        v_new_all.stride(2),
-        v_new_all.stride(3),
-        out.stride(0),
-        out.stride(1),
-        out.stride(2),
-        float(64 ** -0.5),
-        float(l2_eps),
-        GQA_RATIO=gqa_ratio,
-        D_K=64,
-        D_V=64,
-        num_warps=8 if num_chunks >= 64 else 4,
-        num_stages=1 if (bsz >= 4 and num_chunks >= 128) else 2,
+    nw_out = 8 if num_chunks >= 64 else 4
+    ns_out = 1 if (bsz >= 4 and num_chunks >= 128) else 2
+    rt_out = (
+        q, k, g_cum, h_all, v_new_all, cu_seqlens, chunk_req, chunk_t0, out,
+        q.stride(0), q.stride(1), q.stride(2), k.stride(0), k.stride(1), k.stride(2),
+        g_cum.stride(0), g_cum.stride(1), g_cum.stride(2),
+        h_all.stride(0), h_all.stride(1), h_all.stride(2), h_all.stride(3),
+        v_new_all.stride(0), v_new_all.stride(1), v_new_all.stride(2), v_new_all.stride(3),
+        out.stride(0), out.stride(1), out.stride(2), float(64 ** -0.5), float(l2_eps),
+    )
+    ptr_out = (
+        q.data_ptr() | k.data_ptr() | g_cum.data_ptr() | h_all.data_ptr()
+        | v_new_all.data_ptr() | cu_seqlens.data_ptr() | chunk_req.data_ptr()
+        | chunk_t0.data_ptr() | out.data_ptr()
+    )
+    ck_out = (
+        device.index, 102, q.dtype, k.dtype, g_cum.dtype, h_all.dtype, v_new_all.dtype,
+        cu_seqlens.dtype, out.dtype,
+        tuple(_triton_int_spec(v_s) for v_s in rt_out[9:29]),
+        float(64 ** -0.5), float(l2_eps), gqa_ratio, nw_out, ns_out,
+    )
+    triton_fast_launch(
+        _GDN_TRITON_CACHE, ck_out, _gdn_chunk_output_ragged_kernel,
+        num_v_heads, num_chunks, 1, ptr_out, rt_out,
+        {"GQA_RATIO": gqa_ratio, "D_K": 64, "D_V": 64},
+        num_warps=nw_out, num_stages=ns_out,
     )
 
     return out, final_states
@@ -3609,33 +3572,34 @@ class Qwen4_5GatedDeltaNet(nn.Module):
                 if conv_dst_stride_row > 0
                 else int(conv_dst_pool.stride(0))
             )
-            _gdn_scatter_qkvz_conv_snapshots_ragged_kernel[
-                (int(snap_tok_idx.numel()), self.conv_dim // 64)
-            ](
-                projected_2d,
-                init_c_arg,
-                cu_seqlens,
-                snap_tok_idx,
-                snap_req_idx,
-                conv_snap_phys,
-                conv_dst_pool,
-                projected_2d.stride(0),
-                projected_2d.stride(1),
+            rt_sc = (
+                projected_2d, init_c_arg, cu_seqlens, snap_tok_idx, snap_req_idx,
+                conv_snap_phys, conv_dst_pool,
+                projected_2d.stride(0), projected_2d.stride(1),
                 init_conv_state.stride(0) if has_init_c else 0,
                 init_conv_state.stride(1) if has_init_c else 0,
                 init_conv_state.stride(2) if has_init_c else 0,
-                row_st,
-                int(conv_dst_col_offset),
-                int(conv_dst_pool.shape[0]),
-                KEY_DIM=self.key_dim,
-                D_K=64,
-                D_V=64,
-                GQA_RATIO=self.gqa_ratio,
-                GROUP_STRIDE=group_stride,
-                IS_CONSUMER=is_consumer,
-                HAS_INIT=has_init_c,
-                SKIP_INVALID_PHYS=skip_invalid_phys,
-                BLOCK_C=64,
+                row_st, int(conv_dst_col_offset), int(conv_dst_pool.shape[0]),
+            )
+            ptr_sc = (
+                projected_2d.data_ptr() | init_c_arg.data_ptr() | cu_seqlens.data_ptr()
+                | snap_tok_idx.data_ptr() | snap_req_idx.data_ptr()
+                | conv_snap_phys.data_ptr() | conv_dst_pool.data_ptr()
+            )
+            ck_sc = (
+                projected_2d.device.index, 103, projected_2d.dtype, init_c_arg.dtype,
+                cu_seqlens.dtype, snap_tok_idx.dtype, conv_snap_phys.dtype, conv_dst_pool.dtype,
+                tuple(_triton_int_spec(v_s) for v_s in rt_sc[7:15]),
+                self.key_dim, self.gqa_ratio, group_stride, is_consumer, has_init_c, skip_invalid_phys,
+            )
+            triton_fast_launch(
+                _GDN_TRITON_CACHE, ck_sc, _gdn_scatter_qkvz_conv_snapshots_ragged_kernel,
+                int(snap_tok_idx.numel()), self.conv_dim // 64, 1, ptr_sc, rt_sc,
+                {
+                    "KEY_DIM": self.key_dim, "D_K": 64, "D_V": 64, "GQA_RATIO": self.gqa_ratio,
+                    "GROUP_STRIDE": group_stride, "IS_CONSUMER": is_consumer,
+                    "HAS_INIT": has_init_c, "SKIP_INVALID_PHYS": skip_invalid_phys, "BLOCK_C": 64,
+                },
                 num_warps=2,
             )
         return q, k, v

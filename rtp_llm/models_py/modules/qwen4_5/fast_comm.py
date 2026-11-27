@@ -87,12 +87,13 @@ def _all_gather_transpose_lastdim_kernel(
     tl.store(dst_ptr + (m * WS + r) * D + offs_d, vals, mask=mask_d)
 
 
-@triton.jit(do_not_specialize=["M"])
+@triton.jit(do_not_specialize=["M", "offset_units"])
 def _symm_p2p_gather_kernel(
     ptrs_dev_ptr,
     dst_ptr,
     M,
     D_units,
+    offset_units: tl.int64,
     WS: tl.constexpr,
     BLOCK_D: tl.constexpr,
     ELEM_BYTES: tl.constexpr,
@@ -109,11 +110,34 @@ def _symm_p2p_gather_kernel(
     ptrs_base = tl.cast(ptrs_dev_ptr, tl.pointer_type(tl.int64))
     peer_addr = tl.load(ptrs_base + r).to(tl.int64)
     ptr_ty = tl.uint32 if ELEM_BYTES == 4 else tl.uint16
-    peer_ptr = tl.cast(peer_addr, tl.pointer_type(ptr_ty))
+    peer_ptr = tl.cast(peer_addr, tl.pointer_type(ptr_ty)) + offset_units
     dst_cast = tl.cast(dst_ptr, tl.pointer_type(ptr_ty))
     vals = tl.load(peer_ptr + m * D_units + offs_d, mask=mask_d)
     out_row = (m * WS + r) if IS_LAST_DIM else (r * M + m)
     tl.store(dst_cast + out_row * D_units + offs_d, vals, mask=mask_d)
+
+
+try:
+    from cuda.bindings import runtime as _cudart_rt
+except Exception:
+    _cudart_rt = None
+
+
+def _current_cuda_capture_id() -> int:
+    """Return positive CUDA Graph capture ID if capturing and available, else 0/-1."""
+    if not torch.cuda.is_current_stream_capturing():
+        return 0
+    if _cudart_rt is None:
+        return -1
+    try:
+        rc, status, cid, *_ = _cudart_rt.cudaStreamGetCaptureInfo(
+            torch.cuda.current_stream().cuda_stream
+        )
+        if int(rc) == 0 and int(status) == 1 and int(cid) > 0:
+            return int(cid)
+    except Exception:
+        pass
+    return -1
 
 
 _SUPPORTED_WORLD_SIZES = (2, 4, 8)
@@ -261,10 +285,18 @@ class Qwen4_5FastAllReduce:
         self._ag_symm_buf: Optional[torch.Tensor] = None
         self._ag_symm_hdl: Any = None
         self._ag_symm_bytes: int = 0
+        self._ag_symm_slot_bytes: int = 0
         env_ag_min = os.environ.get("QWEN4_5_FAST_AG_SYMM_MIN_BYTES")
         self._ag_symm_min_bytes: Optional[int] = (
             int(env_ag_min) if env_ag_min is not None and env_ag_min != "" else None
         )
+        env_ag_max = os.environ.get("QWEN4_5_FAST_AG_SYMM_MAX_BYTES")
+        self._ag_symm_max_bytes: Optional[int] = (
+            int(env_ag_max) if env_ag_max is not None and env_ag_max != "" else None
+        )
+        self._ag_slot: int = 0
+        self._ag_cg_id: int = 0
+        self._ag_cg_idx: int = 0
         self._gemma_gamma_cache: Dict[int, Tuple[torch.Tensor, int, torch.Tensor]] = {}
         self._sp_ws: Dict[Tuple[Any, ...], torch.Tensor] = {}
         self._destroyed: bool = False
@@ -392,8 +424,10 @@ class Qwen4_5FastAllReduce:
         self._ag_symm_buf = ag_buf
         self._ag_symm_hdl = ag_hdl
         self._ag_symm_bytes = ag_bytes
+        # Four 16B-aligned slots: [0, 1] for CUDA Graph replay, [2, 3] for Eager ping-pong.
+        self._ag_symm_slot_bytes = max(0, (ag_bytes // 4) & ~15)
         if self._ag_symm_min_bytes is None:
-            self._ag_symm_min_bytes = 32768 if self.world_size == 2 else 0
+            self._ag_symm_min_bytes = 0
         return True
 
     def _try_init_flashinfer(self) -> bool:
@@ -1004,15 +1038,21 @@ class Qwen4_5FastAllReduce:
             row_bytes = D * int(x_c.element_size())
             total_bytes = M * row_bytes
             min_symm_bytes = 0 if self._ag_symm_min_bytes is None else int(self._ag_symm_min_bytes)
+            slot_bytes = int(self._ag_symm_slot_bytes)
+            max_symm_bytes = (
+                slot_bytes
+                if self._ag_symm_max_bytes is None
+                else min(slot_bytes, int(self._ag_symm_max_bytes))
+            )
             can_symm_ag = (
                 self._ag_symm_hdl is not None
                 and self._ag_symm_buf is not None
+                and slot_bytes > 0
                 and x_c.device == self.device
                 and M > 0
                 and row_bytes > 0
                 and (row_bytes % 2) == 0
-                and row_bytes <= self._ag_symm_bytes
-                and total_bytes >= min_symm_bytes
+                and min_symm_bytes <= total_bytes <= max_symm_bytes
             )
             if can_symm_ag:
                 assert self._ag_symm_hdl is not None and self._ag_symm_buf is not None
@@ -1033,34 +1073,51 @@ class Qwen4_5FastAllReduce:
                 elem_unit = 4 if (row_bytes % 4) == 0 else 2
                 d_units = row_bytes // elem_unit
                 bd = min(1024, triton.next_power_of_2(max(d_units, 32)))
-                chunk_rows = max(1, min(M, self._ag_symm_bytes // row_bytes))
-                for m0 in range(0, M, chunk_rows):
-                    m1 = min(M, m0 + chunk_rows)
-                    cm = m1 - m0
-                    nbytes = cm * row_bytes
-                    self._ag_symm_buf[:nbytes].reshape(cm, row_bytes).copy_(src_u8[m0:m1])
-                    self._ag_symm_hdl.barrier(channel=0)
-                    if is_last_dim:
-                        dst_slice = dst[m0:m1]
-                    else:
-                        dst_slice = (
-                            dst
-                            if cm == M
-                            else torch.empty((self.world_size, cm, D), dtype=x_c.dtype, device=x_c.device)
-                        )
-                    _symm_p2p_gather_kernel[(cm, self.world_size, triton.cdiv(d_units, bd))](
-                        self._ag_symm_hdl.buffer_ptrs_dev,
-                        dst_slice,
-                        cm,
-                        d_units,
-                        WS=self.world_size,
-                        BLOCK_D=bd,
-                        ELEM_BYTES=elem_unit,
-                        IS_LAST_DIM=is_last_dim,
-                        num_warps=4,
-                    )
-                    if (not is_last_dim) and cm != M:
-                        dst[:, m0:m1, :].copy_(dst_slice)
+
+                cid = _current_cuda_capture_id()
+                if cid == 0:
+                    if self._ag_cg_id > 0:
+                        self._ag_cg_id = 0
+                        self._ag_cg_idx = 0
+                    # Eager ping-pongs slots 2 and 3 (disjoint from CG slots 0 and 1).
+                    # Each call's pre-barrier proves peers finished reading the other Eager slot.
+                    slot = 2 + self._ag_slot
+                    self._ag_slot ^= 1
+                    pre_ch = 0
+                    need_post = False
+                elif cid > 0:
+                    if cid != self._ag_cg_id:
+                        self._ag_cg_id = cid
+                        self._ag_cg_idx = 0
+                    idx = self._ag_cg_idx
+                    self._ag_cg_idx += 1
+                    # Every graph begins at slot 0 (closed by barrier(1)) and alternates
+                    # slot 0 (2 barriers) / slot 1 (1 barrier) so arbitrary-order graph
+                    # replays always find slot 0 closed on entry and drain slot 1 at idx=0.
+                    slot = idx & 1
+                    pre_ch = 0
+                    need_post = (idx & 1) == 0
+                else:
+                    slot = 0
+                    pre_ch = 0
+                    need_post = True
+
+                off_bytes = slot * slot_bytes
+                self._ag_symm_buf[off_bytes : off_bytes + total_bytes].reshape(M, row_bytes).copy_(src_u8)
+                self._ag_symm_hdl.barrier(channel=pre_ch)
+                _symm_p2p_gather_kernel[(M, self.world_size, triton.cdiv(d_units, bd))](
+                    self._ag_symm_hdl.buffer_ptrs_dev,
+                    dst,
+                    M,
+                    d_units,
+                    off_bytes // elem_unit,
+                    WS=self.world_size,
+                    BLOCK_D=bd,
+                    ELEM_BYTES=elem_unit,
+                    IS_LAST_DIM=is_last_dim,
+                    num_warps=4,
+                )
+                if need_post:
                     self._ag_symm_hdl.barrier(channel=1)
                 res = dst.reshape(out_shape)
                 if out is not None and not use_out:

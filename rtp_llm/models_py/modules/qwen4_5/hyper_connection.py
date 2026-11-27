@@ -90,8 +90,8 @@ def _hc_static_empty(
     """Allocate from ws when provided, from internal 1-slot pool for strictly dead 'normed', or fresh."""
     if ws is not None:
         return ws.empty(shape, dtype, device, tag)
-    if tag == "normed":
-        return _hc_alloc_from_pool(_HC_INTERNAL_NORMED_POOL, shape, dtype, device, "normed", 1)
+    if tag in ("normed", "sk_part"):
+        return _hc_alloc_from_pool(_HC_INTERNAL_NORMED_POOL, shape, dtype, device, tag, 1)
     return torch.empty(shape, dtype=dtype, device=device)
 
 
@@ -726,6 +726,187 @@ def _hc_dflash_gconv_combine_norm_split5120_kernel(
             n1 = n1 + tl.load(B_PTR + c1).to(tl.float32)
         tl.store(NORM_PTR + res_base + c0, n0)
         tl.store(NORM_PTR + res_base + c1, n1)
+
+
+@triton.jit
+def _hc_dflash_gconv_combine_norm_branch5120_kernel(
+    RES_PTR,
+    RAW_SUB_PTR,
+    GCONV_DELTA_PTR,
+    GCONV_BASE_PTR,
+    INJ_PTR,
+    W_PTR,
+    B_PTR,
+    COMB_PTR,
+    NORM_PTR,
+    X_STRIDE_ROW: tl.int64,
+    DELTA_STRIDE_ROW: tl.int64,
+    DELTA_STRIDE_TAP: tl.int64,
+    BASE_STRIDE_TAP: tl.int64,
+    CLIP_VAL: tl.float32,
+    HAS_CLIP: tl.constexpr,
+    TAPS: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
+    GROUP_SIZE: tl.constexpr,
+    HIDDEN: tl.constexpr,
+    HC_COUNT: tl.constexpr,
+    SINGLE_STREAM: tl.constexpr,
+    EPS: tl.constexpr,
+    HAS_BIAS: tl.constexpr,
+):
+    """Per-(row, branch) 4096+1024 exact DFlashGroupedConv.finish + HC combine+norm."""
+    row = tl.program_id(0).to(tl.int64)
+    branch = tl.program_id(1).to(tl.int64)
+    o0 = tl.arange(0, 4096).to(tl.int64)
+    o1 = 4096 + tl.arange(0, 1024).to(tl.int64)
+    g0 = o0 // GROUP_SIZE
+    g1 = o1 // GROUP_SIZE
+    pos_in_blk = row % BLOCK_SIZE
+
+    acc0 = tl.zeros((4096,), dtype=tl.float32)
+    acc1 = tl.zeros((1024,), dtype=tl.float32)
+    for tap in tl.static_range(0, TAPS):
+        src_row = row - tap
+        valid = pos_in_blk >= tap
+        safe_row = tl.where(valid, src_row, 0)
+        x0 = tl.load(RAW_SUB_PTR + safe_row * X_STRIDE_ROW + o0, mask=valid, other=0.0).to(tl.float32)
+        x1 = tl.load(RAW_SUB_PTR + safe_row * X_STRIDE_ROW + o1, mask=valid, other=0.0).to(tl.float32)
+        b0 = tl.load(GCONV_BASE_PTR + tap * BASE_STRIDE_TAP + o0).to(tl.float32)
+        b1 = tl.load(GCONV_BASE_PTR + tap * BASE_STRIDE_TAP + o1).to(tl.float32)
+        d0 = tl.load(GCONV_DELTA_PTR + row * DELTA_STRIDE_ROW + tap * DELTA_STRIDE_TAP + g0).to(tl.float32)
+        d1 = tl.load(GCONV_DELTA_PTR + row * DELTA_STRIDE_ROW + tap * DELTA_STRIDE_TAP + g1).to(tl.float32)
+        acc0 += (b0 + d0) * x0
+        acc1 += (b1 + d1) * x1
+
+    if HAS_CLIP:
+        acc0 = tl.minimum(tl.maximum(acc0, -CLIP_VAL), CLIP_VAL)
+        acc1 = tl.minimum(tl.maximum(acc1, -CLIP_VAL), CLIP_VAL)
+    sub0_f = acc0.to(RES_PTR.dtype.element_ty).to(tl.float32)
+    sub1_f = acc1.to(RES_PTR.dtype.element_ty).to(tl.float32)
+
+    c0 = branch * HIDDEN + o0
+    c1 = branch * HIDDEN + o1
+    res_base = row * (HC_COUNT * HIDDEN)
+    in0 = (row * HIDDEN + o0) if SINGLE_STREAM else (res_base + c0)
+    in1 = (row * HIDDEN + o1) if SINGLE_STREAM else (res_base + c1)
+    inj = tl.load(INJ_PTR + row * HC_COUNT + branch).to(tl.float32)
+    r0 = tl.load(RES_PTR + in0).to(tl.float32)
+    r1 = tl.load(RES_PTR + in1).to(tl.float32)
+    cb0 = (r0 + sub0_f * inj).to(RES_PTR.dtype.element_ty)
+    cb1 = (r1 + sub1_f * inj).to(RES_PTR.dtype.element_ty)
+    tl.store(COMB_PTR + res_base + c0, cb0)
+    tl.store(COMB_PTR + res_base + c1, cb1)
+
+    f0 = cb0.to(tl.float32)
+    f1 = cb1.to(tl.float32)
+    inv_rms = 1.0 / tl.sqrt((tl.sum(f0 * f0, axis=0) + tl.sum(f1 * f1, axis=0)) / HIDDEN + EPS)
+    w0 = tl.load(W_PTR + c0).to(tl.float32)
+    w1 = tl.load(W_PTR + c1).to(tl.float32)
+    n0 = f0 * inv_rms * (1.0 + w0)
+    n1 = f1 * inv_rms * (1.0 + w1)
+    if HAS_BIAS:
+        n0 = n0 + tl.load(B_PTR + c0).to(tl.float32)
+        n1 = n1 + tl.load(B_PTR + c1).to(tl.float32)
+    tl.store(NORM_PTR + res_base + c0, n0)
+    tl.store(NORM_PTR + res_base + c1, n1)
+
+
+@triton.jit(do_not_specialize=["M"])
+def _hc_down_inject_sk_gemm_kernel(
+    A_ptr,
+    B_ptr,
+    C_ptr,
+    M,
+    N: tl.constexpr,
+    K: tl.constexpr,
+    SPLIT_K: tl.constexpr,
+    BLOCK_M: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    BLOCK_K: tl.constexpr,
+):
+    """High-K Split-K GEMM writing FP32 partials [SPLIT_K, M, N] without splitKreduce."""
+    pid_m = tl.program_id(0)
+    pid_n = tl.program_id(1)
+    pid_k = tl.program_id(2)
+    rm = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
+    rn = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
+    k_per_split = tl.cdiv(K, SPLIT_K)
+    k_start = pid_k * k_per_split
+    k_end = tl.minimum(k_start + k_per_split, K)
+    rk = k_start + tl.arange(0, BLOCK_K)
+    a_ptrs = A_ptr + rm[:, None] * K + rk[None, :]
+    b_ptrs = B_ptr + rn[None, :] * K + rk[:, None]
+    acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
+    m_mask = rm[:, None] < M
+    n_mask = rn[None, :] < N
+    for _ in range(k_start, k_end, BLOCK_K):
+        km = rk < k_end
+        a = tl.load(a_ptrs, mask=m_mask & km[None, :], other=0.0)
+        b = tl.load(b_ptrs, mask=km[:, None] & n_mask, other=0.0)
+        acc = tl.dot(a, b, acc)
+        rk += BLOCK_K
+        a_ptrs += BLOCK_K
+        b_ptrs += BLOCK_K
+    c_ptrs = C_ptr + pid_k * (M * N) + rm[:, None] * N + rn[None, :]
+    tl.store(c_ptrs, acc, mask=m_mask & n_mask)
+
+
+@triton.jit(do_not_specialize=["M"])
+def _hc_mix_reduce_with_down_inject_sk_kernel(
+    PART_PTR,
+    LOGITS_PTR,
+    NORMED_PTR,
+    OUT_PTR,
+    LATENT_PTR,
+    INJ_PTR,
+    M,
+    SPLIT_K: tl.constexpr,
+    N_OUT: tl.constexpr,
+    LOWRANK: tl.constexpr,
+    HC_COUNT: tl.constexpr,
+    HIDDEN: tl.constexpr,
+    BLOCK_SK: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    BLOCK_H: tl.constexpr,
+):
+    """Fused Split-K partial reduction + down/inject epilogue + weighted mix_reduce."""
+    row = tl.program_id(0).to(tl.int64)
+    col_blk = tl.program_id(1).to(tl.int64)
+    if col_blk == 0:
+        offs_n = tl.arange(0, BLOCK_N)
+        offs_sk = tl.arange(0, BLOCK_SK)
+        vals = tl.load(
+            PART_PTR + offs_sk[:, None] * (M * N_OUT) + row * N_OUT + offs_n[None, :],
+            mask=(offs_sk[:, None] < SPLIT_K) & (offs_n[None, :] < N_OUT),
+            other=0.0,
+        )
+        raw = tl.sum(vals, axis=0)
+        scaled = raw * (1.0 / HC_COUNT)
+        sig_s = tl.sigmoid(scaled)
+        tl.store(
+            LATENT_PTR + row * LOWRANK + offs_n,
+            (scaled * sig_s).to(LATENT_PTR.dtype.element_ty),
+            mask=offs_n < LOWRANK,
+        )
+        tl.store(
+            INJ_PTR + row * HC_COUNT + (offs_n - LOWRANK),
+            (2.0 * sig_s).to(INJ_PTR.dtype.element_ty),
+            mask=(offs_n >= LOWRANK) & (offs_n < N_OUT),
+        )
+
+    offs_h = col_blk * BLOCK_H + tl.arange(0, BLOCK_H)
+    mh = offs_h < HIDDEN
+    acc_h = tl.zeros((BLOCK_H,), dtype=tl.float32)
+    base = row * (HC_COUNT * HIDDEN) + offs_h
+    for b in tl.static_range(HC_COUNT):
+        gw = tl.load(LOGITS_PTR + base + b * HIDDEN, mask=mh, other=0.0).to(tl.float32)
+        xv = tl.load(NORMED_PTR + base + b * HIDDEN, mask=mh, other=0.0).to(tl.float32)
+        acc_h += tl.sigmoid(gw) * xv
+    tl.store(
+        OUT_PTR + row * HIDDEN + offs_h,
+        (acc_h * (1.0 / HC_COUNT)).to(OUT_PTR.dtype.element_ty),
+        mask=mh,
+    )
 
 
 @triton.jit
@@ -1511,25 +1692,24 @@ def hc_dflash_gconv_combine_norm_triton(
         hidden_size == 5120
         and hc_count == 4
         and (4096 % int(gconv_group_size)) == 0
-        and rows >= 64
     ):
         ckey = (
-            res_c.device.index, 32, res_c.dtype, sub_2d.dtype, delta_3d.dtype, base_c.dtype,
+            res_c.device.index, 34, res_c.dtype, sub_2d.dtype, delta_3d.dtype, base_c.dtype,
             inj_c.dtype, w_c.dtype, b_c.dtype,
             _triton_int_spec(x_s0), _triton_int_spec(d_s0), _triton_int_spec(d_s1), _triton_int_spec(b_s0),
             single_stream, float(eps), has_bias, has_clip,
             int(gconv_taps), int(gconv_block_size), int(gconv_group_size),
         )
         triton_fast_launch(
-            _HC_TRITON_CACHE, ckey, _hc_dflash_gconv_combine_norm_split5120_kernel,
-            rows, 1, 1, ptr_or, rt_args,
+            _HC_TRITON_CACHE, ckey, _hc_dflash_gconv_combine_norm_branch5120_kernel,
+            rows, hc_count, 1, ptr_or, rt_args,
             {
                 "HAS_CLIP": has_clip, "TAPS": int(gconv_taps),
                 "BLOCK_SIZE": int(gconv_block_size), "GROUP_SIZE": int(gconv_group_size),
                 "HIDDEN": hidden_size, "HC_COUNT": hc_count, "SINGLE_STREAM": single_stream,
                 "EPS": float(eps), "HAS_BIAS": has_bias,
             },
-            num_warps=4,
+            num_warps=8,
         )
         return combined, normed
 
@@ -1611,6 +1791,98 @@ def hc_mix_reduce_with_down_inject_triton(
             "RAW_STRIDE": raw_stride, "LOWRANK": hc_lowrank, "HIDDEN": hidden_size,
             "HC_COUNT": hc_count, "HAS_LATENT": has_latent, "HAS_INJ": has_inj,
             "BLOCK": block, "BLOCK_L": block_l, "BLOCK_H": block_h,
+        },
+        num_warps=4,
+    )
+    return out, latent, inject_w
+
+
+def _hc_sk_params(rows: int) -> Tuple[int, int, int, int, int]:
+    """Select (BLOCK_M, BLOCK_N, SPLIT_K, BLOCK_K, BLOCK_H) for K=20480, N=132, M<=32."""
+    if rows <= 8:
+        return 16, 32, 40, 64, 512
+    return 16, 32, 40, 128, 512
+
+
+def hc_down_inject_sk_and_mix_triton(
+    normed: torch.Tensor,
+    down_inject_weight: torch.Tensor,
+    up_weight: torch.Tensor,
+    prev_latent: torch.Tensor,
+    hc_lowrank: int,
+    hc_count: int,
+    *,
+    ws: Optional[HCStaticWorkspace] = None,
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Eliminate cublasLt splitKreduce by computing Split-K partials and fusing reduction into mix_reduce."""
+    normed_c = normed if normed.is_contiguous() else normed.contiguous()
+    w_c = down_inject_weight if down_inject_weight.is_contiguous() else down_inject_weight.contiguous()
+    prefix = normed_c.shape[:-1]
+    width = int(normed_c.shape[-1])
+    hidden_size = width // hc_count
+    n_out = hc_lowrank + hc_count
+    rows = normed_c.numel() // width
+
+    out = _hc_static_empty((*prefix, hidden_size), normed_c.dtype, normed_c.device, "out", ws=ws)
+    latent = _hc_static_empty((*prefix, hc_lowrank), normed_c.dtype, normed_c.device, "latent", ws=ws)
+    inject_w = _hc_static_empty((*prefix, hc_count), normed_c.dtype, normed_c.device, "inj", ws=ws)
+    if rows == 0:
+        return out, latent, inject_w
+
+    bm, bn, sk, bk, bh = _hc_sk_params(rows)
+    part = _hc_static_empty((sk, rows, n_out), torch.float32, normed_c.device, "sk_part", ws=ws)
+    dev_idx = normed_c.device.index if normed_c.device.index is not None else torch.cuda.current_device()
+    n_2d = normed_c.view(rows, width)
+
+    ckey_gemm = (dev_idx, 35, normed_c.dtype, w_c.dtype, n_out, width, sk, bm, bn, bk)
+    triton_fast_launch(
+        _HC_TRITON_CACHE,
+        ckey_gemm,
+        _hc_down_inject_sk_gemm_kernel,
+        triton.cdiv(rows, bm),
+        triton.cdiv(n_out, bn),
+        sk,
+        n_2d.data_ptr() | w_c.data_ptr() | part.data_ptr(),
+        (n_2d, w_c, part, rows),
+        {"N": n_out, "K": width, "SPLIT_K": sk, "BLOCK_M": bm, "BLOCK_N": bn, "BLOCK_K": bk},
+        num_warps=4,
+        num_stages=3,
+    )
+
+    gate_logits = F.linear(prev_latent, up_weight)
+    logits_c = gate_logits if gate_logits.is_contiguous() else gate_logits.contiguous()
+    block_sk = max(16, triton.next_power_of_2(sk))
+    block_n = max(16, triton.next_power_of_2(n_out))
+    ckey_mix = (
+        dev_idx, 36, logits_c.dtype, normed_c.dtype, out.dtype,
+        sk, n_out, hc_lowrank, hc_count, hidden_size, block_sk, block_n, bh,
+    )
+    ptr_or = (
+        part.data_ptr()
+        | logits_c.data_ptr()
+        | n_2d.data_ptr()
+        | out.data_ptr()
+        | latent.data_ptr()
+        | inject_w.data_ptr()
+    )
+    triton_fast_launch(
+        _HC_TRITON_CACHE,
+        ckey_mix,
+        _hc_mix_reduce_with_down_inject_sk_kernel,
+        rows,
+        triton.cdiv(hidden_size, bh),
+        1,
+        ptr_or,
+        (part, logits_c, n_2d, out, latent, inject_w, rows),
+        {
+            "SPLIT_K": sk,
+            "N_OUT": n_out,
+            "LOWRANK": hc_lowrank,
+            "HC_COUNT": hc_count,
+            "HIDDEN": hidden_size,
+            "BLOCK_SK": block_sk,
+            "BLOCK_N": block_n,
+            "BLOCK_H": bh,
         },
         num_warps=4,
     )
@@ -1816,7 +2088,37 @@ class Qwen4_5HyperConnection(nn.Module):
                     "prev_latent must be provided when prev_mix=True and is_head=False"
                 )
             if self.emits_latent and self.use_combine:
-                raw = F.linear(normed, self._get_fused_down_inject_weight())
+                w_fused = self._get_fused_down_inject_weight()
+                n_out = self.hc_lowrank + self.hc_count
+                width = self.hc_count * self.hidden_size
+                rows = normed.numel() // width
+                if (
+                    self.hidden_size == 5120
+                    and self.hc_count == 4
+                    and self.hc_lowrank == 128
+                    and 0 < rows <= 32
+                    and normed.dtype in (torch.bfloat16, torch.float16)
+                    and w_fused.dtype == normed.dtype
+                    and not (
+                        torch.is_grad_enabled()
+                        and (
+                            normed.requires_grad
+                            or self.input_mix_weight_down.requires_grad
+                            or self.block_inject_weight.requires_grad
+                        )
+                    )
+                ):
+                    mixed, latent, inject_w = hc_down_inject_sk_and_mix_triton(
+                        normed,
+                        w_fused[:n_out],
+                        self.input_mix_weight_up,
+                        prev_latent,
+                        self.hc_lowrank,
+                        self.hc_count,
+                        ws=ws,
+                    )
+                    return mixed, residual, inject_w, latent
+                raw = F.linear(normed, w_fused)
             elif self.emits_latent:
                 raw = F.linear(normed, self._get_padded_down_weight())
             else:

@@ -2391,12 +2391,15 @@ class Qwen4_5PLELayer(nn.Module):
 
             halo_w = self.conv_kernel_size - 1
             u_2d = u_norm.squeeze(0)
-            tail_u = torch.zeros(
-                (halo_w, self.hc_hidden_size), dtype=u_2d.dtype, device=u_2d.device
-            )
-            take_u = min(N, halo_w)
-            if take_u > 0:
-                tail_u[halo_w - take_u :].copy_(u_2d[N - take_u :])
+            if N >= halo_w and u_2d.is_contiguous():
+                tail_u = u_2d[N - halo_w :]
+            else:
+                tail_u = torch.zeros(
+                    (halo_w, self.hc_hidden_size), dtype=u_2d.dtype, device=u_2d.device
+                )
+                take_u = min(N, halo_w)
+                if take_u > 0:
+                    tail_u[halo_w - take_u :].copy_(u_2d[N - take_u :])
             gathered_tails = self._sp_all_gather_dim0(
                 tail_u,
                 total_tokens=eff_sp * halo_w,
@@ -2412,22 +2415,41 @@ class Qwen4_5PLELayer(nn.Module):
                     for rk_i in range(eff_sp)
                 ]
                 num_sub_reqs = int(cu_seqlens.numel()) - 1
-                if eff_init_conv is None:
-                    eff_init_conv = torch.zeros(
-                        (num_sub_reqs, self.hc_hidden_size, halo_w),
-                        dtype=u_2d.dtype,
-                        device=u_2d.device,
-                    )
+                full_from_owner = -1
+                if (s0 - sp_halo_req0_start) >= halo_w:
+                    for owner_rk, (b0, b1) in enumerate(bounds):
+                        if b0 <= (s0 - halo_w) and (b1 - s0) == 0:
+                            full_from_owner = owner_rk
+                            break
+                if full_from_owner >= 0 and num_sub_reqs == 1:
+                    eff_init_conv = gathered_tails[full_from_owner : full_from_owner + 1].transpose(1, 2)
+                elif full_from_owner >= 0:
+                    if eff_init_conv is None:
+                        eff_init_conv = torch.zeros(
+                            (num_sub_reqs, self.hc_hidden_size, halo_w),
+                            dtype=u_2d.dtype,
+                            device=u_2d.device,
+                        )
+                    else:
+                        eff_init_conv = eff_init_conv.clone()
+                    eff_init_conv[0].copy_(gathered_tails[full_from_owner].transpose(0, 1))
                 else:
-                    eff_init_conv = eff_init_conv.clone()
-                for j in range(halo_w):
-                    target_g = s0 - halo_w + j
-                    if target_g >= sp_halo_req0_start:
-                        for owner_rk, (b0, b1) in enumerate(bounds):
-                            if b0 <= target_g < b1:
-                                tail_idx = halo_w - (b1 - target_g)
-                                eff_init_conv[0, :, j].copy_(gathered_tails[owner_rk, tail_idx])
-                                break
+                    if eff_init_conv is None:
+                        eff_init_conv = torch.zeros(
+                            (num_sub_reqs, self.hc_hidden_size, halo_w),
+                            dtype=u_2d.dtype,
+                            device=u_2d.device,
+                        )
+                    else:
+                        eff_init_conv = eff_init_conv.clone()
+                    for j in range(halo_w):
+                        target_g = s0 - halo_w + j
+                        if target_g >= sp_halo_req0_start:
+                            for owner_rk, (b0, b1) in enumerate(bounds):
+                                if b0 <= target_g < b1:
+                                    tail_idx = halo_w - (b1 - target_g)
+                                    eff_init_conv[0, :, j].copy_(gathered_tails[owner_rk, tail_idx])
+                                    break
         conv_out = causal_dwconv1d_ragged_prefill_with_snapshots_triton(
             u_norm.squeeze(0),
             self.conv1d.weight,

@@ -3481,13 +3481,30 @@ class TestDFlash2Phase2MHAAndTP4(unittest.TestCase):
                 gconv_prod.taps, p_res, p_inj, prev_latent=p_lat, ws=HCStaticWorkspace(),
             )
             torch.cuda.synchronize()
-        self.assertFalse(
-            any(
-                "cutlass_80" in str(getattr(e, "name", "")).lower()
-                for e in prof_hc.events()
-                if e.device_type == torch.profiler.DeviceType.CUDA
+        cuda_names_hc = [
+            str(getattr(e, "name", "")).lower()
+            for e in prof_hc.events()
+            if e.device_type == torch.profiler.DeviceType.CUDA and getattr(e, "device_time_total", 0) > 0
+        ]
+        self.assertFalse(any("cutlass_80" in nm for nm in cuda_names_hc))
+        self.assertFalse(any("splitkreduce" in nm for nm in cuda_names_hc), f"Unexpected splitKreduce in {cuda_names_hc}")
+        for r_cnt in (8, 16, 64, 256, 512):
+            r_raw = torch.randn((r_cnt, 5120), dtype=torch.bfloat16, device=device) * 0.2
+            r_pre, r_coeff = gconv_prod.prepare(r_raw)
+            r_res = torch.randn((r_cnt, 4 * 5120), dtype=torch.bfloat16, device=device) * 0.2
+            r_inj = torch.rand((r_cnt, 4), dtype=torch.bfloat16, device=device)
+            r_lat = torch.randn((r_cnt, 128), dtype=torch.bfloat16, device=device) * 0.2
+            mf, rf, ijf, ltf = hc_prod.combine_dflash_gconv_and_mix_with_latent(
+                r_pre, r_coeff, gconv_prod.base_kernel[1], gconv_prod.block_size, gconv_prod.group_size,
+                gconv_prod.taps, r_res, r_inj, prev_latent=r_lat, clip_value=10.0, ws=HCStaticWorkspace(),
             )
-        )
+            fin = gconv_prod.finish(r_pre, r_coeff, clip_value=10.0)
+            mr, rr, ijr, ltr = hc_prod.combine_and_mix_with_latent_ref(fin, r_res, r_inj, prev_latent=r_lat)
+            for a, b in ((mf, mr), (rf, rr), (ijf, ijr), (ltf, ltr)):
+                self.assertGreaterEqual(
+                    F.cosine_similarity(a.float().reshape(-1), b.float().reshape(-1), dim=0).item(),
+                    0.9999,
+                )
 
 
 @torch.no_grad()
@@ -3600,7 +3617,7 @@ def _dflash2_gloo_pmode_worker(rank: int, world_size: int, port: int, pmode: str
             elif pmode == "sp4_tp4_ep4":
                 assert model.dp_size == 1 and model.tp_size == 4 and model.sp_size == 4 and model.eff_ep_size == 4
                 assert not model.dp_attn and model.sp_rank == model.tp_rank == rank
-                assert model.lm_head_sharded and model.all_to_all_comm is not None
+                assert model.lm_head_sharded and model.all_to_all_comm is None
                 assert model.fast_all_reduce is not None and model.fast_all_reduce.group is model.tp_group
             elif pmode == "dp2_tpsp2_ep4":
                 assert model.dp_size == 2 and model.tp_size == 2 and model.sp_size == 2 and model.eff_ep_size == 4

@@ -2965,6 +2965,496 @@ class Qwen4_5QSATest(unittest.TestCase):
                     ce = _cosine(sp0[cg_k], sp0[eg_k])
                     self.assertGreaterEqual(ce, 0.99999, f"NCCL sp2 {cg_k} vs {eg_k} cos={ce}")
 
+    def test_r8_prefill_cg_empty_dp_and_dp2_tpsp2_sp(self) -> None:
+        if not torch.cuda.is_available():
+            self.skipTest("CUDA is required for R8 prefill CG & SP runtime tests")
+        import multiprocessing as mp
+        import socket
+        from rtp_llm.models_py.model_desc.qwen4_5_runtime import (
+            LocalMemoryCacheStoreWriter,
+            QWEN4_5_CACHE_TAGS,
+        )
+
+        dev = torch.device("cuda:0")
+        dt = torch.bfloat16
+        arch = _make_mini_arch(
+            indexer_head_dim=128,
+            indexer_n_heads=8,
+            indexer_kv_heads=1,
+            indexer_compress_ratio=4,
+            indexer_budget=32,
+            max_position_embeddings=512,
+        )
+        pools = {t: 64 for t in set(QWEN4_5_CACHE_TAGS) | {"linear"}}
+        prev_backend = os.environ.get("QWEN4_5_MXFP4_BACKEND")
+        prev_auto = os.environ.get("QWEN4_5_AUTO_PREFILL_CG")
+        prev_min = os.environ.get("QWEN4_5_AUTO_PREFILL_CG_MIN_TOKENS")
+        prev_max = os.environ.get("QWEN4_5_AUTO_PREFILL_CG_MAX_TOKENS")
+        prev_hits = os.environ.get("QWEN4_5_AUTO_PREFILL_CG_MIN_HITS")
+        os.environ["QWEN4_5_MXFP4_BACKEND"] = "triton"
+        os.environ["QWEN4_5_AUTO_PREFILL_CG"] = "1"
+        os.environ["QWEN4_5_AUTO_PREFILL_CG_MIN_TOKENS"] = "32"
+        os.environ["QWEN4_5_AUTO_PREFILL_CG_MAX_TOKENS"] = "512"
+        os.environ["QWEN4_5_AUTO_PREFILL_CG_MIN_HITS"] = "2"
+        try:
+            with torch.no_grad():
+                lm = Qwen4_5ForCausalLM(
+                    arch, use_triton_mxfp4=True, compute_mode="bf16", dtype=dt, device=dev
+                )
+                lm.init_synthetic_weights(seed=8101, ple_mode="gpu_full", ple_fp8=False)
+                _stabilize_router_margins(lm)
+                lm.prepare_weights()
+                plan = build_qwen4_5_kv_cache_plan(arch)
+                kv_cg = LocalKVCache(plan, tokens_per_block=64, num_blocks_per_tag=pools, device=dev, dtype=dt)
+                kv_eg = LocalKVCache(plan, tokens_per_block=64, num_blocks_per_tag=pools, device=dev, dtype=dt)
+                from rtp_llm.config.qwen4_5_config import Qwen4_5ModelConfig
+
+                mcfg_mtp = Qwen4_5ModelConfig(arch_config=arch)
+                mcfg_mtp.is_mtp = True
+                rt_cg = Qwen4_5RTPModel.from_causal_lm(lm, model_config=mcfg_mtp, kv_cache=kv_cg)
+                rt_eg = Qwen4_5RTPModel.from_causal_lm(lm, model_config=mcfg_mtp, kv_cache=kv_eg)
+                rt_nokv = Qwen4_5RTPModel.from_causal_lm(lm, model_config=mcfg_mtp, kv_cache=None)
+
+                # (A) #442 empty-DP attention_inputs=None / {} guard (kv_cache present and None)
+                empty_ids = torch.empty((0,), dtype=torch.int64, device=dev)
+                for rt_probe in (rt_cg, rt_nokv):
+                    for bad_ai in (None, {}):
+                        out_e = rt_probe.forward(LocalPyModelInputs(input_ids=empty_ids, attention_inputs=bad_ai))
+                        self.assertEqual(tuple(out_e.hidden_states.shape), (0, arch.hidden_size))
+                        if rt_probe._mtp_aux_capture_layer_ids:
+                            self.assertEqual(
+                                tuple(out_e.mtp_target_hidden_states.shape),
+                                (0, len(rt_probe._mtp_aux_capture_layer_ids) * arch.hidden_size),
+                            )
+                        else:
+                            self.assertIsNone(out_e.mtp_target_hidden_states)
+                nonempty_ids = torch.tensor([5, 7], dtype=torch.int64, device=dev)
+                with self.assertRaisesRegex(RuntimeError, "PyModelInputs\\.attention_inputs is required"):
+                    rt_cg.forward(LocalPyModelInputs(input_ids=nonempty_ids, attention_inputs=None))
+
+                # (B) Guarded Auto Short-Seq Prefill CUDA Graph (os30_RSI, prefix_len > 0, T=49..512)
+                gen = torch.Generator(device="cpu").manual_seed(8102)
+                # 7 slots:
+                # 0,1,2: T=49, pfx=64 (Hit1, Capture, Replay + CacheStore)
+                # 3,4,5: T=64 with pfx=128 (Hit1, Capture) & pfx=192 (Dynamic Replay in bucket=256 + CacheStore)
+                # 6: T=64 with unaligned pfx=65 (different mod key, Eager parity)
+                req_max_lens = [160, 160, 160, 224, 224, 288, 160]
+                tb_cg = build_block_tables_for_requests(kv_cg, req_max_lens)
+                tb_eg = build_block_tables_for_requests(kv_eg, req_max_lens)
+
+                def _req_tb(tb_all, idx_r):
+                    return {t: [rows[idx_r]] for t, rows in tb_all.items()}
+
+                def _run_step(rt, tb_one, ids, pfx, is_prefill=True, writer=None, is_s_padded=False):
+                    ai = make_tagged_attention_inputs(
+                        tb_one,
+                        is_prefill=is_prefill,
+                        input_lengths=[int(ids.numel())],
+                        sequence_lengths=[pfx + int(ids.numel())],
+                        prefix_lengths=[pfx if is_prefill else 0],
+                        device=dev,
+                        cache_store_writer=writer,
+                    )
+                    if is_s_padded:
+                        for g in ai.values():
+                            g.is_s_padded = True
+                    return rt.forward(LocalPyModelInputs(input_ids=ids, attention_inputs=ai))
+
+                # Ineligible guard checks: pfx=0, T=16 < 32, and is_s_padded=True never capture
+                toks_16 = torch.randint(4, 240, (16,), generator=gen, dtype=torch.int64).to(dev)
+                out_cg_16 = _run_step(rt_cg, _req_tb(tb_cg, 0), toks_16, 0)
+                os.environ["QWEN4_5_AUTO_PREFILL_CG"] = "0"
+                out_eg_16 = _run_step(rt_eg, _req_tb(tb_eg, 0), toks_16, 0)
+                os.environ["QWEN4_5_AUTO_PREFILL_CG"] = "1"
+                self.assertGreaterEqual(_cosine(out_cg_16.hidden_states, out_eg_16.hidden_states), 0.99999)
+                self.assertEqual(len(rt_cg._auto_prefill_cg_entries), 0)
+
+                # Prime prefixes: req 0,1,2 -> pfx=64; req 3,4 -> pfx=128; req 5 -> pfx=192; req 6 -> pfx=65
+                pfx_lengths = [64, 64, 64, 128, 128, 192, 65]
+                for ri, plen in enumerate(pfx_lengths):
+                    ptoks = torch.randint(4, 240, (plen,), generator=gen, dtype=torch.int64).to(dev)
+                    _run_step(rt_cg, _req_tb(tb_cg, ri), ptoks, 0)
+                    os.environ["QWEN4_5_AUTO_PREFILL_CG"] = "0"
+                    _run_step(rt_eg, _req_tb(tb_eg, ri), ptoks, 0)
+                    os.environ["QWEN4_5_AUTO_PREFILL_CG"] = "1"
+                # Prefix-0 prefill must not capture
+                self.assertEqual(len(rt_cg._auto_prefill_cg_entries), 0)
+
+                # is_s_padded=True must fall back to Eager on both caches and not capture
+                pad_toks = torch.randint(4, 240, (32,), generator=gen, dtype=torch.int64).to(dev)
+                out_cpad = _run_step(rt_cg, _req_tb(tb_cg, 6), pad_toks, 65, is_s_padded=True)
+                os.environ["QWEN4_5_AUTO_PREFILL_CG"] = "0"
+                out_epad = _run_step(rt_eg, _req_tb(tb_eg, 6), pad_toks, 65, is_s_padded=True)
+                os.environ["QWEN4_5_AUTO_PREFILL_CG"] = "1"
+                self.assertGreaterEqual(_cosine(out_cpad.hidden_states, out_epad.hidden_states), 0.99999)
+                self.assertEqual(len(rt_cg._auto_prefill_cg_entries), 0)
+
+                def _assert_writer_match(w_c, w_e, tag_lbl):
+                    self.assertEqual(len(w_c.events), len(w_e.events), f"{tag_lbl} event count")
+                    self.assertEqual(set(w_c.published.keys()), set(w_e.published.keys()), f"{tag_lbl} keys")
+                    for k_pub in w_e.published:
+                        _, pay_e = w_e.published[k_pub]
+                        _, pay_c = w_c.published[k_pub]
+                        self.assertIsNotNone(pay_c)
+                        self.assertEqual(pay_c.shape, pay_e.shape, f"{tag_lbl} {k_pub} shape")
+                        diff_p = float((pay_c.float() - pay_e.float()).abs().max().item())
+                        self.assertLessEqual(diff_p, 1e-2, f"{tag_lbl} {k_pub} payload max_diff={diff_p}")
+
+                # Sequence for T=49, pfx=64 (Hit 1 Eager -> Hit 2 Capture -> Hit 3 Replay + CacheStore + Decode)
+                for step_i, ri in enumerate((0, 1, 2)):
+                    ctoks = torch.randint(4, 240, (49,), generator=gen, dtype=torch.int64).to(dev)
+                    w_cg = LocalMemoryCacheStoreWriter(record_payload=True) if step_i >= 1 else None
+                    w_eg = LocalMemoryCacheStoreWriter(record_payload=True) if step_i >= 1 else None
+                    out_c = _run_step(rt_cg, _req_tb(tb_cg, ri), ctoks, 64, writer=w_cg)
+                    os.environ["QWEN4_5_AUTO_PREFILL_CG"] = "0"
+                    out_e = _run_step(rt_eg, _req_tb(tb_eg, ri), ctoks, 64, writer=w_eg)
+                    os.environ["QWEN4_5_AUTO_PREFILL_CG"] = "1"
+                    self.assertGreaterEqual(_cosine(out_c.hidden_states, out_e.hidden_states), 0.99999)
+                    if rt_cg._mtp_aux_capture_layer_ids:
+                        self.assertGreaterEqual(
+                            _cosine(out_c.mtp_target_hidden_states, out_e.mtp_target_hidden_states), 0.99999
+                        )
+                    if step_i == 0:
+                        self.assertEqual(len(rt_cg._auto_prefill_cg_entries), 0)
+                    else:
+                        self.assertEqual(len(rt_cg._auto_prefill_cg_entries), 1)
+                        _assert_writer_match(w_cg, w_eg, f"T=49 step={step_i}")
+
+                    # Decode continuation right after captured/replayed short prefill
+                    dtok = torch.randint(4, 240, (1,), generator=gen, dtype=torch.int64).to(dev)
+                    dc = _run_step(rt_cg, _req_tb(tb_cg, ri), dtok, 64 + 49, is_prefill=False)
+                    de = _run_step(rt_eg, _req_tb(tb_eg, ri), dtok, 64 + 49, is_prefill=False)
+                    self.assertGreaterEqual(_cosine(dc.hidden_states, de.hidden_states), 0.99999)
+
+                # Dynamic prefix within same ctx_bucket=256: pfx=128 (Hit1, Capture) -> pfx=192 (Replay!)
+                for ri, pfx_val in ((3, 128), (4, 128), (5, 192)):
+                    ctoks = torch.randint(4, 240, (64,), generator=gen, dtype=torch.int64).to(dev)
+                    use_w = ri >= 4
+                    w_cg = LocalMemoryCacheStoreWriter(record_payload=True) if use_w else None
+                    w_eg = LocalMemoryCacheStoreWriter(record_payload=True) if use_w else None
+                    out_c = _run_step(rt_cg, _req_tb(tb_cg, ri), ctoks, pfx_val, writer=w_cg)
+                    os.environ["QWEN4_5_AUTO_PREFILL_CG"] = "0"
+                    out_e = _run_step(rt_eg, _req_tb(tb_eg, ri), ctoks, pfx_val, writer=w_eg)
+                    os.environ["QWEN4_5_AUTO_PREFILL_CG"] = "1"
+                    self.assertGreaterEqual(_cosine(out_c.hidden_states, out_e.hidden_states), 0.99999)
+                    if use_w:
+                        self.assertEqual(len(rt_cg._auto_prefill_cg_entries), 2)
+                        _assert_writer_match(w_cg, w_eg, f"T=64 dyn_pfx={pfx_val}")
+                    dtok = torch.randint(4, 240, (1,), generator=gen, dtype=torch.int64).to(dev)
+                    dc = _run_step(rt_cg, _req_tb(tb_cg, ri), dtok, pfx_val + 64, is_prefill=False)
+                    de = _run_step(rt_eg, _req_tb(tb_eg, ri), dtok, pfx_val + 64, is_prefill=False)
+                    self.assertGreaterEqual(_cosine(dc.hidden_states, de.hidden_states), 0.99999)
+
+                # Unaligned prefix pfx=65, T=64 parity (must not collide with mod=0 key)
+                u_toks = torch.randint(4, 240, (64,), generator=gen, dtype=torch.int64).to(dev)
+                out_cu = _run_step(rt_cg, _req_tb(tb_cg, 6), u_toks, 65)
+                os.environ["QWEN4_5_AUTO_PREFILL_CG"] = "0"
+                out_eu = _run_step(rt_eg, _req_tb(tb_eg, 6), u_toks, 65)
+                os.environ["QWEN4_5_AUTO_PREFILL_CG"] = "1"
+                self.assertGreaterEqual(_cosine(out_cu.hidden_states, out_eu.hidden_states), 0.99999)
+
+            # (C) 4-Rank dp2_tpsp2_ep4 (dp_attn=True SP unlock #470) + Empty-DP attention_inputs=None (#442) + #462
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+                sock.bind(("127.0.0.1", 0))
+                port = sock.getsockname()[1]
+            ctx = mp.get_context("spawn")
+            err_q = ctx.Queue()
+            with tempfile.TemporaryDirectory() as tmp_dir:
+                out_prefix = os.path.join(tmp_dir, "r8_dp2_tpsp2")
+                procs = []
+                for rk in range(4):
+                    proc = ctx.Process(
+                        target=_r8_dp2_tpsp2_empty_worker,
+                        args=(rk, 4, port, out_prefix, err_q),
+                    )
+                    proc.start()
+                    procs.append(proc)
+                for proc in procs:
+                    proc.join(timeout=120)
+                errors = []
+                while not err_q.empty():
+                    errors.append(err_q.get())
+                for rk, proc in enumerate(procs):
+                    if proc.is_alive():
+                        proc.terminate()
+                        self.fail(f"R8 dp2_tpsp2 worker {rk} timed out")
+                    self.assertEqual(proc.exitcode, 0, f"worker {rk} exit={proc.exitcode}: {errors}")
+                self.assertEqual(errors, [])
+
+                r0 = torch.load(f"{out_prefix}.0.pt", map_location="cpu")
+                r1 = torch.load(f"{out_prefix}.1.pt", map_location="cpu")
+                for k in ("prefill", "verify_b2", "decode_b2"):
+                    self.assertGreaterEqual(_cosine(r0[k], r0[f"ref_{k}"]), 0.999, f"{k} vs non-SP ref")
+                    self.assertGreaterEqual(_cosine(r1[k], r1[f"ref_{k}"]), 0.999, f"r1 {k} vs non-SP ref")
+                    self.assertLessEqual(float((r0[k] - r1[k]).abs().max().item()), 1e-3, f"{k} r0 vs r1")
+        finally:
+            for k_env, v_env in (
+                ("QWEN4_5_MXFP4_BACKEND", prev_backend),
+                ("QWEN4_5_AUTO_PREFILL_CG", prev_auto),
+                ("QWEN4_5_AUTO_PREFILL_CG_MIN_TOKENS", prev_min),
+                ("QWEN4_5_AUTO_PREFILL_CG_MAX_TOKENS", prev_max),
+                ("QWEN4_5_AUTO_PREFILL_CG_MIN_HITS", prev_hits),
+            ):
+                if v_env is None:
+                    os.environ.pop(k_env, None)
+                else:
+                    os.environ[k_env] = v_env
+
+    def test_r8_qsa_dynamic_kv_len_zero_recompile_and_zero_sync(self) -> None:
+        if not torch.cuda.is_available():
+            self.skipTest("CUDA is required for R8 dynamic kv_len zero-recompile test")
+        import time
+        from rtp_llm.models_py.model_desc.qwen4_exp_runtime.qsa_selection import (
+            select_qsa_paged_tokens,
+        )
+        from rtp_llm.models_py.modules.qwen4_5 import qsa_bridge as qb
+
+        def _jit_cache_cnt(jit_fn: object) -> int:
+            dcs = getattr(jit_fn, "device_caches", {})
+            entry = dcs.get(0, ()) if isinstance(dcs, dict) else ()
+            return sum(len(item) for item in entry if isinstance(item, dict))
+
+        def _sorted_tokens(sel_t: torch.Tensor) -> torch.Tensor:
+            vals, _ = torch.sort(sel_t.to(torch.int64), dim=-1)
+            return vals
+
+        dev = torch.device("cuda:0")
+        dt = torch.bfloat16
+        ratio = 4
+        budget = 512
+        h_idx = 8
+        d_idx = 128
+        tpb = 64
+        torch.manual_seed(8479)
+
+        # 1) Warm up bsearch Top-K & paged scorer across (256, 1024, 4096, 18432),
+        #    then switch to unaligned kv_len=25749 (BN=8192) -> 0 recompile & <1ms dispatch & exact parity.
+        max_kv_alloc = 26240
+        max_pool_blks = max_kv_alloc // (tpb // ratio) + 8
+        kv_pool = torch.randn((max_pool_blks, tpb // ratio, d_idx), device=dev, dtype=dt)
+        bt_all = torch.arange(1, max_kv_alloc // (tpb // ratio) + 1, device=dev, dtype=torch.int32).unsqueeze(0)
+        q_unrot = torch.randn((1, 16, h_idx, d_idx), device=dev, dtype=dt)
+        q_gamma = torch.full((d_idx,), 0.25, device=dev, dtype=dt)
+
+        def _run_paged_select(kv_len: int, *, do_sync: bool = True) -> Tuple[torch.Tensor, torch.Tensor, float]:
+            n_blks_need = (kv_len + (tpb // ratio) - 1) // (tpb // ratio)
+            bt_kv = bt_all[:, :n_blks_need].contiguous()
+            pos = torch.arange(max(0, kv_len - 16), kv_len, device=dev, dtype=torch.int32).unsqueeze(0)
+            vis = torch.full((1, 16), kv_len, device=dev, dtype=torch.int32)
+            if do_sync:
+                torch.cuda.synchronize(dev)
+            t0 = time.perf_counter()
+            sel = qb.score_and_select_qsa_paged(
+                q_unrot,
+                pos,
+                kv_pool,
+                bt_kv,
+                vis,
+                compress_ratio=ratio,
+                token_budget=budget,
+                rotary_dim=64,
+                rope_theta=10000.0,
+                max_ctx_len=kv_len // ratio,
+                q_norm_gamma=q_gamma,
+            )
+            dt_ms = (time.perf_counter() - t0) * 1000.0
+            q_rot = qb._qsa_norm_and_rope_fast(q_unrot, pos, 64, 10000.0, q_norm_gamma=q_gamma)
+            scores = qb.qsa_paged_score(
+                q_rot,
+                kv_pool,
+                bt_kv,
+                torch.div(vis, ratio, rounding_mode="floor"),
+                max_ctx_len=kv_len // ratio,
+            )
+            return sel, scores, dt_ms
+
+        for kv_len in (256, 1024, 4096, 18432):
+            sel_gpu, scores_gpu, _ = _run_paged_select(kv_len)
+            vis_cpu = torch.full((16,), kv_len, dtype=torch.int32)
+            sel_cpu = select_qsa_paged_tokens(
+                scores_gpu.cpu(), vis_cpu, compress_ratio=ratio, token_budget=budget, scores_are_masked=True
+            ).view(1, 16, budget + ratio - 1)
+            self.assertTrue(
+                torch.equal(_sorted_tokens(sel_gpu.cpu()), _sorted_tokens(sel_cpu)),
+                f"Paged Top-K parity mismatch at kv_len={kv_len}",
+            )
+
+        # Warm the exact _select_top_tokens dispatch for BN=8192 and measure cold-kv_len=25749 switch
+        c_bsearch_0 = _jit_cache_cnt(qb._qsa_bsearch_topk_expand_kernel)
+        c_pscore_0 = _jit_cache_cnt(qb._qsa_paged_score_tc_kernel)
+        c_rope_0 = _jit_cache_cnt(qb._qsa_head_rmsnorm_partial_rope_d128_r64_kernel)
+
+        cols_25749 = 25749 // ratio
+        sc_25749 = torch.randn((16, cols_25749), device=dev, dtype=torch.float32)
+        vis_25749 = torch.full((16,), 25749, device=dev, dtype=torch.int32)
+        torch.cuda.synchronize(dev)
+        prev_sync_mode = torch.cuda.get_sync_debug_mode()
+        torch.cuda.set_sync_debug_mode("error")
+        try:
+            sel_25749, scores_25749, ms_25749 = _run_paged_select(25749, do_sync=False)
+            t0 = time.perf_counter()
+            sel_direct_25749 = qb._select_top_tokens(
+                sc_25749, vis_25749, compress_ratio=ratio, token_budget=budget, scores_are_masked=False
+            )
+            ms_sel_25749 = (time.perf_counter() - t0) * 1000.0
+        finally:
+            torch.cuda.set_sync_debug_mode(prev_sync_mode)
+
+        self.assertEqual(_jit_cache_cnt(qb._qsa_bsearch_topk_expand_kernel), c_bsearch_0)
+        self.assertEqual(_jit_cache_cnt(qb._qsa_paged_score_tc_kernel), c_pscore_0)
+        self.assertEqual(_jit_cache_cnt(qb._qsa_head_rmsnorm_partial_rope_d128_r64_kernel), c_rope_0)
+        self.assertLess(ms_sel_25749, 1.0, f"bsearch switch to kv_len=25749 took {ms_sel_25749:.3f}ms")
+        self.assertLess(ms_25749, 1.0, f"full score_and_select switch to kv_len=25749 took {ms_25749:.3f}ms")
+
+        vis_25749_cpu = torch.full((16,), 25749, dtype=torch.int32)
+        ref_25749 = select_qsa_paged_tokens(
+            scores_25749.cpu(), vis_25749_cpu, compress_ratio=ratio, token_budget=budget, scores_are_masked=True
+        ).view(1, 16, budget + ratio - 1)
+        ref_direct_25749 = select_qsa_paged_tokens(
+            sc_25749.cpu(), vis_25749_cpu, compress_ratio=ratio, token_budget=budget, scores_are_masked=False
+        )
+        self.assertTrue(torch.equal(_sorted_tokens(sel_25749.cpu()), _sorted_tokens(ref_25749)))
+        self.assertTrue(torch.equal(_sorted_tokens(sel_direct_25749.cpu()), _sorted_tokens(ref_direct_25749)))
+
+        # 2) Tiled 2-stage Top-K (kv_len > 32768): warm on 49152 -> switch to 45123 & 50003 with 0 recompile
+        sc_49152 = torch.randn((8, 49152 // ratio), device=dev, dtype=torch.float32)
+        vis_49152 = torch.full((8,), 49152, device=dev, dtype=torch.int32)
+        sel_49152 = qb._select_top_tokens(
+            sc_49152, vis_49152, compress_ratio=ratio, token_budget=budget, scores_are_masked=False
+        )
+        ref_49152 = select_qsa_paged_tokens(
+            sc_49152.cpu(), vis_49152.cpu(), compress_ratio=ratio, token_budget=budget, scores_are_masked=False
+        )
+        self.assertTrue(torch.equal(_sorted_tokens(sel_49152.cpu()), _sorted_tokens(ref_49152)))
+
+        c_t1_0 = _jit_cache_cnt(qb._qsa_tiled_topk_stage1_kernel)
+        c_t2_0 = _jit_cache_cnt(qb._qsa_tiled_topk_stage2_kernel)
+        self.assertGreater(c_t1_0, 0)
+        self.assertGreater(c_t2_0, 0)
+        long_inputs = {
+            kv_long: (
+                torch.randn((8, kv_long // ratio), device=dev, dtype=torch.float32),
+                torch.full((8,), kv_long, device=dev, dtype=torch.int32),
+            )
+            for kv_long in (45123, 50003)
+        }
+        long_outs = {}
+        torch.cuda.set_sync_debug_mode("error")
+        try:
+            for kv_long, (sc_l, vis_l) in long_inputs.items():
+                t0 = time.perf_counter()
+                sel_l = qb._select_top_tokens(
+                    sc_l, vis_l, compress_ratio=ratio, token_budget=budget, scores_are_masked=False
+                )
+                dt_l_ms = (time.perf_counter() - t0) * 1000.0
+                self.assertLess(dt_l_ms, 1.0, f"tiled topk switch to kv_len={kv_long} took {dt_l_ms:.3f}ms")
+                long_outs[kv_long] = sel_l
+        finally:
+            torch.cuda.set_sync_debug_mode(prev_sync_mode)
+        self.assertEqual(_jit_cache_cnt(qb._qsa_tiled_topk_stage1_kernel), c_t1_0)
+        self.assertEqual(_jit_cache_cnt(qb._qsa_tiled_topk_stage2_kernel), c_t2_0)
+        for kv_long, (sc_l, vis_l) in long_inputs.items():
+            ref_l = select_qsa_paged_tokens(
+                sc_l.cpu(), vis_l.cpu(), compress_ratio=ratio, token_budget=budget, scores_are_masked=False
+            )
+            self.assertTrue(
+                torch.equal(_sorted_tokens(long_outs[kv_long].cpu()), _sorted_tokens(ref_l)),
+                f"Tiled Top-K parity mismatch at kv_len={kv_long}",
+            )
+
+        # 3) _qsa_q4_pack_quads_kernel + _try_run_q4_prefill + Bitmap: dynamic (T, K) zero recompile + ZERO CUDA sync
+        b_q4, hq_q4, hkv_q4, s_q4, d_q4, ps_q4 = 1, 8, 1, 16, 256, 64
+        max_t_q4 = 6400
+        q_q4 = torch.randn((b_q4, hq_q4, s_q4, d_q4), device=dev, dtype=dt)
+        kv_q4 = torch.randn((max_t_q4 // ps_q4 + 4, 2, hkv_q4, ps_q4, d_q4), device=dev, dtype=dt)
+        bt_q4 = torch.arange(1, max_t_q4 // ps_q4 + 1, device=dev, dtype=torch.int32).unsqueeze(0)
+
+        def _make_q4_sel(t_cur: int, k_cur: int, with_dup: bool = False) -> torch.Tensor:
+            sel = torch.full((b_q4, s_q4, k_cur), -1, device=dev, dtype=torch.int32)
+            n_q_avail = t_cur // 4
+            k_fill = min(k_cur, (n_q_avail - 4) * 4)
+            for s_i in range(s_q4):
+                q_ids = ((torch.arange(k_fill // 4, device=dev, dtype=torch.int32) * 3 + s_i) % max(1, n_q_avail))
+                toks = (q_ids.unsqueeze(-1) * 4 + torch.arange(4, device=dev, dtype=torch.int32)).reshape(-1)
+                sel[0, s_i, : toks.numel()] = toks
+            if with_dup:
+                sel[0, 0, k_fill - 1] = sel[0, 0, 0]
+            return sel
+
+        sel_warm = _make_q4_sel(4096, 512, with_dup=False)
+        out_warm_u = qb._try_run_q4_prefill(
+            q_q4, kv_q4, kv_q4, None, bt_q4[:, : 4096 // ps_q4], sel_warm,
+            T=4096, page_size=ps_q4, is_paged=True, assume_unique_selected=True,
+        )
+        out_warm_chk = qb._try_run_q4_prefill(
+            q_q4, kv_q4, kv_q4, None, bt_q4[:, : 4096 // ps_q4], sel_warm,
+            T=4096, page_size=ps_q4, is_paged=True, assume_unique_selected=False,
+        )
+        self.assertIsNotNone(out_warm_u)
+        self.assertIsNotNone(out_warm_chk)
+        # Warm duplicate-repair Direct kernel too
+        _ = qb._try_run_q4_prefill(
+            q_q4, kv_q4, kv_q4, None, bt_q4[:, : 4096 // ps_q4], _make_q4_sel(4096, 512, with_dup=True),
+            T=4096, page_size=ps_q4, is_paged=True, assume_unique_selected=False,
+        )
+
+        q4_cases = []
+        for t_cur, k_cur, with_dup in ((4608, 384, False), (5123, 513, False), (6147, 513, True)):
+            n_pg = (t_cur + ps_q4 - 1) // ps_q4
+            q4_cases.append((t_cur, k_cur, n_pg, bt_q4[:, :n_pg].contiguous(), _make_q4_sel(t_cur, k_cur, with_dup=with_dup)))
+        q_bm = torch.randn((1, 4, 128, 128), device=dev, dtype=dt)
+        k_bm = torch.randn((1, 1, 512, 128), device=dev, dtype=dt)
+        v_bm = torch.randn((1, 1, 512, 128), device=dev, dtype=dt)
+        sel_bm = torch.arange(512, device=dev, dtype=torch.int32).view(1, 1, 512).expand(1, 128, 512).contiguous()
+        sel_bm[0, 0, 10] = sel_bm[0, 0, 0]
+
+        c_q4_pack = _jit_cache_cnt(qb._qsa_q4_pack_quads_kernel)
+        c_q4_cmp = _jit_cache_cnt(qb._qsa_q4_compact_quads_kernel)
+        c_q4_gqa = _jit_cache_cnt(qb._qsa_q4_gqa_kernel)
+        c_dsplit = _jit_cache_cnt(qb._qsa_sparse_prefill_dsplit_kernel)
+
+        torch.cuda.synchronize(dev)
+        q4_outs = []
+        torch.cuda.set_sync_debug_mode("error")
+        try:
+            for t_cur, k_cur, n_pg, bt_cur, sel_k in q4_cases:
+                t0 = time.perf_counter()
+                out_k = qb._try_run_q4_prefill(
+                    q_q4, kv_q4, kv_q4, None, bt_cur, sel_k,
+                    T=t_cur, page_size=ps_q4, is_paged=True, assume_unique_selected=False,
+                )
+                dt_k_ms = (time.perf_counter() - t0) * 1000.0
+                self.assertIsNotNone(out_k)
+                self.assertLess(dt_k_ms, 1.0, f"Q4 switch to T={t_cur}, K={k_cur} took {dt_k_ms:.3f}ms")
+                q4_outs.append((t_cur, k_cur, n_pg, bt_cur, sel_k, out_k))
+
+            # Also verify zero CUDA sync in Bitmap path (with duplicate index)
+            out_bm = qb.qsa_sparse_prefill_attention(
+                q_bm, k_bm, v_bm, sel_bm, validate_selected=False, assume_unique_selected=False
+            )
+        finally:
+            torch.cuda.set_sync_debug_mode(prev_sync_mode)
+
+        self.assertEqual(_jit_cache_cnt(qb._qsa_q4_pack_quads_kernel), c_q4_pack)
+        self.assertEqual(_jit_cache_cnt(qb._qsa_q4_compact_quads_kernel), c_q4_cmp)
+        self.assertEqual(_jit_cache_cnt(qb._qsa_q4_gqa_kernel), c_q4_gqa)
+        self.assertEqual(_jit_cache_cnt(qb._qsa_sparse_prefill_dsplit_kernel), c_dsplit)
+
+        for t_cur, k_cur, n_pg, bt_cur, sel_k, out_k in q4_outs:
+            k_dense = kv_q4[bt_cur[0].long(), 0].permute(1, 0, 2, 3).reshape(1, hkv_q4, n_pg * ps_q4, d_q4)[:, :, :t_cur, :].float()
+            v_dense = kv_q4[bt_cur[0].long(), 1].permute(1, 0, 2, 3).reshape(1, hkv_q4, n_pg * ps_q4, d_q4)[:, :, :t_cur, :].float()
+            for s_chk in (0, 2, s_q4 - 1):
+                idx_r = sel_k[0, s_chk]
+                idx_r = idx_r[(idx_r >= 0) & (idx_r < t_cur)].long()
+                sc_ref = (q_q4[0, :, s_chk, :].float() @ k_dense[0, 0, idx_r].T) * (d_q4 ** -0.5)
+                out_ref = (torch.softmax(sc_ref, dim=-1) @ v_dense[0, 0, idx_r]).to(dt)
+                self.assertGreaterEqual(_cosine(out_k[0, :, s_chk], out_ref), 0.9999)
+
+        ref_bm = qb.qsa_sparse_prefill_attention(
+            q_bm.cpu(), k_bm.cpu(), v_bm.cpu(), sel_bm.cpu(), validate_selected=False
+        ).to(dev)
+        self.assertGreaterEqual(_cosine(out_bm, ref_bm), 0.9999)
+
 def _r7_sp2_nccl_cg_worker(
     rank: int,
     world_size: int,
@@ -3820,6 +4310,175 @@ def _r7_tpsp_runtime_worker(
             os.environ.pop("QWEN4_5_MXFP4_STRICT_BF16", None)
         else:
             os.environ["QWEN4_5_MXFP4_STRICT_BF16"] = prev_strict_bf16
+        if dist.is_initialized():
+            dist.destroy_process_group()
+
+
+def _r8_dp2_tpsp2_empty_worker(
+    rank: int,
+    world_size: int,
+    port: int,
+    out_prefix: str,
+    err_queue: object,
+) -> None:
+    import datetime
+    import traceback
+    import torch.distributed as dist
+    from rtp_llm.config.qwen4_5_config import Qwen4_5ModelConfig
+    import types
+    from rtp_llm.models_py.model_desc.qwen4_5_runtime import QWEN4_5_CACHE_TAGS
+
+    prev_strict = os.environ.get("QWEN4_5_MXFP4_STRICT_BF16")
+    prev_backend = os.environ.get("QWEN4_5_MXFP4_BACKEND")
+    os.environ["QWEN4_5_MXFP4_STRICT_BF16"] = "1"
+    os.environ["QWEN4_5_MXFP4_BACKEND"] = "triton"
+    try:
+        os.environ["MASTER_ADDR"] = "127.0.0.1"
+        os.environ["MASTER_PORT"] = str(port)
+        os.environ["RANK"] = str(rank)
+        os.environ["WORLD_SIZE"] = str(world_size)
+        dev = torch.device("cuda:0")
+        torch.cuda.set_device(dev)
+        dist.init_process_group(
+            backend="gloo",
+            rank=rank,
+            world_size=world_size,
+            timeout=datetime.timedelta(seconds=60),
+        )
+        dt = torch.bfloat16
+        cfg = _make_mini_arch(
+            indexer_head_dim=128,
+            indexer_n_heads=8,
+            indexer_kv_heads=1,
+            indexer_compress_ratio=4,
+            indexer_budget=32,
+            max_position_embeddings=512,
+        )
+        pools = {t: 64 for t in set(QWEN4_5_CACHE_TAGS) | {"linear"}}
+        with torch.no_grad():
+            def _make_rt(pmode: str, dp_attn_flag: bool):
+                lm = Qwen4_5ForCausalLM(
+                    cfg,
+                    use_triton_mxfp4=True,
+                    compute_mode="bf16",
+                    dtype=dt,
+                    device=dev,
+                    parallel_mode=pmode,
+                    dp_attn=dp_attn_flag,
+                    dp_equal_tokens=False,
+                    kv_dtype="bf16",
+                )
+                lm.init_synthetic_weights(seed=8201, ple_mode="gpu_sharded", ple_fp8=False)
+                _stabilize_router_margins(lm)
+                lm.prepare_weights()
+                plan = build_qwen4_5_kv_cache_plan(cfg, tp_size=int(lm.model.tp_size), parallel_mode=pmode)
+                kv = LocalKVCache(plan, tokens_per_block=64, num_blocks_per_tag=pools, device=dev, dtype=dt)
+                pc = types.SimpleNamespace(
+                    world_size=world_size,
+                    world_rank=rank,
+                    tp_size=int(lm.model.tp_size),
+                    tp_rank=int(lm.model.tp_rank),
+                    tp_group=lm.model.tp_group,
+                    sp_size=int(lm.model.sp_size),
+                    sp_rank=int(lm.model.sp_rank),
+                    sp_group=lm.model.sp_group,
+                    ep_size=int(lm.model.ep_size),
+                    ep_rank=int(lm.model.ep_rank),
+                    ep_group=lm.model.ep_group,
+                    dp_size=int(lm.model.dp_size),
+                    dp_rank=int(lm.model.dp_rank),
+                    dp_group=lm.model.dp_group,
+                    dp_attn=dp_attn_flag,
+                )
+                mcfg = Qwen4_5ModelConfig(arch_config=cfg)
+                mcfg.is_mtp = True
+                return Qwen4_5RTPModel.from_causal_lm(lm, model_config=mcfg, kv_cache=kv, parallelism_config=pc), kv
+
+            rt_sp, kv_sp = _make_rt("dp2_tpsp2_ep4", True)
+            rt_ref, kv_ref = _make_rt("dp2_tp2_ep4", True)
+
+            assert rt_sp.dp_attn is True
+            eff_sp, eff_rk, _, _ = rt_sp.bridge._resolve_sp_dist()
+            assert eff_sp == 2 and eff_rk == (rank % 2), f"r{rank}: sp={eff_sp}, rk={eff_rk}"
+            assert rt_sp.bridge._cp_indexer_kwargs().get("sp_size") == 2
+            assert rt_ref.bridge._resolve_sp_dist()[0] == 1
+            assert rt_ref.bridge._cp_indexer_kwargs() == {}
+
+            is_empty_dp = int(rt_sp.dp_rank) == 1
+            gen = torch.Generator(device="cpu").manual_seed(8202)
+            p0 = torch.randint(4, 240, (64,), generator=gen, dtype=torch.int64).to(dev)
+            p1 = torch.randint(4, 240, (64,), generator=gen, dtype=torch.int64).to(dev)
+            vrf2 = torch.randint(4, 240, (16,), generator=gen, dtype=torch.int64).to(dev)
+            dec2 = torch.randint(4, 240, (2,), generator=gen, dtype=torch.int64).to(dev)
+
+            def _step(rt, tb, toks, lens, pfxs, is_prefill=True, is_verify=False):
+                if is_empty_dp:
+                    # Exercise #442 directly on both prepare_fmha_impl and forward with empty tokens + attention_inputs=None
+                    mi_e = LocalPyModelInputs(input_ids=torch.empty((0,), dtype=torch.int64, device=dev), attention_inputs=None)
+                    assert rt.prepare_fmha_impl(mi_e, is_cuda_graph=False) is None
+                    return rt.forward(mi_e).hidden_states
+                ai = make_tagged_attention_inputs(
+                    tb,
+                    is_prefill=is_prefill,
+                    input_lengths=lens,
+                    sequence_lengths=([] if is_verify else [p + l for p, l in zip(pfxs, lens)]),
+                    prefix_lengths=(pfxs if is_prefill else [0] * len(lens)),
+                    device=dev,
+                )
+                if is_verify:
+                    for g in ai.values():
+                        g.is_target_verify = True
+                mi = LocalPyModelInputs(input_ids=toks, attention_inputs=ai)
+                fh = rt.prepare_fmha_impl(mi, is_cuda_graph=False)
+                return rt.forward(mi, fmha_impl=fh).hidden_states
+
+            tb_sp = build_block_tables_for_requests(kv_sp, ([] if is_empty_dp else [80, 80]))
+            tb_ref = build_block_tables_for_requests(kv_ref, ([] if is_empty_dp else [80, 80]))
+
+            h_p = _step(rt_sp, tb_sp, torch.cat([p0, p1], dim=0), [64, 64], [0, 0], True, False)
+            h_p_ref = _step(rt_ref, tb_ref, torch.cat([p0, p1], dim=0), [64, 64], [0, 0], True, False)
+
+            # B=2 Verify + batch SP commit exercises _sp_sync_batch_commit_after_tx (#462)
+            h_v = _step(rt_sp, tb_sp, vrf2, [8, 8], [64, 64], True, True)
+            h_v_ref = _step(rt_ref, tb_ref, vrf2, [8, 8], [64, 64], True, True)
+            if not is_empty_dp:
+                acc = torch.tensor([5, 3], dtype=torch.int32, device=dev)
+                for rt_x in (rt_sp, rt_ref):
+                    rt_x.prepare_speculative_target_commit(acc)
+                    rt_x.finish_speculative_target_commit(True)
+                    rt_x.finalize_speculative_target_commit()
+
+            # B=2 Decode via Qwen4_5QSADecodeHandle exercises dec_sp_active=True under dp_attn=True (#470)
+            h_d = _step(rt_sp, tb_sp, dec2, [1, 1], [69, 67], False, False)
+            h_d_ref = _step(rt_ref, tb_ref, dec2, [1, 1], [69, 67], False, False)
+
+            if is_empty_dp:
+                assert tuple(h_p.shape) == (0, cfg.hidden_size)
+                assert tuple(h_v.shape) == (0, cfg.hidden_size)
+                assert tuple(h_d.shape) == (0, cfg.hidden_size)
+            else:
+                torch.save(
+                    {
+                        "prefill": h_p.cpu(),
+                        "ref_prefill": h_p_ref.cpu(),
+                        "verify_b2": h_v.cpu(),
+                        "ref_verify_b2": h_v_ref.cpu(),
+                        "decode_b2": h_d.cpu(),
+                        "ref_decode_b2": h_d_ref.cpu(),
+                    },
+                    f"{out_prefix}.{rank}.pt",
+                )
+    except Exception as exc:  # pragma: no cover - surfaced by parent test
+        err_queue.put((rank, f"{exc!r}\n{traceback.format_exc()}"))
+    finally:
+        for k_env, v_env in (
+            ("QWEN4_5_MXFP4_STRICT_BF16", prev_strict),
+            ("QWEN4_5_MXFP4_BACKEND", prev_backend),
+        ):
+            if v_env is None:
+                os.environ.pop(k_env, None)
+            else:
+                os.environ[k_env] = v_env
         if dist.is_initialized():
             dist.destroy_process_group()
 
