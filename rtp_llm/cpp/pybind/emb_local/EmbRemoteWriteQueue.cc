@@ -1,10 +1,11 @@
 #if USING_CUDA
-#include "rtp_llm/cpp/pybind/emb_local/EmbEvictionWriter.h"
+#include "rtp_llm/cpp/pybind/emb_local/EmbRemoteWriteQueue.h"
 
 #include <rapidjson/writer.h>
 
 #include <atomic>
 #include <cmath>
+#include <map>
 #include <unistd.h>
 
 namespace rtp_llm::emb_local {
@@ -142,7 +143,8 @@ void scalarField(Json& json, const char* field, Emit emit) {
 std::string objectPrefix(const std::string&           key,
                          const Audit&                 audit,
                          bool                         request_scoped,
-                         const Resident&              record,
+                         const Tree&                  result,
+                         const std::vector<Slice>&    slices,
                          int64_t                      max_bytes,
                          std::vector<EmbTensorInput>& tensors,
                          int64_t&                     payload_bytes) {
@@ -157,7 +159,7 @@ std::string objectPrefix(const std::string&           key,
     json.StartArray();
     json.String("result");
     size_t nodes = audit.verdict_present ? 9 : 4;
-    tree(json, *record.tree, 1, nodes);
+    tree(json, result, 1, nodes);
     json.EndArray();
     if (audit.verdict_present) {
         beginField(json, "greennet");
@@ -179,7 +181,7 @@ std::string objectPrefix(const std::string&           key,
 
     json.Key("tensors");
     json.StartArray();
-    for (const auto& slice : record.slices) {
+    for (const auto& slice : slices) {
         const auto offset = align(payload_bytes);
         TORCH_CHECK(offset <= max_bytes && slice.nbytes <= max_bytes - offset, "EMB object exceeds byte limit");
         payload_bytes = offset + slice.nbytes;
@@ -214,15 +216,15 @@ std::string objectPrefix(const std::string&           key,
 }
 }  // namespace
 
-EvictionWriter::EvictionWriter(std::shared_ptr<EmbRegisteredArena> arena,
-                               at::Tensor                          root,
-                               KvcmObjectNativeApiV2               api,
-                               int64_t                             max_object_bytes,
-                               int64_t                             max_pending,
-                               int64_t                             max_bytes,
-                               int64_t                             timeout_ms,
-                               int                                 workers,
-                               bool                                request_scoped):
+RemoteWriteQueue::RemoteWriteQueue(std::shared_ptr<EmbRegisteredArena> arena,
+                                   at::Tensor                          root,
+                                   KvcmObjectNativeApiV2               api,
+                                   int64_t                             max_object_bytes,
+                                   int64_t                             max_pending,
+                                   int64_t                             max_bytes,
+                                   int64_t                             timeout_ms,
+                                   int                                 workers,
+                                   bool                                request_scoped):
     arena_(std::move(arena)),
     root_(std::move(root)),
     api_(api),
@@ -240,7 +242,7 @@ EvictionWriter::EvictionWriter(std::shared_ptr<EmbRegisteredArena> arena,
     workers_.reserve(workers);
     try {
         for (int i = 0; i < workers; ++i) {
-            workers_.emplace_back(&EvictionWriter::run, this);
+            workers_.emplace_back(&RemoteWriteQueue::run, this);
         }
     } catch (...) {
         close();
@@ -248,25 +250,95 @@ EvictionWriter::EvictionWriter(std::shared_ptr<EmbRegisteredArena> arena,
     }
 }
 
-EvictionWriter::~EvictionWriter() {
+RemoteWriteQueue::~RemoteWriteQueue() {
     close();
 }
 
-std::shared_timed_mutex& EvictionWriter::graphGate() {
+std::shared_timed_mutex& RemoteWriteQueue::graphGate() {
     static auto* gate = new std::shared_timed_mutex;
     return *gate;
 }
 
-void EvictionWriter::submit(const std::string&                     key,
-                            const Audit&                           audit,
-                            const std::shared_ptr<const Resident>& record,
-                            std::optional<c10::cuda::CUDAStream>   stream) {
+void RemoteWriteQueue::submit(const std::string&                     key,
+                              const Audit&                           audit,
+                              const std::shared_ptr<const Resident>& record,
+                              std::optional<c10::cuda::CUDAStream>   stream) {
+    enqueue(key, {}, audit, *record->tree, record->slices, [&](Job&) {
+        // Keep the current placement for the detached snapshot. The header
+        // already carries the original devices to use on restore.
+        return copyOut(record, stream, false);
+    });
+}
+
+void RemoteWriteQueue::submitEncoded(const std::string&                                             key,
+                                     const std::string&                                             trace,
+                                     const Audit&                                                   audit,
+                                     const Tree&                                                    result,
+                                     const std::vector<at::Tensor>&                                 inputs,
+                                     const std::vector<std::pair<c10::DeviceIndex, c10::StreamId>>& producers) {
+    std::vector<Slice> slices;
+    slices.reserve(inputs.size());
+    for (const auto& input : inputs) {
+        TORCH_CHECK(input.layout() == at::kStrided && (input.is_cuda() || input.device().is_cpu()),
+                    "unsupported EMB object tensor");
+        slices.push_back({0,
+                          static_cast<int64_t>(input.nbytes()),
+                          input.scalar_type(),
+                          input.sizes().vec(),
+                          input.device(),
+                          input.is_cuda() ? Tier::Gpu : Tier::Cpu});
+    }
+    enqueue(key, trace, audit, result, slices, [&](Job& job) {
+        std::vector<at::Tensor>                         detached(inputs.size());
+        std::map<c10::DeviceIndex, std::vector<size_t>> by_device;
+        for (size_t i = 0; i < inputs.size(); ++i) {
+            if (inputs[i].is_cuda()) {
+                by_device[inputs[i].get_device()].push_back(i);
+            } else {
+                detached[i] = inputs[i].detach().clone(at::MemoryFormat::Contiguous);
+            }
+        }
+        for (const auto& [device, indices] : by_device) {
+            const auto producer = std::find_if(
+                producers.begin(), producers.end(), [device](const auto& stream) { return stream.first == device; });
+            std::vector<at::Tensor> tensors;
+            tensors.reserve(indices.size());
+            for (size_t index : indices) {
+                tensors.push_back(inputs[index]);
+            }
+            auto [snapshots, ready] = snapshotEmbCudaTensors(
+                tensors, producer == producers.end() ? std::nullopt : std::optional(producer->second), true);
+            job.events.push_back(std::move(ready));
+            for (size_t i = 0; i < indices.size(); ++i) {
+                detached[indices[i]] = std::move(snapshots[i]);
+            }
+        }
+        return detached;
+    });
+}
+
+template<typename Snapshot>
+void RemoteWriteQueue::enqueue(const std::string&        key,
+                               const std::string&        trace,
+                               const Audit&              audit,
+                               const Tree&               result,
+                               const std::vector<Slice>& slices,
+                               Snapshot                  snapshot) {
+    if (key.empty() || (audit.verdict_present && !audit.passed)) {
+        return;
+    }
+    if (arena_ && arena_->deviceFailed()) {
+        std::lock_guard lock(mutex_);
+        ++stats_.skipped;
+        return;
+    }
     Job job;
     job.deadline  = WriteClock::now() + timeout_;
     bool reserved = false;
     try {
         int64_t payload_bytes = 0;
-        job.prefix = objectPrefix(key, audit, request_scoped_, *record, max_object_bytes_, job.tensors, payload_bytes);
+        job.prefix =
+            objectPrefix(key, audit, request_scoped_, result, slices, max_object_bytes_, job.tensors, payload_bytes);
         job.payload_offset = align(job.prefix.size());
         job.bytes          = job.payload_offset + payload_bytes;
         job.charge         = job.bytes * (arena_ ? 1 : 3);
@@ -286,11 +358,9 @@ void EvictionWriter::submit(const std::string&                     key,
             ++stats_.pending;
             stats_.bytes += job.charge;
         }
-        job.key = key;
-        // Capture the retired entry in independent tensors before its pool
-        // offsets can be reused. Keep its current placement for the snapshot;
-        // the object header already carries the original output devices.
-        auto detached = copyOut(record, stream, false);
+        job.key       = key;
+        job.trace     = trace;
+        auto detached = snapshot(job);
         for (size_t i = 0; i < detached.size(); ++i) {
             std::get<0>(job.tensors[i]) += job.payload_offset;
             std::get<2>(job.tensors[i]) = std::move(detached[i]);
@@ -315,7 +385,7 @@ void EvictionWriter::submit(const std::string&                     key,
     }
 }
 
-bool EvictionWriter::reserveExternal(int64_t bytes, bool check_task_limit) {
+bool RemoteWriteQueue::reserveExternal(int64_t bytes, bool check_task_limit) {
     std::lock_guard lock(mutex_);
     if (closed_ || bytes > max_bytes_ - stats_.bytes - external_bytes_
         || (check_task_limit && stats_.pending >= max_pending_ - external_tasks_)) {
@@ -326,18 +396,18 @@ bool EvictionWriter::reserveExternal(int64_t bytes, bool check_task_limit) {
     return true;
 }
 
-void EvictionWriter::releaseExternal(int64_t bytes) {
+void RemoteWriteQueue::releaseExternal(int64_t bytes) {
     std::lock_guard lock(mutex_);
     external_bytes_ -= bytes;
     --external_tasks_;
 }
 
-EvictionWriter::Stats EvictionWriter::stats() const {
+RemoteWriteQueue::Stats RemoteWriteQueue::stats() const {
     std::lock_guard lock(mutex_);
     return stats_;
 }
 
-void EvictionWriter::finish(const std::string& key, int64_t bytes, const EmbWriteResult& result) {
+void RemoteWriteQueue::finish(const std::string& key, int64_t bytes, const EmbWriteResult& result) {
     std::lock_guard lock(mutex_);
     keys_.erase(key);
     --stats_.pending;
@@ -361,7 +431,7 @@ void EvictionWriter::finish(const std::string& key, int64_t bytes, const EmbWrit
     }
 }
 
-EmbWriteResult EvictionWriter::writeStaged(Job& job, const std::string& trace) {
+EmbWriteResult RemoteWriteQueue::writeStaged(Job& job, const std::string& trace) {
     auto output = at::empty({job.bytes}, at::TensorOptions().dtype(at::kByte).device(at::kCPU));
     packEmbTensorSlices(output, std::move(job.prefix), job.payload_offset, job.tensors);
     if (WriteClock::now() >= job.deadline) {
@@ -399,9 +469,9 @@ EmbWriteResult EvictionWriter::writeStaged(Job& job, const std::string& trace) {
             result.data_transfer_may_be_inflight != 0};
 }
 
-void EvictionWriter::run() {
+void RemoteWriteQueue::run() {
     static std::atomic<uint64_t> sequence{0};
-    const auto                   trace_prefix = "emb-evict-" + std::to_string(::getpid()) + "-"
+    const auto                   trace_prefix = "emb-write-" + std::to_string(::getpid()) + "-"
                               + std::to_string(std::chrono::system_clock::now().time_since_epoch().count()) + "-";
     for (;;) {
         Job  job;
@@ -421,23 +491,31 @@ void EvictionWriter::run() {
             if (!cancelled && WriteClock::now() < job.deadline) {
                 std::shared_lock gate(graphGate(), std::defer_lock);
                 if (gate.try_lock_until(job.deadline)) {
+                    // Both staging and GDR wait before they allocate or lease.
+                    for (const auto& event : job.events) {
+                        event->synchronize();
+                    }
                     const auto remaining =
                         std::chrono::duration_cast<std::chrono::nanoseconds>(job.deadline - WriteClock::now()).count();
-                    const auto trace = trace_prefix + std::to_string(sequence.fetch_add(1, std::memory_order_relaxed));
-                    result           = arena_ ? writeEmbObject(*arena_,
-                                                     root_,
-                                                     job.bytes,
-                                                     std::move(job.prefix),
-                                                     job.payload_offset,
-                                                     job.tensors,
-                                                               {},
-                                                     api_,
-                                                     job.key,
-                                                     trace,
-                                                     remaining,
-                                                     false,
-                                                     true) :
-                                                writeStaged(job, trace);
+                    if (remaining > 0) {
+                        if (job.trace.empty()) {
+                            job.trace = trace_prefix + std::to_string(sequence.fetch_add(1, std::memory_order_relaxed));
+                        }
+                        result = arena_ ? writeEmbObject(*arena_,
+                                                         root_,
+                                                         job.bytes,
+                                                         std::move(job.prefix),
+                                                         job.payload_offset,
+                                                         job.tensors,
+                                                         {},
+                                                         api_,
+                                                         job.key,
+                                                         job.trace,
+                                                         remaining,
+                                                         false,
+                                                         true) :
+                                          writeStaged(job, job.trace);
+                    }
                 }
             }
         } catch (...) {
@@ -449,7 +527,7 @@ void EvictionWriter::run() {
     }
 }
 
-void EvictionWriter::close() {
+void RemoteWriteQueue::close() {
     std::lock_guard closing(close_mutex_);
     {
         std::lock_guard lock(mutex_);

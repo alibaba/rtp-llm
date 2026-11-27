@@ -1,6 +1,6 @@
 #pragma once
 
-#include "rtp_llm/cpp/pybind/emb_local/EmbEvictionWriter.h"
+#include "rtp_llm/cpp/pybind/emb_local/EmbRemoteWriteQueue.h"
 
 #include <limits>
 
@@ -29,7 +29,7 @@ public:
     };
 
     Shard(int64_t gpu_bytes, int64_t cpu_bytes, int device, bool notify_cpu = false, bool notify_gpu = false,
-          int64_t snapshot_limit = 0, std::shared_ptr<EvictionWriter> writer = {}):
+          int64_t snapshot_limit = 0, std::shared_ptr<RemoteWriteQueue> writer = {}):
         device_(device), limits_{cpu_bytes, gpu_bytes}, notify_{notify_cpu, notify_gpu}, snapshot_limit_(snapshot_limit),
         writer_(std::move(writer)) {
         TORCH_CHECK(gpu_bytes >= 0 && cpu_bytes >= 0 && snapshot_limit >= 0, "invalid local EMB capacity");
@@ -390,7 +390,7 @@ private:
     Bytes                                            limits_;
     const std::array<bool, 2>                        notify_;
     const int64_t                                    snapshot_limit_;
-    const std::shared_ptr<EvictionWriter>              writer_;
+    const std::shared_ptr<RemoteWriteQueue>              writer_;
     std::atomic<int64_t>                             dropped_snapshots_{0};
     std::mutex                                       transfer_;
     std::mutex                                       pools_;
