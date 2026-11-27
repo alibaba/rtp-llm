@@ -7,6 +7,27 @@ py_test(
     env = checkpoint_reader_test_env(),
 )
 
+[
+    py_test(
+        name = "test_fp8_fused_float_scales_" + name,
+        srcs = ["test_fp8_online_scale_layout.py"],
+        main = "test_fp8_online_scale_layout.py",
+        args = ["OnlineFp8ScaleLayoutTest.test_tp1_float_scale_tiles_through_device_gemm"],
+        env = checkpoint_reader_test_env({"TEST_FP8_FLOAT_SCALE_DEVICE": name}),
+        tags = [tag],
+        exec_properties = {"gpu": gpu, "gpu_count": "1"},
+        target_compatible_with = select({
+            platform: [],
+            "//conditions:default": ["@platforms//:incompatible"],
+        }),
+        deps = ["//rtp_llm/models_py:checkpoint_reader_test_support", "//rtp_llm/models_py:new_weight_loader", "//rtp_llm:fastsafetensors"],
+    )
+    for name, tag, gpu, platform in [
+        ("sm90", "H20_CU13", "H20_CU13", "//:using_cuda13_x86"),
+        ("rocm", "rocm", "MI308X-ROCM7", "//:using_rocm"),
+    ]
+]
+
 py_library(
     name = "mxfp4_test_fixtures",
     srcs = ["test_mxfp4_quark.py"],

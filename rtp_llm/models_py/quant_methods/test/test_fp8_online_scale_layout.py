@@ -1,13 +1,9 @@
-"""CPU checkpoint regression for the DeepGEMM packed-scale storage ABI.
-
-Readers, owner TP/GQA dispatch and online block quantization are real. Only the
-GPU requantizer/GEMM are replaced with explicit CPU contract doubles; no GPU
-numerical accuracy, CUDA graph or smoke result is established by these tests.
-"""
+"""CPU checkpoint contracts and SM90/ROCm device tests for online block FP8."""
 
 import os
 import tempfile
 import unittest
+from contextlib import nullcontext
 from types import SimpleNamespace
 from unittest import mock
 
@@ -38,7 +34,11 @@ def _owner(kind, tp, rank):
         quant_config=QuantizationConfig("fp8_block_online"),
         prefix="proj",
     )
-    if kind == "qkv":
+    if kind == "qkv_partial":
+        root.proj = QKVParallelLinear(
+            hidden_size=1152, num_heads=6, num_kv_heads=2, head_dim=24, **kwargs
+        )
+    elif kind == "qkv":
         root.proj = QKVParallelLinear(
             hidden_size=1152, num_heads=4, num_kv_heads=2, head_dim=128, **kwargs
         )
@@ -59,6 +59,7 @@ def _owner(kind, tp, rank):
 def _checkpoint(kind):
     rows = {
         "qkv": [("q_proj", 512), ("k_proj", 256), ("v_proj", 256)],
+        "qkv_partial": [("q_proj", 144), ("k_proj", 48), ("v_proj", 48)],
         "merged": [("gate_proj", 256), ("up_proj", 256)],
         "merged_partial": [("gate_proj", 192), ("up_proj", 192)],
         "row": [("", 384)],
@@ -94,6 +95,90 @@ def _load(directory, kind, tp, rank, backend):
 
 
 class OnlineFp8ScaleLayoutTest(unittest.TestCase):
+    def _check_partial_projection_tiles(self, device):
+        for kind in ("merged_partial", "qkv_partial"):
+            checkpoint = _checkpoint(kind)
+            # Independent OldLoader reference: quantize the complete fused
+            # source, not the loader's staged weight or its individual parts.
+            source = torch.cat(list(checkpoint.values())).to(device)
+            padded = torch.nn.functional.pad(source, (0, 0, 0, -len(source) % 128))
+            expected, scale = fp8_quant.per_block_cast_to_fp8(
+                padded.float(), use_ue8m0=False
+            )
+            if device == "cuda" and torch.version.hip:
+                expected, scale = fp8._prepare_rocm_fp8_block_weight(expected, scale)
+            with tempfile.TemporaryDirectory() as directory:
+                save_file(checkpoint, os.path.join(directory, "model.safetensors"))
+                for reader in checkpoint_readers("scratch", "fastsafetensors"):
+                    with self.subTest(kind=kind, reader=reader, device=device):
+                        layer = _load(directory, kind, 1, 0, reader).to(device)
+                        # CPU checks the real float-scale quantizer; only
+                        # backend discovery is substituted on a CPU worker.
+                        backend = (
+                            mock.patch.object(
+                                fp8,
+                                "_select_fp8_runtime_backend",
+                                return_value=fp8._CUDA_DEEP_GEMM,
+                            )
+                            if device == "cpu"
+                            else nullcontext()
+                        )
+                        with backend:
+                            layer.process_weights_after_loading()
+                        self.assertEqual(layer.weight.shape, padded.shape)
+                        self.assertEqual(layer._fp8_logical_output_size, len(source))
+                        torch.testing.assert_close(
+                            layer.weight.view(torch.uint8),
+                            expected.view(torch.uint8),
+                            rtol=0,
+                            atol=0,
+                        )
+                        torch.testing.assert_close(
+                            layer.weight_scale, scale, rtol=0, atol=0
+                        )
+                        if device == "cuda":
+                            # A one-hot activation compares the real GEMM with
+                            # the unquantized projection, including tail rows.
+                            x = source.new_zeros(2, 3, source.shape[1])
+                            x[..., 1] = 1
+                            out = layer(x)
+                            ref = torch.nn.functional.linear(x, source)
+                            self.assertEqual(out.shape, ref.shape)
+                            torch.testing.assert_close(out, ref, rtol=0.07, atol=0.002)
+
+    def test_tp1_float_scale_tiles_cross_projection_boundaries(self):
+        self._check_partial_projection_tiles("cpu")
+
+    @unittest.skipUnless(os.getenv("TEST_FP8_FLOAT_SCALE_DEVICE"), "CPU contract suite")
+    def test_tp1_float_scale_tiles_through_device_gemm(self):
+        self.assertTrue(torch.cuda.is_available())
+        if os.environ["TEST_FP8_FLOAT_SCALE_DEVICE"] == "sm90":
+            self.assertIsNone(torch.version.hip)
+            self.assertEqual(torch.cuda.get_device_capability()[0], 9)
+        else:
+            self.assertEqual(os.environ["TEST_FP8_FLOAT_SCALE_DEVICE"], "rocm")
+            self.assertIsNotNone(torch.version.hip)
+        self._check_partial_projection_tiles("cuda")
+
+    def test_tp2_cannot_join_partial_projection_tiles(self):
+        for kind in ("merged_partial", "qkv_partial"):
+            for rank in (0, 1):
+                for backend, ue8m0 in (
+                    (fp8._CUDA_DEEP_GEMM, False),
+                    (fp8._ROCM_AITER_BLOCK, False),
+                    (fp8._CUDA_DEEP_GEMM, True),
+                ):
+                    with self.subTest(
+                        kind=kind, rank=rank, backend=backend, ue8m0=ue8m0
+                    ):
+                        layer = _owner(kind, 2, rank).proj
+                        with mock.patch.object(
+                            fp8, "_select_fp8_runtime_backend", return_value=backend
+                        ), mock.patch.object(
+                            fp8, "is_deep_gemm_e8m0_used", return_value=ue8m0
+                        ), self.assertRaisesRegex(ValueError, "align"):
+                            layer.process_weights_after_loading()
+
     def test_checkpoint_packed_scales_retain_mn_major_storage_until_gemm(self):
         # K>512 is essential: a single packed column hides contiguous() damage.
         for kind in ("column", "row", "merged", "qkv"):

@@ -1188,27 +1188,31 @@ class Fp8BlockOnlineLinearMethod(FloatingStartupLoRA, QuantizeMethodBase):
         shard_names = getattr(layer, "shard_names", None)
         num_shards = len(shard_names) if shard_names else 1
 
+        shard_sizes = None
+        if num_shards > 1:
+            shard_sizes = (
+                [layer.q_size, layer.kv_size, layer.kv_size]
+                if hasattr(layer, "q_size") and hasattr(layer, "kv_size")
+                else [logical_n // num_shards] * num_shards
+            )
+            if len(shard_sizes) != num_shards or sum(shard_sizes) != logical_n:
+                raise ValueError(
+                    f"FP8 shard sizes {shard_sizes} do not match merged output "
+                    f"{logical_n} in {getattr(layer, 'prefix', '?')}"
+                )
+            # At TP=1 this is the complete fused matrix: its tiles may cross
+            # projection boundaries. With TP, neighboring global rows can be
+            # on another rank, so joining partial tiles would change the scale.
+            if getattr(layer, "tp_size", None) != 1 and any(
+                rows % self.BLOCK for rows in shard_sizes
+            ):
+                raise ValueError(
+                    f"FP8 merged shard rows must align to {self.BLOCK}: {shard_sizes}"
+                )
         direct_ue8m0 = self._use_deep_gemm and is_deep_gemm_e8m0_used(weight.device)
         if direct_ue8m0:
             # Main quantizes online dense source weights directly to UE8M0;
             # float-scale FP8 -> BF16 -> UE8M0 introduces a second rounding.
-            # Without TP this is the same complete fused matrix as the original
-            # converter: a 128-row quantization tile may span two projections.
-            # A sharded owner has discarded neighboring rows, so joining two
-            # partial tiles locally would compute a different block maximum.
-            if num_shards > 1:
-                sizes = (
-                    [layer.q_size, layer.kv_size, layer.kv_size]
-                    if hasattr(layer, "q_size") and hasattr(layer, "kv_size")
-                    else [logical_n // num_shards] * num_shards
-                )
-                if sum(sizes) != logical_n or (
-                    getattr(layer, "tp_size", None) != 1
-                    and any(s % self.BLOCK for s in sizes)
-                ):
-                    raise ValueError(
-                        f"FP8 merged shard rows must align to {self.BLOCK}: {sizes}"
-                    )
             runtime_n = (logical_n + self.BLOCK - 1) // self.BLOCK * self.BLOCK
             source = weight
             if padded_k != logical_k or runtime_n != logical_n:
@@ -1217,47 +1221,26 @@ class Fp8BlockOnlineLinearMethod(FloatingStartupLoRA, QuantizeMethodBase):
                 )
             fp8_weight, scale = quant_weight_ue8m0_packed(source.contiguous())
             logical_output_n = logical_n
-        elif num_shards > 1:
-            if hasattr(layer, "q_size") and hasattr(layer, "kv_size"):
-                shard_sizes = [layer.q_size, layer.kv_size, layer.kv_size]
-            elif logical_n % num_shards == 0:
-                shard_sizes = [logical_n // num_shards] * num_shards
-            else:
-                raise ValueError(
-                    f"cannot infer FP8 shard sizes for merged output {logical_n} "
-                    f"with {num_shards} shards in {getattr(layer, 'prefix', '?')}"
-                )
-            if len(shard_sizes) != num_shards or sum(shard_sizes) != logical_n:
-                raise ValueError(
-                    f"FP8 shard sizes {shard_sizes} do not match merged output "
-                    f"{logical_n} in {getattr(layer, 'prefix', '?')}"
-                )
+        elif shard_sizes is not None and all(
+            rows % self.BLOCK == 0 for rows in shard_sizes
+        ):
+            # On exact tile boundaries, process one projection at a time to
+            # keep the float32 staging allocation small.
             quant_shards = []
             scale_shards = []
-            runtime_shard_sizes = []
-            for shard, shard_n in zip(
-                torch.split(weight, shard_sizes, dim=0), shard_sizes
-            ):
-                if shard_n % self.BLOCK != 0:
-                    raise ValueError(
-                        f"FP8 block quantization requires merged shard rows to align "
-                        f"to {self.BLOCK}; got {shard_n} in "
-                        f"{getattr(layer, 'prefix', '?')}"
-                    )
-                padded_shard_n = (shard_n + self.BLOCK - 1) // self.BLOCK * self.BLOCK
+            for shard in torch.split(weight, shard_sizes, dim=0):
                 quant_shard, scale_shard = per_block_quant_like_legacy(
                     shard, self.BLOCK
                 )
                 quant_shard = torch.nn.functional.pad(
                     quant_shard,
-                    (0, padded_k - logical_k, 0, padded_shard_n - shard_n),
+                    (0, padded_k - logical_k),
                 )
                 quant_shards.append(quant_shard)
                 scale_shards.append(scale_shard)
-                runtime_shard_sizes.append(padded_shard_n)
             fp8_weight = torch.cat(quant_shards, dim=0)
             scale = torch.cat(scale_shards, dim=0)
-            runtime_n = sum(runtime_shard_sizes)
+            runtime_n = logical_n
             logical_output_n = logical_n
         else:
             fp8_weight, scale = per_block_quant_like_legacy(weight, self.BLOCK)
