@@ -49,6 +49,7 @@ _GPU_TESTS = [
     "test_flash_mla_decode_kernel_layout",
     "test_fused_decode_meta_comprehensive",
     "test_compressor_start_finish_prefill",
+    "test_p1_prefill_sync_and_parity",
     "test_pool_slot_mapping_split",
     "test_indexer_cp_padded_gather_triton",
     "test_prefill_common_metadata_cuda",
@@ -158,6 +159,18 @@ cuda13_sm100_py_test(
 
 dsv4_py_test(
     name = "test_fused_qnorm_quant_perf",
+    tags = [
+        "manual",
+        "perf",
+    ],
+    deps = _DSV4_FP8_TEST_DEPS + [
+        "//rtp_llm/models_py/modules/dsv4/test:dsv4_kernel_perf_utils",
+    ],
+)
+
+dsv4_py_test(
+    name = "test_p1_prefill_ops_perf",
+    args = ["-s"],
     tags = [
         "manual",
         "perf",

@@ -298,6 +298,113 @@ def _plan_score_chunk_ranges(
     return ranges
 
 
+def _compute_score_chunk_stats_host(
+    ranges: list[tuple[int, int]],
+    *,
+    ratio: int,
+    cu_q_host: Optional[list[int]],
+    cu_k_host: Optional[list[int]],
+    T_per_req_host: Optional[list[int]],
+    host_input_lengths: Optional[tuple[int, ...]],
+    host_prefix_lengths: Optional[tuple[int, ...]],
+    cp_ctx: Optional[Any],
+) -> Optional[list[int]]:
+    if (
+        cu_q_host is None
+        or cu_k_host is None
+        or T_per_req_host is None
+        or host_input_lengths is None
+        or host_prefix_lengths is None
+    ):
+        return None
+    B = len(T_per_req_host)
+    if len(host_input_lengths) != B or len(host_prefix_lengths) != B or len(cu_q_host) != B + 1:
+        return None
+    cp_active = cp_ctx is not None and int(getattr(cp_ctx, "cp_size", 1)) > 1
+    if cp_active:
+        chunk_lengths = getattr(cp_ctx, "chunk_lengths_per_req", None)
+        if not chunk_lengths or len(chunk_lengths) != B:
+            return None
+        # Confirm cu_q_host matches the ZigZag chunk boundaries.
+        acc = 0
+        for idx, c_len in enumerate(chunk_lengths):
+            if cu_q_host[idx] != acc:
+                return None
+            acc += int(c_len)
+        if cu_q_host[B] != acc:
+            return None
+        cp_size = int(cp_ctx.cp_size)
+        cp_rank = int(cp_ctx.cp_rank)
+    else:
+        chunk_lengths = None
+        cp_size = 1
+        cp_rank = 0
+
+    stats_host: list[int] = []
+    for rs, re in ranges:
+        k_lo: Optional[int] = None
+        k_hi: Optional[int] = None
+        min_len: Optional[int] = None
+        max_len: Optional[int] = None
+        for b in range(B):
+            q0 = cu_q_host[b]
+            q1 = cu_q_host[b + 1]
+            lo = rs if rs > q0 else q0
+            hi = re if re < q1 else q1
+            if lo >= hi:
+                continue
+            ks_b = cu_k_host[b]
+            P_b = int(host_prefix_lengths[b])
+            T_b = int(T_per_req_host[b])
+            k_lo = ks_b if k_lo is None or ks_b < k_lo else k_lo
+            if not cp_active:
+                pos_first = P_b + (lo - q0)
+                pos_last = P_b + (hi - 1 - q0)
+                len_first = min((pos_first + 1) // ratio, T_b)
+                len_last = min((pos_last + 1) // ratio, T_b)
+                ke_last = ks_b + len_last
+                k_hi = ke_last if k_hi is None or ke_last > k_hi else k_hi
+                min_len = len_first if min_len is None or len_first < min_len else min_len
+                max_len = len_last if max_len is None or len_last > max_len else max_len
+            else:
+                assert chunk_lengths is not None
+                c_b = int(chunk_lengths[b])
+                pair = c_b // 2
+                padded_b = c_b * cp_size
+                max_rel = max(int(host_input_lengths[b]) - 1, 0)
+                loc_lo = lo - q0
+                loc_hi = hi - q0
+                # Even half: [0, pair)
+                e_lo = loc_lo
+                e_hi = loc_hi if loc_hi < pair else pair
+                if e_lo < e_hi:
+                    rel_first = min(cp_rank * pair + e_lo, max_rel)
+                    rel_last = min(cp_rank * pair + (e_hi - 1), max_rel)
+                    l0 = min((P_b + rel_first + 1) // ratio, T_b)
+                    l1 = min((P_b + rel_last + 1) // ratio, T_b)
+                    k_hi = (ks_b + l1) if k_hi is None or (ks_b + l1) > k_hi else k_hi
+                    min_len = l0 if min_len is None or l0 < min_len else min_len
+                    max_len = l1 if max_len is None or l1 > max_len else max_len
+                # Odd half: [pair, c_b)
+                o_lo = loc_lo if loc_lo > pair else pair
+                o_hi = loc_hi
+                if o_lo < o_hi:
+                    j_lo = o_lo - pair
+                    j_hi = o_hi - pair
+                    odd_base = padded_b - (cp_rank + 1) * pair
+                    rel_first = min(odd_base + j_lo, max_rel)
+                    rel_last = min(odd_base + (j_hi - 1), max_rel)
+                    l0 = min((P_b + rel_first + 1) // ratio, T_b)
+                    l1 = min((P_b + rel_last + 1) // ratio, T_b)
+                    k_hi = (ks_b + l1) if k_hi is None or (ks_b + l1) > k_hi else k_hi
+                    min_len = l0 if min_len is None or l0 < min_len else min_len
+                    max_len = l1 if max_len is None or l1 > max_len else max_len
+        if k_lo is None or k_hi is None or max_len is None or min_len is None:
+            return None
+        stats_host.extend((k_lo, k_hi, max_len, min_len))
+    return stats_host
+
+
 def _build_score_chunks(
     ks: torch.Tensor,
     ke: torch.Tensor,
@@ -311,6 +418,9 @@ def _build_score_chunks(
     cu_q_host: Optional[list[int]],
     cu_k_host: Optional[list[int]],
     T_per_req_host: Optional[list[int]],
+    host_input_lengths: Optional[tuple[int, ...]] = None,
+    host_prefix_lengths: Optional[tuple[int, ...]] = None,
+    cp_ctx: Optional[Any] = None,
 ) -> tuple[_IndexerFP8ScoreChunk, ...]:
     del use_varlen, sp_int
     if M <= 0 or T <= 0:
@@ -342,15 +452,26 @@ def _build_score_chunks(
     if not ranges:
         return ()
 
-    stats_list = []
-    for rs, re in ranges:
-        ks_c = ks[rs:re]
-        ke_c = ke[rs:re]
-        len_c = ke_c - ks_c
-        stats_list.append(
-            torch.stack([ks_c.min(), ke_c.max(), len_c.max(), len_c.min()])
-        )
-    stats_host = torch.cat(stats_list).tolist()
+    stats_host = _compute_score_chunk_stats_host(
+        ranges,
+        ratio=ratio,
+        cu_q_host=cu_q_host,
+        cu_k_host=cu_k_host,
+        T_per_req_host=T_per_req_host,
+        host_input_lengths=host_input_lengths,
+        host_prefix_lengths=host_prefix_lengths,
+        cp_ctx=cp_ctx,
+    )
+    if stats_host is None:
+        stats_list = []
+        for rs, re in ranges:
+            ks_c = ks[rs:re]
+            ke_c = ke[rs:re]
+            len_c = ke_c - ks_c
+            stats_list.append(
+                torch.stack([ks_c.min(), ke_c.max(), len_c.max(), len_c.min()])
+            )
+        stats_host = torch.cat(stats_list).tolist()
 
     chunks_out: list[_IndexerFP8ScoreChunk] = []
     for idx, (rs, re) in enumerate(ranges):
@@ -759,12 +880,18 @@ class IndexerFP8(PoolBackedModule):
     # --------------------------------------------------------------
     # Q-projection + RoPE helper (shared between prefill & decode)
     # --------------------------------------------------------------
+    def can_use_qr_quant(self) -> bool:
+        return hasattr(self.wq_b, "forward_quantized") and bool(
+            getattr(self.wq_b, "scale_ue8m0", False)
+        )
+
     def _compute_indexer_q(
         self,
-        qr: torch.Tensor,
+        qr: Optional[torch.Tensor],
         freqs_cis: torch.Tensor,
         batched_rope: bool = False,
         apply_rope: bool = True,
+        qr_quant: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
     ) -> torch.Tensor:
         """qr → wq_b → unflatten → optional RoPE → q.
 
@@ -779,13 +906,20 @@ class IndexerFP8(PoolBackedModule):
         # Framework FP8 linear (CudaFp8DeepGEMMLinear) requires 2D input;
         # flatten leading dims and restore.
         with record_function_range("dsv4.fp8.indexer.compute_q.wq_b"):
-            if qr.dim() > 2:
-                shape = qr.shape
-                q = self.wq_b(qr.reshape(-1, shape[-1])).view(
-                    *shape[:-1], self.n_heads * self.head_dim
-                )
+            if qr_quant is not None and self.can_use_qr_quant():
+                q_fp8, q_scale = qr_quant
+                q = self.wq_b.forward_quantized(q_fp8, q_scale)
+                if qr is not None and qr.dim() > 2:
+                    q = q.view(*qr.shape[:-1], self.n_heads * self.head_dim)
             else:
-                q = self.wq_b(qr)
+                assert qr is not None, "IndexerFP8._compute_indexer_q requires qr"
+                if qr.dim() > 2:
+                    shape = qr.shape
+                    q = self.wq_b(qr.reshape(-1, shape[-1])).view(
+                        *shape[:-1], self.n_heads * self.head_dim
+                    )
+                else:
+                    q = self.wq_b(qr)
             q = q.unflatten(-1, (self.n_heads, self.head_dim))
         if not apply_rope:
             return q
@@ -932,6 +1066,8 @@ class IndexerFP8(PoolBackedModule):
         req_id_per_token: Optional[torch.Tensor] = None,
         max_seqlen_q: int = 0,
         has_prefix: bool,
+        host_input_lengths: Optional[tuple[int, ...]] = None,
+        host_prefix_lengths: Optional[tuple[int, ...]] = None,
     ) -> _IndexerFP8PrefillMeta:
         """Build per-call FP8 prefill metadata.
 
@@ -1029,24 +1165,56 @@ class IndexerFP8(PoolBackedModule):
                 )
                 # Graph shapes must not depend on request lengths. The score
                 # and gather kernels mask using device-side cu_kv_seqlens/ks/ke.
-                host_input_lengths = getattr(cp_ctx, "input_lengths_global_host", None)
-                host_prefix_lengths = getattr(cp_ctx, "prefix_lengths_host", None)
+                eff_host_inputs = (
+                    getattr(cp_ctx, "input_lengths_global_host", None)
+                    if cp_active
+                    else host_input_lengths
+                )
+                if (
+                    not cp_active
+                    and eff_host_inputs is None
+                    and eff_input_lengths.device.type == "cpu"
+                    and eff_input_lengths.numel() > 0
+                ):
+                    eff_host_inputs = tuple(
+                        int(v) for v in eff_input_lengths.tolist()
+                    )
+                if (
+                    not cp_active
+                    and eff_host_inputs is None
+                    and cu_seqlens.device.type == "cpu"
+                    and cu_seqlens.numel() >= 2
+                ):
+                    cu_cpu = [int(v) for v in cu_seqlens.tolist()]
+                    eff_host_inputs = tuple(
+                        cu_cpu[i + 1] - cu_cpu[i] for i in range(len(cu_cpu) - 1)
+                    )
+                eff_host_prefixes = (
+                    getattr(cp_ctx, "prefix_lengths_host", None)
+                    if cp_active
+                    else host_prefix_lengths
+                )
+                if (
+                    eff_host_prefixes is None
+                    and prefix_lengths.device.type == "cpu"
+                    and prefix_lengths.numel() > 0
+                ):
+                    eff_host_prefixes = tuple(
+                        int(v) for v in prefix_lengths.tolist()
+                    )
                 M = int(position_ids.numel())  # T_total
                 end_pos_0: Optional[int] = None
                 if capturing:
                     T = self._kv_cache_t * batch_size
                 elif (
-                    cp_active
-                    and host_input_lengths is not None
-                    and host_prefix_lengths is not None
-                    and len(host_input_lengths) == batch_size
-                    and len(host_prefix_lengths) == batch_size
+                    eff_host_inputs is not None
+                    and eff_host_prefixes is not None
+                    and len(eff_host_inputs) == batch_size
+                    and len(eff_host_prefixes) == batch_size
                 ):
                     host_seq_total_per_req = tuple(
                         int(prefix) + int(length)
-                        for prefix, length in zip(
-                            host_prefix_lengths, host_input_lengths
-                        )
+                        for prefix, length in zip(eff_host_prefixes, eff_host_inputs)
                     )
                     T_per_req_host = [
                         total // ratio for total in host_seq_total_per_req
@@ -1057,10 +1225,22 @@ class IndexerFP8(PoolBackedModule):
                         cu_k_host.append(cu_k_host[-1] + tb)
                     if batch_size == 1:
                         cu_q_host = [0, M]
-                    elif cu_seqlens.device.type == "cpu":
-                        cu_q_host = [int(v) for v in cu_seqlens.tolist()]
+                    elif cp_active:
+                        cp_chunks = getattr(cp_ctx, "chunk_lengths_per_req", None)
+                        if (
+                            cp_chunks is not None
+                            and len(cp_chunks) == batch_size
+                            and sum(int(c) for c in cp_chunks) == M
+                        ):
+                            cu_q_host = [0]
+                            for c in cp_chunks:
+                                cu_q_host.append(cu_q_host[-1] + int(c))
+                        else:
+                            cu_q_host = [int(v) for v in cu_seqlens.tolist()]
                     else:
-                        cu_q_host = [int(v) for v in cu_seqlens.tolist()]
+                        cu_q_host = [0]
+                        for l_q in eff_host_inputs:
+                            cu_q_host.append(cu_q_host[-1] + int(l_q))
                 else:
                     # Single batched D2H read gives end_pos[0], T_per_req, cu_seqlens
                     # and total T cleanly once per prefill step.
@@ -1176,6 +1356,8 @@ class IndexerFP8(PoolBackedModule):
             is_fresh_prefill = sp_int == 0
         else:
             # Legacy B == 1 scalar path — unchanged, bit-equal to pre-Phase-3a.
+            eff_host_inputs = (int(seqlen),)
+            eff_host_prefixes = (int(sp_int),)
             with record_function_range("dsv4.fp8.indexer.prepare.legacy"):
                 end_pos = sp_int + seqlen
                 is_fresh_prefill = sp_int == 0
@@ -1298,6 +1480,8 @@ class IndexerFP8(PoolBackedModule):
                                 is_batched=True,
                                 seq_start_per_req=cp_seq_start_per_req,
                                 cu_seq_per_req=cp_cu_seq_per_req,
+                                prefix_lengths_host=eff_host_prefixes,
+                                host_input_lengths=eff_host_inputs,
                             )
                     else:
                         compressor_meta = None
@@ -1316,7 +1500,11 @@ class IndexerFP8(PoolBackedModule):
                             seq_start_per_req=prefix_lengths,
                             cu_seqlens=cu_seqlens,
                         )
-                        compressor_meta = compressor.prepare_metadata(**cmp_args)
+                        compressor_meta = compressor.prepare_metadata(
+                            **cmp_args,
+                            prefix_lengths_host=eff_host_prefixes,
+                            host_input_lengths=eff_host_inputs,
+                        )
             finally:
                 self._clear_nested_pool()
 
@@ -1335,6 +1523,9 @@ class IndexerFP8(PoolBackedModule):
                     cu_q_host=cu_q_host,
                     cu_k_host=cu_k_host,
                     T_per_req_host=T_per_req_host,
+                    host_input_lengths=eff_host_inputs,
+                    host_prefix_lengths=eff_host_prefixes,
+                    cp_ctx=cp_ctx if cp_active else None,
                 )
 
         return _IndexerFP8PrefillMeta(
@@ -1462,7 +1653,7 @@ class IndexerFP8(PoolBackedModule):
     def forward(
         self,
         x: torch.Tensor,
-        qr: torch.Tensor,
+        qr: Optional[torch.Tensor],
         attention_inputs: _IndexerFP8PrefillMeta,
         *,
         # REQUIRED, never Optional — by design. Threaded straight to the nested
@@ -1472,6 +1663,7 @@ class IndexerFP8(PoolBackedModule):
         workspace: "PrefillWorkspace",
         cp_gather_stream: Optional[Any] = None,
         post_gather_stream: Optional[Any] = None,
+        qr_quant: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
     ) -> torch.Tensor:
         M = attention_inputs.M
         T = attention_inputs.T
@@ -1502,7 +1694,10 @@ class IndexerFP8(PoolBackedModule):
         try:
             with record_function_range("dsv4.fp8.indexer.prefill.compute_q"):
                 q = self._compute_indexer_q(
-                    qr, attention_inputs.freqs_cis_slice, apply_rope=False
+                    qr,
+                    attention_inputs.freqs_cis_slice,
+                    apply_rope=False,
+                    qr_quant=qr_quant,
                 )
             with record_function_range("dsv4.fp8.indexer.prefill.nested_compressor"):
                 self.compressor(
@@ -1659,12 +1854,13 @@ class IndexerFP8(PoolBackedModule):
     def forward_with_pending_nested(
         self,
         x: torch.Tensor,
-        qr: torch.Tensor,
+        qr: Optional[torch.Tensor],
         attention_inputs: _IndexerFP8PrefillMeta,
         nested_pending: Optional[_CompressorPending],
         before_gather_k: Optional[Callable[[], None]] = None,
         cp_gather_stream: Optional[Any] = None,
         post_gather_stream: Optional[Any] = None,
+        qr_quant: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
     ) -> torch.Tensor:
         """Overlap-variant of :meth:`forward`.
 
@@ -1714,7 +1910,10 @@ class IndexerFP8(PoolBackedModule):
         try:
             with record_function_range("dsv4.fp8.indexer.prefill.compute_q"):
                 q = self._compute_indexer_q(
-                    qr, attention_inputs.freqs_cis_slice, apply_rope=False
+                    qr,
+                    attention_inputs.freqs_cis_slice,
+                    apply_rope=False,
+                    qr_quant=qr_quant,
                 )
             with record_function_range("dsv4.fp8.indexer.prefill.nested_compressor"):
                 self.compressor.finish_prefill(nested_pending)

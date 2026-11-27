@@ -344,9 +344,12 @@ def _load_score_tile(
         load_mask = use_raw[:, None] & mask[None, :]
         row_base = raw_base
 
-    score = tl.load(row_base[:, None] + block[None, :], mask=load_mask, other=0.0).to(
-        tl.float32
-    )
+    score = tl.load(
+        row_base[:, None] + block[None, :],
+        mask=load_mask,
+        other=0.0,
+        eviction_policy="evict_first",
+    ).to(tl.float32)
     ape_rows_safe = tl.where(use_raw, pos % COMPRESS_RATIO, 0)
     ape_vals = tl.load(
         ape_ptr + ape_rows_safe[:, None] * ap_s + h_off[:, None] + block[None, :],
@@ -404,9 +407,12 @@ def _load_kv_tile(
     else:
         load_mask = use_raw[:, None] & mask[None, :]
         row_base = raw_base
-    return tl.load(row_base[:, None] + block[None, :], mask=load_mask, other=0.0).to(
-        tl.float32
-    )
+    return tl.load(
+        row_base[:, None] + block[None, :],
+        mask=load_mask,
+        other=0.0,
+        eviction_policy="evict_first",
+    ).to(tl.float32)
 
 
 @triton.jit
@@ -638,6 +644,441 @@ def _compress_and_rmsnorm(
     return compressed_kv * rrms * rms_w
 
 
+@triton.jit
+def _quant_rope_store_584b(
+    normed,
+    position,
+    kv_block_idx,
+    kv_pos_in_block,
+    cos_sin_cache_ptr,
+    cos_sin_stride,
+    k_cache_ptr,
+    kv_cache_block_size,
+    block,
+    mask,
+    HEAD_SIZE: tl.constexpr,
+    TRITON_BLOCK_SIZE: tl.constexpr,
+    COMPRESS_RATIO: tl.constexpr,
+    ROPE_HEAD_DIM: tl.constexpr,
+    FP8_MAX: tl.constexpr,
+    QUANT_BLOCK: tl.constexpr,
+    TOKEN_STRIDE: tl.constexpr,
+    SCALE_DIM: tl.constexpr,
+    KV_BLOCK_STRIDE,
+):
+    cache_block_ptr = k_cache_ptr + kv_block_idx.to(tl.int64) * KV_BLOCK_STRIDE.to(
+        tl.int64
+    )
+    fp8_ptr = cache_block_ptr + kv_pos_in_block * TOKEN_STRIDE
+    scale_ptr = (
+        cache_block_ptr
+        + kv_cache_block_size * TOKEN_STRIDE
+        + kv_pos_in_block * SCALE_DIM
+    )
+
+    NOPE_HEAD_DIM: tl.constexpr = HEAD_SIZE - ROPE_HEAD_DIM
+    HALF_ROPE: tl.constexpr = ROPE_HEAD_DIM // 2
+
+    N_QUANT_BLOCKS: tl.constexpr = TRITON_BLOCK_SIZE // QUANT_BLOCK
+    N_NOPE_BLOCKS: tl.constexpr = NOPE_HEAD_DIM // QUANT_BLOCK
+    INV_FP8_MAX: tl.constexpr = 1.0 / FP8_MAX
+
+    quant_input = normed.to(tl.bfloat16).to(tl.float32)
+    quant_2d = tl.reshape(quant_input, (N_QUANT_BLOCKS, QUANT_BLOCK))
+    abs_2d = tl.abs(quant_2d)
+    block_absmax = tl.max(abs_2d, axis=1)
+    block_absmax = tl.maximum(block_absmax, 1e-4)
+
+    raw_scales = block_absmax * INV_FP8_MAX
+    exponents = tl.ceil(tl.log2(raw_scales))
+    inv_scales = tl.exp2(-exponents)
+    inv_scales_col = tl.reshape(inv_scales, (N_QUANT_BLOCKS, 1))
+    x_scaled = quant_2d * inv_scales_col
+    x_clamped = tl.clamp(x_scaled, -FP8_MAX, FP8_MAX)
+    x_fp8 = x_clamped.to(tl.float8e4nv)
+    x_uint8 = x_fp8.to(tl.uint8, bitcast=True)
+    x_uint8_flat = tl.reshape(x_uint8, (TRITON_BLOCK_SIZE,))
+
+    nope_mask = block < NOPE_HEAD_DIM
+    tl.store(fp8_ptr + block, x_uint8_flat, mask=nope_mask)
+
+    scale_idx = tl.arange(0, N_QUANT_BLOCKS)
+    encoded = exponents + 127.0
+    encoded = tl.maximum(tl.minimum(encoded, 255.0), 0.0)
+    tl.store(
+        scale_ptr + scale_idx,
+        encoded.to(tl.uint8),
+        mask=scale_idx < N_NOPE_BLOCKS,
+    )
+    tl.store(scale_ptr + N_NOPE_BLOCKS, tl.zeros((), dtype=tl.uint8))
+
+    NUM_PAIRS: tl.constexpr = TRITON_BLOCK_SIZE // 2
+    NOPE_PAIRS: tl.constexpr = NOPE_HEAD_DIM // 2
+
+    pair_2d = tl.reshape(normed, (NUM_PAIRS, 2))
+    even, odd = tl.split(pair_2d)
+
+    pair_idx = tl.arange(0, NUM_PAIRS)
+    rope_pair_local = pair_idx - NOPE_PAIRS
+    is_rope_pair = rope_pair_local >= 0
+    cs_idx = tl.maximum(rope_pair_local, 0)
+
+    compressed_pos = (position // COMPRESS_RATIO) * COMPRESS_RATIO
+    cache_base = cos_sin_cache_ptr + compressed_pos * cos_sin_stride
+    cos_v = tl.load(cache_base + cs_idx, mask=is_rope_pair, other=1.0)
+    sin_v = tl.load(cache_base + HALF_ROPE + cs_idx, mask=is_rope_pair, other=0.0)
+
+    new_even = even * cos_v - odd * sin_v
+    new_odd = odd * cos_v + even * sin_v
+    result = tl.interleave(new_even, new_odd)
+
+    bf16_ptr = (fp8_ptr + NOPE_HEAD_DIM).to(tl.pointer_type(tl.bfloat16))
+    rope_local = block - NOPE_HEAD_DIM
+    is_rope = (block >= NOPE_HEAD_DIM) & mask
+    tl.store(bf16_ptr + rope_local, result.to(tl.bfloat16), mask=is_rope)
+
+
+_HCA_NUM_T_SPLITS = 4
+_HCA_SPLIT_T = 32
+_HCA_CHUNK_D = 64
+_HCA_D_CHUNKS = 8
+_HCA_SPLIT_WS_CACHE: dict[tuple[int, int], torch.Tensor] = {}
+
+
+def _get_hca_split_ws(
+    num_work: int, head_dim: int, device: torch.device
+) -> torch.Tensor:
+    needed = 3 * num_work * _HCA_NUM_T_SPLITS * head_dim
+    if device.type == "cuda" and torch.cuda.is_current_stream_capturing():
+        return torch.empty(
+            (3, num_work, _HCA_NUM_T_SPLITS, head_dim),
+            dtype=torch.float32,
+            device=device,
+        )
+    stream_id = (
+        int(torch.cuda.current_stream(device).cuda_stream)
+        if device.type == "cuda"
+        else 0
+    )
+    key = (device.index if device.index is not None else 0, stream_id)
+    buf = _HCA_SPLIT_WS_CACHE.get(key)
+    if buf is None or int(buf.numel()) < needed:
+        buf = torch.empty((needed,), dtype=torch.float32, device=device)
+        _HCA_SPLIT_WS_CACHE[key] = buf
+    return buf[:needed].view(3, num_work, _HCA_NUM_T_SPLITS, head_dim)
+
+
+@triton.jit(
+    do_not_specialize=[
+        "num_work",
+        "ws_plane",
+        "kv_raw_stride",
+        "score_raw_stride",
+        "ape_stride",
+        "state_cache_stride0",
+        "state_cache_stride1",
+        "block_table_stride",
+        "block_size",
+        "seq_start",
+        "n_raw",
+        "kv_cache_block_size",
+        "NUM_STATE_BLOCKS",
+    ]
+)
+def _hca_compress_split_stage1_kernel(
+    state_cache_ptr,
+    state_cache_stride0,
+    state_cache_stride1,
+    token_to_req_indices_ptr,
+    positions_ptr,
+    block_table_ptr,
+    block_table_stride,
+    block_size,
+    kv_raw_ptr,
+    kv_raw_stride,
+    score_raw_ptr,
+    score_raw_stride,
+    ape_ptr,
+    ape_stride,
+    seq_start,
+    n_raw,
+    seq_start_per_req_ptr,
+    cu_seq_per_req_ptr,
+    kv_slot_mapping_ptr,
+    kv_cache_block_size,
+    unpad_restore_ptr,
+    active_indices_ptr,
+    ws_ptr,
+    ws_plane,
+    num_work,
+    HEAD_SIZE: tl.constexpr,
+    STATE_WIDTH: tl.constexpr,
+    COMPRESS_RATIO: tl.constexpr,
+    NUM_T_SPLITS: tl.constexpr,
+    SPLIT_T: tl.constexpr,
+    CHUNK_D: tl.constexpr,
+    D_CHUNKS: tl.constexpr,
+    NUM_STATE_BLOCKS,
+    BATCHED: tl.constexpr,
+    TRAP_INVALID_KV_ACCESS: tl.constexpr,
+    STATE_RING_ENTRIES: tl.constexpr,
+    MAY_USE_CACHE: tl.constexpr,
+    USE_UNPAD_RESTORE: tl.constexpr,
+    USE_ACTIVE_INDICES: tl.constexpr,
+    ALIGN4: tl.constexpr,
+):
+    row_id = tl.program_id(0).to(tl.int64)
+    if row_id >= num_work:
+        return
+    if USE_ACTIVE_INDICES:
+        token_idx = tl.load(active_indices_ptr + row_id).to(tl.int64)
+    else:
+        token_idx = row_id
+
+    kv_slot_idx = tl.load(kv_slot_mapping_ptr + token_idx)
+    if kv_slot_idx < 0:
+        return
+
+    position = tl.load(positions_ptr + token_idx).to(tl.int64)
+    if (position + 1) % COMPRESS_RATIO != 0:
+        return
+
+    pid_sd = tl.program_id(1)
+    split_t = pid_sd // D_CHUNKS
+    d_chunk = pid_sd % D_CHUNKS
+
+    req_idx = tl.load(token_to_req_indices_ptr + token_idx).to(tl.int64)
+    if BATCHED:
+        req_seq_start = tl.load(seq_start_per_req_ptr + req_idx).to(tl.int64)
+        req_cu_lo = tl.load(cu_seq_per_req_ptr + req_idx).to(tl.int64)
+        req_cu_hi = tl.load(cu_seq_per_req_ptr + req_idx + 1).to(tl.int64)
+        req_n_raw = req_cu_hi - req_cu_lo
+    else:
+        req_seq_start = tl.zeros((), dtype=tl.int64) + seq_start
+        req_cu_lo = tl.zeros((), dtype=tl.int64)
+        req_n_raw = tl.zeros((), dtype=tl.int64) + n_raw
+
+    start = position - COMPRESS_RATIO + 1
+    tokens = split_t * SPLIT_T + tl.arange(0, SPLIT_T)
+    cur_pos = start + tokens.to(tl.int64)
+    mask_pos = cur_pos >= 0
+    flat_idx_in_req = cur_pos - req_seq_start
+    use_raw = mask_pos & (flat_idx_in_req >= 0) & (flat_idx_in_req < req_n_raw)
+    flat_idx_safe = tl.where(use_raw, req_cu_lo + flat_idx_in_req, 0)
+
+    if USE_UNPAD_RESTORE:
+        raw_row_idx = tl.load(
+            unpad_restore_ptr + flat_idx_safe, mask=use_raw, other=0
+        ).to(tl.int64)
+    else:
+        raw_row_idx = flat_idx_safe
+
+    kv_s = tl.multiple_of(kv_raw_stride.to(tl.int64), 4) if ALIGN4 else kv_raw_stride.to(tl.int64)
+    sc_s = (
+        tl.multiple_of(score_raw_stride.to(tl.int64), 4)
+        if ALIGN4
+        else score_raw_stride.to(tl.int64)
+    )
+    ap_s = tl.multiple_of(ape_stride.to(tl.int64), 4) if ALIGN4 else ape_stride.to(tl.int64)
+
+    raw_score_ptrs = score_raw_ptr + raw_row_idx * sc_s
+    raw_kv_ptrs = kv_raw_ptr + raw_row_idx * kv_s
+
+    if MAY_USE_CACHE:
+        use_cache = mask_pos & ~use_raw
+        block_indices = (cur_pos // block_size) % tl.maximum(block_table_stride, 1)
+        block_indices_safe = tl.where(use_cache, block_indices, 0)
+        block_numbers = tl.load(
+            block_table_ptr + req_idx * block_table_stride + block_indices_safe,
+            mask=use_cache,
+            other=0,
+        )
+        invalid_state_block = use_cache & (block_numbers >= NUM_STATE_BLOCKS)
+        if tl.max(invalid_state_block.to(tl.int32), axis=0) != 0:
+            _trap_invalid_kv_access(TRAP_INVALID_KV_ACCESS)
+        valid_block = use_cache & (block_numbers > 0)
+        block_numbers_i64 = tl.where(valid_block, block_numbers, 0).to(tl.int64)
+        block_offsets = tl.where(mask_pos, cur_pos % STATE_RING_ENTRIES, 0).to(tl.int64)
+        st_s0 = (
+            tl.multiple_of(state_cache_stride0.to(tl.int64), 4)
+            if ALIGN4
+            else state_cache_stride0.to(tl.int64)
+        )
+        st_s1 = (
+            tl.multiple_of(state_cache_stride1.to(tl.int64), 4)
+            if ALIGN4
+            else state_cache_stride1.to(tl.int64)
+        )
+        cache_kv_ptrs = (
+            state_cache_ptr + block_numbers_i64 * st_s0 + block_offsets * st_s1
+        )
+        cache_score_ptrs = cache_kv_ptrs + STATE_WIDTH
+        load_mask_1d = use_raw | valid_block
+        score_row_ptrs = tl.where(use_raw, raw_score_ptrs, cache_score_ptrs)
+        kv_row_ptrs = tl.where(use_raw, raw_kv_ptrs, cache_kv_ptrs)
+    else:
+        load_mask_1d = use_raw
+        score_row_ptrs = raw_score_ptrs
+        kv_row_ptrs = raw_kv_ptrs
+
+    d_offs = d_chunk * CHUNK_D + tl.arange(0, CHUNK_D)
+    if ALIGN4:
+        d_offs = tl.multiple_of(d_offs, 4)
+
+    load_mask_2d = load_mask_1d[:, None]
+    score = tl.load(
+        score_row_ptrs[:, None] + d_offs[None, :],
+        mask=load_mask_2d,
+        other=0.0,
+        eviction_policy="evict_first",
+    ).to(tl.float32)
+    ape_rows_safe = tl.where(use_raw, cur_pos % COMPRESS_RATIO, 0)
+    ape_vals = tl.load(
+        ape_ptr + ape_rows_safe[:, None] * ap_s + d_offs[None, :],
+        mask=use_raw[:, None],
+        other=0.0,
+    ).to(tl.float32)
+    score = tl.where(load_mask_2d, score + ape_vals, float("-inf"))
+
+    m_s = tl.max(score, axis=0)
+    m_safe = tl.where(m_s > float("-inf"), m_s, 0.0)
+    p_s = tl.where(load_mask_2d, tl.exp(score - m_safe[None, :]), 0.0)
+    l_s = tl.sum(p_s, axis=0)
+
+    kv_tile = tl.load(
+        kv_row_ptrs[:, None] + d_offs[None, :],
+        mask=load_mask_2d,
+        other=0.0,
+        eviction_policy="evict_first",
+    ).to(tl.float32)
+    acc_s = tl.sum(p_s * kv_tile, axis=0)
+
+    ws_off = (row_id * NUM_T_SPLITS + split_t) * HEAD_SIZE + d_offs
+    if ALIGN4:
+        ws_off = tl.multiple_of(ws_off, 4)
+    plane = ws_plane.to(tl.int64)
+    tl.store(ws_ptr + ws_off, m_s)
+    tl.store(ws_ptr + plane + ws_off, l_s)
+    tl.store(ws_ptr + 2 * plane + ws_off, acc_s)
+
+
+@triton.jit(
+    do_not_specialize=[
+        "num_work",
+        "ws_plane",
+        "kv_cache_block_size",
+        "KV_BLOCK_STRIDE",
+        "NUM_KV_BLOCKS",
+        "cos_sin_stride",
+    ]
+)
+def _hca_compress_split_finalize_kernel(
+    positions_ptr,
+    rms_norm_weight_ptr,
+    rms_norm_eps,
+    cos_sin_cache_ptr,
+    cos_sin_stride,
+    k_cache_ptr,
+    kv_slot_mapping_ptr,
+    kv_cache_block_size,
+    active_indices_ptr,
+    ws_ptr,
+    ws_plane,
+    num_work,
+    HEAD_SIZE: tl.constexpr,
+    TRITON_BLOCK_SIZE: tl.constexpr,
+    COMPRESS_RATIO: tl.constexpr,
+    ROPE_HEAD_DIM: tl.constexpr,
+    FP8_MAX: tl.constexpr,
+    QUANT_BLOCK: tl.constexpr,
+    TOKEN_STRIDE: tl.constexpr,
+    SCALE_DIM: tl.constexpr,
+    NUM_T_SPLITS: tl.constexpr,
+    KV_BLOCK_STRIDE,
+    NUM_KV_BLOCKS,
+    TRAP_INVALID_KV_ACCESS: tl.constexpr,
+    USE_ACTIVE_INDICES: tl.constexpr,
+    ALIGN4: tl.constexpr,
+):
+    row_id = tl.program_id(0).to(tl.int64)
+    if row_id >= num_work:
+        return
+    if USE_ACTIVE_INDICES:
+        token_idx = tl.load(active_indices_ptr + row_id).to(tl.int64)
+    else:
+        token_idx = row_id
+
+    kv_slot_idx = tl.load(kv_slot_mapping_ptr + token_idx)
+    if kv_slot_idx < 0:
+        return
+
+    position = tl.load(positions_ptr + token_idx).to(tl.int64)
+    if (position + 1) % COMPRESS_RATIO != 0:
+        return
+
+    kv_block_idx = kv_slot_idx // kv_cache_block_size
+    kv_pos_in_block = kv_slot_idx % kv_cache_block_size
+    if kv_block_idx < 0:
+        _trap_invalid_kv_access(TRAP_INVALID_KV_ACCESS)
+    if kv_block_idx >= NUM_KV_BLOCKS:
+        _trap_invalid_kv_access(TRAP_INVALID_KV_ACCESS)
+
+    block = tl.arange(0, TRITON_BLOCK_SIZE)
+    if ALIGN4:
+        block = tl.multiple_of(block, 4)
+    mask = block < HEAD_SIZE
+
+    plane = ws_plane.to(tl.int64)
+    row_ws_base = row_id * NUM_T_SPLITS * HEAD_SIZE
+
+    m_g = tl.full((TRITON_BLOCK_SIZE,), float("-inf"), dtype=tl.float32)
+    l_g = tl.zeros((TRITON_BLOCK_SIZE,), dtype=tl.float32)
+    acc_g = tl.zeros((TRITON_BLOCK_SIZE,), dtype=tl.float32)
+
+    for s in tl.static_range(NUM_T_SPLITS):
+        ws_off = row_ws_base + s * HEAD_SIZE + block
+        m_s = tl.load(ws_ptr + ws_off, eviction_policy="evict_first")
+        l_s = tl.load(ws_ptr + plane + ws_off, eviction_policy="evict_first")
+        acc_s = tl.load(ws_ptr + 2 * plane + ws_off, eviction_policy="evict_first")
+        m_new = tl.maximum(m_g, m_s)
+        m_new_safe = tl.where(m_new > float("-inf"), m_new, 0.0)
+        alpha = tl.where(m_g > float("-inf"), tl.exp(m_g - m_new_safe), 0.0)
+        beta = tl.where(m_s > float("-inf"), tl.exp(m_s - m_new_safe), 0.0)
+        l_g = l_g * alpha + l_s * beta
+        acc_g = acc_g * alpha + acc_s * beta
+        m_g = m_new
+
+    d_safe = tl.where(l_g > 0.0, l_g, 1.0)
+    compressed_kv = tl.where(l_g > 0.0, acc_g / d_safe, 0.0)
+
+    rms_w = tl.load(rms_norm_weight_ptr + block, mask=mask, other=0.0)
+    variance = tl.sum(compressed_kv * compressed_kv, axis=0) / HEAD_SIZE
+    rrms = tl.rsqrt(variance + rms_norm_eps)
+    normed = compressed_kv * rrms * rms_w
+
+    _quant_rope_store_584b(
+        normed,
+        position,
+        kv_block_idx,
+        kv_pos_in_block,
+        cos_sin_cache_ptr,
+        cos_sin_stride,
+        k_cache_ptr,
+        kv_cache_block_size,
+        block,
+        mask,
+        HEAD_SIZE=HEAD_SIZE,
+        TRITON_BLOCK_SIZE=TRITON_BLOCK_SIZE,
+        COMPRESS_RATIO=COMPRESS_RATIO,
+        ROPE_HEAD_DIM=ROPE_HEAD_DIM,
+        FP8_MAX=FP8_MAX,
+        QUANT_BLOCK=QUANT_BLOCK,
+        TOKEN_STRIDE=TOKEN_STRIDE,
+        SCALE_DIM=SCALE_DIM,
+        KV_BLOCK_STRIDE=KV_BLOCK_STRIDE,
+    )
+
+
 # =============================================================================
 # DeepseekV4 attention path: head_dim=512 (CSA / HCA), 584B per slot
 # =============================================================================
@@ -780,76 +1221,27 @@ def _fused_kv_compress_norm_rope_insert_sparse_attn(
         ALIGN4=ALIGN4,
     )
 
-    cache_block_ptr = k_cache_ptr + kv_block_idx.to(tl.int64) * KV_BLOCK_STRIDE.to(
-        tl.int64
+    _quant_rope_store_584b(
+        normed,
+        position,
+        kv_block_idx,
+        kv_pos_in_block,
+        cos_sin_cache_ptr,
+        cos_sin_stride,
+        k_cache_ptr,
+        kv_cache_block_size,
+        block,
+        mask,
+        HEAD_SIZE=HEAD_SIZE,
+        TRITON_BLOCK_SIZE=TRITON_BLOCK_SIZE,
+        COMPRESS_RATIO=COMPRESS_RATIO,
+        ROPE_HEAD_DIM=ROPE_HEAD_DIM,
+        FP8_MAX=FP8_MAX,
+        QUANT_BLOCK=QUANT_BLOCK,
+        TOKEN_STRIDE=TOKEN_STRIDE,
+        SCALE_DIM=SCALE_DIM,
+        KV_BLOCK_STRIDE=KV_BLOCK_STRIDE,
     )
-    fp8_ptr = cache_block_ptr + kv_pos_in_block * TOKEN_STRIDE
-    scale_ptr = (
-        cache_block_ptr
-        + kv_cache_block_size * TOKEN_STRIDE
-        + kv_pos_in_block * SCALE_DIM
-    )
-
-    NOPE_HEAD_DIM: tl.constexpr = HEAD_SIZE - ROPE_HEAD_DIM
-    HALF_ROPE: tl.constexpr = ROPE_HEAD_DIM // 2
-
-    N_QUANT_BLOCKS: tl.constexpr = TRITON_BLOCK_SIZE // QUANT_BLOCK
-    N_NOPE_BLOCKS: tl.constexpr = NOPE_HEAD_DIM // QUANT_BLOCK
-    INV_FP8_MAX: tl.constexpr = 1.0 / FP8_MAX
-
-    quant_input = normed.to(tl.bfloat16).to(tl.float32)
-    quant_2d = tl.reshape(quant_input, (N_QUANT_BLOCKS, QUANT_BLOCK))
-    abs_2d = tl.abs(quant_2d)
-    block_absmax = tl.max(abs_2d, axis=1)
-    block_absmax = tl.maximum(block_absmax, 1e-4)
-
-    raw_scales = block_absmax * INV_FP8_MAX
-    exponents = tl.ceil(tl.log2(raw_scales))
-    inv_scales = tl.exp2(-exponents)
-    inv_scales_col = tl.reshape(inv_scales, (N_QUANT_BLOCKS, 1))
-    x_scaled = quant_2d * inv_scales_col
-    x_clamped = tl.clamp(x_scaled, -FP8_MAX, FP8_MAX)
-    x_fp8 = x_clamped.to(tl.float8e4nv)
-    x_uint8 = x_fp8.to(tl.uint8, bitcast=True)
-    x_uint8_flat = tl.reshape(x_uint8, (TRITON_BLOCK_SIZE,))
-
-    nope_mask = block < NOPE_HEAD_DIM
-    tl.store(fp8_ptr + block, x_uint8_flat, mask=nope_mask)
-
-    scale_idx = tl.arange(0, N_QUANT_BLOCKS)
-    encoded = exponents + 127.0
-    encoded = tl.maximum(tl.minimum(encoded, 255.0), 0.0)
-    tl.store(
-        scale_ptr + scale_idx,
-        encoded.to(tl.uint8),
-        mask=scale_idx < N_NOPE_BLOCKS,
-    )
-    tl.store(scale_ptr + N_NOPE_BLOCKS, tl.zeros((), dtype=tl.uint8))
-
-    NUM_PAIRS: tl.constexpr = TRITON_BLOCK_SIZE // 2
-    NOPE_PAIRS: tl.constexpr = NOPE_HEAD_DIM // 2
-
-    pair_2d = tl.reshape(normed, (NUM_PAIRS, 2))
-    even, odd = tl.split(pair_2d)
-
-    pair_idx = tl.arange(0, NUM_PAIRS)
-    rope_pair_local = pair_idx - NOPE_PAIRS
-    is_rope_pair = rope_pair_local >= 0
-    cs_idx = tl.maximum(rope_pair_local, 0)
-
-    compressed_pos = (position // COMPRESS_RATIO) * COMPRESS_RATIO
-    cache_base = cos_sin_cache_ptr + compressed_pos * cos_sin_stride
-    cos_v = tl.load(cache_base + cs_idx, mask=is_rope_pair, other=1.0)
-    sin_v = tl.load(cache_base + HALF_ROPE + cs_idx, mask=is_rope_pair, other=0.0)
-
-    new_even = even * cos_v - odd * sin_v
-    new_odd = odd * cos_v + even * sin_v
-    result = tl.interleave(new_even, new_odd)
-
-    bf16_ptr = (fp8_ptr + NOPE_HEAD_DIM).to(tl.pointer_type(tl.bfloat16))
-    rope_local = block - NOPE_HEAD_DIM
-    is_rope = (block >= NOPE_HEAD_DIM) & mask
-    tl.store(bf16_ptr + rope_local, result.to(tl.bfloat16), mask=is_rope)
 
 
 # =============================================================================
@@ -1412,7 +1804,85 @@ def run_fused_compress_kv_write(
     if num_stages is not None:
         launch_kwargs["num_stages"] = num_stages
 
-    if head_dim == 512:
+    if head_dim == 512 and compress_ratio == 128 and (not overlap) and use_active:
+        ws_plane = num_work * _HCA_NUM_T_SPLITS * head_dim
+        ws = _get_hca_split_ws(num_work, head_dim, kv_cache.device)
+        _hca_compress_split_stage1_kernel[
+            (num_work, _HCA_NUM_T_SPLITS * _HCA_D_CHUNKS)
+        ](
+            state_cache_arg,
+            state_stride0,
+            state_stride1,
+            token_to_req_indices,
+            positions,
+            block_table_arg,
+            block_table_stride,
+            state_block_size,
+            kv_raw,
+            kv_raw.stride(0),
+            score_raw,
+            score_raw.stride(0),
+            ape,
+            ape.stride(0),
+            seq_start,
+            n_raw,
+            seq_start_per_req,
+            cu_seq_per_req,
+            kv_slot_mapping,
+            kv_block_size,
+            unpad_restore_arg,
+            active_indices_arg,
+            ws,
+            ws_plane,
+            num_work,
+            HEAD_SIZE=head_dim,
+            STATE_WIDTH=state_width,
+            COMPRESS_RATIO=compress_ratio,
+            NUM_T_SPLITS=_HCA_NUM_T_SPLITS,
+            SPLIT_T=_HCA_SPLIT_T,
+            CHUNK_D=_HCA_CHUNK_D,
+            D_CHUNKS=_HCA_D_CHUNKS,
+            NUM_STATE_BLOCKS=num_state_blocks,
+            BATCHED=batched,
+            TRAP_INVALID_KV_ACCESS=True,
+            STATE_RING_ENTRIES=state_ring_entries,
+            MAY_USE_CACHE=effective_may_use_cache,
+            USE_UNPAD_RESTORE=use_unpad_restore,
+            USE_ACTIVE_INDICES=True,
+            ALIGN4=align4,
+            num_warps=4,
+            num_stages=1,
+        )
+        _hca_compress_split_finalize_kernel[(num_work,)](
+            positions,
+            rms_norm_weight,
+            rms_norm_eps,
+            cos_sin_cache,
+            cos_sin_cache.stride(0),
+            kv_cache,
+            kv_slot_mapping,
+            kv_block_size,
+            active_indices_arg,
+            ws,
+            ws_plane,
+            num_work,
+            HEAD_SIZE=head_dim,
+            TRITON_BLOCK_SIZE=triton.next_power_of_2(head_dim),
+            COMPRESS_RATIO=compress_ratio,
+            ROPE_HEAD_DIM=rope_head_dim,
+            FP8_MAX=448.0,
+            QUANT_BLOCK=cfg["quant_block"],
+            TOKEN_STRIDE=cfg["token_stride"],
+            SCALE_DIM=cfg["scale_dim"],
+            NUM_T_SPLITS=_HCA_NUM_T_SPLITS,
+            KV_BLOCK_STRIDE=kv_block_stride,
+            NUM_KV_BLOCKS=int(kv_cache.shape[0]),
+            TRAP_INVALID_KV_ACCESS=True,
+            USE_ACTIVE_INDICES=True,
+            ALIGN4=align4,
+            num_warps=4,
+        )
+    elif head_dim == 512:
         _fused_kv_compress_norm_rope_insert_sparse_attn[(num_work,)](
             state_cache_arg,
             state_stride0,

@@ -489,6 +489,99 @@ def _resolve_host_prefixes(
     return None
 
 
+def _build_host_compacted_slot_indices(
+    positions: torch.Tensor,
+    *,
+    host_input_lengths: Tuple[int, ...],
+    host_prefixes: Tuple[int, ...],
+    has_prefix: bool,
+    can_skip_state_cache_read: bool,
+    window_size: int,
+    compress_ratio: int,
+    cp_size: int,
+    cp_rank: int,
+    kv_owner_tokens_per_block: int,
+) -> Tuple[
+    Optional[torch.Tensor],
+    Optional[torch.Tensor],
+    Optional[torch.Tensor],
+    Optional[torch.Tensor],
+    bool,
+]:
+    """Compute compacted boundary indices purely on host (zero GPU nonzero sync).
+
+    Returns ``active_state_indices=None`` so ``run_save_partial_states`` scans
+    ``state_slots`` directly on-device without a host sync.
+    """
+    device = positions.device
+    B = len(host_input_lengths)
+    if (
+        B == 1
+        and cp_size <= 1
+        and (can_skip_state_cache_read or not has_prefix or host_prefixes[0] <= 0)
+    ):
+        L0 = int(host_input_lengths[0])
+        P0 = int(host_prefixes[0])
+        off0 = (compress_ratio - 1 - (P0 % compress_ratio)) % compress_ratio
+        if off0 >= L0:
+            empty = positions.new_empty((0,), dtype=torch.int32)
+            return None, empty, empty, empty, False
+        count = (L0 - 1 - off0) // compress_ratio + 1
+        raw_t = off0 + compress_ratio * torch.arange(
+            count, dtype=torch.int32, device=device
+        )
+        return None, raw_t, positions.new_empty((0,), dtype=torch.int32), raw_t, False
+
+    raw_list: list[int] = []
+    cached_list: list[int] = []
+    active_list: list[int] = []
+    any_global = False
+    cu_q = 0
+    for req_b in range(B):
+        L_b = int(host_input_lengths[req_b])
+        P_b = int(host_prefixes[req_b])
+        if L_b > 0:
+            off = (compress_ratio - 1 - (P_b % compress_ratio)) % compress_ratio
+            while off < L_b:
+                pos = P_b + off
+                needs_cache = (
+                    (not can_skip_state_cache_read)
+                    and has_prefix
+                    and P_b > 0
+                    and (pos - window_size + 1) < P_b
+                )
+                if needs_cache:
+                    any_global = True
+                owned = (
+                    True
+                    if cp_size <= 1
+                    else ((pos // kv_owner_tokens_per_block) % cp_size) == cp_rank
+                )
+                if owned:
+                    tok_idx = cu_q + off
+                    active_list.append(tok_idx)
+                    if needs_cache:
+                        cached_list.append(tok_idx)
+                    else:
+                        raw_list.append(tok_idx)
+                off += compress_ratio
+        cu_q += L_b
+
+    empty = positions.new_empty((0,), dtype=torch.int32)
+    if not active_list:
+        return None, empty, empty, empty, any_global
+    if not cached_list:
+        raw_t = torch.tensor(raw_list, dtype=torch.int32, device=device)
+        return None, raw_t, empty, raw_t, any_global
+    if not raw_list:
+        cac_t = torch.tensor(cached_list, dtype=torch.int32, device=device)
+        return None, empty, cac_t, cac_t, any_global
+    raw_t = torch.tensor(raw_list, dtype=torch.int32, device=device)
+    cac_t = torch.tensor(cached_list, dtype=torch.int32, device=device)
+    act_t = torch.tensor(active_list, dtype=torch.int32, device=device)
+    return None, raw_t, cac_t, act_t, any_global
+
+
 def _build_compacted_slot_indices(
     positions: torch.Tensor,
     b_idx: torch.Tensor,
@@ -500,6 +593,11 @@ def _build_compacted_slot_indices(
     can_skip_state_cache_read: bool,
     window_size: int,
     compress_ratio: int,
+    host_input_lengths: Optional[Tuple[int, ...]] = None,
+    host_prefixes: Optional[Tuple[int, ...]] = None,
+    cp_size: int = 1,
+    cp_rank: int = 0,
+    kv_owner_tokens_per_block: int = 0,
 ) -> Tuple[
     Optional[torch.Tensor],
     Optional[torch.Tensor],
@@ -518,6 +616,28 @@ def _build_compacted_slot_indices(
             None,
             None,
             bool(has_prefix and not can_skip_state_cache_read),
+        )
+
+    if (
+        host_input_lengths is not None
+        and host_prefixes is not None
+        and len(host_input_lengths) > 0
+        and len(host_input_lengths) == len(host_prefixes)
+        and len(host_input_lengths) == int(seq_start_per_req.numel())
+        and sum(int(x) for x in host_input_lengths) == N
+        and (cp_size <= 1 or kv_owner_tokens_per_block > 0)
+    ):
+        return _build_host_compacted_slot_indices(
+            positions,
+            host_input_lengths=host_input_lengths,
+            host_prefixes=host_prefixes,
+            has_prefix=has_prefix,
+            can_skip_state_cache_read=can_skip_state_cache_read,
+            window_size=window_size,
+            compress_ratio=compress_ratio,
+            cp_size=cp_size,
+            cp_rank=cp_rank,
+            kv_owner_tokens_per_block=kv_owner_tokens_per_block,
         )
 
     active_state_indices: Optional[torch.Tensor] = None
@@ -803,6 +923,7 @@ class CompressorFP8(PoolBackedModule):
         seq_start_per_req: Optional[torch.Tensor] = None,
         cu_seq_per_req: Optional[torch.Tensor] = None,
         prefix_lengths_host: Optional[Tuple[int, ...]] = None,
+        host_input_lengths: Optional[Tuple[int, ...]] = None,
     ) -> CompressorMeta:
         """Compute slot mappings + token_to_req from current pool context.
 
@@ -903,6 +1024,11 @@ class CompressorFP8(PoolBackedModule):
             )
             else 0
         )
+        host_inputs = host_input_lengths
+        if host_inputs is None and cp_ctx is not None:
+            cp_in = getattr(cp_ctx, "input_lengths_global_host", None)
+            if cp_in is not None:
+                host_inputs = tuple(int(v) for v in cp_in)
         window_size = (1 + int(overlap)) * self.compress_ratio
         (
             active_state_indices,
@@ -920,6 +1046,13 @@ class CompressorFP8(PoolBackedModule):
             can_skip_state_cache_read=can_skip_state_cache_read,
             window_size=window_size,
             compress_ratio=self.compress_ratio,
+            host_input_lengths=host_inputs,
+            host_prefixes=host_prefixes,
+            cp_size=cp_size,
+            cp_rank=cp_rank,
+            kv_owner_tokens_per_block=int(
+                getattr(self, "_kv_owner_tokens_per_block", self._kv_tokens_per_block)
+            ),
         )
         meta = CompressorMeta(
             positions=positions,

@@ -879,9 +879,12 @@ def compute_swa_slot_in_flat_from_cu(
     do_not_specialize=[
         "combined_indices_stride",
         "topk_indices_stride",
+        "num_tokens",
+        "num_reqs",
         "M",
         "N",
         "TOP_K",
+        "COMBINED_TOPK",
     ]
 )
 def _combine_topk_swa_indices_kernel(
@@ -895,101 +898,165 @@ def _combine_topk_swa_indices_kernel(
     gather_lens_ptr,
     cu_cmp_offsets_ptr,
     cu_swa_offsets_ptr,
+    num_tokens,
+    num_reqs,
     M,
     N,
     TOP_K,
     COMPRESS_RATIO: tl.constexpr,
     WINDOW_SIZE: tl.constexpr,
-    PADDED_TOP_K: tl.constexpr,
-    PADDED_WINDOW_SIZE: tl.constexpr,
+    COMBINED_TOPK,
+    BLOCK_T: tl.constexpr,
+    BLOCK_C: tl.constexpr,
+    SINGLE_REQ: tl.constexpr,
+    DENSE_ARANGE_TOPK: tl.constexpr,
+    HAS_TOPK: tl.constexpr,
+    ALIGNED_IN: tl.constexpr,
+    ALIGNED_OUT: tl.constexpr,
     HAS_CU_CMP_OFFSETS: tl.constexpr,
     HAS_CU_SWA_OFFSETS: tl.constexpr,
 ):
-    """Per-query layout of ``[combined_topk]`` row in the gathered workspace.
+    """Tiled vectorized combine of compressed-attn topk + SWA window indices."""
+    block_t = tl.program_id(0)
+    rows = block_t * BLOCK_T + tl.arange(0, BLOCK_T)
+    row_mask = rows < num_tokens
 
-    Workspace layout for a single batch slice (padded length ``M`` or ragged
-    via ``cu_cmp_offsets`` / ``cu_swa_offsets``):
-        [cmp_base, cmp_base + N_b)           — compressed-attn region
-        [swa_ws_base, swa_ws_base + gl_b)    — SWA region (last ``gather_len`` tokens)
-
-    For query at absolute sequence position ``pos``:
-        topk_len = min((pos+1) // COMPRESS_RATIO, TOP_K)   # 0 for SWA-only
-        swa_len  = min(pos+1, WINDOW_SIZE)
-        row[:topk_len]                   = topk_indices[token, :topk_len] + cmp_base
-        row[topk_len:topk_len+swa_len]   = swa_ws_base + (pos - swa_len + 1
-                                                          - gather_start) + arange
-            where gather_start = seq_len - gather_len
-    """
-    batch_idx = tl.program_id(0)
-    worker_id = tl.program_id(1)
-    num_workers = tl.num_programs(1)
-
-    # query_start_loc is a global tensor (across all decodes + prefills);
-    # rebase to chunk-local offsets so the index math works on the local
-    # ``topk_indices_ptr`` slice.
-    base = tl.load(query_start_loc_ptr)
-    query_start = tl.load(query_start_loc_ptr + batch_idx) - base
-    query_end = tl.load(query_start_loc_ptr + batch_idx + 1) - base
-    query_len = query_end - query_start
-    seq_len = tl.load(seq_lens_ptr + batch_idx)
-    gather_len = tl.load(gather_lens_ptr + batch_idx)
-    start_pos = seq_len - query_len  # absolute sequence pos of first new query
-    gather_start = seq_len - gather_len  # first absolute pos in gathered region
-    if HAS_CU_CMP_OFFSETS:
-        cmp_base = tl.load(cu_cmp_offsets_ptr + batch_idx).to(tl.int32)
+    base = tl.load(query_start_loc_ptr).to(tl.int32)
+    if SINGLE_REQ:
+        q_start = tl.zeros((BLOCK_T,), dtype=tl.int32)
+        q_end = tl.full(
+            (BLOCK_T,),
+            tl.load(query_start_loc_ptr + 1).to(tl.int32) - base,
+            tl.int32,
+        )
+        seq_len = tl.full((BLOCK_T,), tl.load(seq_lens_ptr).to(tl.int32), tl.int32)
+        gather_len = tl.full(
+            (BLOCK_T,), tl.load(gather_lens_ptr).to(tl.int32), tl.int32
+        )
+        if HAS_CU_CMP_OFFSETS:
+            cmp_base = tl.full(
+                (BLOCK_T,), tl.load(cu_cmp_offsets_ptr).to(tl.int32), tl.int32
+            )
+        else:
+            cmp_base = tl.zeros((BLOCK_T,), dtype=tl.int32)
+        if HAS_CU_SWA_OFFSETS:
+            swa_ws_base = tl.full(
+                (BLOCK_T,), tl.load(cu_swa_offsets_ptr).to(tl.int32), tl.int32
+            )
+        else:
+            swa_ws_base = tl.full((BLOCK_T,), N, tl.int32)
+        in_range = row_mask & (rows < q_end)
     else:
-        cmp_base = M * batch_idx
-    if HAS_CU_SWA_OFFSETS:
-        swa_ws_base = tl.load(cu_swa_offsets_ptr + batch_idx).to(tl.int32)
-    else:
-        swa_ws_base = M * batch_idx + N
+        lo = tl.zeros((BLOCK_T,), dtype=tl.int32)
+        hi = tl.full((BLOCK_T,), num_reqs, dtype=tl.int32)
+        while tl.max((lo < hi).to(tl.int32), axis=0) != 0:
+            active = lo < hi
+            mid = (lo + hi) >> 1
+            safe_idx = tl.minimum(mid + 1, num_reqs)
+            end_val = tl.load(query_start_loc_ptr + safe_idx).to(tl.int32) - base
+            go_left = end_val > rows
+            hi = tl.where(active & go_left, mid, hi)
+            lo = tl.where(active & ~go_left, mid + 1, lo)
+        req = lo
+        in_range = row_mask & (req < num_reqs)
+        safe_req = tl.where(in_range, req, 0)
+        q_start = tl.load(query_start_loc_ptr + safe_req).to(tl.int32) - base
+        q_end = tl.load(query_start_loc_ptr + safe_req + 1).to(tl.int32) - base
+        seq_len = tl.load(seq_lens_ptr + safe_req).to(tl.int32)
+        gather_len = tl.load(gather_lens_ptr + safe_req).to(tl.int32)
+        if HAS_CU_CMP_OFFSETS:
+            cmp_base = tl.load(cu_cmp_offsets_ptr + safe_req).to(tl.int32)
+        else:
+            cmp_base = safe_req * M
+        if HAS_CU_SWA_OFFSETS:
+            swa_ws_base = tl.load(cu_swa_offsets_ptr + safe_req).to(tl.int32)
+        else:
+            swa_ws_base = safe_req * M + N
 
-    for token_idx in range(query_start + worker_id, query_end, num_workers):
-        token_idx_in_query = token_idx - query_start
-        pos = start_pos + token_idx_in_query
-        # Both the C4A indexer and the C128A metadata builder emit
-        # min((pos + 1) // compress_ratio, topk_tokens) valid entries —
-        # this matches that. Caller passes TOP_K=0 for SWA-only layers
-        # to zero out the compressed contribution.
-        topk_len = tl.minimum((pos + 1) // COMPRESS_RATIO, TOP_K)
-        swa_len = tl.minimum(pos + 1, WINDOW_SIZE)
+    query_len = q_end - q_start
+    start_pos = seq_len - query_len
+    gather_start = seq_len - gather_len
+    pos = start_pos + (rows - q_start)
 
-        # Promote the row index once. Long-context HCA prefill of a 1.1M-token
-        # query can reach token_idx ~ 274092 with strides 8565 / 9600, so the
-        # default int32 ``token_idx * stride`` wraps at ~2.35-2.63B and writes
-        # off-allocation (sticky CUDA_ERROR_ILLEGAL_ADDRESS at the next sync).
-        # Same wrap, same fix as the CP variant kernel below.
-        token_idx_i64 = token_idx.to(tl.int64)
+    topk_len = tl.where(in_range, tl.minimum((pos + 1) // COMPRESS_RATIO, TOP_K), 0)
+    swa_len = tl.where(in_range, tl.minimum(pos + 1, WINDOW_SIZE), 0)
+    combined_len = topk_len + swa_len
+    swa_base = swa_ws_base + pos - gather_start - swa_len + 1 - topk_len
 
-        offset = tl.arange(0, PADDED_TOP_K)
-        mask = offset < topk_len
-        topk_indices = tl.load(
-            topk_indices_ptr + token_idx_i64 * topk_indices_stride + offset,
-            mask=mask,
-        )
-        tl.store(
-            combined_indices_ptr + token_idx_i64 * combined_indices_stride + offset,
-            topk_indices + cmp_base,
-            mask=mask,
-        )
+    tl.store(combined_lens_ptr + rows, combined_len.to(tl.int32), mask=in_range)
 
-        # Triton ``arange`` requires a power-of-2 range; use the padded
-        # tile but mask down to the real ``swa_len`` (≤ WINDOW_SIZE) so
-        # callers can pass any window_size.
-        offset = tl.arange(0, PADDED_WINDOW_SIZE)
-        # SWA workspace indices for positions [pos - swa_len + 1, pos]:
-        # buffer index = swa_ws_base + (position - gather_start).
-        tl.store(
-            combined_indices_ptr
-            + token_idx_i64 * combined_indices_stride
-            + topk_len
-            + offset,
-            swa_ws_base + offset + pos - swa_len + 1 - gather_start,
-            mask=offset < swa_len,
-        )
+    max_topk_len = tl.max(topk_len, axis=0)
+    max_combined_len = tl.max(combined_len, axis=0)
+    row_i64 = rows[:, None].to(tl.int64)
+    c_stride = (
+        combined_indices_stride.to(tl.int64) * 4
+        if ALIGNED_OUT
+        else combined_indices_stride.to(tl.int64)
+    )
+    in_stride = (
+        topk_indices_stride.to(tl.int64) * 4
+        if ALIGNED_IN
+        else topk_indices_stride.to(tl.int64)
+    )
+    neg_one = tl.full((BLOCK_T, BLOCK_C), -1, dtype=tl.int32)
 
-        combined_len = topk_len + swa_len
-        tl.store(combined_lens_ptr + token_idx, combined_len)
+    for col_base in range(0, COMBINED_TOPK, BLOCK_C):
+        if ALIGNED_OUT:
+            cols = tl.max_contiguous(
+                tl.multiple_of(col_base + tl.arange(0, BLOCK_C), [4]),
+                [BLOCK_C],
+            )
+            col_mask = (cols // 4) < (COMBINED_TOPK // 4)
+            out_off = tl.max_contiguous(
+                tl.multiple_of(row_i64 * c_stride + cols[None, :], [1, 4]),
+                [1, BLOCK_C],
+            )
+        else:
+            cols = col_base + tl.arange(0, BLOCK_C)
+            col_mask = cols < COMBINED_TOPK
+            out_off = row_i64 * c_stride + cols[None, :]
+
+        store_mask = row_mask[:, None] & col_mask[None, :]
+        if col_base >= max_combined_len:
+            tl.store(combined_indices_ptr + out_off, neg_one, mask=store_mask)
+        else:
+            col = cols[None, :]
+            in_topk = col < topk_len[:, None]
+            in_swa = (col >= topk_len[:, None]) & (col < combined_len[:, None])
+            if DENSE_ARANGE_TOPK:
+                topk_val = col.to(tl.int32)
+                out_val = tl.where(
+                    in_topk,
+                    cmp_base[:, None] + topk_val,
+                    tl.where(in_swa, swa_base[:, None] + col, -1),
+                ).to(tl.int32)
+            elif HAS_TOPK and col_base < max_topk_len:
+                if ALIGNED_IN:
+                    in_cols = tl.max_contiguous(
+                        tl.multiple_of(col_base + tl.arange(0, BLOCK_C), [4]),
+                        [BLOCK_C],
+                    )
+                    in_off = tl.max_contiguous(
+                        tl.multiple_of(row_i64 * in_stride + in_cols[None, :], [1, 4]),
+                        [1, BLOCK_C],
+                    )
+                    topk_load_mask = in_range[:, None] & ((in_cols // 4) < (TOP_K // 4))[None, :]
+                else:
+                    in_off = row_i64 * in_stride + col
+                    topk_load_mask = in_range[:, None] & (cols < TOP_K)[None, :]
+                topk_val = tl.load(
+                    topk_indices_ptr + in_off,
+                    mask=topk_load_mask,
+                    other=0,
+                ).to(tl.int32)
+                out_val = tl.where(
+                    in_topk,
+                    cmp_base[:, None] + topk_val,
+                    tl.where(in_swa, swa_base[:, None] + col, -1),
+                ).to(tl.int32)
+            else:
+                out_val = tl.where(in_swa, swa_base[:, None] + col, -1).to(tl.int32)
+            tl.store(combined_indices_ptr + out_off, out_val, mask=store_mask)
 
 
 def combine_topk_swa_indices(
@@ -1006,6 +1073,7 @@ def combine_topk_swa_indices(
     flash_mla_indices: bool = False,
     cu_cmp_offsets: Optional[torch.Tensor] = None,
     cu_swa_offsets: Optional[torch.Tensor] = None,
+    dense_arange_topk: bool = False,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """Build ``(combined_indices, combined_lens)`` for ``flash_mla_sparse_fwd``.
 
@@ -1026,7 +1094,7 @@ def combine_topk_swa_indices(
     ), "query_start_loc and seq_lens must be int32"
     assert gather_lens.dtype == torch.int32, "gather_lens must be int32"
     assert window_size >= 1 and compress_ratio >= 1
-    assert int(topk_indices.shape[-1]) >= int(
+    assert dense_arange_topk or int(topk_indices.shape[-1]) >= int(
         topk
     ), f"topk_indices width {topk_indices.shape[-1]} < topk {topk}"
 
@@ -1060,9 +1128,8 @@ def combine_topk_swa_indices(
         if flash_mla_indices
         else (num_tokens, combined_topk)
     )
-    combined_indices = torch.full(
+    combined_indices = torch.empty(
         combined_indices_shape,
-        fill_value=-1,
         dtype=torch.int32,
         device=topk_indices.device,
     )
@@ -1071,37 +1138,60 @@ def combine_topk_swa_indices(
     )
 
     if num_tokens == 0 or num_reqs == 0:
+        if num_tokens > 0:
+            combined_indices.fill_(-1)
         return combined_indices, combined_lens
 
-    # ``PADDED_TOP_K`` is the constexpr ``tl.arange`` tile for the
-    # compressed-attn part; pad to power-of-2 ≥ topk_indices.shape[-1] so the
-    # SIMD load mask lines up. SWA-only layers pass topk_indices.shape[-1] == 0
-    # → use 1.
-    padded_top_k = max(1, triton.next_power_of_2(int(topk_indices.shape[-1])))
-    # Same constraint for the SWA arange tile — Triton requires arange ranges
-    # to be power-of-2; mask inside the kernel handles the real ``window_size``.
-    padded_window_size = max(1, triton.next_power_of_2(int(window_size)))
-    NUM_WORKERS = 128
-    _combine_topk_swa_indices_kernel[(num_reqs, NUM_WORKERS)](
+    BLOCK_T = 2
+    BLOCK_C = 256
+    out_stride = int(combined_indices.stride(0))
+    aligned_out = (
+        (combined_topk % 4 == 0)
+        and (out_stride % 4 == 0)
+        and ((combined_indices.data_ptr() % 16) == 0)
+    )
+    out_stride_arg = out_stride // 4 if aligned_out else out_stride
+
+    in_stride = int(topk_indices.stride(0))
+    aligned_in = (
+        (not dense_arange_topk)
+        and (topk > 0)
+        and (topk % 4 == 0)
+        and (in_stride % 4 == 0)
+        and ((topk_indices.data_ptr() % 16) == 0)
+    )
+    in_stride_arg = in_stride // 4 if aligned_in else in_stride
+
+    dummy_off = query_start_loc
+    _combine_topk_swa_indices_kernel[(triton.cdiv(num_tokens, BLOCK_T),)](
         combined_indices,
-        combined_indices.stride(0),
+        out_stride_arg,
         combined_lens,
         topk_indices,
-        topk_indices.stride(0),
+        in_stride_arg,
         query_start_loc,
         seq_lens,
         gather_lens,
-        cu_cmp_offsets,
-        cu_swa_offsets,
-        M,
-        N,
-        TOP_K=topk,
-        COMPRESS_RATIO=compress_ratio,
-        WINDOW_SIZE=window_size,
-        PADDED_TOP_K=padded_top_k,
-        PADDED_WINDOW_SIZE=padded_window_size,
+        cu_cmp_offsets if cu_cmp_offsets is not None else dummy_off,
+        cu_swa_offsets if cu_swa_offsets is not None else dummy_off,
+        num_tokens,
+        num_reqs,
+        int(M),
+        int(N),
+        TOP_K=int(topk),
+        COMPRESS_RATIO=int(compress_ratio),
+        WINDOW_SIZE=int(window_size),
+        COMBINED_TOPK=int(combined_topk),
+        BLOCK_T=BLOCK_T,
+        BLOCK_C=BLOCK_C,
+        SINGLE_REQ=(num_reqs == 1),
+        DENSE_ARANGE_TOPK=bool(dense_arange_topk),
+        HAS_TOPK=(int(topk) > 0),
+        ALIGNED_IN=bool(aligned_in),
+        ALIGNED_OUT=bool(aligned_out),
         HAS_CU_CMP_OFFSETS=cu_cmp_offsets is not None,
         HAS_CU_SWA_OFFSETS=cu_swa_offsets is not None,
+        num_warps=4,
     )
     return combined_indices, combined_lens
 
@@ -1141,29 +1231,15 @@ def _combine_topk_swa_indices_cp_kernel(
     BLOCK_C: tl.constexpr,
     IS_VARLEN: tl.constexpr,
     DENSE_ARANGE_TOPK: tl.constexpr,
+    ALIGNED_IN: tl.constexpr,
     ALIGNED_OUT: tl.constexpr,
+    HAS_TOPK: tl.constexpr,
     HAS_CU_CMP_OFFSETS: tl.constexpr,
     HAS_CU_SWA_OFFSETS: tl.constexpr,
 ):
-    """CP-aware fused combine.
-
-    Unlike the generic vLLM kernel, CP cannot derive ``pos`` from
-    contiguous query row ids because rank-local rows are zigzagged. This
-    kernel consumes explicit per-row ``global_positions`` and optionally
-    per-row request ids / per-request prefixes / ragged offsets for varlen B>1.
-    """
+    """CP-aware fused combine (1D row-loop CTA + 128-bit vectorized I/O)."""
     block_t = tl.program_id(0)
-    block_c = tl.program_id(1)
     rows = block_t * BLOCK_T + tl.arange(0, BLOCK_T)
-    if ALIGNED_OUT:
-        cols = tl.max_contiguous(
-            tl.multiple_of(block_c * BLOCK_C + tl.arange(0, BLOCK_C), [4]),
-            [BLOCK_C],
-        )
-        col_mask = (cols // 4) < (COMBINED_TOPK // 4)
-    else:
-        cols = block_c * BLOCK_C + tl.arange(0, BLOCK_C)
-        col_mask = cols < COMBINED_TOPK
     row_mask = rows < num_tokens
 
     gp = tl.load(global_positions_ptr + rows, mask=row_mask, other=0).to(tl.int32)
@@ -1203,61 +1279,87 @@ def _combine_topk_swa_indices_cp_kernel(
 
     p = tl.minimum(prefix, WINDOW_SIZE - 1)
     gather_start = prefix - p
-    topk_len = tl.minimum((gp + 1) // COMPRESS_RATIO, TOP_K)
-    swa_len = tl.minimum(gp + 1, WINDOW_SIZE)
+    topk_len = tl.where(row_mask, tl.minimum((gp + 1) // COMPRESS_RATIO, TOP_K), 0)
+    swa_len = tl.where(row_mask, tl.minimum(gp + 1, WINDOW_SIZE), 0)
     combined_len = topk_len + swa_len
     swa_base = swa_ws_base + gp - gather_start - swa_len + 1 - topk_len
 
-    col = cols[None, :]
-    # int64 row indexing — long-context CP4 HCA L3 prefill of a 1.1M-token
-    # query gives ``num_tokens`` ≈ 274092 and ``topk_indices_stride`` = 8565
-    # (dense ``arange(N)`` materialised on the meta builder side). The
-    # default int32 ``row * topk_indices_stride`` therefore overflows at
-    # ~2.35B, producing a sticky CUDA_ERROR_ILLEGAL_ADDRESS that surfaces
-    # at the next sync (typically caught at ``_ws_sync('combine_topk_cp')``
-    # in ``Attention._attn_via_workspace``). Same wrap exists on
-    # ``combined_indices_stride`` (9600) at ~2.63B. Promote the row
-    # broadcast once and reuse for both pointer expressions while keeping all
-    # 2D value intermediates in int32.
+    tl.store(combined_lens_ptr + rows, combined_len.to(tl.int32), mask=row_mask)
+
+    max_topk_len = tl.max(topk_len, axis=0)
+    max_combined_len = tl.max(combined_len, axis=0)
     row_i64 = rows[:, None].to(tl.int64)
-    in_topk = col < topk_len[:, None]
-    in_swa = (col >= topk_len[:, None]) & (col < combined_len[:, None])
-
-    if DENSE_ARANGE_TOPK:
-        topk_val = col.to(tl.int32)
-    else:
-        topk_val = tl.load(
-            topk_indices_ptr + row_i64 * topk_indices_stride.to(tl.int64) + col,
-            mask=row_mask[:, None] & col_mask[None, :] & in_topk,
-            other=0,
-        ).to(tl.int32)
-    swa_val = swa_base[:, None] + col
-    out_val = tl.where(
-        in_topk,
-        cmp_base[:, None] + topk_val,
-        tl.where(in_swa, swa_val, -1),
-    ).to(tl.int32)
-
-    if ALIGNED_OUT:
-        c_stride = combined_indices_stride.to(tl.int64) * 4
-        out_off = tl.max_contiguous(
-            tl.multiple_of(row_i64 * c_stride + col, [1, 4]),
-            [1, BLOCK_C],
-        )
-    else:
-        out_off = row_i64 * combined_indices_stride.to(tl.int64) + col
-
-    tl.store(
-        combined_indices_ptr + out_off,
-        out_val,
-        mask=row_mask[:, None] & col_mask[None, :],
+    c_stride = (
+        combined_indices_stride.to(tl.int64) * 4
+        if ALIGNED_OUT
+        else combined_indices_stride.to(tl.int64)
     )
-
-    tl.store(
-        combined_lens_ptr + rows,
-        combined_len.to(tl.int32),
-        mask=row_mask & (block_c == 0),
+    in_stride = (
+        topk_indices_stride.to(tl.int64) * 4
+        if ALIGNED_IN
+        else topk_indices_stride.to(tl.int64)
     )
+    neg_one = tl.full((BLOCK_T, BLOCK_C), -1, dtype=tl.int32)
+
+    for col_base in range(0, COMBINED_TOPK, BLOCK_C):
+        if ALIGNED_OUT:
+            cols = tl.max_contiguous(
+                tl.multiple_of(col_base + tl.arange(0, BLOCK_C), [4]),
+                [BLOCK_C],
+            )
+            col_mask = (cols // 4) < (COMBINED_TOPK // 4)
+            out_off = tl.max_contiguous(
+                tl.multiple_of(row_i64 * c_stride + cols[None, :], [1, 4]),
+                [1, BLOCK_C],
+            )
+        else:
+            cols = col_base + tl.arange(0, BLOCK_C)
+            col_mask = cols < COMBINED_TOPK
+            out_off = row_i64 * c_stride + cols[None, :]
+
+        store_mask = row_mask[:, None] & col_mask[None, :]
+        if col_base >= max_combined_len:
+            tl.store(combined_indices_ptr + out_off, neg_one, mask=store_mask)
+        else:
+            col = cols[None, :]
+            in_topk = col < topk_len[:, None]
+            in_swa = (col >= topk_len[:, None]) & (col < combined_len[:, None])
+            if DENSE_ARANGE_TOPK:
+                topk_val = col.to(tl.int32)
+                out_val = tl.where(
+                    in_topk,
+                    cmp_base[:, None] + topk_val,
+                    tl.where(in_swa, swa_base[:, None] + col, -1),
+                ).to(tl.int32)
+            elif HAS_TOPK and col_base < max_topk_len:
+                if ALIGNED_IN:
+                    in_cols = tl.max_contiguous(
+                        tl.multiple_of(col_base + tl.arange(0, BLOCK_C), [4]),
+                        [BLOCK_C],
+                    )
+                    in_off = tl.max_contiguous(
+                        tl.multiple_of(row_i64 * in_stride + in_cols[None, :], [1, 4]),
+                        [1, BLOCK_C],
+                    )
+                    topk_load_mask = row_mask[:, None] & (
+                        (in_cols // 4) < (TOP_K // 4)
+                    )[None, :]
+                else:
+                    in_off = row_i64 * in_stride + col
+                    topk_load_mask = row_mask[:, None] & (cols < TOP_K)[None, :]
+                topk_val = tl.load(
+                    topk_indices_ptr + in_off,
+                    mask=topk_load_mask,
+                    other=0,
+                ).to(tl.int32)
+                out_val = tl.where(
+                    in_topk,
+                    cmp_base[:, None] + topk_val,
+                    tl.where(in_swa, swa_base[:, None] + col, -1),
+                ).to(tl.int32)
+            else:
+                out_val = tl.where(in_swa, swa_base[:, None] + col, -1).to(tl.int32)
+            tl.store(combined_indices_ptr + out_off, out_val, mask=store_mask)
 
 
 def combine_topk_swa_indices_cp(
@@ -1363,7 +1465,7 @@ def combine_topk_swa_indices_cp(
         if not cu_swa_offsets.is_contiguous():
             cu_swa_offsets = cu_swa_offsets.contiguous()
 
-    BLOCK_T = 8
+    BLOCK_T = 2
     BLOCK_C = 256
     out_stride = int(combined_indices.stride(0))
     aligned_out = (
@@ -1373,21 +1475,30 @@ def combine_topk_swa_indices_cp(
         and (BLOCK_C % 4 == 0)
     )
     out_stride_arg = out_stride // 4 if aligned_out else out_stride
-    grid = (
-        triton.cdiv(num_tokens, BLOCK_T),
-        triton.cdiv(combined_topk, BLOCK_C),
+
+    in_stride = int(topk_indices.stride(0))
+    aligned_in = (
+        (not dense_arange_topk)
+        and (topk > 0)
+        and (topk % 4 == 0)
+        and (in_stride % 4 == 0)
+        and ((topk_indices.data_ptr() % 16) == 0)
+        and (BLOCK_C % 4 == 0)
     )
+    in_stride_arg = in_stride // 4 if aligned_in else in_stride
+
+    grid = (triton.cdiv(num_tokens, BLOCK_T),)
     _combine_topk_swa_indices_cp_kernel[grid](
         combined_indices,
         out_stride_arg,
         combined_lens,
         topk_indices,
-        topk_indices.stride(0),
+        in_stride_arg,
         global_positions,
         req_ptr,
         prefix_ptr,
-        cu_cmp_offsets,
-        cu_swa_offsets,
+        cu_cmp_offsets if cu_cmp_offsets is not None else global_positions,
+        cu_swa_offsets if cu_swa_offsets is not None else global_positions,
         num_tokens,
         int(sp_int),
         int(M),
@@ -1400,7 +1511,9 @@ def combine_topk_swa_indices_cp(
         BLOCK_C=BLOCK_C,
         IS_VARLEN=bool(is_varlen),
         DENSE_ARANGE_TOPK=bool(dense_arange_topk),
+        ALIGNED_IN=bool(aligned_in),
         ALIGNED_OUT=bool(aligned_out),
+        HAS_TOPK=(int(topk) > 0),
         HAS_CU_CMP_OFFSETS=cu_cmp_offsets is not None,
         HAS_CU_SWA_OFFSETS=cu_swa_offsets is not None,
         num_warps=4,

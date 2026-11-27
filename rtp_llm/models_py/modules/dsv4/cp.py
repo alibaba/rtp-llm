@@ -572,6 +572,7 @@ def build_cp_context_for_forward(
     prefix_lengths: Optional[torch.Tensor] = None,
     prefix_lengths_host: Optional[torch.Tensor] = None,
     chunk_lengths_device: Optional[torch.Tensor] = None,
+    chunk_lengths_host: Optional[torch.Tensor] = None,
     kv_cache_sharded: bool = False,
 ) -> CPContext:
     """`build_cp_context` plus the shared prefix->position-offset convention.
@@ -594,6 +595,7 @@ def build_cp_context_for_forward(
         position_offset=position_offset,
         position_offset_host=prefix_lengths_host,
         chunk_lengths_device=chunk_lengths_device,
+        chunk_lengths_host=chunk_lengths_host,
         kv_cache_sharded=kv_cache_sharded,
     )
 
@@ -614,6 +616,7 @@ def build_cp_context(
     position_offset: Union[int, torch.Tensor] = 0,
     position_offset_host: Optional[torch.Tensor] = None,
     chunk_lengths_device: Optional[torch.Tensor] = None,
+    chunk_lengths_host: Optional[torch.Tensor] = None,
     kv_cache_sharded: bool = False,
 ) -> CPContext:
     """Compute the per-forward derived CPContext from framework metadata."""
@@ -653,14 +656,34 @@ def build_cp_context(
         input_lengths_global_host = _host_int_tuple(actual_input_lengths_cpu)
 
     chunk_lengths_obj = getattr(cp_info, "prefill_cp_chunk_lengths", None)
-    if prepare_fusion_requested and input_lengths_global_host is not None:
+    if (
+        chunk_lengths_host is not None
+        and isinstance(chunk_lengths_host, torch.Tensor)
+        and chunk_lengths_host.device.type == "cpu"
+        and int(chunk_lengths_host.numel()) > 0
+    ):
+        chunk_lengths = list(_host_int_tuple(chunk_lengths_host))
+    elif input_lengths_global_host is not None and (
+        prepare_fusion_requested
+        or chunk_lengths_obj is None
+        or int(chunk_lengths_obj.numel()) == 0
+    ):
         alignment = 2 * int(cp_size)
         chunk_lengths = [
             ((length + alignment - 1) // alignment) * 2
             for length in input_lengths_global_host
         ]
     elif chunk_lengths_obj is not None and chunk_lengths_obj.numel() > 0:
-        chunk_lengths = [int(v) for v in chunk_lengths_obj.detach().cpu().tolist()]
+        if chunk_lengths_obj.device.type == "cpu":
+            chunk_lengths = [int(v) for v in chunk_lengths_obj.tolist()]
+        elif input_lengths_global_host is not None:
+            alignment = 2 * int(cp_size)
+            chunk_lengths = [
+                ((length + alignment - 1) // alignment) * 2
+                for length in input_lengths_global_host
+            ]
+        else:
+            chunk_lengths = [int(v) for v in chunk_lengths_obj.detach().cpu().tolist()]
     elif input_lengths_global_host is not None and len(input_lengths_global_host) == 1:
         chunk_lengths = [chunk_length]
     else:
@@ -684,15 +707,20 @@ def build_cp_context(
     if isinstance(position_offset, torch.Tensor):
         host_source = (
             position_offset_host
-            if prepare_fusion_requested
-            and position_offset_host is not None
+            if position_offset_host is not None
             and int(position_offset_host.numel()) > 0
             else position_offset
         )
         prefix_lengths_host_list = list(_host_int_tuple(host_source))
         if len(prefix_lengths_host_list) == 1 and B > 1:
             prefix_lengths_host_list *= B
-        prefix_lengths = position_offset.to(device=device).contiguous()
+        prefix_lengths = position_offset.to(
+            device=device,
+            non_blocking=(
+                torch.device(device).type == "cuda"
+                and position_offset.device.type == "cpu"
+            ),
+        ).contiguous()
         if prefix_lengths.numel() == 1 and B > 1:
             prefix_lengths = prefix_lengths.expand(B).contiguous()
     else:
@@ -708,7 +736,10 @@ def build_cp_context(
         input_lengths_global = actual_input_lengths_cpu.to(
             device=device,
             dtype=torch.int32,
-            non_blocking=prepare_fusion_requested,
+            non_blocking=(
+                torch.device(device).type == "cuda"
+                and actual_input_lengths_cpu.device.type == "cpu"
+            ),
         ).contiguous()
 
     seq_len_full_host = (
@@ -864,9 +895,32 @@ def build_cp_context(
             expected = torch.arange(seq_len_full, dtype=restore_prefix.dtype)
             unpad_restore_is_prefix = bool(torch.equal(restore_prefix.cpu(), expected))
         unpad_restore = restore_prefix.to(torch.long)
-    else:
+    elif (
+        input_lengths_global_host is not None
+        and len(chunk_lengths) == len(input_lengths_global_host)
+    ):
         # Multi-request CP has padding after each request's real-token prefix,
-        # so restore rows must be selected with the full concat padding mask.
+        # so select [pad_off : pad_off + real_len] per request without triggering
+        # a torch.nonzero cudaStreamSynchronize via boolean indexing.
+        real_offsets = []
+        pad_off = 0
+        for per_req_chunk, real_len in zip(chunk_lengths, input_lengths_global_host):
+            if real_len > 0:
+                real_offsets.append(
+                    torch.arange(
+                        pad_off, pad_off + real_len, dtype=torch.long, device=device
+                    )
+                )
+            pad_off += per_req_chunk * cp_size
+        real_idx = (
+            torch.cat(real_offsets)
+            if real_offsets
+            else torch.empty(0, dtype=torch.long, device=device)
+        )
+        unpad_restore = restore_indices.index_select(0, real_idx).to(torch.long)
+        seq_len_full = int(real_idx.numel())
+    else:
+        # Fallback when global host lengths are absent.
         unpad_restore = restore_indices[padding_mask == 1].to(torch.long)
         seq_len_full = int(unpad_restore.shape[0])
     prefix_per_token = _gather_1d(prefix_lengths, req_id_per_token)
@@ -1115,6 +1169,39 @@ def cp_all_gather_full_varlen(
     return full.view((cp_ctx.seq_len_full,) + trailing)
 
 
+if _TRITON_AVAILABLE:
+
+    @triton.jit(do_not_specialize=["T_local", "H", "in_stride", "out_stride"])
+    def _cp_gather_last_by_request_kernel(
+        local_ptr,
+        in_stride,
+        out_ptr,
+        out_stride,
+        req_ids_ptr,
+        gpos_ptr,
+        target_ptr,
+        local_is_real_ptr,
+        T_local,
+        H,
+        BLOCK_H: tl.constexpr,
+    ):
+        t = tl.program_id(0).to(tl.int64)
+        if t >= T_local:
+            return
+        if tl.load(local_is_real_ptr + t) == 0:
+            return
+        gpos = tl.load(gpos_ptr + t)
+        target = tl.load(target_ptr + t)
+        if gpos != target:
+            return
+        req_id = tl.load(req_ids_ptr + t).to(tl.int64)
+        col_base = tl.program_id(1).to(tl.int64) * BLOCK_H
+        cols = col_base + tl.arange(0, BLOCK_H)
+        mask = cols < H
+        vals = tl.load(local_ptr + t * in_stride + cols, mask=mask)
+        tl.store(out_ptr + req_id * out_stride + cols, vals, mask=mask)
+
+
 def cp_gather_last_by_request(
     local_2d: torch.Tensor,
     cp_ctx: CPContext,
@@ -1151,11 +1238,32 @@ def cp_gather_last_by_request(
 
     global_positions = cp_ctx.global_positions.to(device=device, dtype=torch.long)
     local_is_real = cp_ctx.local_is_real.to(device=device)
-    owner_mask = local_is_real & (global_positions == target_per_token)
 
     local_last = local_2d.new_zeros((B, H))
-    owner_req_ids = req_ids[owner_mask]
-    local_last.index_copy_(0, owner_req_ids, local_2d[owner_mask])
+    T_local = int(local_2d.size(0))
+    if T_local > 0 and B > 0 and H > 0:
+        if local_2d.is_cuda and _TRITON_AVAILABLE:
+            BLOCK_H = 1024
+            _cp_gather_last_by_request_kernel[(T_local, triton.cdiv(H, BLOCK_H))](
+                local_2d,
+                local_2d.stride(0),
+                local_last,
+                local_last.stride(0),
+                req_ids.contiguous(),
+                global_positions.contiguous(),
+                target_per_token.contiguous(),
+                local_is_real.to(torch.uint8).contiguous(),
+                T_local,
+                H,
+                BLOCK_H=BLOCK_H,
+                num_warps=4,
+            )
+        else:
+            owner_mask = local_is_real & (global_positions == target_per_token)
+            local_last_ext = local_2d.new_zeros((B + 1, H))
+            dst_row = torch.where(owner_mask, req_ids, B)
+            local_last_ext.index_copy_(0, dst_row, local_2d)
+            local_last = local_last_ext[:B]
 
     # Zigzag CP assigns each real global token to exactly one rank, so each
     # request's final token contributes from one rank only.  Summing the gathered

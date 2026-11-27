@@ -49,6 +49,7 @@ from rtp_llm.models_py.modules.dsv4.cp import (
     _CP_ROLE_MAIN,
     CPContext,
     build_cp_full_prefill_positions,
+    cp_actual_owned_kv_len,
     cp_actual_owned_kv_lens,
     cp_all_gather_full_varlen,
     cp_freqs_cis_local,
@@ -59,6 +60,10 @@ from rtp_llm.models_py.modules.dsv4.fp8._cp_attention_shard import (
     build_swa_cp_local_indices,
     prefer_raw_q_merge_attention_conservative,
     remap_topk_to_cp_local,
+)
+from rtp_llm.models_py.modules.dsv4.fp8._fused_qnorm_quant_triton import (
+    can_fuse_qnorm_fp8_ue8m0_quant,
+    fused_rmsnorm_fp8_ue8m0_quant,
 )
 from rtp_llm.models_py.modules.dsv4.fp8._pool_reader import (
     CompressedKPoolReader,
@@ -222,6 +227,7 @@ def _build_suffix_cp_sliced_slot_mapping(
     tokens_per_block_for_block_table: int,
     cp_rank: int,
     cp_size: int,
+    max_gather: Optional[int] = None,
 ) -> torch.Tensor:
     """Build suffix slots for CP-sliced SWA_KV local blocks.
 
@@ -239,7 +245,8 @@ def _build_suffix_cp_sliced_slot_mapping(
 
     gather_lens_l = gather_lens.to(device=device, dtype=torch.long).reshape(-1)
     seq_lens_l = seq_lens.to(device=device, dtype=torch.long).reshape(-1)
-    max_gather = int(gather_lens_l.max().item()) if gather_lens_l.numel() else 0
+    if max_gather is None:
+        max_gather = int(gather_lens_l.max().item()) if gather_lens_l.numel() else 0
     if max_gather <= 0:
         return torch.empty((B, 0), dtype=torch.long, device=device)
 
@@ -831,9 +838,10 @@ class PrefillQKV(NamedTuple):
     buffers, which are dead by then. Consumers assert ``q is not None``.
     """
 
-    qr: torch.Tensor
+    qr: Optional[torch.Tensor]
     q: Optional[torch.Tensor]
     kv_full: torch.Tensor
+    qr_quant: Optional[Tuple[torch.Tensor, torch.Tensor]] = None
 
 
 class AttentionFP8(nn.Module):
@@ -1960,15 +1968,64 @@ class AttentionFP8(nn.Module):
         norm_eps: float,
     ) -> Tuple[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
         with record_function_range("dsv4.fp8.attn.qkv.fused_attn_norm_input_quant"):
-            x_norm, x_fp8, x_scale = rmsnorm_fp8_quant_ue8m0(
-                x,
-                norm_weight,
-                eps=norm_eps,
-                group_size=128,
-                clamp_eps=1.0e-4,
-                out_norm=x,
-            )
+            if (
+                can_fuse_qnorm_fp8_ue8m0_quant(x, norm_weight, group_size=128)
+                and x.data_ptr() % 16 == 0
+                and norm_weight.data_ptr() % 16 == 0
+            ):
+                x_norm, (x_fp8, x_scale) = fused_rmsnorm_fp8_ue8m0_quant(
+                    x,
+                    norm_weight,
+                    eps=norm_eps,
+                    group_size=128,
+                    clamp_eps=1.0e-4,
+                    emit_norm=True,
+                    out_norm=x,
+                )
+                assert x_norm is not None
+            else:
+                x_norm, x_fp8, x_scale = rmsnorm_fp8_quant_ue8m0(
+                    x,
+                    norm_weight,
+                    eps=norm_eps,
+                    group_size=128,
+                    clamp_eps=1.0e-4,
+                    out_norm=x,
+                )
         return x_norm, (x_fp8, x_scale)
+
+    def _indexer_can_consume_qr_quant(self) -> bool:
+        if self.indexer is None:
+            return True
+        return (
+            isinstance(self.indexer, IndexerFP8)
+            and "forward" not in self.indexer.__dict__
+            and "forward_with_pending_nested" not in self.indexer.__dict__
+            and "_compute_indexer_q" not in self.indexer.__dict__
+            and type(self.indexer).forward is IndexerFP8.forward
+            and type(self.indexer).forward_with_pending_nested
+            is IndexerFP8.forward_with_pending_nested
+            and type(self.indexer)._compute_indexer_q
+            is IndexerFP8._compute_indexer_q
+            and self.indexer.can_use_qr_quant()
+            and getattr(self.indexer.wq_b, "K", None) == int(self.q_lora_rank)
+        )
+
+    def _can_use_qr_fused_quant(
+        self, q_proj_2d: torch.Tensor, q_norm: torch.Tensor
+    ) -> bool:
+        return (
+            "_materialize_prefill_q" not in self.__dict__
+            and type(self)._materialize_prefill_q
+            is AttentionFP8._materialize_prefill_q
+            and hasattr(self.wq_b, "forward_quantized")
+            and bool(getattr(self.wq_b, "scale_ue8m0", False))
+            and getattr(self.wq_b, "K", None) == int(q_proj_2d.shape[-1])
+            and int(q_proj_2d.shape[0]) > 0
+            and can_fuse_qnorm_fp8_ue8m0_quant(q_proj_2d, q_norm, group_size=128)
+            and q_proj_2d.data_ptr() % 16 == 0
+            and q_norm.data_ptr() % 16 == 0
+        )
 
     def _lin_from_shared_quant(
         self,
@@ -2749,9 +2806,18 @@ class AttentionFP8(nn.Module):
         # ``[T_total, q_lora]``). Drop the legacy ``unsqueeze(0)`` so the
         # batched flat caller hits the same code path without rewrapping.
         with record_function_range("dsv4.fp8.attn.csa.indexer"):
-            raw = self.indexer(
-                x, qkv.qr, common.csa_meta.indexer_meta, workspace=common.workspace
-            )
+            if qkv.qr_quant is not None and self._indexer_can_consume_qr_quant():
+                raw = self.indexer(
+                    x,
+                    qkv.qr,
+                    common.csa_meta.indexer_meta,
+                    workspace=common.workspace,
+                    qr_quant=qkv.qr_quant,
+                )
+            else:
+                raw = self.indexer(
+                    x, qkv.qr, common.csa_meta.indexer_meta, workspace=common.workspace
+                )
         return self._forward_prefill_compressed(
             x,
             qkv,
@@ -2856,15 +2922,27 @@ class AttentionFP8(nn.Module):
                 indexer_post_stream = (
                     _get_cp_post_gather_stream(x.device) if x.is_cuda else None
                 )
-                raw = self.indexer.forward_with_pending_nested(
-                    x,
-                    qkv.qr,
-                    csa_meta.indexer_meta,
-                    nested_pending,
-                    before_gather_k=None,
-                    cp_gather_stream=cp_stream,
-                    post_gather_stream=indexer_post_stream,
-                )
+                if qkv.qr_quant is not None and self._indexer_can_consume_qr_quant():
+                    raw = self.indexer.forward_with_pending_nested(
+                        x,
+                        qkv.qr,
+                        csa_meta.indexer_meta,
+                        nested_pending,
+                        before_gather_k=None,
+                        cp_gather_stream=cp_stream,
+                        post_gather_stream=indexer_post_stream,
+                        qr_quant=qkv.qr_quant,
+                    )
+                else:
+                    raw = self.indexer.forward_with_pending_nested(
+                        x,
+                        qkv.qr,
+                        csa_meta.indexer_meta,
+                        nested_pending,
+                        before_gather_k=None,
+                        cp_gather_stream=cp_stream,
+                        post_gather_stream=indexer_post_stream,
+                    )
                 nested_pending = None
             if main_pending is not None:
                 with record_function_range(
@@ -3446,21 +3524,52 @@ class AttentionFP8(nn.Module):
                             combined_lens,
                         )
             else:
-                with record_function_range("dsv4.fp8.attn.workspace.combine_topk"):
-                    combined_indices, combined_lens = combine_topk_swa_indices(
-                        topk_indices=cmp_topk,
-                        query_start_loc=wm.qsl,
-                        seq_lens=wm.swa_seq_lens,
-                        gather_lens=wm.swa_gather_lens,
-                        window_size=self.window_size,
-                        compress_ratio=ratio,
-                        topk=int(cmp_topk.shape[-1]),
-                        M=0 if use_ragged else wm.M,
-                        N=0 if use_ragged else wm.N,
-                        flash_mla_indices=True,
-                        cu_cmp_offsets=wm.cu_cmp_offsets,
-                        cu_swa_offsets=wm.cu_swa_offsets,
+                is_dense_hca = (
+                    wm.dense_cmp_topk is not None and cmp_topk is wm.dense_cmp_topk
+                )
+                combine_cache = wm.hca_combine_cache if is_dense_hca else None
+                combine_key = (
+                    (
+                        "noncp",
+                        self.window_size,
+                        ratio,
+                        int(cmp_topk.shape[-1]),
+                        wm.M,
+                        wm.N,
+                        wm.total_ws_rows,
                     )
+                    if combine_cache is not None
+                    else None
+                )
+                cached_combine = (
+                    combine_cache.get(combine_key)
+                    if combine_cache is not None and combine_key is not None
+                    else None
+                )
+                if cached_combine is not None:
+                    combined_indices, combined_lens = cached_combine
+                else:
+                    with record_function_range("dsv4.fp8.attn.workspace.combine_topk"):
+                        combined_indices, combined_lens = combine_topk_swa_indices(
+                            topk_indices=cmp_topk,
+                            query_start_loc=wm.qsl,
+                            seq_lens=wm.swa_seq_lens,
+                            gather_lens=wm.swa_gather_lens,
+                            window_size=self.window_size,
+                            compress_ratio=ratio,
+                            topk=int(cmp_topk.shape[-1]),
+                            M=0 if use_ragged else wm.M,
+                            N=0 if use_ragged else wm.N,
+                            flash_mla_indices=True,
+                            cu_cmp_offsets=wm.cu_cmp_offsets,
+                            cu_swa_offsets=wm.cu_swa_offsets,
+                            dense_arange_topk=is_dense_hca,
+                        )
+                    if combine_cache is not None and combine_key is not None:
+                        combine_cache[combine_key] = (
+                            combined_indices,
+                            combined_lens,
+                        )
 
             post_gather_stream = None
             if cmp_pending is not None or swa_prefix_pending is not None:
@@ -3768,7 +3877,32 @@ class AttentionFP8(nn.Module):
         local_ws_per_req = (local_cmp_lens + wm.swa_gather_lens.to(torch.int32)).to(
             torch.int32
         )
-        if B > 0:
+        host_in = getattr(cp_ctx, "input_lengths_global_host", None)
+        host_pf = getattr(cp_ctx, "prefix_lengths_host", None)
+        if (
+            B > 0
+            and host_in is not None
+            and host_pf is not None
+            and len(host_in) == B
+            and len(host_pf) == B
+        ):
+            owned_host = [
+                cp_actual_owned_kv_len(
+                    (int(p) + int(inp)) // max(int(self.compress_ratio), 1),
+                    cp_ctx.cp_size,
+                    wm.cmp_eb,
+                    cp_ctx.cp_rank,
+                )
+                for p, inp in zip(host_pf, host_in)
+            ]
+            gathers_host = [
+                int(inp) + min(int(p), self.window_size - 1)
+                for p, inp in zip(host_pf, host_in)
+            ]
+            local_N = max(owned_host, default=0)
+            gather_len_max = max(gathers_host, default=0)
+            local_total_ws_rows = sum(o + g for o, g in zip(owned_host, gathers_host))
+        elif B > 0:
             local_N, gather_len_max, local_total_ws_rows = (
                 int(v)
                 for v in torch.stack(
@@ -4105,8 +4239,37 @@ class AttentionFP8(nn.Module):
         position_ids = _flat_1d(position_ids)
         req_id_per_token = _flat_1d(req_id_per_token)
         sp_per_req = _flat_1d(sp_per_req)
+        host_pair = getattr(self, "_prefill_host_lengths", None)
+        host_in_local: Optional[Tuple[int, ...]] = None
+        host_pf: Optional[Tuple[int, ...]] = None
+        if isinstance(host_pair, tuple) and len(host_pair) == 2:
+            host_in_local, host_pf = host_pair
+        if cp_on:
+            assert cp_ctx is not None
+            if host_in_local is None:
+                cp_chunks = getattr(cp_ctx, "chunk_lengths_per_req", None)
+                if cp_chunks is not None:
+                    host_in_local = tuple(int(v) for v in cp_chunks)
+            if host_pf is None:
+                cp_pf = getattr(cp_ctx, "prefix_lengths_host", None)
+                if cp_pf is not None:
+                    host_pf = tuple(int(v) for v in cp_pf)
+            host_in_global = getattr(cp_ctx, "input_lengths_global_host", None)
+        else:
+            if host_in_local is None and input_lengths.device.type == "cpu":
+                host_in_local = tuple(int(v) for v in input_lengths.tolist())
+            elif host_in_local is None and cu_seqlens.device.type == "cpu":
+                cu_cpu = [int(v) for v in cu_seqlens.tolist()]
+                host_in_local = tuple(
+                    cu_cpu[i + 1] - cu_cpu[i] for i in range(len(cu_cpu) - 1)
+                )
+            host_in_global = host_in_local
+        if host_pf is None and prefix_lengths.device.type == "cpu":
+            host_pf = tuple(int(v) for v in prefix_lengths.tolist())
         if any_cont is None and reuse_common_meta is not None:
             any_cont = reuse_common_meta.any_cont
+        if any_cont is None and host_pf is not None and len(host_pf) == batch_size:
+            any_cont = any(int(p) > 0 for p in host_pf)
         if any_cont is None:
             if prefix_lengths.is_cuda and torch.cuda.is_current_stream_capturing():
                 raise RuntimeError(
@@ -4190,6 +4353,9 @@ class AttentionFP8(nn.Module):
                     position_ids=position_ids,
                     req_id_per_token=req_id_per_token,
                     topk_length_kv_full=topk_length_kv_full,
+                    host_input_lengths=host_in_local,
+                    host_input_lengths_global=host_in_global,
+                    host_prefix_lengths=host_pf,
                 )
             # A device-side fill remains valid during CUDA Graph capture.
             row_seqlens_full = torch.full(
@@ -4276,6 +4442,9 @@ class AttentionFP8(nn.Module):
                     req_id_per_token=req_id_per_token,
                     max_seqlen_q=max_seqlen_q,
                     has_prefix=any_cont,
+                    host_input_lengths=host_in_local,
+                    host_input_lengths_global=host_in_global,
+                    host_prefix_lengths=host_pf,
                 )
         elif self.compress_ratio == 128:
             with record_function_range("dsv4.fp8.meta.hca"):
@@ -4293,6 +4462,9 @@ class AttentionFP8(nn.Module):
                     req_id_per_token=req_id_per_token,
                     max_seqlen_q=max_seqlen_q,
                     has_prefix=any_cont,
+                    host_input_lengths=host_in_local,
+                    host_input_lengths_global=host_in_global,
+                    host_prefix_lengths=host_pf,
                 )
 
         return PrefillMeta(
@@ -4341,6 +4513,9 @@ class AttentionFP8(nn.Module):
         req_id_per_token: Optional[torch.Tensor] = None,
         max_seqlen_q: int = 0,
         has_prefix: bool,
+        host_input_lengths: Optional[Tuple[int, ...]] = None,
+        host_input_lengths_global: Optional[Tuple[int, ...]] = None,
+        host_prefix_lengths: Optional[Tuple[int, ...]] = None,
     ) -> CsaPrefillMeta:
         """Build CSA-layer per-call metadata: indexer prepare + main CSA
         compressor prepare_metadata.
@@ -4381,6 +4556,15 @@ class AttentionFP8(nn.Module):
         with record_function_range("dsv4.fp8.meta.csa.bind_pool"):
             self._set_compressor_pool_context()
         with record_function_range("dsv4.fp8.meta.csa.indexer_prepare"):
+            idx_extra = {}
+            if (
+                (host_input_lengths is not None or host_prefix_lengths is not None)
+                and isinstance(self.indexer, IndexerFP8)
+                and "prepare" not in self.indexer.__dict__
+                and type(self.indexer).prepare is IndexerFP8.prepare
+            ):
+                idx_extra["host_input_lengths"] = host_input_lengths
+                idx_extra["host_prefix_lengths"] = host_prefix_lengths
             indexer_meta = self.indexer.prepare(
                 bsz=1,
                 seqlen=seqlen,
@@ -4397,14 +4581,16 @@ class AttentionFP8(nn.Module):
                 req_id_per_token=req_id_per_token,
                 max_seqlen_q=max_seqlen_q,
                 has_prefix=has_prefix,
+                **idx_extra,
             )
         cp_ctx_local = getattr(self, "_cp_ctx", None)
         cp_active = cp_ctx_local is not None and cp_ctx_local.cp_size > 1
+        cmp_supports_host = (
+            isinstance(self.compressor, CompressorFP8)
+            and "prepare_metadata" not in self.compressor.__dict__
+            and type(self.compressor).prepare_metadata is CompressorFP8.prepare_metadata
+        )
         if cp_active:
-            # Under CP the main compressor all-gathers KV/score to the full
-            # global sequence. Build the matching full-sequence metadata once
-            # per ratio bucket here (the prefill_meta broadcast path) instead
-            # of rebuilding it inside every layer's compressor.forward.
             assert cp_ctx_local is not None
             with record_function_range("dsv4.fp8.meta.csa.cp_compressor_prepare"):
                 (
@@ -4414,6 +4600,13 @@ class AttentionFP8(nn.Module):
                     cp_cu_seq_per_req,
                 ) = build_cp_full_prefill_positions(cp_ctx_local, device)
                 assert cp_ctx_local.input_lengths_global is not None
+                cmp_extra = {}
+                if cmp_supports_host and (
+                    host_prefix_lengths is not None
+                    or host_input_lengths_global is not None
+                ):
+                    cmp_extra["prefix_lengths_host"] = host_prefix_lengths
+                    cmp_extra["host_input_lengths"] = host_input_lengths_global
                 compressor_meta = self.compressor.prepare_metadata(
                     cp_positions,
                     cp_b_idx,
@@ -4421,11 +4614,9 @@ class AttentionFP8(nn.Module):
                     is_batched=True,
                     seq_start_per_req=cp_seq_start_per_req,
                     cu_seq_per_req=cp_cu_seq_per_req,
+                    **cmp_extra,
                 )
         else:
-            # Inline (vs. calling ``_build_compressor_meta``) is load-bearing:
-            # it shares the surrounding pool bind with ``indexer.prepare`` so
-            # the indexer's nested compressor-meta hoist fires under one bind.
             with record_function_range("dsv4.fp8.meta.csa.compressor_prepare"):
                 cmp_args = build_prepare_metadata_args(
                     use_varlen=use_varlen,
@@ -4438,7 +4629,16 @@ class AttentionFP8(nn.Module):
                     seq_start_per_req=sp_per_req,
                     cu_seqlens=cu_seqlens,
                 )
-                compressor_meta = self.compressor.prepare_metadata(**cmp_args)
+                cmp_extra = {}
+                if cmp_supports_host and (
+                    host_prefix_lengths is not None or host_input_lengths is not None
+                ):
+                    cmp_extra["prefix_lengths_host"] = host_prefix_lengths
+                    cmp_extra["host_input_lengths"] = host_input_lengths
+                compressor_meta = self.compressor.prepare_metadata(
+                    **cmp_args,
+                    **cmp_extra,
+                )
         with record_function_range("dsv4.fp8.meta.csa.clear_pool"):
             self._clear_compressor_pool_context()
 
@@ -4457,6 +4657,10 @@ class AttentionFP8(nn.Module):
                 position_ids=position_ids,
                 req_id_per_token=req_id_per_token,
                 max_seqlen_q=max_seqlen_q,
+                host_input_lengths=(
+                    host_input_lengths_global if cp_active else host_input_lengths
+                ),
+                host_prefix_lengths=host_prefix_lengths,
             )
         return CsaPrefillMeta(
             indexer_meta=indexer_meta,
@@ -4480,14 +4684,15 @@ class AttentionFP8(nn.Module):
         req_id_per_token: Optional[torch.Tensor] = None,
         max_seqlen_q: int = 0,
         has_prefix: bool,
+        host_input_lengths: Optional[Tuple[int, ...]] = None,
+        host_input_lengths_global: Optional[Tuple[int, ...]] = None,
+        host_prefix_lengths: Optional[Tuple[int, ...]] = None,
     ) -> HcaPrefillMeta:
         """Build HCA-layer per-call metadata: main HCA compressor
         prepare_metadata."""
         cp_ctx_local = getattr(self, "_cp_ctx", None)
-        if cp_ctx_local is not None and cp_ctx_local.cp_size > 1:
-            # CP compressor metadata is for the all-gathered global sequence.
-            # It is still layer-invariant within the HCA ratio bucket, so build
-            # it in the prefill_meta broadcast path and pass it to the hot path.
+        cp_active = cp_ctx_local is not None and cp_ctx_local.cp_size > 1
+        if cp_active:
             with record_function_range("dsv4.fp8.meta.hca.cp_compressor_prepare"):
                 self._set_compressor_pool_context()
                 try:
@@ -4498,6 +4703,19 @@ class AttentionFP8(nn.Module):
                         cp_cu_seq_per_req,
                     ) = build_cp_full_prefill_positions(cp_ctx_local, device)
                     assert cp_ctx_local.input_lengths_global is not None
+                    cmp_extra = {}
+                    if (
+                        isinstance(self.compressor, CompressorFP8)
+                        and "prepare_metadata" not in self.compressor.__dict__
+                        and type(self.compressor).prepare_metadata
+                        is CompressorFP8.prepare_metadata
+                        and (
+                            host_prefix_lengths is not None
+                            or host_input_lengths_global is not None
+                        )
+                    ):
+                        cmp_extra["prefix_lengths_host"] = host_prefix_lengths
+                        cmp_extra["host_input_lengths"] = host_input_lengths_global
                     compressor_meta = self.compressor.prepare_metadata(
                         cp_positions,
                         cp_b_idx,
@@ -4505,6 +4723,7 @@ class AttentionFP8(nn.Module):
                         is_batched=True,
                         seq_start_per_req=cp_seq_start_per_req,
                         cu_seq_per_req=cp_cu_seq_per_req,
+                        **cmp_extra,
                     )
                 finally:
                     self._clear_compressor_pool_context()
@@ -4524,6 +4743,8 @@ class AttentionFP8(nn.Module):
                     req_id_per_token=req_id_per_token,
                     max_seqlen_q=max_seqlen_q,
                     has_prefix=has_prefix,
+                    host_input_lengths=host_input_lengths,
+                    host_prefix_lengths=host_prefix_lengths,
                 )
         with record_function_range("dsv4.fp8.meta.hca.workspace"):
             workspace_meta = self._build_workspace_meta(
@@ -4540,6 +4761,10 @@ class AttentionFP8(nn.Module):
                 position_ids=position_ids,
                 req_id_per_token=req_id_per_token,
                 max_seqlen_q=max_seqlen_q,
+                host_input_lengths=(
+                    host_input_lengths_global if cp_active else host_input_lengths
+                ),
+                host_prefix_lengths=host_prefix_lengths,
             )
         return HcaPrefillMeta(
             compressor_meta=compressor_meta,
@@ -4562,6 +4787,8 @@ class AttentionFP8(nn.Module):
         position_ids: Optional[torch.Tensor] = None,
         req_id_per_token: Optional[torch.Tensor] = None,
         max_seqlen_q: int = 0,
+        host_input_lengths: Optional[Tuple[int, ...]] = None,
+        host_prefix_lengths: Optional[Tuple[int, ...]] = None,
     ) -> Optional[WorkspaceMeta]:
         """Static index/dim metadata for the vLLM-style workspace + dual-
         gather + ``combine_topk_swa_indices`` flow. Returns ``None`` when
@@ -4711,18 +4938,39 @@ class AttentionFP8(nn.Module):
             P_per_req = torch.clamp_max(sp_i32, win - 1)  # [B]
             gather_len_per_req = S_i32 + P_per_req  # [B]
 
-            host_input_lengths = getattr(
-                cp_ctx_local, "input_lengths_global_host", None
+            eff_host_inputs = (
+                getattr(cp_ctx_local, "input_lengths_global_host", None)
+                if cp_active
+                else host_input_lengths
             )
-            host_prefix_lengths = getattr(cp_ctx_local, "prefix_lengths_host", None)
+            if (
+                not cp_active
+                and eff_host_inputs is None
+                and input_lengths.device.type == "cpu"
+                and input_lengths.numel() == B
+            ):
+                eff_host_inputs = tuple(int(v) for v in input_lengths.tolist())
+            eff_host_prefixes = (
+                getattr(cp_ctx_local, "prefix_lengths_host", None)
+                if cp_active
+                else host_prefix_lengths
+            )
+            if eff_host_prefixes is None and cp_ctx_local is not None:
+                eff_host_prefixes = getattr(cp_ctx_local, "prefix_lengths_host", None)
+            if (
+                eff_host_prefixes is None
+                and prefix_lengths.device.type == "cpu"
+                and prefix_lengths.numel() == B
+            ):
+                eff_host_prefixes = tuple(int(v) for v in prefix_lengths.tolist())
+            host_input_lengths = eff_host_inputs
+            host_prefix_lengths = eff_host_prefixes
             cmp_cu_tiles: Optional[torch.Tensor] = None
             cmp_total_tiles: Optional[int] = None
             swa_cache_cu_tiles: Optional[torch.Tensor] = None
             swa_cache_total_tiles: Optional[int] = None
             cu_swa_offsets_cpu: Optional[Tuple[int, ...]] = None
             if device.type == "cuda" and torch.cuda.is_current_stream_capturing():
-                # Replay can change device lengths/prefixes. Size from the
-                # fixed block-table/token capacities, not capture-time values.
                 N_max = (
                     int(cmp_bt.shape[1])
                     * _dsv4_pool_tokens_per_block(self._kv_cache, tag=cmp_at)
@@ -4744,8 +4992,7 @@ class AttentionFP8(nn.Module):
                 gather_len_max = seqlen_eff + P_cap
                 total_cmp_tokens = None
             elif (
-                cp_active
-                and host_input_lengths is not None
+                host_input_lengths is not None
                 and host_prefix_lengths is not None
                 and len(host_input_lengths) == B
                 and len(host_prefix_lengths) == B
@@ -4952,23 +5199,27 @@ class AttentionFP8(nn.Module):
                 if cp_ctx_local.input_lengths_global is not None
                 else input_lengths
             )
+            raw_host_in = getattr(cp_ctx_local, "input_lengths_global_host", None) or host_input_lengths
+            raw_host_pf = getattr(cp_ctx_local, "prefix_lengths_host", None) or host_prefix_lengths
             if _force_all_cp_raw_q_merge():
-                use_cp_raw_q_merge = int(input_src.to(torch.long).sum().item()) > 0
+                if raw_host_in is not None:
+                    use_cp_raw_q_merge = sum(int(v) for v in raw_host_in) > 0
+                else:
+                    use_cp_raw_q_merge = int(input_src.to(torch.long).sum().item()) > 0
             else:
                 prefix_src = (
                     cp_ctx_local.prefix_lengths
                     if cp_ctx_local.prefix_lengths is not None
                     else prefix_lengths
                 )
-                prefix_len = int(prefix_src.to(torch.long).sum().item())
-                input_len = int(input_src.to(torch.long).sum().item())
-                # Ratio gate: only commit to raw-Q gather when the byte
-                # budget favors it (P/T ≥ 1024 for CSA r=4 + topk,
-                # P/T ≥ 32768 for HCA r=128, otherwise compare exact
-                # raw-Q+O+LSE+topk total vs packed-KV gather bytes).
-                # include_topk_gather=True for CSA (indexer topk is also
-                # gathered along the cp_all_gather_full_varlen path); False
-                # for HCA (no indexer).
+                if raw_host_pf is not None:
+                    prefix_len = sum(int(v) for v in raw_host_pf)
+                else:
+                    prefix_len = int(prefix_src.to(torch.long).sum().item())
+                if raw_host_in is not None:
+                    input_len = sum(int(v) for v in raw_host_in)
+                else:
+                    input_len = int(input_src.to(torch.long).sum().item())
                 use_cp_raw_q_merge = (
                     prefix_len > 0
                     and input_len > 0
@@ -4980,6 +5231,15 @@ class AttentionFP8(nn.Module):
                     )
                 )
 
+        if device.type == "cuda" and torch.cuda.is_current_stream_capturing():
+            swa_max_gather_host: Optional[int] = win - 1
+        elif host_prefix_lengths is not None and len(host_prefix_lengths) == B:
+            swa_max_gather_host = min(
+                max((int(p) for p in host_prefix_lengths), default=0),
+                win - 1,
+            )
+        else:
+            swa_max_gather_host = None
         swa_cache_slot_mapping = _build_suffix_pool_slot_mapping(
             block_table=swa_bt_int32,
             seq_lens=swa_cache_seq_lens,
@@ -4987,11 +5247,7 @@ class AttentionFP8(nn.Module):
             entries_per_block=swa_eb,
             tokens_per_block_for_block_table=swa_tokens_per_block,
             ring_entries=swa_eb,
-            max_gather=(
-                win - 1
-                if device.type == "cuda" and torch.cuda.is_current_stream_capturing()
-                else None
-            ),
+            max_gather=swa_max_gather_host,
         )
         swa_cache_compaction = self._build_swa_cp_byte_compaction(
             swa_cache_slot_mapping,
@@ -5047,6 +5303,8 @@ class AttentionFP8(nn.Module):
         req_id_per_token: Optional[torch.Tensor] = None,
         max_seqlen_q: int = 0,
         has_prefix: bool,
+        host_input_lengths: Optional[Tuple[int, ...]] = None,
+        host_prefix_lengths: Optional[Tuple[int, ...]] = None,
     ):
         """Run the main compressor's ``prepare_metadata`` with its pool
         context temporarily bound. Returns ``CompressorMeta``. The pool
@@ -5075,9 +5333,18 @@ class AttentionFP8(nn.Module):
             seq_start_per_req=sp_per_req,
             cu_seqlens=cu_seqlens,
         )
+        cmp_extra = {}
+        if (
+            isinstance(self.compressor, CompressorFP8)
+            and "prepare_metadata" not in self.compressor.__dict__
+            and type(self.compressor).prepare_metadata is CompressorFP8.prepare_metadata
+            and (host_prefix_lengths is not None or host_input_lengths is not None)
+        ):
+            cmp_extra["prefix_lengths_host"] = host_prefix_lengths
+            cmp_extra["host_input_lengths"] = host_input_lengths
         self._set_compressor_pool_context()
         try:
-            return self.compressor.prepare_metadata(**cmp_args)
+            return self.compressor.prepare_metadata(**cmp_args, **cmp_extra)
         finally:
             self._clear_compressor_pool_context()
 
@@ -5124,6 +5391,9 @@ class AttentionFP8(nn.Module):
         position_ids: torch.Tensor,
         req_id_per_token: torch.Tensor,
         topk_length_kv_full: Optional[torch.Tensor] = None,
+        host_input_lengths: Optional[Tuple[int, ...]] = None,
+        host_input_lengths_global: Optional[Tuple[int, ...]] = None,
+        host_prefix_lengths: Optional[Tuple[int, ...]] = None,
     ) -> SwaPrefillMeta:
         """Varlen path: B>=1, per-request tensor plumbing.
 
@@ -5331,9 +5601,28 @@ class AttentionFP8(nn.Module):
         cu_swa_offsets: Optional[torch.Tensor] = None
         cu_swa_offsets_cpu: Optional[Tuple[int, ...]] = None
         total_ws_rows = 0
+        eff_host_prefixes = (
+            host_prefix_lengths or getattr(cp_ctx, "prefix_lengths_host", None)
+        )
+        if (
+            eff_host_prefixes is None
+            and prefix_lengths.device.type == "cpu"
+            and prefix_lengths.numel() >= write_B
+        ):
+            eff_host_prefixes = tuple(int(v) for v in prefix_lengths[:write_B].tolist())
+        if cp_on_write:
+            eff_host_inputs = host_input_lengths_global or getattr(
+                cp_ctx, "input_lengths_global_host", None
+            )
+        else:
+            eff_host_inputs = host_input_lengths
+            if (
+                eff_host_inputs is None
+                and input_lengths.device.type == "cpu"
+                and input_lengths.numel() >= write_B
+            ):
+                eff_host_inputs = tuple(int(v) for v in input_lengths[:write_B].tolist())
         if capturing:
-            # Every request has at most write_num_tokens new tokens and
-            # win-1 cached tokens. Keep this bound valid across graph replays.
             p_cap = win - 1 if any_cont else 0
             combined_gather_len_max = write_num_tokens + p_cap
             if any_cont:
@@ -5343,18 +5632,15 @@ class AttentionFP8(nn.Module):
                 ).contiguous()
                 total_ws_rows = write_B * p_cap + write_num_tokens
         elif any_cont and cache_gather_lens is not None:
-            host_prefix_lengths = getattr(cp_ctx, "prefix_lengths_host", None)
-            host_input_lengths = getattr(cp_ctx, "input_lengths_global_host", None)
             if (
-                cp_on_write
-                and host_prefix_lengths is not None
-                and len(host_prefix_lengths) == write_B
-                and host_input_lengths is not None
-                and len(host_input_lengths) == write_B
+                eff_host_prefixes is not None
+                and len(eff_host_prefixes) == write_B
+                and eff_host_inputs is not None
+                and len(eff_host_inputs) == write_B
             ):
                 gather_lengths_host = [
                     int(length) + min(int(prefix), win - 1)
-                    for prefix, length in zip(host_prefix_lengths, host_input_lengths)
+                    for prefix, length in zip(eff_host_prefixes, eff_host_inputs)
                 ]
                 cu_swa_host: list[int] = []
                 acc = 0
@@ -5371,7 +5657,7 @@ class AttentionFP8(nn.Module):
                     cache_cu_tiles,
                     cache_total_tiles,
                 ) = _swa_dq.build_dequant_cu_tiles_from_host(
-                    [min(int(prefix), win - 1) for prefix in host_prefix_lengths],
+                    [min(int(prefix), win - 1) for prefix in eff_host_prefixes],
                     device=device,
                 )
             else:
@@ -5399,17 +5685,34 @@ class AttentionFP8(nn.Module):
                 cache_cu_tiles = _swa_dq.build_dequant_cu_tiles_device(
                     cache_gather_lens
                 )
+        elif (
+            eff_host_inputs is not None
+            and len(eff_host_inputs) == write_B
+            and eff_host_prefixes is not None
+            and len(eff_host_prefixes) == write_B
+        ):
+            combined_gather_len_max = max(
+                (
+                    int(length) + min(int(prefix), win - 1)
+                    for prefix, length in zip(eff_host_prefixes, eff_host_inputs)
+                ),
+                default=0,
+            )
         else:
             combined_gather_len_max = int(combined_gather_lens.max().item())
         M = max(combined_gather_len_max, 1)
 
-        # cache_* + combined_* only populated on continuation (via_concat).
-        # ``prefix_len_max`` under varlen is only consumed as a boolean
-        # dequant guard in ``_attn_fp8_swa_via_concat`` — the per-request
-        # P_b math runs through ``cache_gather_lens``. Sentinel ``1`` on
-        # continuation avoids an extra ``.item()`` sync.
         if any_cont:
             assert cache_seq_lens is not None and cache_gather_lens is not None
+            if capturing:
+                swa_max_gather_host: Optional[int] = win - 1
+            elif eff_host_prefixes is not None and len(eff_host_prefixes) == write_B:
+                swa_max_gather_host = min(
+                    max((int(p) for p in eff_host_prefixes), default=0),
+                    win - 1,
+                )
+            else:
+                swa_max_gather_host = None
             cache_slot_mapping = _build_suffix_pool_slot_mapping(
                 block_table=bt_swa,
                 seq_lens=cache_seq_lens,
@@ -5417,12 +5720,7 @@ class AttentionFP8(nn.Module):
                 entries_per_block=eb,
                 tokens_per_block_for_block_table=swa_tokens_per_block,
                 ring_entries=eb,
-                max_gather=(
-                    win - 1
-                    if device.type == "cuda"
-                    and torch.cuda.is_current_stream_capturing()
-                    else None
-                ),
+                max_gather=swa_max_gather_host,
             )
             cache_compaction = self._build_swa_cp_byte_compaction(
                 cache_slot_mapping,
@@ -5548,11 +5846,9 @@ class AttentionFP8(nn.Module):
         else:
             shared_input_quant = None
 
-        def compute_qr() -> torch.Tensor:
-            # q_lora_a + norm only — small ``[1, T, q_lora_rank]`` (fed to the
-            # indexer). The big ``q_lora_b`` + RoPE are deferred to
-            # ``_materialize_prefill_q`` so the 16 GiB Q buffer can reuse the
-            # union workspace storage after the compressors finish.
+        def compute_qr() -> (
+            Tuple[Optional[torch.Tensor], Optional[Tuple[torch.Tensor, torch.Tensor]]]
+        ):
             with record_function_range("dsv4.fp8.attn.qkv.q_lora_a_norm"):
                 if shared_input_quant is not None:
                     q_proj = self._lin_from_shared_quant(
@@ -5560,9 +5856,22 @@ class AttentionFP8(nn.Module):
                     )
                 else:
                     q_proj = self._lin(self.wq_a, x_3d)
-                return self._rmsnorm_weighted(
-                    q_proj, self.q_norm
-                )  # [1, T, q_lora_rank]
+                q_proj_2d = q_proj.reshape(-1, q_proj.shape[-1])
+                if self._can_use_qr_fused_quant(q_proj_2d, self.q_norm):
+                    emit_norm = not self._indexer_can_consume_qr_quant()
+                    qr_norm, qr_quant = fused_rmsnorm_fp8_ue8m0_quant(
+                        q_proj_2d,
+                        self.q_norm,
+                        eps=self.eps,
+                        group_size=128,
+                        clamp_eps=1.0e-4,
+                        emit_norm=emit_norm,
+                    )
+                    return qr_norm, qr_quant
+                return (
+                    self._rmsnorm_weighted(q_proj, self.q_norm).squeeze(0),
+                    None,
+                )
 
         def compute_kv() -> torch.Tensor:
             with record_function_range("dsv4.fp8.attn.qkv.kv_proj_rope"):
@@ -5576,7 +5885,7 @@ class AttentionFP8(nn.Module):
                     kv_in, self.kv_norm, common.freqs_cis, rd, eps=self.eps
                 )
 
-        qr = compute_qr()
+        qr, qr_quant = compute_qr()
         kv = compute_kv()
         if common.cp_on:
             with record_function_range("dsv4.fp8.attn.qkv.cp_gather_varlen"):
@@ -5597,9 +5906,10 @@ class AttentionFP8(nn.Module):
             kv_full = kv
 
         return PrefillQKV(
-            qr=qr.squeeze(0),
+            qr=qr,
             q=None,  # deferred to _materialize_prefill_q
             kv_full=kv_full.squeeze(0),
+            qr_quant=qr_quant,
         )
 
     def _materialize_prefill_q(
@@ -5616,15 +5926,26 @@ class AttentionFP8(nn.Module):
         if qkv.q is not None:
             return qkv
         assert common.workspace is not None, "prefill workspace not bound"
-        qr_3d = qkv.qr.unsqueeze(0)  # [1, T, q_lora_rank]
         with record_function_range("dsv4.fp8.attn.qkv.q_lora_b_rope"):
-            seqlen = int(qr_3d.shape[1])
-            q_out = common.workspace.prefill_q(seqlen)
-            q_local_flat = self._lin(
-                self.wq_b,
-                qr_3d,
-                out=q_out.view(seqlen, self.n_heads * self.head_dim),
-            )
+            if qkv.qr_quant is not None and hasattr(self.wq_b, "forward_quantized"):
+                qr_fp8, qr_scale = qkv.qr_quant
+                seqlen = int(qr_fp8.shape[0])
+                q_out = common.workspace.prefill_q(seqlen)
+                q_local_flat = self.wq_b.forward_quantized(
+                    qr_fp8,
+                    qr_scale,
+                    out=q_out.view(seqlen, self.n_heads * self.head_dim),
+                )
+            else:
+                assert qkv.qr is not None, "PrefillQKV requires qr when qr_quant is None"
+                qr_3d = qkv.qr.unsqueeze(0)  # [1, T, q_lora_rank]
+                seqlen = int(qr_3d.shape[1])
+                q_out = common.workspace.prefill_q(seqlen)
+                q_local_flat = self._lin(
+                    self.wq_b,
+                    qr_3d,
+                    out=q_out.view(seqlen, self.n_heads * self.head_dim),
+                )
             assert q_local_flat.data_ptr() == q_out.data_ptr()
             q_local = q_local_flat.view(1, seqlen, self.n_heads, self.head_dim)
             q_local = fused_rmsnorm_rope(

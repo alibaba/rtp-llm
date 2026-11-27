@@ -496,6 +496,17 @@ def forward_layers(
     cp_rank = getattr(v4, "_cp_rank", 0)
     cp_ctx = None
     if cp_info is not None and cp_size > 1:
+        cp_prefix_host = getattr(cp_info, "prefill_prefix_lengths_cpu", None)
+        if cp_prefix_host is None:
+            attn_pl = getattr(attn_inputs, "prefix_lengths", None)
+            if isinstance(attn_pl, torch.Tensor) and attn_pl.device.type == "cpu":
+                cp_prefix_host = attn_pl
+        attn_il = getattr(attn_inputs, "input_lengths", None)
+        cp_chunk_host = (
+            attn_il
+            if isinstance(attn_il, torch.Tensor) and attn_il.device.type == "cpu"
+            else None
+        )
         cp_ctx = build_cp_context_for_forward(
             cp_info,
             cp_size,
@@ -503,8 +514,9 @@ def forward_layers(
             int(input_ids.size(0)),
             input_ids.device,
             prefix_lengths=getattr(attn_inputs, "prefix_lengths", None),
-            prefix_lengths_host=getattr(cp_info, "prefill_prefix_lengths_cpu", None),
+            prefix_lengths_host=cp_prefix_host,
             chunk_lengths_device=getattr(attn_inputs, "input_lengths", None),
+            chunk_lengths_host=cp_chunk_host,
             kv_cache_sharded=bool(getattr(v4, "_kv_cache_sharded", False)),
         )
     v4._propagate_cp_ctx(cp_ctx)
@@ -571,11 +583,34 @@ def forward_layers(
             host_input_lengths: Optional[torch.Tensor] = None
             host_prefix_lengths: Optional[torch.Tensor] = None
             any_cont_for_meta: Optional[bool] = None
+            host_in_tuple: Optional[Tuple[int, ...]] = None
+            host_pf_tuple: Optional[Tuple[int, ...]] = None
+            if cp_ctx is not None:
+                host_in_tuple = cp_ctx.input_lengths_global_host
+                host_pf_tuple = cp_ctx.prefix_lengths_host
             if attn_inputs is not None:
                 host_input_lengths = attn_inputs.input_lengths
                 host_prefix_lengths = attn_inputs.prefix_lengths
                 input_lengths_device = attn_inputs.input_lengths_device
                 prefix_lengths_device = attn_inputs.prefix_lengths_device
+                if (
+                    host_in_tuple is None
+                    and host_input_lengths is not None
+                    and host_input_lengths.device.type == "cpu"
+                    and host_input_lengths.numel() > 0
+                ):
+                    host_in_tuple = tuple(
+                        int(v) for v in host_input_lengths.reshape(-1).tolist()
+                    )
+                if (
+                    host_pf_tuple is None
+                    and host_prefix_lengths is not None
+                    and host_prefix_lengths.device.type == "cpu"
+                    and host_prefix_lengths.numel() > 0
+                ):
+                    host_pf_tuple = tuple(
+                        int(v) for v in host_prefix_lengths.reshape(-1).tolist()
+                    )
                 input_lengths_source = (
                     input_lengths_device
                     if input_lengths_device is not None
@@ -593,25 +628,44 @@ def forward_layers(
                     and input_lengths_source.numel() > 0
                 ):
                     input_lengths = input_lengths_source.to(
-                        device=positions.device, dtype=torch.int32
+                        device=positions.device,
+                        dtype=torch.int32,
+                        non_blocking=(
+                            positions.device.type == "cuda"
+                            and input_lengths_source.device.type == "cpu"
+                        ),
                     ).contiguous()
                 if (
                     prefix_lengths_source is not None
                     and prefix_lengths_source.numel() > 0
                 ):
                     prefix_lengths = prefix_lengths_source.to(
-                        device=positions.device, dtype=torch.int32
+                        device=positions.device,
+                        dtype=torch.int32,
+                        non_blocking=(
+                            positions.device.type == "cuda"
+                            and prefix_lengths_source.device.type == "cpu"
+                        ),
                     ).contiguous()
+            if (
+                host_in_tuple is None
+                and cu_seqlens is not None
+                and cu_seqlens.device.type == "cpu"
+                and cu_seqlens.numel() >= 2
+            ):
+                cu_cpu = [int(v) for v in cu_seqlens.reshape(-1).tolist()]
+                host_in_tuple = tuple(
+                    cu_cpu[i + 1] - cu_cpu[i] for i in range(len(cu_cpu) - 1)
+                )
 
             # Scalar metadata must come from the host mirror. Reading a CUDA
             # tensor with item() here synchronizes and invalidates graph capture.
-            if (
-                host_prefix_lengths is not None
-                and host_prefix_lengths.device.type == "cpu"
-                and host_prefix_lengths.numel() > 0
-            ):
-                sp_int_for_meta = int(host_prefix_lengths.reshape(-1)[0].item())
-                any_cont_for_meta = bool((host_prefix_lengths > 0).any().item())
+            if host_pf_tuple is not None and len(host_pf_tuple) > 0:
+                sp_int_for_meta = int(host_pf_tuple[0])
+                any_cont_for_meta = any(p > 0 for p in host_pf_tuple)
+            elif cp_ctx is not None:
+                sp_int_for_meta = int(cp_ctx.prefix_length)
+                any_cont_for_meta = sp_int_for_meta > 0
             elif (
                 positions.device.type == "cpu"
                 or not torch.cuda.is_current_stream_capturing()
@@ -650,25 +704,41 @@ def forward_layers(
                     sp_per_req = torch.where(
                         valid_starts, selected_starts, torch.zeros_like(selected_starts)
                     ).contiguous()
-                req_id_per_token = (
-                    torch.searchsorted(
-                        cu_seqlens.to(device=positions.device, dtype=torch.int64),
-                        torch.arange(
-                            int(h.size(0)),
-                            device=positions.device,
-                            dtype=torch.int64,
-                        ),
-                        right=True,
+                if host_in_tuple is not None and len(host_in_tuple) == 1:
+                    req_id_per_token = torch.zeros(
+                        (int(h.size(0)),),
+                        device=positions.device,
+                        dtype=torch.int32,
                     )
-                    .sub_(1)
-                    .to(torch.int32)
-                    .contiguous()
-                )
+                else:
+                    req_id_per_token = (
+                        torch.searchsorted(
+                            cu_seqlens.to(
+                                device=positions.device,
+                                dtype=torch.int64,
+                                non_blocking=(
+                                    positions.device.type == "cuda"
+                                    and cu_seqlens.device.type == "cpu"
+                                ),
+                            ),
+                            torch.arange(
+                                int(h.size(0)),
+                                device=positions.device,
+                                dtype=torch.int64,
+                            ),
+                            right=True,
+                        )
+                        .sub_(1)
+                        .to(torch.int32)
+                        .contiguous()
+                    )
             batch_size = 1
             if cu_seqlens is not None and cu_seqlens.numel() >= 2:
                 batch_size = int(cu_seqlens.numel() - 1)
             max_seqlen_q = int(h.size(0))
-            if (
+            if host_in_tuple is not None and len(host_in_tuple) > 0:
+                max_seqlen_q = max(host_in_tuple)
+            elif (
                 host_input_lengths is not None
                 and host_input_lengths.device.type == "cpu"
                 and host_input_lengths.numel() > 0
@@ -677,6 +747,12 @@ def forward_layers(
             # The max-sized workspace was allocated before CP setup and
             # embedding so a cached embedding allocation cannot fragment it.
             assert ws is not None
+            if host_in_tuple is not None or host_pf_tuple is not None:
+                host_pair = (host_in_tuple, host_pf_tuple)
+                for _layer in v4.layers:
+                    _attn = getattr(_layer, "attn", None)
+                    if _attn is not None:
+                        _attn._prefill_host_lengths = host_pair
             try:
                 build_and_propagate_prefill_meta_fp8(
                     v4,
@@ -698,6 +774,11 @@ def forward_layers(
             except Exception:
                 clear_prefill_meta_shared_fp8(v4)
                 raise
+            finally:
+                for _layer in v4.layers:
+                    _attn = getattr(_layer, "attn", None)
+                    if _attn is not None and hasattr(_attn, "_prefill_host_lengths"):
+                        _attn._prefill_host_lengths = None
 
     layer_forward_range = _profiler.make_layer_forward_range()
     try:
