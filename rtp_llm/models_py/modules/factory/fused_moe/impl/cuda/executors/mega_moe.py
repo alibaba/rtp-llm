@@ -198,6 +198,47 @@ class MegaMoeExecutor(Fp8Fp4ExecutorBase):
     def _new_input_packer(self):
         return get_mega_moe_input_packer(prepared=self._prepared_policy is not None)
 
+    def _execute_gate_pack(
+        self,
+        payload,
+        *,
+        activation: str,
+        expert_map: Optional[torch.Tensor],
+        a2_scale: Optional[torch.Tensor],
+        apply_router_weight_on_input: bool,
+    ):
+        from rtp_llm.models_py.modules.factory.fused_moe.defs.fused_moe import (
+            CombineForwardPayload,
+        )
+
+        if activation.lower() not in ("silu", "siglu", "swiglu"):
+            raise ValueError(
+                f"FP8/FP4 MoE requires SiLU activation, got {activation!r}"
+            )
+        if expert_map is not None:
+            raise ValueError("FP8/FP4 MoE does not support expert_map")
+        if a2_scale is not None:
+            raise ValueError("FP8/FP4 MoE does not accept an external a2_scale")
+        if apply_router_weight_on_input:
+            raise ValueError("FP8/FP4 MoE applies router weights during output combine")
+        out = getattr(payload, "out", None)
+        if out is not None:
+            output, topk_weights, topk_ids = self.forward_gate_pack(
+                payload.expert_x,
+                payload.gate_payload,
+                out=out,
+            )
+        else:
+            output, topk_weights, topk_ids = self.forward_gate_pack(
+                payload.expert_x,
+                payload.gate_payload,
+            )
+        payload.expert_topk_weights = topk_weights
+        payload.expert_topk_ids = topk_ids
+        return CombineForwardPayload(
+            fused_expert_output=self._restore_output_dtype(payload, output)
+        )
+
     def execute(
         self,
         payload,
@@ -216,6 +257,14 @@ class MegaMoeExecutor(Fp8Fp4ExecutorBase):
             extra_expert_args,
         )
         if getattr(self.cfg, "mega_moe_policy", None) is None:
+            if getattr(payload, "gate_payload", None) is not None:
+                return self._execute_gate_pack(
+                    payload,
+                    activation=activation,
+                    expert_map=expert_map,
+                    a2_scale=a2_scale,
+                    apply_router_weight_on_input=apply_router_weight_on_input,
+                )
             return execute(payload, *args)
         from .mega_moe_runtime import execute_prepared_mega_moe
 
@@ -831,10 +880,24 @@ class MegaMoeExecutor(Fp8Fp4ExecutorBase):
                 setattr(clone, name, torch.empty_like(value))
         return clone
 
+    def _can_use_output_buffer(
+        self, x: torch.Tensor, tokens: int, out: Optional[torch.Tensor]
+    ) -> bool:
+        return (
+            out is not None
+            and self._mega_y is not None
+            and out.is_contiguous()
+            and out.device == x.device
+            and out.dtype == self._mega_y.dtype
+            and out.shape == (tokens, self._mega_y.size(1))
+            and (out.numel() == 0 or out.data_ptr() % 16 == 0)
+        )
+
     def forward_gate_pack(
         self,
         x: torch.Tensor,
         gate_payload: ExpertGatePayload,
+        out: Optional[torch.Tensor] = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Route and pack directly into the MegaMoE symmetric buffer."""
 
@@ -872,6 +935,10 @@ class MegaMoeExecutor(Fp8Fp4ExecutorBase):
         )
         if shared_stage is None:
             self._stage_kernel_inputs(tokens, inputs_prepacked=True)
-        y = self._mega_y[:tokens]
+        y = (
+            out
+            if self._can_use_output_buffer(x, tokens, out)
+            else self._mega_y[:tokens]
+        )
         self._launch(y, tokens, x.device)
         return y, buf.topk_weights[:tokens], buf.topk_idx[:tokens]

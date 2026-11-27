@@ -84,6 +84,7 @@ class ExpertForwardPayload:
     expert_ids_are_local: bool = False
     router_context: object | None = None
     gate_payload: Optional[ExpertGatePayload] = None
+    out: Optional[torch.Tensor] = None
 
 
 @dataclass
@@ -338,6 +339,7 @@ class FusedMoe(torch.nn.Module):
         extra_expert_args: Optional[Dict[str, Any]] = None,
         extra_finalize_args: Optional[FinalizeArgs] = None,
         skip_tp_allreduce: bool = False,
+        out: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         self._validate_skip_tp_allreduce(skip_tp_allreduce)
         if not self.supports_gate_pack:
@@ -345,6 +347,8 @@ class FusedMoe(torch.nn.Module):
                 f"strategy {self.strategy_name!r} does not support fused gate packing"
             )
         expert_payload = self.router.prepare_gate_pack(hidden_states, gate_payload)
+        if out is not None:
+            expert_payload.out = out
         return self._execute_payload(
             hidden_states,
             expert_payload,

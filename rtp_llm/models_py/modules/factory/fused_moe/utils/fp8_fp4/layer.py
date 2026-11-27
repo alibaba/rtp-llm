@@ -322,8 +322,22 @@ class Fp8Fp4MoeLayer(nn.Module):
                 observer("topk_weights", topk_weights)
                 observer("topk_indices", topk_ids)
 
+        routed_out = out_flat if self._shared_executor is None else None
+
         def run_routed_experts() -> torch.Tensor:
             if gate_payload is not None:
+                if (
+                    routed_out is not None
+                    and routed_out.is_contiguous()
+                    and routed_out.shape == (x.size(0), self.dim)
+                    and routed_out.dtype == x.dtype
+                ):
+                    return self.fused_moe.forward_gate_pack(
+                        hidden_states=x,
+                        gate_payload=gate_payload,
+                        activation="silu",
+                        out=routed_out,
+                    )
                 return self.fused_moe.forward_gate_pack(
                     hidden_states=x,
                     gate_payload=gate_payload,
@@ -344,9 +358,14 @@ class Fp8Fp4MoeLayer(nn.Module):
             if observer is not None:
                 observer("routed_y", output)
             with record_function_range("moe.add_shared"):
-                output = output.to(dtype=x.dtype)
+                if output.dtype != x.dtype:
+                    output = output.to(dtype=x.dtype)
                 if out_flat is not None:
-                    out_flat.copy_(output)
+                    if (
+                        output is not out_flat
+                        and output.data_ptr() != out_flat.data_ptr()
+                    ):
+                        out_flat.copy_(output)
                     output = out_flat
                 output = output.view(shape)
             if observer is not None:

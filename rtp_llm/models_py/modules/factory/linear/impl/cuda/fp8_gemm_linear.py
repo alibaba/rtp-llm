@@ -145,6 +145,25 @@ class CudaFp8GEMMLinear(LinearBase):
             return True
         return False
 
+    def quantize_input(
+        self,
+        input: torch.Tensor,
+        input_scales: Optional[torch.Tensor] = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Quantize activations using the backing DeepGEMM FP8 quantizer."""
+        return self._deepgemm_linear.quantize_input(input, input_scales)
+
+    def forward_quantized(
+        self,
+        input_fp8: torch.Tensor,
+        input_scales: torch.Tensor,
+        out: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        """Run GEMM on pre-quantized FP8 activations via DeepGEMM."""
+        return self._deepgemm_linear.forward_quantized(
+            input_fp8, input_scales, out=out
+        )
+
     def forward(
         self,
         input: torch.Tensor,
