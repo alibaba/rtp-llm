@@ -193,7 +193,8 @@ public:
             }
             if (pause_armed_) {
                 ++phase_entered_;
-                auto context = std::make_shared<TransferBatchAsyncContext>();
+                auto context =
+                    std::make_shared<TransferBatchAsyncContext>(descriptors.size(), nullptr, task.completionProof());
                 pending_.push_back({std::move(task), scripted_success, context});
                 cv_.notify_all();
                 return context;
@@ -201,7 +202,9 @@ public:
         }
         if (!scripted_success) {
             return std::make_shared<CompletedTransferAsyncContext>(
-                ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "scripted transfer failure"));
+                TransferResult::executionException(true, "scripted transfer failure"),
+                descriptors.size(),
+                task.completionProof());
         }
         return PerRankBlockTransferEngine::executeBatch(std::move(task));
     }
@@ -253,7 +256,7 @@ public:
         }
         for (auto& submit : pending) {
             if (!submit.success) {
-                submit.context->complete(ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "scripted transfer failure"));
+                submit.context->complete(TransferResult::executionException(true, "scripted transfer failure"));
                 continue;
             }
             auto context = PerRankBlockTransferEngine::executeBatch(std::move(submit.task));

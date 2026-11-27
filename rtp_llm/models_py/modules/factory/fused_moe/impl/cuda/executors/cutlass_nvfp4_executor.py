@@ -20,13 +20,6 @@ from rtp_llm.models_py.modules.factory.fused_moe.utils.nvfp4_weights import (
 )
 
 
-def _prefill_library(config):
-    return (
-        getattr(config, "prefill_library", None),
-        getattr(config, "prefill_library_sha256", None),
-    )
-
-
 class CutlassNvfp4Executor(FusedMoeExpertExecutor):
     @classmethod
     def executor_type(cls):
@@ -70,22 +63,6 @@ class CutlassNvfp4Executor(FusedMoeExpertExecutor):
         self.quant_scales = prepared.cutlass_quant_scales()
         self.ep_size, self.ep_rank = prepared.ep_size, prepared.ep_rank
         self.tp_size, self.tp_rank = prepared.tp_size, prepared.tp_rank
-        self.sm120_prefill = None
-        backend_config = getattr(config.model_config, "quant_config", None)
-        library, library_sha256 = _prefill_library(backend_config)
-        if (
-            library
-            and self.w1.is_cuda
-            and torch.version.hip is None
-            and torch.cuda.get_device_capability(self.w1.device) == (12, 0)
-        ):
-            from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.sm120_nvfp4_prefill import (
-                Sm120PrefillMoE,
-            )
-
-            self.sm120_prefill = Sm120PrefillMoE(
-                library, library_sha256, self.w1.device
-            )
 
     @property
     def local_num_experts(self):
@@ -111,33 +88,6 @@ class CutlassNvfp4Executor(FusedMoeExpertExecutor):
                 "CUTLASS NVFP4 requires global expert IDs and output router weighting"
             )
         expert_x = payload.expert_x
-        if (
-            self.sm120_prefill is not None
-            and expert_x.ndim == 2
-            and expert_x.dtype == torch.bfloat16
-            and expert_x.is_contiguous()
-            and expert_x.shape[0] >= 128
-            and expert_x.shape[1] == 2560
-            and self.w1.ndim == self.w2.ndim == 3
-            and self.w1.shape[0] == self.w2.shape[0]
-            and self.w1.shape[2] * 16 == expert_x.shape[1]
-            and self.w2.shape[1] == expert_x.shape[1]
-            and self.w1.shape[1] == 32 * self.w2.shape[2]
-            and not torch.cuda.is_current_stream_capturing()
-        ):
-            output = self.sm120_prefill(
-                expert_x,
-                payload.expert_topk_ids.to(torch.int32),
-                payload.expert_topk_weights.to(torch.float32),
-                self.w1,
-                self.w2,
-                self.quant_scales,
-                tp_size=self.tp_size,
-                tp_rank=self.tp_rank,
-                ep_size=self.ep_size,
-                ep_rank=self.ep_rank,
-            )
-            return CombineForwardPayload(fused_expert_output=output)
         output = cutlass_fused_moe(
             input=expert_x,
             input_sf=None,

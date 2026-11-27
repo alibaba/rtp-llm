@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstddef>
+#include <optional>
 #include <vector>
 
 #include "rtp_llm/cpp/cache/block_tree_cache/group_set/GroupSet.h"
@@ -21,6 +22,11 @@ public:
                                std::vector<TransferDescriptor>& descriptors,
                                const std::vector<GroupSetPtr>&  group_sets,
                                std::vector<size_t>*             wire_item_indices = nullptr);
+
+    static std::optional<TransferTask> decodeTransferTask(const MemoryOperationRequestPB&  request,
+                                                          const std::vector<GroupSetPtr>& group_sets,
+                                                          MemoryOperationResponsePB&      response,
+                                                          std::vector<size_t>* wire_item_indices = nullptr);
 
     static MemoryOperationResponsePB::Code encodeCode(CacheCopyError error);
     static CacheCopyError                  decodeCode(MemoryOperationResponsePB::Code error);

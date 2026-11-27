@@ -141,32 +141,6 @@ TEST(BlockTreeTaskPoolTest, ExpiredAbsoluteDeadlineRunsTimeoutInsteadOfTask) {
     EXPECT_TRUE(timeout_ran.load());
 }
 
-TEST(BlockTreeTaskPoolTest, ExpiredTaskCaptureCanSubmitWhenReleased) {
-    BlockTreeTaskPool pool(1, 8, "BlockTreeTaskPoolTest");
-    ASSERT_TRUE(pool.start());
-    std::promise<void> unblock;
-    auto gate = unblock.get_future().share();
-    ASSERT_TRUE(pool.submit(BlockTreeTaskClass::LOAD, [gate] { gate.wait(); }));
-    std::atomic<bool> timeout_ran{false};
-    std::atomic<bool> followup_ran{false};
-    auto lease = std::shared_ptr<int>(new int(0), [&](int* value) {
-        delete value;
-        EXPECT_TRUE(pool.submit(BlockTreeTaskClass::LOAD, [&] { followup_ran.store(true); }));
-    });
-    EXPECT_TRUE(pool.submit(BlockTreeTaskClass::LOAD, [lease] { ADD_FAILURE() << "expired task ran"; },
-                            BlockTreeTaskPool::Clock::now() + std::chrono::hours(1),
-                            [&] { timeout_ran.store(true); }));
-    lease.reset();
-    {
-        std::lock_guard<std::mutex> lock(pool.lifecycle_mutex_);
-        pool.load_queue_.back().deadline = BlockTreeTaskPool::Clock::now() - std::chrono::seconds(1);
-    }
-    unblock.set_value();
-    pool.waitForIdle();
-    EXPECT_TRUE(timeout_ran.load());
-    EXPECT_TRUE(followup_ran.load());
-}
-
 TEST(BlockTreeTaskPoolTest, ShutdownRejectsNewTasksAndIsIdempotent) {
     BlockTreeTaskPool pool(1, 8, "BlockTreeTaskPoolTest");
     ASSERT_TRUE(pool.start());

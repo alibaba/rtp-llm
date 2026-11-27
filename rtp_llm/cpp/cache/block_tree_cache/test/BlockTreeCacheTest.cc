@@ -684,8 +684,17 @@ TEST_F(BlockTreeCacheMetricsTest, UnfreezeMetricsCountUniqueTargetsPerPoolAndBac
     pools[2].tier            = Tier::DEVICE;
     pools[3].pool_name       = "disk";
     pools[3].tier            = Tier::DISK;
+    auto report_pool_metrics = [&] {
+        RtpLLMCachePoolMetricsCollector collector;
+        collector.report_frozen_ref_blocks = true;
+        for (const auto& pool : pools) {
+            kmonitor::MetricsTags tags("pool_name", pool.pool_name);
+            tags.AddTag("tier", tierName(pool.tier));
+            reporter->report<RtpLLMCachePoolMetrics, RtpLLMCachePoolMetricsCollector>(&tags, &collector);
+        }
+    };
     auto expect_zero_metrics = [&] {
-        metrics_reporter.reportUnfreezeZeroMetrics(pools);
+        report_pool_metrics();
         for (const auto& pool : pools) {
             for (const char* backend : {"local", "kvcm"}) {
                 for (bool forced : {false, true}) {
@@ -695,22 +704,16 @@ TEST_F(BlockTreeCacheMetricsTest, UnfreezeMetricsCountUniqueTargetsPerPoolAndBac
         }
     };
     expect_zero_metrics();
-    FrozenTask::ExecutionInfo execution;
-    execution.trace_id = uint64_t{1};
-    execution.remote   = true;
-    execution.descriptors.push_back(
-        {0, 0, Tier::DEVICE, Tier::HOST, {{source, 1, 0, "source"}}, {{first, 1, 0, "first"}, {first, 2, 0, "first"}}});
-    execution.descriptors.push_back(
-        {1, 0, Tier::DEVICE, Tier::HOST, {}, {{first, 1, 0, "first"}, {second, 1, 0, "second"}}});
-    metrics_reporter.reportUnfreezeMetrics(execution, false);
-    execution.trace_id = std::string("kvcm-1");
-    execution.remote   = false;
-    execution.descriptors.pop_back();
-    metrics_reporter.reportUnfreezeMetrics(execution, false);
-    metrics_reporter.reportUnfreezeMetrics(execution, true);
-    execution.trace_id = uint64_t{2};
-    metrics_reporter.reportUnfreezeMetrics(execution, true);
-    metrics_reporter.reportUnfreezeZeroMetrics(pools);
+    std::string backend = "local";
+    std::vector<TransferTargetBlock> targets = {{first, 1}, {first, 2}, {first, 1}, {second, 1}};
+    metrics_reporter.reportUnfreezeMetrics(targets, backend, false);
+    backend = "kvcm";
+    targets.resize(2);
+    metrics_reporter.reportUnfreezeMetrics(targets, backend, false);
+    metrics_reporter.reportUnfreezeMetrics(targets, backend, true);
+    backend = "local";
+    metrics_reporter.reportUnfreezeMetrics(targets, backend, true);
+    report_pool_metrics();
     EXPECT_DOUBLE_EQ(snapshot_unfreeze_blocks("first", Tier::HOST, "kvcm", true), 2);
     EXPECT_DOUBLE_EQ(snapshot_unfreeze_blocks("first", Tier::HOST, "local", true), 2);
     EXPECT_DOUBLE_EQ(snapshot_unfreeze_blocks("first", Tier::HOST, "local"), 2);
@@ -732,8 +735,10 @@ TEST_F(BlockTreeCacheMetricsTest, FrozenMetricIsOwnerOnlyAndIncludesZeroForEvery
         collector.report_frozen_ref_blocks = false;
         collector.frozen_ref_blocks        = 9;
         const auto series_before           = metricSeriesCount(metrics->frozen_ref_blocks_metric);
+        const auto unfreeze_series_before  = metricSeriesCount(metrics->unfreeze_blocks_qps_metric);
         ASSERT_TRUE((reporter->report<RtpLLMCachePoolMetrics, RtpLLMCachePoolMetricsCollector>(&tags, &collector)));
         EXPECT_EQ(metricSeriesCount(metrics->frozen_ref_blocks_metric), series_before);
+        EXPECT_EQ(metricSeriesCount(metrics->unfreeze_blocks_qps_metric), unfreeze_series_before);
         collector.report_frozen_ref_blocks = true;
         collector.frozen_ref_blocks        = 0;
         ASSERT_TRUE((reporter->report<RtpLLMCachePoolMetrics, RtpLLMCachePoolMetricsCollector>(&tags, &collector)));
@@ -2726,12 +2731,8 @@ TEST_F(BlockTreeCacheTest, CapacityReleaseRetriesWatermarkWithoutDroppingHeldOrF
     BlockTreeCacheTestPeer::runMaintenanceForTest(*cache);
     EXPECT_FALSE(cache->tree()->findNode({100}).empty());
 
-    const std::weak_ptr<BlockTreeCache> weak_cache = cache;
-    pool->setCapacityChangeCallback([weak_cache] {
-        if (const auto current = weak_cache.lock()) {
-            current->onCapacityChanged();
-        }
-    });
+    const auto capacity_changed = cache->capacityChangeCallback();
+    pool->setCapacityChangeCallback(capacity_changed);
     pool->decRef(42, DeviceBlockRefType::REQUEST);
     BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache);
     EXPECT_FALSE(cache->tree()->findNode({100}).empty());
@@ -2745,7 +2746,10 @@ TEST_F(BlockTreeCacheTest, CapacityReleaseRetriesWatermarkWithoutDroppingHeldOrF
     EXPECT_FALSE(cache->tree()->findNode({200}).empty());
     EXPECT_TRUE(pool->isAllocated(43));
     EXPECT_TRUE(pool->isFrozen(43));
-    pool->setCapacityChangeCallback({});
+    const std::weak_ptr<BlockTreeCache> cache_lifetime = cache;
+    cache.reset();
+    ASSERT_TRUE(cache_lifetime.expired());
+    EXPECT_NO_THROW(capacity_changed());
 }
 
 TEST_F(BlockTreeCacheTest, WatermarkDirectDropPreservesDeviceBlockWithTreeOperationReference) {

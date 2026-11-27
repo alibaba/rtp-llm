@@ -9,15 +9,19 @@
 #include <vector>
 
 #include "kmonitor/client/MetricsReporter.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/ScopeRollback.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/metrics/BlockTreeCacheMetricsReporter.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/evict/EvictionTaskRunner.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/test/BlockTreeCacheTestUtils.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeReclaimer.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/BlockTransferDispatcher.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferBatchAsyncContext.h"
 #include "rtp_llm/cpp/utils/TimeUtil.h"
 
 namespace rtp_llm {
 namespace {
+
+using block_transfer_engine_test::bufferSafeResult;
 
 using ScriptedTransferEngine = block_tree_cache_test::ScriptedPerRankBlockTransferEngine;
 
@@ -62,7 +66,9 @@ public:
         const auto& descriptors = task.descriptors();
         batches_.emplace_back(descriptors.begin(), descriptors.end());
         if (on_submit_) {
+            block_tree_cache_detail::ScopeRollback unsubmitted([&] { task.completionProof()->report(true); });
             on_submit_();
+            unsubmitted.dismiss();
         }
         ++batch_count_;
         return ScriptedTransferEngine::executeBatch(std::move(task));
@@ -107,8 +113,9 @@ public:
     }
 
     void complete(size_t index, bool success) {
-        contexts_.at(index)->complete(success ? ErrorInfo::OkStatus() :
-                                                ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "injected failure"));
+        const auto status =
+            success ? ErrorInfo::OkStatus() : ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "injected failure");
+        contexts_.at(index)->complete(bufferSafeResult(status));
     }
 
 private:
@@ -124,7 +131,8 @@ protected:
                                 makeRunnerTestGroupSet(1, "eviction_runner_1", disk_pool),
                                 makeRunnerTestGroupSet(2, "eviction_runner_2", disk_pool)};
         transfer_engine_     = std::make_shared<BatchCountingTransferEngine>(group_sets_, false);
-        transfer_dispatcher_ = std::make_unique<BlockTransferDispatcher>(transfer_engine_);
+        transfer_dispatcher_ =
+            std::make_unique<BlockTransferDispatcher>(transfer_engine_, std::make_shared<BlockTreeReclaimer>());
     }
 
     EvictionTaskRunner makeRunner() {
@@ -180,7 +188,7 @@ TEST(EvictionTransferTaskTest, ConstructorOwnsDescriptorsAndTimings) {
 
 TEST_F(EvictionTaskRunnerTest, SubmitsPrimaryWithoutBlocking) {
     auto                    deferred_engine = std::make_shared<DeferredTransferEngine>(group_sets_);
-    BlockTransferDispatcher dispatcher(deferred_engine);
+    BlockTransferDispatcher dispatcher(deferred_engine, std::make_shared<BlockTreeReclaimer>());
     EvictionTaskRunner      runner(group_sets_, &dispatcher, &task_pool_, metrics_reporter_);
     auto                    task = std::make_shared<EvictionTransferTask>(makeCopyTask());
     std::optional<bool>     result;
@@ -225,7 +233,7 @@ TEST_F(EvictionTaskRunnerTest, SubmitsAllDescriptorsAsOneLogicalTransfer) {
 
 TEST_F(EvictionTaskRunnerTest, RunOwnsTransferMetricsLifetime) {
     auto                    deferred_engine = std::make_shared<DeferredTransferEngine>(group_sets_);
-    BlockTransferDispatcher dispatcher(deferred_engine);
+    BlockTransferDispatcher dispatcher(deferred_engine, std::make_shared<BlockTreeReclaimer>());
     EvictionTaskRunner      runner(group_sets_, &dispatcher, &task_pool_, metrics_reporter_);
     auto                    task = std::make_shared<EvictionTransferTask>(makeCopyTask());
     std::optional<bool>     result;

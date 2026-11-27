@@ -424,7 +424,6 @@ protected:
         if (block_matches) {
             backend->blockMatches();
         }
-        cache_manager_->stopFrozenTaskRecovery();
         cache_manager_->coordinator_manager_->block_tree_cache_.reset();
         cache_manager_->block_tree_cache_.reset();
         auto cache = createBlockTreeCache(cache_manager_->cacheConfig(),
@@ -435,7 +434,6 @@ protected:
         EXPECT_NE(cache, nullptr);
         cache_manager_->block_tree_cache_ = cache;
         cache_manager_->coordinator_manager_->attachBlockTreeCache(cache);
-        EXPECT_TRUE(cache_manager_->startFrozenTaskRecovery());
 
         if (seed_host) {
             auto& resource = stream_->streamCacheResource();

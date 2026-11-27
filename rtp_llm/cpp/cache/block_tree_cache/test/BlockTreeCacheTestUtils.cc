@@ -26,6 +26,8 @@
 
 namespace rtp_llm::block_tree_cache_test {
 
+using block_transfer_engine_test::bufferSafeResult;
+
 void CallbackBarrier::enterAndWait() {
     std::unique_lock<std::mutex> lock(mutex_);
     ++entered_count_;
@@ -84,11 +86,12 @@ std::shared_ptr<TransferAsyncContext> ControlledPerRankBlockTransferEngine::exec
         barrier_->enterAndWait();
     }
     if (action_ == TransferCopyAction::Throw) {
+        task.completionProof()->report(true);
         throw std::runtime_error("injected copy failure");
     }
     if (action_ == TransferCopyAction::Fail) {
         return std::make_shared<CompletedTransferAsyncContext>(
-            ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "injected copy failure"));
+            bufferSafeResult(ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "injected copy failure")));
     }
     return PerRankBlockTransferEngine::executeBatch(std::move(task));
 }
@@ -488,7 +491,8 @@ std::unique_ptr<BlockTreeCache> makeBlockTreeCacheForTest(std::vector<GroupSetPt
                                                           BlockTreeCacheConfig                       config,
                                                           std::shared_ptr<StorageBackend>            storage_backend,
                                                           std::shared_ptr<BroadcastManager>          broadcast_manager,
-                                                          std::shared_ptr<kmonitor::MetricsReporter> metrics_reporter) {
+                                                          std::shared_ptr<kmonitor::MetricsReporter> metrics_reporter,
+                                                          RecoveryTestOptions                        recovery) {
     group_sets = workLoopTestGroups(std::move(group_sets));
     if (config.disk_cache_evict_max_pending_bytes == 0) {
         config.disk_cache_evict_max_pending_bytes = KVCacheConfig{}.disk_cache_evict_max_pending_bytes;
@@ -523,21 +527,27 @@ std::unique_ptr<BlockTreeCache> makeBlockTreeCacheForTest(std::vector<GroupSetPt
         };
     }
     auto cache_metrics_reporter = std::make_shared<BlockTreeCacheMetricsReporter>(std::move(metrics_reporter));
-    auto per_rank_engine        = std::make_shared<PerRankBlockTransferEngine>(group_sets,
+    auto reclaimer              = std::make_shared<BlockTreeReclaimer>(cache_metrics_reporter);
+    reclaimer->configure(recovery.rank,
+                         recovery.interval_ms,
+                         recovery.query_timeout_ms,
+                         recovery.force_release_timeout_ms,
+                         broadcast_manager);
+    auto per_rank_engine = std::make_shared<PerRankBlockTransferEngine>(group_sets,
                                                                         config.enable_disk_cache,
                                                                         config.device_disk_staging_block_count,
                                                                         config.max_descriptors_per_transfer_batch,
                                                                         config.transfer_worker_count,
                                                                         config.transfer_queue_max_size,
                                                                         cache_metrics_reporter,
-                                                                        0,
+                                                                        recovery.rank,
                                                                         kDefaultCrcSlotsPerWorkLoop);
     std::shared_ptr<MultiRankBlockTransferEngine> multi_rank_engine;
     if (broadcast_manager != nullptr) {
         multi_rank_engine = std::make_shared<MultiRankBlockTransferEngine>(group_sets, std::move(broadcast_manager));
     }
     auto transfer_dispatcher =
-        std::make_unique<BlockTransferDispatcher>(std::move(per_rank_engine), std::move(multi_rank_engine));
+        std::make_unique<BlockTransferDispatcher>(std::move(per_rank_engine), reclaimer, std::move(multi_rank_engine));
     auto task_pool = std::make_unique<BlockTreeTaskPool>(
         static_cast<size_t>(config.task_pool_size), config.business_queue_max_size, "BlockTreeCacheTaskPool");
     auto tree  = std::make_unique<BlockTree>(std::move(group_sets));
@@ -546,8 +556,10 @@ std::unique_ptr<BlockTreeCache> makeBlockTreeCacheForTest(std::vector<GroupSetPt
                                                   std::move(storage_backend),
                                                   std::move(transfer_dispatcher),
                                                   std::move(task_pool),
-                                                  std::move(cache_metrics_reporter));
+                                                  std::move(cache_metrics_reporter),
+                                                  reclaimer);
     if (cache->storageBackend()) {
+        cache->storageBackend()->setReclaimer(reclaimer);
         RTP_LLM_CHECK_WITH_INFO(cache->storageBackend()->init(std::move(storage_topology),
                                                               std::move(storage_pools),
                                                               std::move(storage_buffer_resolver)),
@@ -798,10 +810,10 @@ std::shared_ptr<TransferAsyncContext> ScriptedPerRankBlockTransferEngine::execut
         return PerRankBlockTransferEngine::executeBatch(std::move(task));
     }
     if (success) {
-        return std::make_shared<CompletedTransferAsyncContext>(ErrorInfo::OkStatus());
+        return std::make_shared<CompletedTransferAsyncContext>(bufferSafeResult());
     }
     return std::make_shared<CompletedTransferAsyncContext>(
-        ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "scripted transfer failure"));
+        bufferSafeResult(ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "scripted transfer failure")));
 }
 
 void ScriptedPerRankBlockTransferEngine::enqueue(bool success) {
