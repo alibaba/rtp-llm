@@ -29,15 +29,24 @@ from rtp_llm.models_py.modules.factory.fused_moe.defs.fused_moe import ExpertGat
 # fused kernel.  ~4× per-call speedup, identical top-k indices vs eager.
 try:
     from rtp_llm.models_py.triton_kernels.moe.gate_fused import (
+        fused_moe_gate,
         fused_sqrtsoftplus_gate,
         fused_sqrtsoftplus_hash_gate,
     )
 
     _GATE_FUSED_OK = True
 except Exception:  # pragma: no cover
+    fused_moe_gate = None
     fused_sqrtsoftplus_gate = None
     fused_sqrtsoftplus_hash_gate = None
     _GATE_FUSED_OK = False
+
+try:
+    from rtp_llm.models_py.modules.factory.fused_moe.utils.fp8_fp4.mega_gate import (
+        try_bf16_mega_gate,
+    )
+except Exception:  # pragma: no cover
+    try_bf16_mega_gate = None
 
 
 def _use_fused_gate(score_func: str, x_size_0: int, topk: int) -> bool:
@@ -277,6 +286,11 @@ class Gate(nn.Module):
                 torch.zeros((0, self.topk), dtype=torch.float32, device=x.device),
                 torch.zeros((0, self.topk), dtype=torch.long, device=x.device),
             )
+        mega_gate_fn = globals().get("try_bf16_mega_gate")
+        if mega_gate_fn is not None:
+            mega_result = mega_gate_fn(self, x, input_ids)
+            if mega_result is not None:
+                return mega_result
         # BF16 GEMM with FP32 epilogue replaces the
         # FP32-everywhere path that previously emitted SIMT sgemm 128x128
         # (127× × 1.15 ms = 145 ms in the 64k+CP=4 trace).  Score numerics
@@ -315,6 +329,48 @@ class Gate(nn.Module):
                 topk=self.topk,
                 route_scale=float(self.route_scale),
                 norm_eps=1e-12,
+            )
+
+        fused_general_gate = globals().get("fused_moe_gate")
+        if (
+            fused_general_gate is not None
+            and not self.hash
+            and getattr(self, "_ced_row_projection", None) is None
+            and os.environ.get("MOE_GATE_FUSED", "1") != "0"
+            and os.environ.get("MOE_GATE_FP32", "0") != "1"
+            and scores.is_cuda
+            and self.score_func in ("softmax", "sigmoid", "sqrtsoftplus", "identity")
+            and (
+                self.score_func != "sqrtsoftplus"
+                or self.bias is None
+                or self._visual_routing_active()
+            )
+            and 1 <= self.topk <= 32
+            and (self.bias is not None or not self._visual_routing_active())
+        ):
+            image_mask = (
+                input_ids.reshape(-1) >= self.vocab_size
+                if self._visual_routing_active() and input_ids is not None
+                else None
+            )
+            bias_arg = None if self.bias is None else self.bias.contiguous()
+            bias_vl_arg = (
+                None
+                if (bias_arg is None or image_mask is None or self.bias_vl is None)
+                else self.bias_vl.contiguous()
+            )
+            if bias_vl_arg is None:
+                image_mask = None
+            return fused_general_gate(
+                scores.contiguous(),
+                bias_arg,
+                topk=self.topk,
+                score_func=self.score_func,
+                route_scale=float(self.route_scale),
+                norm_eps=1e-12,
+                normalize=self.score_func != "softmax",
+                bias_vl=bias_vl_arg,
+                image_token_mask=image_mask,
             )
 
         if self.score_func == "softmax":

@@ -232,6 +232,74 @@ class TestMegaMoEInputPacker(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "out_fp8 must be contiguous"):
             FusedMegaMoEInputPacker().pack(x, weights, indices, buf, tokens)
 
+    def test_fused_pack_x_inputs_matches_torch_bits(self):
+        from rtp_llm.models_py.triton_kernels.moe.mega_moe_input_pack import (
+            fused_pack_mega_moe_x_inputs,
+        )
+
+        torch.manual_seed(7)
+        for tokens in (0, 1, 17, 128):
+            with self.subTest(tokens=tokens):
+                dim, topk = 512, 6
+                x = torch.randn(tokens, dim, device="cuda", dtype=torch.bfloat16)
+                weights = torch.rand(tokens, topk, device="cuda", dtype=torch.float32)
+                indices = torch.randint(
+                    0, 256, (tokens, topk), device="cuda", dtype=torch.int64
+                )
+                ref = _make_buf(max(tokens, 1), dim, topk, "cuda")
+                got = _make_buf(max(tokens, 1), dim, topk, "cuda")
+                if tokens > 0:
+                    with _env("MOE_STRICT_FUSED", "0"):
+                        TorchMegaMoEInputPacker().pack(x, weights, indices, ref, tokens)
+                fused_pack_mega_moe_x_inputs(
+                    x, got.x[:tokens], got.x_sf[:tokens]
+                )
+                if tokens > 0:
+                    self.assertTrue(
+                        torch.equal(
+                            ref.x[:tokens].view(torch.uint8),
+                            got.x[:tokens].view(torch.uint8),
+                        )
+                    )
+                    self.assertTrue(torch.equal(ref.x_sf[:tokens], got.x_sf[:tokens]))
+
+    def test_fused_pack_x_inputs_stages_shared_l1_sf(self):
+        from rtp_llm.models_py.modules.factory.fused_moe.utils.mega_moe.shared_fp8_scale import (
+            stage_shared_fp8_input_scales,
+        )
+        from rtp_llm.models_py.triton_kernels.moe.mega_moe_input_pack import (
+            fused_pack_mega_moe_x_inputs,
+        )
+
+        torch.manual_seed(9)
+        dim, block_m = 512, 192
+        aligned_block_m = ((block_m + 127) // 128) * 128
+        for tokens in (1, 17, 257):
+            with self.subTest(tokens=tokens):
+                x = torch.randn(tokens, dim, device="cuda", dtype=torch.bfloat16)
+                out_fp8 = torch.empty((tokens, dim), device="cuda", dtype=torch.float8_e4m3fn)
+                out_sf = torch.empty((tokens, dim // 128), device="cuda", dtype=torch.int32)
+                num_blocks = (tokens + block_m - 1) // block_m
+                dest_rows = num_blocks * aligned_block_m
+                got_shared_sf = torch.full(
+                    (dest_rows, dim // 128), -1, device="cuda", dtype=torch.int32
+                )
+                fused_pack_mega_moe_x_inputs(
+                    x,
+                    out_fp8,
+                    out_sf,
+                    out_shared_l1_sf=got_shared_sf,
+                    shared_l1_block_m=block_m,
+                )
+                ref_shared_sf = torch.empty_like(got_shared_sf)
+                stage_shared_fp8_input_scales(
+                    out_sf,
+                    ref_shared_sf,
+                    tokens=tokens,
+                    block_m=block_m,
+                )
+                self.assertTrue(torch.equal(got_shared_sf, ref_shared_sf))
+
 
 if __name__ == "__main__":
     unittest.main()

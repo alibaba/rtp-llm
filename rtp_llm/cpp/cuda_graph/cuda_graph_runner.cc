@@ -2205,6 +2205,22 @@ void CudaGraphRunner::captureOneGraphInstance(int key, const char* key_type) {
         cuda_graph::graphDeviceSynchronize();
 
         CudaGraphStreamLife stream_life(capture_stream_);
+#if USING_CUDA
+        {
+            // DeepGEMM's bf16_mega_gate caches a per-stream score_barriers tensor
+            // on the first T>0 launch. Initialize it on capture_stream_ BEFORE
+            // graphCaptureBegin if DSV4/mega_gate has been loaded on this process.
+            py::dict sys_modules = py::module_::import("sys").attr("modules");
+            const char* mega_gate_mod =
+                "rtp_llm.models_py.modules.factory.fused_moe.utils.fp8_fp4.mega_gate";
+            if (sys_modules.contains(mega_gate_mod)) {
+                py::object mod = sys_modules[mega_gate_mod];
+                if (!mod.is_none() && py::hasattr(mod, "prepare_capture_stream_barrier")) {
+                    mod.attr("prepare_capture_stream_barrier")();
+                }
+            }
+        }
+#endif
         auto&               graph               = graph_instances_[key].graph_;
         std::string         output_dot_filename = "";
         if (enable_cuda_graph_debug_mode_) {

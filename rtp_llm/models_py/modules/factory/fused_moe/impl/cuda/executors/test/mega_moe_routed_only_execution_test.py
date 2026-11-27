@@ -27,6 +27,9 @@ from rtp_llm.models_py.modules.factory.fused_moe.utils.fp8_fp4.chunked_layer imp
     resolve_moe_max_tokens_per_rank,
     synchronized_moe_chunk_plan,
 )
+from rtp_llm.models_py.modules.factory.fused_moe.utils.fp8_fp4.mega_gate import (
+    prepare_capture_stream_barrier,
+)
 from rtp_llm.utils.model_weight import W
 
 _WORLD_SIZE = 2
@@ -337,9 +340,12 @@ def _worker(
             _sync_ranks_for_mega(device)
             mega(graph_x, graph_ids)
         torch.cuda.synchronize(device)
+        capture_stream = torch.cuda.Stream(device=device)
+        with torch.cuda.stream(capture_stream):
+            prepare_capture_stream_barrier(device)
         _sync_ranks_for_mega(device)
         graph = torch.cuda.CUDAGraph()
-        with torch.inference_mode(), torch.cuda.graph(graph):
+        with torch.inference_mode(), torch.cuda.graph(graph, stream=capture_stream):
             graph_actual = mega(graph_x, graph_ids)
         torch.manual_seed(20261200 + rank)
         graph_x.copy_(torch.randn_like(graph_x))
@@ -494,9 +500,12 @@ def _se_worker(
             _sync_ranks_for_mega(device)
             mega_se(graph_x, graph_ids)
         torch.cuda.synchronize(device)
+        capture_stream = torch.cuda.Stream(device=device)
+        with torch.cuda.stream(capture_stream):
+            prepare_capture_stream_barrier(device)
         _sync_ranks_for_mega(device)
         graph = torch.cuda.CUDAGraph()
-        with torch.inference_mode(), torch.cuda.graph(graph):
+        with torch.inference_mode(), torch.cuda.graph(graph, stream=capture_stream):
             graph_actual = mega_se(graph_x, graph_ids)
         torch.manual_seed(20263300 + rank)
         graph_x.copy_(torch.randn_like(graph_x))

@@ -36,6 +36,12 @@ def _load_fused_hash_gate():
     return fused_sqrtsoftplus_hash_gate
 
 
+def _load_general_fused_gate():
+    from rtp_llm.models_py.triton_kernels.moe.gate_fused import fused_moe_gate
+
+    return fused_moe_gate
+
+
 def _load_eager_route_selector():
     from rtp_llm.models_py.modules.factory.fused_moe.utils.fp8_fp4.gate import (
         _select_routes_with_nonfinite_fallback,
@@ -259,6 +265,200 @@ class GateEagerNonfiniteTest(unittest.TestCase):
             self.assertTrue(torch.allclose(weights[row], expected_weights))
         self.assertTrue(torch.isfinite(weights).all().item())
         self.assertTrue(((indices >= 0) & (indices < E)).all().item())
+
+
+class GeneralizedGateFusedTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        if not torch.cuda.is_available():
+            raise AssertionError("CUDA is required by this dedicated SM100 target")
+        if torch.cuda.get_device_capability()[0] != 10:
+            raise AssertionError("SM100 is required by this dedicated SM100 target")
+        _load_general_fused_gate()
+
+    @staticmethod
+    def _eager_general_gate(
+        scores: torch.Tensor,
+        bias: torch.Tensor | None,
+        topk: int,
+        *,
+        score_func: str,
+        route_scale: float,
+        normalize: bool,
+        norm_eps: float = 1e-12,
+        n_group: int = 0,
+        topk_group: int = 0,
+        bias_vl: torch.Tensor | None = None,
+        image_token_mask: torch.Tensor | None = None,
+    ):
+        s = scores.float()
+        if score_func == "softmax":
+            s_active = s.softmax(dim=-1)
+        elif score_func == "sigmoid":
+            s_active = s.sigmoid()
+        elif score_func == "sqrtsoftplus":
+            s_active = F.softplus(s).sqrt()
+        else:
+            s_active = s
+
+        if bias is not None:
+            if bias_vl is not None and image_token_mask is not None:
+                b = torch.where(
+                    image_token_mask.unsqueeze(-1), bias_vl.float(), bias.float()
+                )
+            else:
+                b = bias.float()
+            s_biased = s_active + b
+        else:
+            s_biased = s_active
+
+        if n_group > 1 and topk_group < n_group:
+            n_tokens, experts = s_biased.shape
+            group_scores = (
+                s_biased.view(n_tokens, n_group, experts // n_group)
+                .topk(2, dim=-1)[0]
+                .sum(dim=-1)
+            )
+            group_idx = torch.topk(group_scores, k=topk_group, dim=-1, sorted=False)[1]
+            group_mask = torch.zeros_like(group_scores).scatter_(1, group_idx, 1.0)
+            score_mask = (
+                group_mask.unsqueeze(-1)
+                .expand(n_tokens, n_group, experts // n_group)
+                .reshape(n_tokens, experts)
+                .bool()
+            )
+            s_biased = s_biased.masked_fill(~score_mask, float("-inf"))
+
+        indices = s_biased.topk(topk, dim=-1)[1]
+        weights = s_active.gather(1, indices)
+        if normalize:
+            weights = weights / (weights.sum(dim=-1, keepdim=True) + norm_eps)
+        weights = weights * route_scale
+        return weights, indices
+
+    def _assert_matches_eager(self, **kwargs):
+        fused = _load_general_fused_gate()
+        w_ref, i_ref = self._eager_general_gate(**kwargs)
+        w_got, i_got = fused(**kwargs)
+        self.assertEqual(i_got.dtype, torch.int64)
+        self.assertEqual(w_got.dtype, torch.float32)
+        self.assertEqual(i_ref.tolist(), i_got.tolist())
+        torch.testing.assert_close(w_got, w_ref, rtol=1e-4, atol=1e-5)
+
+    def test_softmax_sigmoid_identity_with_and_without_bias(self):
+        torch.manual_seed(11)
+        device = "cuda:0"
+        for dtype in (torch.float32, torch.bfloat16):
+            for score_func, normalize in (
+                ("softmax", False),
+                ("sigmoid", True),
+                ("sigmoid", False),
+                ("identity", True),
+                ("sqrtsoftplus", True),
+            ):
+                for use_bias in (False, True):
+                    with self.subTest(
+                        dtype=dtype, score_func=score_func, normalize=normalize, use_bias=use_bias
+                    ):
+                        if dtype == torch.bfloat16 and not use_bias:
+                            # 7-bit bfloat16 mantissa collides easily in torch.randn without bias;
+                            # use distinct per-row scores so topk order is uniquely determined.
+                            perm = torch.stack([torch.randperm(130, device=device) for _ in range(29)])
+                            scores = ((perm.float() - 65.0) * 0.05).to(torch.bfloat16)
+                        else:
+                            scores = torch.randn(29, 130, device=device, dtype=dtype)
+                        bias = (
+                            torch.randn(130, device=device, dtype=torch.float32) * 0.1
+                            if use_bias
+                            else None
+                        )
+                        self._assert_matches_eager(
+                            scores=scores,
+                            bias=bias,
+                            topk=6,
+                            score_func=score_func,
+                            route_scale=2.5,
+                            normalize=normalize,
+                        )
+
+    def test_visual_bias_and_non_multiple_of_4_experts(self):
+        torch.manual_seed(12)
+        device = "cuda:0"
+        N, E, K = 17, 37, 5
+        scores = torch.randn(N, E + 8, device=device, dtype=torch.bfloat16)[:, :E]
+        bias = torch.randn(E, device=device, dtype=torch.float32) * 0.2
+        bias_vl = torch.randn(E, device=device, dtype=torch.float32) * 0.2
+        image_mask = (torch.arange(N, device=device) % 3) == 0
+        self._assert_matches_eager(
+            scores=scores,
+            bias=bias,
+            topk=K,
+            score_func="sigmoid",
+            route_scale=1.5,
+            normalize=True,
+            bias_vl=bias_vl,
+            image_token_mask=image_mask,
+        )
+
+    def test_grouped_topk_parity_and_nonfinite_fallback(self):
+        torch.manual_seed(13)
+        device = "cuda:0"
+        N, E, K = 24, 256, 8
+        scores = torch.randn(N, E, device=device, dtype=torch.float32)
+        bias = torch.randn(E, device=device, dtype=torch.float32) * 0.2
+        self._assert_matches_eager(
+            scores=scores,
+            bias=bias,
+            topk=K,
+            score_func="sigmoid",
+            route_scale=2.5,
+            normalize=True,
+            n_group=8,
+            topk_group=4,
+        )
+
+        scores_bad = scores[:4].clone()
+        scores_bad[0, 5] = float("nan")
+        scores_bad[2, 9] = float("inf")
+        fused = _load_general_fused_gate()
+        w_bad, i_bad = fused(
+            scores_bad,
+            bias,
+            topk=K,
+            score_func="softmax",
+            route_scale=2.0,
+            normalize=False,
+            n_group=8,
+            topk_group=4,
+        )
+        expected_i = torch.arange(K, device=device, dtype=torch.int64)
+        expected_w = torch.full((K,), 2.0 / K, device=device, dtype=torch.float32)
+        for row in (0, 2):
+            self.assertTrue(torch.equal(i_bad[row], expected_i))
+            self.assertTrue(torch.allclose(w_bad[row], expected_w))
+
+    def test_token_count_not_specialized_in_triton_cache(self):
+        from rtp_llm.models_py.triton_kernels.moe.gate_fused import _gate_moe_topk_kernel
+
+        self.assertIn("N", _gate_moe_topk_kernel.do_not_specialize)
+        fused = _load_general_fused_gate()
+        bias = torch.zeros(64, device="cuda:0", dtype=torch.float32)
+        dev_idx = torch.cuda.current_device()
+        cache = _gate_moe_topk_kernel.device_caches[dev_idx][0]
+        before = len(cache)
+        fused(torch.randn(1, 64, device="cuda:0"), bias, topk=4, score_func="softmax")
+        mid = len(cache)
+        for n in (7, 19, 65):
+            fused(
+                torch.randn(n, 64, device="cuda:0"),
+                bias,
+                topk=4,
+                score_func="softmax",
+            )
+        after = len(cache)
+        self.assertGreaterEqual(mid, before)
+        self.assertEqual(after, mid)
 
 
 if __name__ == "__main__":

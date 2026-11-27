@@ -2909,3 +2909,29 @@ def _launch_dummy_fp8_mqa_logits(
         0,
     )
     del q, k, k_scale, weights, ks, ke, logits
+
+
+@torch.inference_mode()
+def warmup_bf16_mega_gate_jit(
+    model: Any,
+    *,
+    max_m: int,
+    device: torch.device,
+) -> int:
+    """JIT-compile unique ``deep_gemm.bf16_mega_gate`` shapes across heuristic buckets."""
+    if not model_warm_up_enabled():
+        return 0
+    device = torch.device(device)
+    if not _is_cuda_device(device):
+        return 0
+    _assert_not_capturing()
+
+    from rtp_llm.models_py.modules.factory.fused_moe.utils.fp8_fp4.mega_gate import (
+        collect_mega_gate_specs_from_model,
+        warmup_bf16_mega_gate_specs,
+    )
+
+    specs = collect_mega_gate_specs_from_model(model)
+    if not specs:
+        return 0
+    return warmup_bf16_mega_gate_specs(specs, max_tokens=int(max_m), device=device)

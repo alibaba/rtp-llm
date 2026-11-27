@@ -975,6 +975,181 @@ def _resolve_shared_l1_sf_args(
     return True, block_m, aligned_block_m, required_destination_rows
 
 
+def _validate_tensor_specs(
+    specs: tuple[tuple[str, torch.Tensor, tuple[int, ...], torch.dtype], ...],
+    *,
+    device: torch.device,
+    cuda_error_prefix: str,
+) -> None:
+    for name, tensor, expected_shape, expected_dtype in specs:
+        if not tensor.is_cuda:
+            raise RuntimeError(
+                f"{cuda_error_prefix}; {name} is on {tensor.device}"
+            )
+        if tensor.device != device:
+            raise ValueError(f"{name} must be on {device}, got {tensor.device}")
+        if tuple(tensor.shape) != expected_shape:
+            raise ValueError(
+                f"{name} shape mismatch: expected {expected_shape}, "
+                f"got {tuple(tensor.shape)}"
+            )
+        if tensor.dtype != expected_dtype:
+            raise ValueError(f"{name} must be {expected_dtype}, got {tensor.dtype}")
+        if tensor.dim() > 1 and tensor.stride(-1) != 1:
+            raise ValueError(
+                f"{name} must be contiguous in its last dimension; "
+                f"got stride={tensor.stride()}"
+            )
+
+
+@triton.jit(
+    do_not_specialize=[
+        "M",
+        "se_block_m",
+        "se_aligned_block_m",
+        "required_destination_rows",
+        "grid_m",
+        "shared_sf_stride_m",
+        "shared_sf_stride_k",
+    ]
+)
+def _pack_mega_moe_x_kernel(
+    x_ptr,
+    out_fp8_ptr,
+    out_sf_ptr,
+    out_shared_l1_sf_ptr,
+    M,
+    se_block_m,
+    se_aligned_block_m,
+    required_destination_rows,
+    grid_m,
+    shared_sf_stride_m,
+    shared_sf_stride_k,
+    N: tl.constexpr,
+    x_stride_m: tl.constexpr,
+    out_stride_m: tl.constexpr,
+    sf_stride_m: tl.constexpr,
+    eps: tl.constexpr,
+    fp8_max: tl.constexpr,
+    BLOCK_M: tl.constexpr,
+    STAGE_SHARED_SF: tl.constexpr,
+):
+    pid_m_blk = tl.program_id(0).to(tl.int64)
+    pid_blk = tl.program_id(1)
+    offs_m = pid_m_blk * BLOCK_M + tl.arange(0, BLOCK_M).to(tl.int64)
+    row_mask = offs_m < M
+
+    packed = _pack_x_block(
+        x_ptr,
+        out_fp8_ptr,
+        out_sf_ptr,
+        offs_m,
+        pid_blk,
+        M,
+        N,
+        x_stride_m,
+        out_stride_m,
+        sf_stride_m,
+        eps,
+        fp8_max,
+        BLOCK_M,
+    )
+    if STAGE_SHARED_SF:
+        _stage_shared_l1_sf_block(
+            packed,
+            out_shared_l1_sf_ptr,
+            offs_m,
+            row_mask,
+            pid_m_blk,
+            pid_blk,
+            M,
+            se_block_m,
+            se_aligned_block_m,
+            required_destination_rows,
+            grid_m,
+            shared_sf_stride_m,
+            shared_sf_stride_k,
+        )
+
+
+def fused_pack_mega_moe_x_inputs(
+    x: torch.Tensor,
+    out_fp8: torch.Tensor,
+    out_sf: torch.Tensor,
+    *,
+    out_shared_l1_sf: torch.Tensor | None = None,
+    shared_l1_block_m: int | None = None,
+) -> None:
+    """Pack BF16 activations into MegaMoE FP8 + UE8M0 buffers when routing already ran.
+
+    Used with ``deep_gemm.bf16_mega_gate(..., out=(buf.topk_idx, buf.topk_weights))``
+    where top-K weights and indices are written directly into the symmetric
+    buffer by DeepGEMM.  When both ``out_shared_l1_sf`` and
+    ``shared_l1_block_m`` are supplied, shared-expert L1 SF staging is fused
+    inline.
+    """
+    if x.dim() != 2 or x.dtype != torch.bfloat16:
+        raise ValueError(
+            f"MegaMoE x-pack requires [T, D] bfloat16 x, got {tuple(x.shape)} {x.dtype}"
+        )
+    if not x.is_cuda:
+        raise RuntimeError(f"MegaMoE x-pack requires CUDA bf16 x, got {x.device}")
+    tokens, dim = int(x.shape[0]), int(x.shape[1])
+    if dim <= 0 or dim % 512 != 0:
+        raise ValueError(f"dim must be a positive multiple of 512, got {dim}")
+    specs = (
+        ("x", x, (tokens, dim), torch.bfloat16),
+        ("out_fp8", out_fp8, (tokens, dim), torch.float8_e4m3fn),
+        ("out_sf", out_sf, (tokens, dim // 128), torch.int32),
+    )
+    _validate_tensor_specs(
+        specs,
+        device=x.device,
+        cuda_error_prefix="MegaMoE x-pack requires CUDA tensors",
+    )
+    stage_shared_sf, se_block_m, se_aligned_block_m, req_dest_rows = (
+        _resolve_shared_l1_sf_args(
+            out_shared_l1_sf,
+            shared_l1_block_m,
+            tokens=tokens,
+            dim=dim,
+            device=x.device,
+        )
+    )
+    if tokens == 0:
+        if stage_shared_sf and out_shared_l1_sf is not None:
+            out_shared_l1_sf.zero_()
+        return
+    shared_sf_ptr = out_shared_l1_sf if stage_shared_sf else out_sf
+    assert shared_sf_ptr is not None
+    block_m = _gate_pack_block_m(tokens)
+    fp8_max = torch.finfo(torch.float8_e4m3fn).max
+    num_k_blocks = triton.cdiv(dim, 128)
+    grid_m = triton.cdiv(tokens, block_m)
+    _pack_mega_moe_x_kernel[(grid_m, num_k_blocks)](
+        x,
+        out_fp8,
+        out_sf,
+        shared_sf_ptr,
+        tokens,
+        se_block_m,
+        se_aligned_block_m,
+        req_dest_rows,
+        grid_m,
+        int(shared_sf_ptr.stride(0)),
+        int(shared_sf_ptr.stride(1)),
+        dim,
+        x.stride(0),
+        out_fp8.stride(0),
+        out_sf.stride(0),
+        1.0e-4,
+        fp8_max,
+        BLOCK_M=block_m,
+        STAGE_SHARED_SF=stage_shared_sf,
+        num_warps=4,
+    )
+
+
 def fused_pack_mega_moe_gate_inputs(
     x: torch.Tensor,
     scores: torch.Tensor,

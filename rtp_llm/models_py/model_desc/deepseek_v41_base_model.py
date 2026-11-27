@@ -815,6 +815,7 @@ class DeepSeekV4Model(GptModelBase):
                     resolve_cp_metadata_warmup_max_batch_size,
                     resolve_dense_gemm_warmup_max_m,
                     warmup_batched_fp8_einsum_jit,
+                    warmup_bf16_mega_gate_jit,
                     warmup_compressor_combine_branch_kernels,
                     warmup_dense_gemm_jit,
                     warmup_dsv4_fp8_swa_slot_dequant_jit,
@@ -950,6 +951,11 @@ class DeepSeekV4Model(GptModelBase):
                     )
                 _fp8_mqa_logits_shapes = _collect_dsv4_fp8_mqa_logits_shapes(self.v4)
                 warmup_fp8_mqa_logits_jit(_fp8_mqa_logits_shapes, device=_jit_device)
+                warmup_bf16_mega_gate_jit(
+                    self,
+                    max_m=_dense_gemm_max_m,
+                    device=_jit_device,
+                )
                 logging.info("[DeepSeekV4Model] kernel JIT prewarm done")
             except Exception:
                 logging.exception("[DeepSeekV4Model] kernel JIT prewarm failed")

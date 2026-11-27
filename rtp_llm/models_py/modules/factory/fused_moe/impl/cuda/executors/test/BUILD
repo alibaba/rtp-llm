@@ -376,6 +376,15 @@ cuda13_sm100_py_test(
     ],
 )
 
+cuda13_sm100_py_test(
+    name = "mega_gate_sm100_test",
+    srcs = ["mega_gate_sm100_test.py"],
+    deps = [
+        "//rtp_llm:testlib",
+        "//rtp_llm/models_py:modules",
+    ],
+)
+
 # Constructor synchronization is a CPU-only contract; exercise it in normal UT.
 py_test(
     name = "trtllm_fp4_initialization_test",

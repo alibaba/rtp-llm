@@ -300,8 +300,17 @@ class Fp8Fp4MoeLayer(nn.Module):
         gate_payload = None
         topk_weights = None
         topk_ids = None
+        if observer is None and getattr(self.fused_moe, "supports_mega_gate", False):
+            from rtp_llm.models_py.modules.factory.fused_moe.utils.fp8_fp4.mega_gate import (
+                can_use_bf16_mega_gate,
+            )
+
+            use_mega_gate = can_use_bf16_mega_gate(self.gate, x, flat_ids)
+        else:
+            use_mega_gate = False
         use_gate_pack = (
-            observer is None
+            not use_mega_gate
+            and observer is None
             and self.fused_moe.supports_gate_pack
             and self.gate.can_prepare_gate_payload(x, flat_ids)
         )
@@ -323,20 +332,33 @@ class Fp8Fp4MoeLayer(nn.Module):
                 observer("topk_indices", topk_ids)
 
         routed_out = out_flat if self._shared_executor is None else None
+        direct_out = (
+            routed_out
+            if (
+                routed_out is not None
+                and routed_out.is_contiguous()
+                and routed_out.shape == (x.size(0), self.dim)
+                and routed_out.dtype == x.dtype
+            )
+            else None
+        )
 
         def run_routed_experts() -> torch.Tensor:
+            if use_mega_gate:
+                return self.fused_moe.forward_mega_gate(
+                    hidden_states=x,
+                    gate=self.gate,
+                    input_ids=flat_ids,
+                    activation="silu",
+                    out=direct_out,
+                )
             if gate_payload is not None:
-                if (
-                    routed_out is not None
-                    and routed_out.is_contiguous()
-                    and routed_out.shape == (x.size(0), self.dim)
-                    and routed_out.dtype == x.dtype
-                ):
+                if direct_out is not None:
                     return self.fused_moe.forward_gate_pack(
                         hidden_states=x,
                         gate_payload=gate_payload,
                         activation="silu",
-                        out=routed_out,
+                        out=direct_out,
                     )
                 return self.fused_moe.forward_gate_pack(
                     hidden_states=x,
@@ -352,7 +374,8 @@ class Fp8Fp4MoeLayer(nn.Module):
             )
 
         if self._shared_executor is None:
-            prepare_routes()
+            if not use_mega_gate:
+                prepare_routes()
             with record_function_range("moe.routed_experts"):
                 output = run_routed_experts()
             if observer is not None:
@@ -375,7 +398,8 @@ class Fp8Fp4MoeLayer(nn.Module):
         # Match the original MegaMoE scheduling: its standalone shared expert
         # starts before the BF16 gate GEMM and fused route/input pack, maximizing
         # overlap. Ordinary gate paths keep gate selection ahead of shared work.
-        if not use_gate_pack:
+        fused_route_in_executor = use_mega_gate or use_gate_pack
+        if not fused_route_in_executor:
             prepare_routes()
         with record_function_range("moe.shared_expert_start"):
             self._shared_executor.start(self.shared_experts, x)

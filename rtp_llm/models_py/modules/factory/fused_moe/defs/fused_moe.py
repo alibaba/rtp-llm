@@ -157,6 +157,12 @@ class FusedMoeDataRouter(ABC):
 
         return False
 
+    @property
+    def supports_mega_gate(self) -> bool:
+        """Whether this router supports executors running bf16_mega_gate directly."""
+
+        return False
+
     def prepare_gate_pack(
         self,
         a1: torch.Tensor,
@@ -248,6 +254,23 @@ class FusedMoeExpertExecutor(ABC):
 
         return False
 
+    @property
+    def supports_mega_gate(self) -> bool:
+        """Whether this executor implements ``forward_mega_gate``."""
+
+        return False
+
+    def forward_mega_gate(
+        self,
+        x: torch.Tensor,
+        gate: Any,
+        input_ids: Optional[torch.Tensor] = None,
+        out: Optional[torch.Tensor] = None,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        raise NotImplementedError(
+            f"{type(self).__name__} does not support bf16_mega_gate fusion"
+        )
+
     @abstractmethod
     def execute(
         self,
@@ -327,6 +350,64 @@ class FusedMoe(torch.nn.Module):
         return bool(
             self.router.supports_gate_pack and self.fused_experts.supports_gate_pack
         )
+
+    @property
+    def supports_mega_gate(self) -> bool:
+        # Check ``self.supports_gate_pack`` so benchmarks/callers that disable
+        # gate packing also opt out of fused bf16_mega_gate + x-pack.
+        return bool(
+            self.supports_gate_pack
+            and self.router.supports_mega_gate
+            and self.fused_experts.supports_mega_gate
+        )
+
+    def forward_mega_gate(
+        self,
+        hidden_states: torch.Tensor,
+        gate: Any,
+        input_ids: Optional[torch.Tensor] = None,
+        activation: str = "silu",
+        expert_map: Optional[torch.Tensor] = None,
+        a2_scale: Optional[torch.Tensor] = None,
+        apply_router_weight_on_input: bool = False,
+        extra_expert_args: Optional[Dict[str, Any]] = None,
+        extra_finalize_args: Optional[FinalizeArgs] = None,
+        skip_tp_allreduce: bool = False,
+        out: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        self._validate_skip_tp_allreduce(skip_tp_allreduce)
+        if not self.supports_mega_gate:
+            raise RuntimeError(
+                f"strategy {self.strategy_name!r} does not support bf16_mega_gate fusion"
+            )
+        if activation.lower() not in ("silu", "siglu", "swiglu"):
+            raise ValueError(
+                f"FP8/FP4 MoE requires SiLU activation, got {activation!r}"
+            )
+        if expert_map is not None:
+            raise ValueError("FP8/FP4 MoE does not support expert_map")
+        if a2_scale is not None:
+            raise ValueError("FP8/FP4 MoE does not accept an external a2_scale")
+        if apply_router_weight_on_input:
+            raise ValueError("FP8/FP4 MoE applies router weights during output combine")
+        if extra_expert_args is not None or extra_finalize_args is not None:
+            raise ValueError(
+                "forward_mega_gate does not accept extra_expert_args/extra_finalize_args"
+            )
+        if (
+            hidden_states.numel() == 0
+            and self.fused_experts.execute_empty_inputs is not True
+        ):
+            return torch.empty_like(hidden_states)
+        output, _, _ = self.fused_experts.forward_mega_gate(
+            hidden_states,
+            gate,
+            input_ids=input_ids,
+            out=out,
+        )
+        if output.dtype != hidden_states.dtype:
+            output = output.to(dtype=hidden_states.dtype)
+        return output
 
     def forward_gate_pack(
         self,

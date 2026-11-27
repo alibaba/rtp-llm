@@ -428,6 +428,7 @@ def warmup_v41_decode_jit(model, *, device):
     warmup_v41_shared_expert_jit(model, max_m=max_m, device=device)
     warmup_v41_hc_jit(model.v4, max_m=max_m, device=device)
     warmup_v41_decode_query_jit(model, max_m=max_m, device=device)
+    common.warmup_bf16_mega_gate_jit(model, max_m=max_m, device=device)
     common._sync_cuda(device)
     common._release_cuda_cache(device)
     logging.info(
@@ -520,6 +521,7 @@ def warmup_v41_prefill_jit(model, *, device):
     warmup_v41_shared_expert_jit(model, max_m=max_m, device=device)
     warmup_v41_hc_jit(model.v4, max_m=max_m, device=device)
     warmup_v41_engram_jit(model, max_m=max_m, device=device)
+    common.warmup_bf16_mega_gate_jit(model, max_m=max_m, device=device)
     warmup_v41_attention_jit(
         model.v4,
         max_seq_len=int(model._v4_args.max_seq_len),

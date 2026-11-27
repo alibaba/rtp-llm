@@ -43,6 +43,15 @@ py_test(
 )
 
 py_test(
+    name = "mega_gate_contract_test",
+    srcs = ["mega_gate_contract_test.py"],
+    deps = [
+        "//rtp_llm/models_py:modules",
+        "//rtp_llm:testlib",
+    ],
+)
+
+py_test(
     name = "test_moe_weight_adapter",
     srcs = ["test_moe_weight_adapter.py"],
     deps = ["//rtp_llm/models_py:modules", "//rtp_llm:testlib"],

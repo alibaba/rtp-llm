@@ -278,6 +278,16 @@ class MegaMoeExecutor(Fp8Fp4ExecutorBase):
             and 1 <= self.cfg.n_activated_experts <= 32
         )
 
+    @property
+    def supports_mega_gate(self) -> bool:
+        if not self.supports_gate_pack:
+            return False
+        from rtp_llm.models_py.modules.factory.fused_moe.utils.fp8_fp4.mega_gate import (
+            is_bf16_mega_gate_available,
+        )
+
+        return is_bf16_mega_gate_available()
+
     @classmethod
     def check_conditions(cls, checker: Any, config) -> None:
         prepared = getattr(config, "mega_moe_policy", None) is not None
@@ -648,6 +658,7 @@ class MegaMoeExecutor(Fp8Fp4ExecutorBase):
             num_sms,
             tuple(token_counts),
             self.supports_gate_pack,
+            self.supports_mega_gate,
         )
         if warmup_key in _MEGA_MOE_JIT_WARMED_KEYS:
             return
@@ -751,6 +762,12 @@ class MegaMoeExecutor(Fp8Fp4ExecutorBase):
                 )
                 torch.cuda.synchronize(device)
         dist.barrier()
+        if (
+            self.supports_mega_gate
+            and device.type == "cuda"
+            and self._mega_buf is not None
+        ):
+            self._warmup_mega_gate_x_pack(token_counts, x)
 
     def _validate_capacity(self, tokens: int) -> None:
         if self.includes_shared_expert:
@@ -942,3 +959,72 @@ class MegaMoeExecutor(Fp8Fp4ExecutorBase):
         )
         self._launch(y, tokens, x.device)
         return y, buf.topk_weights[:tokens], buf.topk_idx[:tokens]
+
+    def _pack_x_inputs(self, x: torch.Tensor, tokens: int) -> None:
+        from rtp_llm.models_py.triton_kernels.moe.mega_moe_input_pack import (
+            fused_pack_mega_moe_x_inputs,
+        )
+
+        buf = self._mega_buf
+        shared_stage = self._shared_fp8_scale_stage_target(tokens)
+        if shared_stage is None:
+            out_shared_l1_sf = None
+            shared_l1_block_m = None
+        else:
+            out_shared_l1_sf, shared_l1_block_m = shared_stage
+        fused_pack_mega_moe_x_inputs(
+            x,
+            buf.x[:tokens],
+            buf.x_sf[:tokens],
+            out_shared_l1_sf=out_shared_l1_sf,
+            shared_l1_block_m=shared_l1_block_m,
+        )
+        if shared_stage is None:
+            self._stage_kernel_inputs(tokens, inputs_prepacked=True)
+
+    def _warmup_mega_gate_x_pack(
+        self, token_counts: list[int], x: torch.Tensor
+    ) -> None:
+        device = x.device
+        for token_count in token_counts:
+            self._pack_x_inputs(x[:token_count], token_count)
+            torch.cuda.synchronize(device)
+
+    def forward_mega_gate(
+        self,
+        x: torch.Tensor,
+        gate: Any,
+        input_ids: Optional[torch.Tensor] = None,
+        out: Optional[torch.Tensor] = None,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Run ``deep_gemm.bf16_mega_gate`` directly into ``buf`` + x-pack + MegaMoE."""
+        if not self.supports_mega_gate:
+            raise RuntimeError(
+                "MegaMoE bf16_mega_gate requires fused packer and deep_gemm.bf16_mega_gate"
+            )
+        tokens = int(x.size(0))
+        self._validate_capacity(tokens)
+        from rtp_llm.models_py.modules.factory.fused_moe.utils.fp8_fp4.mega_gate import (
+            run_bf16_mega_gate,
+        )
+
+        buf = self._mega_buf
+        out_idx = buf.topk_idx[:tokens]
+        out_weights = buf.topk_weights[:tokens]
+        if tokens > 0:
+            chunk_rows = int(getattr(gate, "_prefill_gate_chunk_rows", 0) or 0)
+            run_bf16_mega_gate(
+                gate,
+                x,
+                input_ids,
+                out=(out_idx, out_weights),
+                chunk_rows=chunk_rows,
+            )
+        self._pack_x_inputs(x, tokens)
+        y = (
+            out
+            if self._can_use_output_buffer(x, tokens, out)
+            else self._mega_y[:tokens]
+        )
+        self._launch(y, tokens, x.device)
+        return y, out_weights, out_idx

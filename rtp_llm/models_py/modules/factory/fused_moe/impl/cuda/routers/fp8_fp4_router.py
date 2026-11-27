@@ -71,6 +71,10 @@ class MegaMoeRouter(Fp8Fp4Router):
     def supports_gate_pack(self) -> bool:
         return True
 
+    @property
+    def supports_mega_gate(self) -> bool:
+        return True
+
     def prepare_gate_pack(
         self,
         a1: torch.Tensor,
