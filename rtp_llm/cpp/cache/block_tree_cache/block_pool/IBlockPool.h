@@ -39,6 +39,7 @@ struct BlockPoolConfigBase {
     BlockPoolType pool_type{BlockPoolType::DEVICE};
     std::string   pool_name;
     size_t        physical_block_count{0};
+    bool          allocate_storage{true};
 };
 
 // IBlockPool owns allocation and Tree-internal lifetime shared by Device, Host, and Disk.
@@ -62,6 +63,7 @@ public:
     void setCapacityChangeCallback(std::function<void()> callback);
 
     const std::string&  poolName() const;
+    BlockPoolType poolType() const { return config_->pool_type; }
     virtual std::string debugString() const;
     virtual size_t      blockSizeBytes() const = 0;
 
@@ -82,12 +84,6 @@ public:
     void freezeBlock(BlockIdxType block) noexcept;
     bool isFrozen(BlockIdxType block) const;
 
-    // Prepare, but do not acquire or release, one FROZEN reference per block.
-    // Call while ordinary references protect these allocations, before frozen
-    // holds are acquired. Invoke the returned closure exactly once after the
-    // caller acquires its frozen holds, and this pool must outlive the closure.
-    // Preparation may allocate; release cannot allocate and isolates capacity
-    // notification failures so a completed decrement is never retried.
     std::function<void()> prepareFrozenReferenceRelease(BlockIdList blocks);
 
     // Number of distinct blocks carrying at least one tree reference of this type.
@@ -183,6 +179,7 @@ private:
     void          checkUniqueBlocksNoLock(const BlockIdList& blocks) const;
     static size_t treeRefTypeIndex(BlockTreeRefType ref_type);
     void          incTreeRefNoLock(BlockIdxType block, size_t ref_type_index);
+    void          decTreeRefNoLock(BlockIdxType block, size_t ref_type_index);
     void          releaseFrozenReferences(const BlockIdList& blocks, const std::function<void()>& notify) noexcept;
 
     size_t       totalBlocksNumNoLock() const;

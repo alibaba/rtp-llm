@@ -145,6 +145,8 @@ public:
     // Declarative per-model KV cache layout. C++ cache config consumes this
     // and performs runtime finalization such as block/ring sizing.
     LayerKVCacheSpecDescs kv_cache_spec_descs;
+    // This model uses local Page-RR KV tables even when Query CP is disabled or the role is Decode.
+    bool use_page_rr_kv_cache = false;
     // Model policy for prefix recomputation; live P/D transfers are unaffected.
     int     cache_min_replay_tokens = 1;
     int64_t cache_key_hash_seed     = 0;

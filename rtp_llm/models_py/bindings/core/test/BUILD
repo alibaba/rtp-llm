@@ -72,6 +72,7 @@ exec_ops_test_deps = [
     "//rtp_llm/cpp/cache:batch_kv_cache_resource",
     "//rtp_llm/cpp/cache/test:cache_config_test_utils",
     "//rtp_llm/cpp/cache:cache_config",
+    "//rtp_llm/cpp/cache:kv_cache_specs",
     "//rtp_llm/models_py/bindings:op_defs",
     "//rtp_llm/models_py/bindings/core:cache_store_async_writer",
     "//rtp_llm/models_py/bindings/core:exec_ops_test_lib",

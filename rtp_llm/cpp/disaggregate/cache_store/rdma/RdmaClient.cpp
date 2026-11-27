@@ -34,6 +34,7 @@ bool RdmaClient::init(uint32_t io_thread_count, uint32_t worker_thread_count) {
         RTP_LLM_LOG_ERROR("rdma reporter init failed");
         return false;
     }
+    metrics_reporter_ = metrics_reporter;
 
     ::accl::barex::XClientTransportConfig config(io_thread_count, worker_thread_count, xmempool, metrics_reporter);
     client_ = ::accl::barex::XClientTransport::NewInstance(config);
@@ -48,6 +49,12 @@ bool RdmaClient::init(uint32_t io_thread_count, uint32_t worker_thread_count) {
         connect_timeout_ms_,
         qp_count_per_connection_);
     return true;
+}
+
+void RdmaClient::stopMetricsReporter() {
+    if (auto reporter = metrics_reporter_.lock()) {
+        reporter->release();
+    }
 }
 
 std::shared_ptr<RdmaConnection> RdmaClient::getConnection(const std::string& ip, uint32_t port) {

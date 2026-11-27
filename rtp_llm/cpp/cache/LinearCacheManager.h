@@ -42,7 +42,8 @@ public:
                          int                  seq_len,
                          bool                 enable_reuse_cache   = false,
                          int                  reserve_step         = 0,
-                         std::vector<size_t>* backfilled_positions = nullptr) override;
+                         std::vector<size_t>* backfilled_positions = nullptr,
+                         const RequiredPositions& required_positions   = {}) override;
 
     void removeSkippedBlocks(BlockIds& block_ids, bool enable_reuse_cache = false, int reserve_step = 0) override;
     void releaseRequestStateToDecodeTail(BlockIds& block_ids, int reserve_step) override;

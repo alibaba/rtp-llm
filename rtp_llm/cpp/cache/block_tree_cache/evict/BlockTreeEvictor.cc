@@ -576,7 +576,7 @@ BlockTreeEvictor::batchEvictLocked(size_t group_set_id, Tier source_tier, size_t
 void BlockTreeEvictor::runEvictionTask(std::shared_ptr<const EvictionTransferTask> task) noexcept {
     try {
         task_runner_->runTransfer(task, *metrics_reporter_, [this, task](ErrorInfo error) noexcept {
-            completeEvictionTask(task, std::move(error));
+            scheduleEvictionSettlement(task, error.ok());
         });
         return;
     } catch (const std::exception& error) {
@@ -584,12 +584,7 @@ void BlockTreeEvictor::runEvictionTask(std::shared_ptr<const EvictionTransferTas
     } catch (...) {
         RTP_LLM_LOG_ERROR("eviction copy failed with unknown exception");
     }
-    completeEvictionTask(std::move(task), ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "eviction task runner exception"));
-}
-
-void BlockTreeEvictor::completeEvictionTask(std::shared_ptr<const EvictionTransferTask> task,
-                                            ErrorInfo                                   error) noexcept {
-    scheduleEvictionSettlement(std::move(task), error.ok());
+    scheduleEvictionSettlement(std::move(task), false);
 }
 
 void BlockTreeEvictor::scheduleEvictionSettlement(std::shared_ptr<const EvictionTransferTask> task,
@@ -850,13 +845,13 @@ BlockTreeEvictor::watermarkLogicalBatchLimit(const GroupSet& group_set, Tier sou
             continue;
         }
         has_pending        = true;
-        const size_t bytes = pending_group->diskPool()->strideBytes();
+        const size_t bytes = pending_group->diskPool()->evictionBlockBytes();
         if (count > available_bytes / bytes) {
             return 0;
         }
         available_bytes -= count * bytes;
     }
-    size_t count = available_bytes / group_set.diskPool()->strideBytes();
+    size_t count = available_bytes / group_set.diskPool()->evictionBlockBytes();
     if (count == 0 && !has_pending) {
         count = 1;
     }

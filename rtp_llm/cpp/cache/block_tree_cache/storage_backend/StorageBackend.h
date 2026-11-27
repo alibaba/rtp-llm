@@ -23,7 +23,12 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferTypes.h"
 #include "rtp_llm/cpp/utils/ErrorCode.h"
 
+class RemoteOperationRequestPB;
+class FunctionResponsePB;
+
 namespace rtp_llm {
+
+class BlockTreeReclaimer;
 
 class BatchKVCacheResource;
 class BlockTreeCacheMetricsReporter;
@@ -49,9 +54,9 @@ enum class StorageQuarantineReason {
 };
 
 // Describes who protects local targets after UNKNOWN, not whether I/O is safe.
-enum class StorageLocalTargetProtection {
-    LEGACY,            // StorageBackend hands its pins off to the block pool's FROZEN references.
-    TARGETS_HELD,      // The backend already owns protection for every local target.
+enum class StorageTargetProtection {
+    FREEZE_REQUEST_BLOCKS,            // StorageBackend hands its pins off to the block pool's FROZEN references.
+    PROTECTED_BY_BACKEND,      // The backend already owns protection for every local target.
     NO_LOCAL_TARGETS,  // The operation only reads local sources.
 };
 
@@ -63,20 +68,20 @@ public:
     StorageOperationCompletionUnknown(
         const std::string&           message,
         StorageQuarantineReason      reason,
-        StorageLocalTargetProtection local_target_protection = StorageLocalTargetProtection::LEGACY):
+        StorageTargetProtection local_target_protection = StorageTargetProtection::FREEZE_REQUEST_BLOCKS):
         std::runtime_error(message), reason_(reason), local_target_protection_(local_target_protection) {}
 
     StorageQuarantineReason reason() const noexcept {
         return reason_;
     }
 
-    StorageLocalTargetProtection localTargetProtection() const noexcept {
+    StorageTargetProtection localTargetProtection() const noexcept {
         return local_target_protection_;
     }
 
 private:
     StorageQuarantineReason      reason_;
-    StorageLocalTargetProtection local_target_protection_;
+    StorageTargetProtection local_target_protection_;
 };
 
 // An explicit timeout with unknown buffer safety preserves the timeout error code.
@@ -150,6 +155,12 @@ private:
 // before derived backend state starts destruction.
 class StorageBackend {
 public:
+    virtual bool executeRemoteRequest(const RemoteOperationRequestPB&, FunctionResponsePB&) {
+        return false;
+    }
+    virtual void setReclaimer(std::shared_ptr<BlockTreeReclaimer>) {}
+
+
     using MatchDone      = std::function<void(
         size_t matched_blocks_num, std::shared_ptr<StorageBackendMatchMeta> match_meta, bool success)>;
     using Done           = std::function<void(ErrorInfo error)>;

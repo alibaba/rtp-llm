@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <limits>
 #include <optional>
 #include <string>
 #include <vector>
@@ -100,24 +101,25 @@ KVCacheSpecDesc makeOpaqueStateDesc(const std::string& tag) {
 
 TEST(PPStageCacheConfigTest, PpOneKeepsWholeModel) {
     const auto model  = makeHybridModelConfig(8);
-    const auto staged = CacheConfigCreator::stageScopedModelConfig(model, ParallelismConfig{});
-    EXPECT_EQ(staged.num_layers, 8);
-    EXPECT_EQ(staged.kv_cache_spec_descs.size(), 8u);
-    EXPECT_EQ(staged.hybrid_attention_config.hybrid_attention_types.size(), 8u);
+    const auto config = CacheConfigCreator::createConfig(model, ParallelismConfig{}, KVCacheConfig{});
+    EXPECT_EQ(config.layer_num, 8u);
+    EXPECT_EQ(config.global_layer_begin, 0u);
+    EXPECT_EQ(config.layerIdsForGroup("linear"), (std::vector<int>{0, 1, 2, 4, 5, 6}));
+    EXPECT_EQ(config.layerIdsForGroup("full"), (std::vector<int>{3, 7}));
 }
 
 TEST(PPStageCacheConfigTest, StageScopeUsesConfiguredPartition) {
     const auto                                     model    = makeHybridModelConfig(65);
     const std::vector<std::pair<int64_t, int64_t>> expected = {{0, 17}, {17, 33}, {33, 49}, {49, 65}};
     for (int64_t rank = 0; rank < 4; ++rank) {
-        const auto staged       = CacheConfigCreator::stageScopedModelConfig(model, makePpConfig(65, 4, rank));
+        const auto config       = CacheConfigCreator::createConfig(model, makePpConfig(65, 4, rank), KVCacheConfig{});
         const auto [begin, end] = expected[static_cast<size_t>(rank)];
-        EXPECT_EQ(staged.num_layers, end - begin);
-        ASSERT_EQ(staged.kv_cache_spec_descs.size(), static_cast<size_t>(end - begin));
-        ASSERT_EQ(staged.hybrid_attention_config.hybrid_attention_types.size(), static_cast<size_t>(end - begin));
+        EXPECT_EQ(config.global_layer_begin, static_cast<uint32_t>(begin));
+        EXPECT_EQ(config.layer_num, static_cast<uint32_t>(end - begin));
+        ASSERT_EQ(config.topology().layers().size(), static_cast<size_t>(end - begin));
         for (int64_t local = 0; local < end - begin; ++local) {
-            EXPECT_EQ(staged.kv_cache_spec_descs[static_cast<size_t>(local)][0].tag,
-                      model.kv_cache_spec_descs[static_cast<size_t>(begin + local)][0].tag);
+            const auto& tag = model.kv_cache_spec_descs[static_cast<size_t>(begin + local)][0].tag;
+            EXPECT_EQ(config.topology().layer(static_cast<int>(local)).group_tags, (std::vector<std::string>{tag}));
         }
     }
 }
@@ -187,6 +189,22 @@ TEST(PPStageCacheConfigTest, PpAllowsOpaqueStateAndSwaGroups) {
     EXPECT_TRUE(config.use_opaque_kv_cache_store);
     EXPECT_EQ(config.group("state").policy.group_type, CacheGroupType::SWA);
     EXPECT_EQ(config.group("state").policy.sliding_window_size, 32);
+
+    /** Both layouts contain 64 FP32 elements per block. Layer 0 has 4 entries, layer 4 has 8. */
+    auto conflicting_state                 = model.kv_cache_spec_descs[0].front();
+    conflicting_state.entry_elems          = 8;
+    conflicting_state.explicit_entry_count = 8;
+    model.kv_cache_spec_descs[4]           = {conflicting_state};
+    for (const auto& parallelism : {makePpConfig(8, 1, 0), makePpConfig(8, 2, 0), makePpConfig(8, 2, 1)}) {
+        SCOPED_TRACE(::testing::Message() << "pp_size=" << parallelism.pp_size << ", pp_rank=" << parallelism.pp_rank);
+        try {
+            CacheConfigCreator::createConfig(model, parallelism, KVCacheConfig{});
+            ADD_FAILURE() << "expected conflicting opaque layouts for tag=state to be rejected";
+        } catch (const std::exception& e) {
+            EXPECT_NE(std::string(e.what()).find("cache tag=state has multiple physical prototypes"), std::string::npos)
+                << e.what();
+        }
+    }
 }
 
 TEST(PPStageCacheConfigTest, TransferPolicySurvivesSingletonStagesAndWarmup) {
@@ -197,8 +215,14 @@ TEST(PPStageCacheConfigTest, TransferPolicySurvivesSingletonStagesAndWarmup) {
             layout.pp_stage_layer_counts = {4, 3, 1};
             const auto config            = CacheConfigCreator::createConfig(model, layout, KVCacheConfig{});
             const auto warmup            = CacheConfigCreator::createWarmupConfig(model, layout, KVCacheConfig{}, 0);
-            EXPECT_EQ(config.groupNums(), hybrid && rank == 0 ? 2 : 1);
-            EXPECT_EQ(warmup.groupNums(), config.groupNums());
+            EXPECT_EQ(config.groupNums(), hybrid ? 2 : 1);
+            EXPECT_EQ(warmup.groupTags(), config.groupTags());
+            if (hybrid) {
+                EXPECT_EQ(config.layerIdsForGroup("linear").empty(), rank == 2);
+                EXPECT_EQ(config.layerIdsForGroup("full").empty(), rank == 1);
+                EXPECT_EQ(warmup.layerIdsForGroup("linear"), config.layerIdsForGroup("linear"));
+                EXPECT_EQ(warmup.layerIdsForGroup("full"), config.layerIdsForGroup("full"));
+            }
             EXPECT_EQ(config.usesGroupCacheTransferPolicy(), hybrid);
             EXPECT_EQ(warmup.usesGroupCacheTransferPolicy(), hybrid);
         }
@@ -220,6 +244,9 @@ TEST(PPStageCacheConfigTest, PoolBlockWeightsAcceptTagsOwnedByOtherStages) {
         const auto config            = CacheConfigCreator::createConfig(model, layout, kv_cache_config);
         EXPECT_EQ(config.blockWeight("full"), 8u);
         EXPECT_EQ(config.blockWeight("linear"), 1u);
+        const uint32_t expected_limit = std::numeric_limits<int32_t>::max() / (rank == 1 ? 1u : 8u);
+        EXPECT_EQ(config.maxBaselineBlockNum(), expected_limit);
+        EXPECT_NO_THROW(CacheConfigCreator::sizingSignature(config, expected_limit));
     }
 }
 
@@ -243,10 +270,12 @@ TEST(PPStageCacheConfigTest, DraftInheritsWholeModelTransferPolicyOnLastStage) {
         const auto target = hybrid ? makeHybridModelConfig(8) : makeSingleModelConfig(8);
         const auto config =
             CacheConfigCreator::createConfig(target, layout, KVCacheConfig{}, speculative, &draft, true, false);
-        ASSERT_EQ(config.groupNums(), 1);
+        ASSERT_EQ(config.groupNums(), hybrid ? 2 : 1);
+        EXPECT_EQ(config.layerIdsForGroup("full"), (std::vector<int>{0, 1, 2}));
         ASSERT_EQ(config.mtp_sub_configs.size(), 2u);
         for (const auto& sub : config.mtp_sub_configs) {
-            ASSERT_EQ(sub->groupNums(), 1);
+            ASSERT_EQ(sub->groupTags(), config.groupTags());
+            EXPECT_EQ(sub->layerIdsForGroup("full"), (std::vector<int>{0}));
             EXPECT_EQ(sub->usesGroupCacheTransferPolicy(), hybrid);
         }
     }

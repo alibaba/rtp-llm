@@ -142,10 +142,11 @@ std::shared_ptr<const PlanResult> P2PSchedulerDecodeRead::planFor(int           
 }
 
 ErrorResult<P2PBroadcastClient::RankRoutes>
-P2PSchedulerDecodeRead::buildDecodeRankRoutes(const TransferPlan&        plan,
-                                                   KVCacheResource&           resource,
-                                                   const std::pair<int, int>& block_range,
-                                                   size_t                     worker_num) const {
+P2PSchedulerDecodeRead::buildDecodeRankRoutes(const TransferPlan&              plan,
+                                              KVCacheResource&                 resource,
+                                              const std::pair<int, int>&       block_range,
+                                              size_t                           worker_num,
+                                              std::vector<PrefillRouteKeysPB>& prefill_route_keys) const {
     P2PBroadcastClient::RankRoutes rank_routes(worker_num);
 
     // Validate the complete identity/row pair before projecting a route or submitting any RPC.
@@ -179,8 +180,11 @@ P2PSchedulerDecodeRead::buildDecodeRankRoutes(const TransferPlan&        plan,
                                      std::min(logical_count, window_begin + static_cast<size_t>(block_range.second)) :
                                      logical_count;
 
-    const auto layout = ShardLayoutFactory::fromTopology(
-        *config_.topology, config_.parallelism_config, RoleType::DECODE, config_.cache_key_tokens_per_block);
+    const auto layout = ShardLayoutFactory::fromTopology(*config_.topology,
+                                                         config_.parallelism_config,
+                                                         RoleType::DECODE,
+                                                         config_.cache_key_tokens_per_block,
+                                                         config_.local_full_page_rr);
     for (const auto& route : plan.routes) {
         if (route.dst_rank < 0 || static_cast<size_t>(route.dst_rank) >= worker_num
             || !layout.hasGroup(route.cache_tag)) {
@@ -201,8 +205,12 @@ P2PSchedulerDecodeRead::buildDecodeRankRoutes(const TransferPlan&        plan,
                 continue;
             }
             const int cp_size = layout.physicalCpSize(route->cache_tag);
-            // COMPACT keeps the same state slots on every Decode rank; FULL uses identity mapping.
-            const int       worker_cp_rank = 0;
+            // FULL PageRR resolves the logical key against this worker's local table.
+            // Compact state slots remain identical on all Decode ranks.
+            const int worker_cp_rank =
+                layout.effectiveMapping(route->cache_tag) == CpBlockMappingMode::BLOCK_ROUND_ROBIN ?
+                    layout.routeCpRank(static_cast<int>(worker_rank), route->cache_tag) :
+                    0;
             TransferRoutePB pb;
             RouteCodec::encodeForDecode(*route, &pb);
             const auto append_buffer = [&](const std::shared_ptr<LayerCacheBuffer>& buffer) {
@@ -247,6 +255,12 @@ P2PSchedulerDecodeRead::buildDecodeRankRoutes(const TransferPlan&        plan,
                 }
             }
             if (!pb.layer_blocks().empty()) {
+                if (route->filter_prefill_keys) {
+                    // FULL PageRR projects the same logical keys for every layer on the route.
+                    auto& filter = prefill_route_keys.emplace_back();
+                    filter.set_route_id(route->route_id);
+                    *filter.mutable_cache_keys() = pb.layer_blocks(0).cache_keys();
+                }
                 rank_routes[worker_rank].push_back(std::move(pb));
             }
         }
@@ -346,6 +360,7 @@ P2PSchedulerDecodeRead::AsyncReadResult P2PSchedulerDecodeRead::asyncRead(
     // （dst.cpSize() ∈ {1, src.cpSize()}）判定，不再由这里一刀切。
     P2PBroadcastClient::RankRoutes rank_routes;
     std::vector<int>                active_route_ids;
+    std::vector<PrefillRouteKeysPB> prefill_route_keys;
     uint64_t                       plan_digest = 0;
     const size_t                   worker_num  = config_.worker_grpc_addrs.size();
     if (!no_transfer) {
@@ -367,7 +382,7 @@ P2PSchedulerDecodeRead::AsyncReadResult P2PSchedulerDecodeRead::asyncRead(
             return report_early_failure(plan->error);
         }
         plan_digest = plan->plan.digest();
-        auto routes = buildDecodeRankRoutes(plan->plan, *resource, block_range, worker_num);
+        auto routes = buildDecodeRankRoutes(plan->plan, *resource, block_range, worker_num, prefill_route_keys);
         collector->decode_schedule_plan_cost_time_us = currentTimeUs() - plan_start_us;
         if (!routes.ok()) {
             RTP_LLM_LOG_WARNING("asyncRead: route projection failed, unique_key=%s, error=%s",
@@ -412,8 +427,9 @@ P2PSchedulerDecodeRead::AsyncReadResult P2PSchedulerDecodeRead::asyncRead(
          unique_key,
          request_deadline_ms,
          transfer_deadline_ms,
-         rank_routes      = std::move(rank_routes),
-         active_route_ids = std::move(active_route_ids),
+         rank_routes        = std::move(rank_routes),
+         active_route_ids   = std::move(active_route_ids),
+         prefill_route_keys = std::move(prefill_route_keys),
          plan_digest,
          collector,
          async_context,
@@ -440,7 +456,8 @@ P2PSchedulerDecodeRead::AsyncReadResult P2PSchedulerDecodeRead::asyncRead(
                                                        std::move(rank_routes),
                                                        std::move(active_route_ids),
                                                        plan_digest,
-                                                       pipeline);
+                                                       pipeline,
+                                                       prefill_route_keys);
                 if (!async_calls) {
                     return;
                 }
@@ -505,7 +522,8 @@ P2PSchedulerDecodeRead::startAsyncReadCalls(int64_t                             
                                             P2PBroadcastClient::RankRoutes                       rank_routes,
                                             std::vector<int>                                     active_route_ids,
                                             uint64_t                                             plan_digest,
-                                            bool                                                 pipeline) {
+                                            bool                                                 pipeline,
+                                            const std::vector<PrefillRouteKeysPB>&               prefill_route_keys) {
 
     const int64_t entry_us = currentTimeUs();
     RTP_LLM_LOG_DEBUG("[PD-DIAG] startAsyncReadCalls entry, unique_key=%s, prefill=%s:%u, timestamp_us=%ld",
@@ -529,7 +547,8 @@ P2PSchedulerDecodeRead::startAsyncReadCalls(int64_t                             
                                                    no_transfer,
                                                    plan_digest,
                                                    active_route_ids,
-                                                   pipeline && !no_transfer ? config_.pipeline_layout : std::string{});
+                                                   pipeline && !no_transfer ? config_.pipeline_layout : std::string{},
+                                                   prefill_route_keys);
     const int64_t server_load_cost_us                = currentTimeUs() - server_load_start_us;
     collector->decode_schedule_server_submit_time_us = server_load_cost_us;
     if (server_load_cost_us >= 100000) {

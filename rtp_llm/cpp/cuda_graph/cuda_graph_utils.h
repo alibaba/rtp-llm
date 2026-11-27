@@ -34,6 +34,7 @@ public:
         decoder_layer_hidden_states_(hidden_states) {
         py_model_inputs_.attention_inputs.input_lengths         = inputs.attention_inputs.input_lengths;
         py_model_inputs_.attention_inputs.input_lengths_device  = inputs.attention_inputs.input_lengths_device;
+        py_model_inputs_.attention_inputs.linear_replay         = inputs.attention_inputs.linear_replay;
         py_model_inputs_.attention_inputs.mtp_indexer_seed_rows = inputs.attention_inputs.mtp_indexer_seed_rows;
         py_model_inputs_.attention_inputs.sequence_lengths      = inputs.attention_inputs.sequence_lengths;
         py_model_inputs_.attention_inputs.kv_cache_kernel_block_id_device =

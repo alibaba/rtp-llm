@@ -121,6 +121,14 @@ def init_vit_group_args(parser, vit_config):
         help="是否需要下载headers",
     )
     vit_group.add_argument(
+        "--enable_oss_internal_endpoint_rewrite",
+        env_name="ENABLE_OSS_INTERNAL_ENDPOINT_REWRITE",
+        bind_to=(vit_config, "enable_oss_internal_endpoint_rewrite"),
+        type=str2bool,
+        default=vit_config.enable_oss_internal_endpoint_rewrite,
+        help="Rewrite supported public OSS media URLs to internal endpoints",
+    )
+    vit_group.add_argument(
         "--mm_image_max_file_size_kb",
         env_name="MM_IMAGE_MAX_FILE_SIZE_KB",
         bind_to=(vit_config, "mm_image_max_file_size_kb"),

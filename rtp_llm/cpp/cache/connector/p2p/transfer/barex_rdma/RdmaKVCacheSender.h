@@ -21,6 +21,12 @@ public:
     ~RdmaKVCacheSender() = default;
 
 public:
+    void stop() override {
+        if (rdma_server_) {
+            rdma_server_->stop();
+        }
+    }
+
     /// @brief 初始化 TCP client 及 RDMA server
     bool init(int tcp_io_thread_count,
               int rdma_io_thread_count,

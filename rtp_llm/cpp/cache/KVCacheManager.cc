@@ -1,9 +1,6 @@
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
 #include "rtp_llm/cpp/cache/connector/Meta.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorResourceStore.h"
-#include "rtp_llm/cpp/cache/block_tree_cache/transfer/FrozenTaskRecovery.h"
-#include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferCompletionForget.h"
-#include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferCompletionCleanup.h"
 #include "rtp_llm/cpp/cache/events/KVCMPublisher.h"
 
 #include <algorithm>
@@ -15,6 +12,7 @@
 #include <optional>
 #include <pthread.h>
 #include <sstream>
+#include <unordered_set>
 
 #include "rtp_llm/cpp/cache/BatchKVCacheResource.h"
 #include "rtp_llm/cpp/cache/CPSlotMapper.h"
@@ -27,8 +25,6 @@
 #ifdef RTP_LLM_USE_REMOTE_KV_CACHE
 #include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm/KVCMStorageBackend.h"
 #endif
-#include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeTaskPool.h"
-#include "rtp_llm/cpp/cache/block_tree_cache/transfer/BlockTransferRequestConverter.h"
 #include "rtp_llm/cpp/cache/connector/p2p/LayerBlockConverterImpl.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnector.h"
 #include "rtp_llm/cpp/cache/connector/p2p/plan/PipelineLayoutCodec.h"
@@ -42,6 +38,7 @@
 #include "rtp_llm/cpp/utils/TimeUtil.h"
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
 #include "rtp_llm/models_py/bindings/core/Types.h"
+#include "rtp_llm/models_py/bindings/core/torch_utils/TypeConvert.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
 
 namespace rtp_llm {
@@ -254,12 +251,9 @@ KVCacheManager::KVCacheManager(const CacheConfig&                 config,
         }
     }
 
-    const auto& cp_cfg = parallelism_config_.prefill_cp_config;
-    // Decode retains every received FULL page on each TP rank. Its sharding
-    // flag describes the upstream prefill layout for transport/state sizing,
-    // not local allocation: applying the CP mapper here would underallocate by the CP factor.
-    if (cp_cfg.kv_cache_sharded && (cp_cfg.is_enabled() || cp_cfg.is_prefill_enabled())
-        && parallelism_config_.role_type != RoleType::DECODE && parallelism_config_.tp_size > 1) {
+    // Allocation, cache-store projection and PD loading share this local mapper.
+    // The upstream Prefill shard count does not determine Decode's local layout.
+    if (config_.local_kv_cache_sharded && parallelism_config_.tp_size > 1) {
         cp_slot_mapper_ = std::make_shared<CPSlotMapper>(static_cast<int>(parallelism_config_.tp_rank),
                                                          static_cast<int>(parallelism_config_.tp_size),
                                                          static_cast<int>(config_.seq_size_per_block));
@@ -282,15 +276,12 @@ KVCacheManager::KVCacheManager(const CacheConfig&                 config,
 }
 
 KVCacheManager::~KVCacheManager() {
-    // Queries, cleanup and capacity notifications must finish while the cache, RPC
-    // manager and allocation wait state are still alive. Never join under a lock.
-    stopFrozenTaskRecovery();
-    stopMissingCleanup();
     {
         std::lock_guard<std::mutex> lock(allocation_wait_state_->mutex);
         allocation_wait_state_->stopped.store(true, std::memory_order_release);
     }
     allocation_wait_state_->cv.notify_all();
+    stopP2PConnector();
     stopMetricsReporter();
     stopCacheEventPublisher();
 }
@@ -299,6 +290,12 @@ void KVCacheManager::stopMetricsReporter() {
     stop_.store(true, std::memory_order_release);
     if (metrics_reporter_thread_.joinable()) {
         metrics_reporter_thread_.join();
+    }
+}
+
+void KVCacheManager::stopP2PConnector() {
+    if (p2p_connector_) {
+        p2p_connector_->stop();
     }
 }
 
@@ -337,6 +334,7 @@ bool KVCacheManager::init() {
     coordinator_manager_->setCPSlotMapper(cp_slot_mapper_);
     coordinator_manager_->setSkipRemoteReusedWrite(pd_sep_config_.role_type == RoleType::PREFILL);
     RTP_LLM_CHECK_WITH_INFO(coordinator_manager_->init(), "CoordinatorCacheManager init failed");
+    initLinearReplayPool();
     // Observe real pool capacity, including asynchronous eviction and lease release.
     const auto capacity_changed = allocationChangeCallback();
     for (const auto& pool : coordinator_manager_->groupBlockPools()) {
@@ -383,23 +381,12 @@ bool KVCacheManager::init() {
         RTP_LLM_LOG_ERROR("KVCacheManager::init: failed to create BlockTreeCache");
         return false;
     }
-    transfer_broadcast_manager_ = std::move(broadcast_manager);
-    if (isAllocatorOwner()) {
-        completion_cleanup_ = std::make_shared<TransferCompletionCleanup>();
-        block_tree_cache_->setCompletionCleanup(completion_cleanup_);
-#ifdef RTP_LLM_USE_REMOTE_KV_CACHE
-        if (auto backend = std::dynamic_pointer_cast<KVCMStorageBackend>(block_tree_cache_->storageBackend()))
-            backend->setCompletionCleanup(completion_cleanup_);
-#endif
-    }
     coordinator_manager_->attachBlockTreeCache(block_tree_cache_);
-    const std::weak_ptr<BlockTreeCache> weak_cache = block_tree_cache_;
+    const auto notify_cache = block_tree_cache_->capacityChangeCallback();
     for (const auto& pool : coordinator_manager_->groupBlockPools()) {
-        pool->setCapacityChangeCallback([capacity_changed, weak_cache] {
+        pool->setCapacityChangeCallback([capacity_changed, notify_cache] {
             capacity_changed();
-            if (const auto cache = weak_cache.lock()) {
-                cache->onCapacityChanged();
-            }
+            notify_cache();
         });
     }
     initCacheEventPublisher();
@@ -407,68 +394,13 @@ bool KVCacheManager::init() {
     if (!initP2PConnector()) {
         return false;
     }
-    missing_cleanup_thread_ = std::thread(&KVCacheManager::missingCleanupLoop, this);
 
     if (metrics_reporter_) {
         stop_.store(false, std::memory_order_relaxed);
         metrics_reporter_thread_ = std::thread(&KVCacheManager::reportMetricsLoop, this);
     }
 
-    return startFrozenTaskRecovery();
-}
-
-bool KVCacheManager::startFrozenTaskRecovery() {
-    if (!isAllocatorOwner()) {
-        return true;
-    }
-    if (!block_tree_cache_) {
-        return false;
-    }
-    if (frozen_task_recovery_) {
-        return true;
-    }
-    try {
-        auto recovery = std::make_unique<FrozenTaskRecovery>(
-            [this] { return frozenTasks(); },
-            [this](const FrozenTask::ExecutionInfo& execution, int timeout_ms) {
-                return queryTransferCompletion(execution, timeout_ms);
-            },
-            [this](int timeout_ms, const std::function<bool()>& stopped) {
-                if (completion_cleanup_) {
-                    return completion_cleanup_->drain(
-                        [this](const auto& target, const auto& traces, int timeout) {
-                            return forgetTransferCompletion(target, traces, timeout);
-                        },
-                        timeout_ms,
-                        stopped);
-                }
-                return TransferCompletionCleanup::Summary{};
-            },
-            [this](const FrozenTask::ExecutionInfo& execution, bool forced) {
-                block_tree_cache_->reportUnfreezeMetrics(execution, forced);
-            },
-            static_cast<int>(kv_cache_config_.block_tree_frozen_force_release_timeout_ms));
-        constexpr int kRecoveryIntervalMs = 1000;
-        constexpr int kQueryTimeoutMs     = 1000;
-        if (!recovery->start(kRecoveryIntervalMs, kQueryTimeoutMs)) {
-            RTP_LLM_LOG_ERROR("failed to start frozen task recovery thread");
-            return false;
-        }
-        frozen_task_recovery_ = std::move(recovery);
-        return true;
-    } catch (const std::exception& error) {
-        RTP_LLM_LOG_ERROR("failed to initialize frozen task recovery: %s", error.what());
-    } catch (...) {
-        RTP_LLM_LOG_ERROR("failed to initialize frozen task recovery");
-    }
-    return false;
-}
-
-void KVCacheManager::stopFrozenTaskRecovery() noexcept {
-    if (frozen_task_recovery_) {
-        frozen_task_recovery_->stop();
-        frozen_task_recovery_.reset();
-    }
+    return true;
 }
 
 std::shared_ptr<BroadcastManager> KVCacheManager::createMultiRankBlockTransferManager() const {
@@ -781,6 +713,196 @@ GroupedCacheLayerLayout KVCacheManager::getMTPModuleGroupedCacheLayerLayout(int 
     return projectLayout(coordinator_manager_->allLayerCacheBase(), mtp_sub_config->topologyPtr(), global_layer_ids);
 }
 
+void KVCacheManager::initLinearReplayPool() {
+    if (!config_.linear_replay.enabled()) {
+        return;
+    }
+    const auto& plan = config_.linear_replay;
+    RTP_LLM_CHECK(plan.slotCount() > 0 && plan.maxSteps() > 0);
+    const auto layout = coordinator_manager_->allLayerCacheBase();
+    const auto slots  = plan.slotCount();
+    for (const int group_id : config_.linear_replay.group_ids) {
+        const auto& group = config_.groups().at(static_cast<size_t>(group_id));
+        auto& layers = linear_replay_by_tag_[group.tag];
+        layers.resize(config_.layer_num);
+        for (const int layer_id : config_.layerIdsForGroup(group.tag)) {
+            if (layer_id < 0 || layer_id >= static_cast<int>(config_.layer_num)) {
+                continue;
+            }
+            const auto& base = layout.at(group.tag, static_cast<size_t>(layer_id)).kv_addr;
+            RTP_LLM_CHECK_WITH_INFO(base.defined(), "LINEAR replay layer %d tag=%s has no cache buffer",
+                                    layer_id, group.tag.c_str());
+            auto                              f32 = torch::TensorOptions().device(base.device()).dtype(torch::kFloat32);
+            torch_ext::LinearReplayLayerCache replay;
+            replay.k = torch::empty(c10::IntArrayRef(plan.k_shape.data(), plan.k_shape.size()), f32);
+            replay.u = torch::empty(c10::IntArrayRef(plan.u_shape.data(), plan.u_shape.size()), f32);
+            replay.g = torch::empty(c10::IntArrayRef(plan.g_shape.data(), plan.g_shape.size()), f32);
+            replay.conv_inputs =
+                torch::empty(c10::IntArrayRef(plan.conv_input_shape.data(), plan.conv_input_shape.size()),
+                             f32.dtype(dataTypeToTorchType(plan.conv_dtype)));
+            layers[static_cast<size_t>(layer_id)] = std::move(replay);
+        }
+    }
+    linear_replay_slots_ = std::make_shared<LinearReplaySlotPool>(static_cast<size_t>(slots));
+    linear_replay_retirement_ = std::make_shared<LinearReplayRetirementQueue>();
+}
+
+std::shared_ptr<LinearReplayLease> KVCacheManager::acquireLinearReplaySlot() {
+    if (!linear_replay_slots_) {
+        return nullptr;
+    }
+    linear_replay_retirement_->reap();
+    return linear_replay_slots_->acquire();
+}
+
+std::shared_ptr<LinearReplayBlockHold> KVCacheManager::holdLinearReplayBlocks(const BatchKVCacheResourcePtr& resource,
+                                                                              int state_token_position) {
+    if (!resource || !config_.linear_replay.enabled()) {
+        return nullptr;
+    }
+    std::vector<std::pair<DeviceBlockPoolPtr, BlockIndicesType>> held;
+    for (const int group_id : config_.linear_replay.group_ids) {
+        const auto& group = config_.groups().at(static_cast<size_t>(group_id));
+        const auto& pool = coordinator_manager_->groupBlockPools().at(static_cast<size_t>(group_id));
+        std::unordered_set<BlockIdxType> unique;
+        for (int batch = 0; batch < resource->batchSize(); ++batch) {
+            const auto& blocks = resource->blocks(batch, group.tag);
+            size_t begin = resource->cacheResource(batch).linearReplayActiveBegin(group.tag, blocks.size());
+            size_t      end    = blocks.size();
+            if (state_token_position >= 0) {
+                begin = static_cast<size_t>(state_token_position) / group.seqSizePerBlock();
+                RTP_LLM_CHECK_WITH_INFO(begin < end, "LINEAR replay state position exceeds its block table");
+                end = begin + 1;
+            }
+            for (size_t position = begin; position < end; ++position) {
+                if (blocks[position] > 0) {
+                    unique.insert(blocks[position]);
+                }
+            }
+        }
+        BlockIndicesType ids(unique.begin(), unique.end());
+        if (!ids.empty()) {
+            pool->incRef(ids);
+            held.emplace_back(pool, std::move(ids));
+        }
+    }
+    auto* block_hold = new LinearReplayBlockHold;
+    for (const auto& [pool, ids] : held) {
+        block_hold->blocks_by_pool[pool.get()].insert(ids.begin(), ids.end());
+    }
+    return std::shared_ptr<LinearReplayBlockHold>(
+        block_hold,
+        [retirement = linear_replay_retirement_, held = std::move(held)](LinearReplayBlockHold* value) mutable {
+            const auto event = value->lastUse();
+            delete value;
+            retirement->retire(event, [held = std::move(held)] {
+                for (const auto& [pool, ids] : held) {
+                    pool->decRef(ids);
+                }
+            });
+        });
+}
+
+bool KVCacheManager::makeLinearReplayTailsPrivate(
+    const BatchKVCacheResourcePtr&                             resource,
+    int                                                        min_processed_length,
+    const std::vector<std::shared_ptr<LinearReplayBlockHold>>& request_holds) {
+    if (!resource || !config_.linear_replay.enabled()) {
+        return true;
+    }
+    linear_replay_retirement_->reap();
+    std::unordered_set<const LinearReplayBlockHold*> owned_holds;
+    for (const auto& hold : request_holds) {
+        if (hold) {
+            owned_holds.insert(hold.get());
+        }
+    }
+    struct Replacement {
+        int batch;
+        std::string tag;
+        size_t position;
+        BlockIdxType source;
+        BlockIdxType destination;
+        DeviceBlockPoolPtr pool;
+    };
+    std::vector<Replacement> replacements;
+    struct ActiveBegin { int batch; std::string tag; size_t begin; };
+    std::vector<ActiveBegin> active_begins;
+    for (const int group_id : config_.linear_replay.group_ids) {
+        const auto& group = config_.groups().at(static_cast<size_t>(group_id));
+        const auto& pool = coordinator_manager_->groupBlockPools().at(static_cast<size_t>(group_id));
+        for (int batch = 0; batch < resource->batchSize(); ++batch) {
+            const auto& blocks = resource->blocks(batch, group.tag);
+            size_t begin = blocks.size() > 2 ? blocks.size() - 2 : 0;
+            if (min_processed_length >= 0) {
+                // Capacity checks require two tail slots at seqLength (processed + 1).
+                // Proposal slots and previous reservations must not move that tail forward.
+                const size_t seq_slots =
+                    (static_cast<size_t>(min_processed_length) + group.seqSizePerBlock()) / group.seqSizePerBlock();
+                begin = std::min(begin, seq_slots > 2 ? seq_slots - 2 : 0);
+            }
+            active_begins.push_back({batch, group.tag, begin});
+            for (size_t position = begin; position < blocks.size(); ++position) {
+                const auto source = blocks[position];
+                uint32_t   owned_references = 1;
+                for (const auto* hold : owned_holds) {
+                    owned_references += hold->contains(pool.get(), source);
+                }
+                // Verify and rebuild are ordered on the same compute stream.
+                // Our own retained anchor is safe to update in place; external
+                // request/tree references still require a private destination.
+                if (source > 0 && pool->isExclusiveRequestBlock(source, owned_references)) {
+                    continue;
+                }
+                auto destination = pool->malloc();
+                if (!destination) {
+                    coordinator_manager_->cacheGroups().at(static_cast<size_t>(group_id))->ensureFreeBlocks(1);
+                    if (source > 0 && pool->isExclusiveRequestBlock(source, owned_references)) {
+                        continue;
+                    }
+                    destination = pool->malloc();
+                }
+                if (!destination) {
+                    RTP_LLM_LOG_WARNING("LINEAR replay tail copy failed tag=%s batch=%d position=%zu free=%zu "
+                                        "total=%zu staged=%zu",
+                                        group.tag.c_str(), batch, position, pool->freeBlocksNum(),
+                                        pool->totalBlocksNum(), replacements.size());
+                    for (const auto& item : replacements) {
+                        item.pool->decRef(item.destination);
+                    }
+                    return false;
+                }
+                pool->incRef(*destination);
+                replacements.push_back({batch, group.tag, position, source, *destination, pool});
+            }
+        }
+    }
+    for (const auto& item : replacements) {
+        resource->mutableBlockIds(item.batch, item.tag).setAt(item.position, item.destination);
+        if (item.source > 0) {
+            item.pool->decRef(item.source);
+        }
+    }
+    for (const auto& item : active_begins) {
+        resource->cacheResource(item.batch).setLinearReplayActiveBegin(item.tag, item.begin);
+        resource->cacheResource(item.batch).restrictLinearReplayPrefix(item.tag, item.begin);
+    }
+    return true;
+}
+
+void KVCacheManager::markLinearReplayStarted(const BatchKVCacheResourcePtr& resource, int processed_length) {
+    if (!resource) {
+        return;
+    }
+    for (const int group_id : config_.linear_replay.group_ids) {
+        const auto& group = config_.groups().at(static_cast<size_t>(group_id));
+        const size_t position = static_cast<size_t>(std::max(0, processed_length)) / group.seqSizePerBlock();
+        for (int batch = 0; batch < resource->batchSize(); ++batch) {
+            resource->cacheResource(batch).restrictLinearReplayPrefix(group.tag, position);
+        }
+    }
+}
+
 // 资源统计和信息查询
 
 size_t KVCacheManager::freeBlocksNum() const {
@@ -1083,266 +1205,13 @@ std::shared_ptr<AsyncContext> KVCacheManager::asyncLoadCache(const KVCacheResour
     return p2p_connector_->asyncRead(resource, meta, p2p_start_block, matched_blocks - p2p_start_block);
 }
 
-std::vector<std::shared_ptr<FrozenTask>> KVCacheManager::frozenTasks() const {
-    if (!block_tree_cache_) {
-        return {};
-    }
-    auto tasks = block_tree_cache_->frozenTasks();
-#ifdef RTP_LLM_USE_REMOTE_KV_CACHE
-    auto backend = std::dynamic_pointer_cast<KVCMStorageBackend>(block_tree_cache_->storageBackend());
-    if (backend) {
-        const auto remote_tasks = backend->frozenTasks();
-        tasks.insert(tasks.end(), remote_tasks.begin(), remote_tasks.end());
-    }
-#endif
-    return tasks;
-}
-
-TransferTaskRegistry::State KVCacheManager::localTransferCompletion(const TransferExecutionTrace& trace_id) const {
-    if (!validTransferExecutionTrace(trace_id) || !block_tree_cache_) {
-        return TransferTaskRegistry::State::UNKNOWN;
-    }
-    if (const auto* transfer_trace = std::get_if<uint64_t>(&trace_id)) {
-        return block_tree_cache_->localTransferCompletion(*transfer_trace);
-    }
-#ifdef RTP_LLM_USE_REMOTE_KV_CACHE
-    auto backend = std::dynamic_pointer_cast<KVCMStorageBackend>(block_tree_cache_->storageBackend());
-    if (backend) {
-        return backend->queryReadCompletion(std::get<std::string>(trace_id));
-    }
-#endif
-    return TransferTaskRegistry::State::UNKNOWN;
-}
-
-TransferTaskRegistry::ForgetResult
-KVCacheManager::localForgetTransferCompletion(const TransferExecutionTrace& trace_id) const {
-    using Result = TransferTaskRegistry::ForgetResult;
-    if (!validTransferExecutionTrace(trace_id)) {
-        RTP_LLM_LOG_WARNING("completion forget requires a nonempty execution trace");
-        return Result::INVALID;
-    }
-    if (!block_tree_cache_)
-        return Result::FAILED;
-    if (const auto* trace = std::get_if<uint64_t>(&trace_id))
-        return block_tree_cache_->forgetLocalTransferCompletion(*trace);
-#ifdef RTP_LLM_USE_REMOTE_KV_CACHE
-    auto backend = std::dynamic_pointer_cast<KVCMStorageBackend>(block_tree_cache_->storageBackend());
-    if (backend)
-        return backend->forgetReadCompletion(std::get<std::string>(trace_id));
-#endif
-    return Result::FAILED;
-}
-
-TransferCompletionForgetResult KVCacheManager::forgetTransferCompletion(
-    const TransferCompletionTarget& target, const std::vector<TransferExecutionTrace>& traces, int timeout_ms) const {
-    return TransferCompletionForget(
-               transfer_broadcast_manager_,
-               [this](const TransferExecutionTrace& trace) { return localForgetTransferCompletion(trace); })
-        .forget(target, traces, timeout_ms);
-}
-
-TransferCompletionQueryResult KVCacheManager::queryTransferCompletion(const FrozenTask::ExecutionInfo& execution,
-                                                                      int timeout_ms) const {
-    return TransferCompletionQuery(
-               transfer_broadcast_manager_,
-               [this](const TransferExecutionTrace& trace_id) { return localTransferCompletion(trace_id); })
-        .query(execution, timeout_ms);
-}
-
 bool KVCacheManager::executeFunction(const FunctionRequestPB& request, FunctionResponsePB& response) {
-    if (request.has_completion_forget()) {
-        auto* forget_response = response.mutable_completion_forget();
-        forget_response->Clear();
-        forget_response->set_rank(static_cast<uint32_t>(parallelism_config_.pp_rank * parallelism_config_.tp_size
-                                                        + parallelism_config_.tp_rank));
-        const auto& keys = request.completion_forget().keys();
-        if (static_cast<size_t>(keys.size()) > kTransferCompletionForgetBatchSize) {
-            RTP_LLM_LOG_WARNING("completion forget batch exceeds limit: %d", keys.size());
-            return false;
-        }
-        for (const auto& key : keys) {
-            auto* entry = forget_response->add_entries();
-            entry->mutable_key()->CopyFrom(key);
-            auto result = TransferTaskRegistry::ForgetResult::INVALID;
-            switch (key.trace_case()) {
-                case TransferCompletionKeyPB::kTransferTraceId:
-                    result = localForgetTransferCompletion(TransferExecutionTrace{key.transfer_trace_id()});
-                    break;
-                case TransferCompletionKeyPB::kKvcmTraceId:
-                    result = localForgetTransferCompletion(TransferExecutionTrace{key.kvcm_trace_id()});
-                    break;
-                default:
-                    RTP_LLM_LOG_WARNING("completion forget key has no trace namespace");
-                    break;
-            }
-            switch (result) {
-                case TransferTaskRegistry::ForgetResult::DONE:
-                    entry->set_status(TRANSFER_FORGET_DONE);
-                    break;
-                case TransferTaskRegistry::ForgetResult::RUNNING:
-                    entry->set_status(TRANSFER_FORGET_RUNNING);
-                    break;
-                case TransferTaskRegistry::ForgetResult::INVALID:
-                    entry->set_status(TRANSFER_FORGET_INVALID);
-                    break;
-                default:
-                    entry->set_status(TRANSFER_FORGET_FAILED);
-                    break;
-            }
-        }
-        return true;
-    }
-    if (request.has_completion_query()) {
-        auto* query_response = response.mutable_completion_query();
-        query_response->Clear();
-        query_response->set_rank(static_cast<uint32_t>(parallelism_config_.pp_rank * parallelism_config_.tp_size
-                                                       + parallelism_config_.tp_rank));
-        for (const auto& key : request.completion_query().keys()) {
-            auto* entry = query_response->add_entries();
-            entry->mutable_key()->CopyFrom(key);
-            auto state = TransferTaskRegistry::State::UNKNOWN;
-            switch (key.trace_case()) {
-                case TransferCompletionKeyPB::kTransferTraceId:
-                    state = localTransferCompletion(TransferExecutionTrace{key.transfer_trace_id()});
-                    break;
-                case TransferCompletionKeyPB::kKvcmTraceId:
-                    state = localTransferCompletion(TransferExecutionTrace{key.kvcm_trace_id()});
-                    break;
-                default:
-                    break;
-            }
-            switch (state) {
-                case TransferTaskRegistry::State::REJECTED:
-                    entry->set_state(TRANSFER_COMPLETION_UNKNOWN);
-                    entry->set_admission_closed(true);
-                    break;
-                case TransferTaskRegistry::State::RUNNING:
-                    entry->set_state(TRANSFER_COMPLETION_RUNNING);
-                    break;
-                case TransferTaskRegistry::State::BUFFER_SAFE:
-                    entry->set_state(TRANSFER_COMPLETION_BUFFER_SAFE);
-                    break;
-                default:
-                    entry->set_state(TRANSFER_COMPLETION_UNKNOWN);
-                    break;
-            }
-        }
-        return true;
-    }
-    if (request.has_remote_request()) {
-#ifdef RTP_LLM_USE_REMOTE_KV_CACHE
-        if (!block_tree_cache_) {
-            RTP_LLM_LOG_WARNING("KVCacheManager::executeFunction: block tree cache is not initialized");
-            return false;
-        }
-        auto backend = std::dynamic_pointer_cast<KVCMStorageBackend>(block_tree_cache_->storageBackend());
-        if (!backend) {
-            RTP_LLM_LOG_WARNING("KVCacheManager::executeFunction: KVCM storage backend is not initialized");
-            return false;
-        }
-        const bool success   = backend->execute(request.remote_request(), *response.mutable_remote_response());
-        const auto operation = request.remote_request().op();
-        // Read/write results are application state and must reach rank 0 even
-        // when the SDK failed or timed out. Metadata handlers retain their contract.
-        return operation == REMOTE_OPERATION_READ || operation == REMOTE_OPERATION_WRITE ? true : success;
-#else
-        RTP_LLM_LOG_WARNING("KVCacheManager::executeFunction: KVCM support is not compiled in");
-        return false;
-#endif
-    }
     if (request.has_p2p_request()) {
         return p2p_connector_ && p2p_connector_->executeFunction(request, response);
     }
-    if (!request.has_mem_request()) {
-        RTP_LLM_LOG_WARNING("KVCacheManager::executeFunction: unsupported request type");
-        return false;
-    }
-    RTP_LLM_LOG_INFO("transfer_lifecycle event=rpc_execute_enter trace=%lu request=%ld rank=%ld timeout_ms=%ld",
-                     request.mem_request().transfer_trace_id(),
-                     request.mem_request().transfer_request_id(),
-                     parallelism_config_.tp_rank,
-                     request.mem_request().timeout_ms());
-    if (!block_tree_cache_) {
-        RTP_LLM_LOG_WARNING("KVCacheManager::executeFunction: block tree cache is not initialized");
-        return false;
-    }
-
-    MemoryOperationResponsePB* memory_response = response.mutable_mem_response();
-    memory_response->set_code(MemoryOperationResponsePB::INVALID_REQUEST);
-    memory_response->set_buffer_safe(false);
-    memory_response->mutable_error_info()->set_error_code(static_cast<int64_t>(ErrorCode::INVALID_PARAMS));
-    memory_response->mutable_error_info()->set_error_message("invalid grouped transfer request");
-    memory_response->clear_block_errors();
-    for (int i = 0; i < request.mem_request().copy_items_size(); ++i) {
-        memory_response->add_block_errors(MemoryOperationResponsePB::INVALID_REQUEST);
-    }
-    if (request.mem_request().transfer_trace_id() == 0) {
-        memory_response->set_buffer_safe(true);
-        memory_response->mutable_error_info()->set_error_message("transfer execution trace ID is required");
-        RTP_LLM_LOG_WARNING("KVCacheManager::executeFunction: missing transfer execution trace ID");
-        return true;
-    }
-    std::vector<TransferDescriptor> descriptors;
-    std::vector<size_t>             wire_item_indices;
-    const bool                      allow_absent_group_sets = parallelism_config_.pp_size > 1;
-    if (!BlockTransferRequestConverter::decodeTransfer(request.mem_request(),
-                                                       descriptors,
-                                                       block_tree_cache_->groupSets(),
-                                                       allow_absent_group_sets,
-                                                       allow_absent_group_sets ? &wire_item_indices : nullptr)) {
-        RTP_LLM_LOG_WARNING("KVCacheManager::executeFunction: invalid grouped transfer request");
-        return true;
-    }
-    if (descriptors.empty()) {
-        TransferResult result;
-        result.expandBlockErrors(request.mem_request().copy_items_size());
-        BlockTransferRequestConverter::encodeTransferResult(*memory_response, result);
-        return true;
-    }
-
-    const int64_t timeout_ms = request.mem_request().timeout_ms();
-    if (timeout_ms > std::numeric_limits<int>::max()) {
-        memory_response->mutable_error_info()->set_error_message("transfer timeout exceeds supported range");
-        RTP_LLM_LOG_WARNING("KVCacheManager::executeFunction: transfer timeout exceeds supported range");
-        return true;
-    }
-    const auto timeout =
-        timeout_ms > 0 ? std::chrono::milliseconds(timeout_ms) : BlockTreeTaskPool::kDefaultQueueWaitTimeout;
-    TransferTask transfer_task(descriptors,
-                               timeout,
-                               request.mem_request().has_transfer_request_id() ?
-                                   std::optional<int64_t>(request.mem_request().transfer_request_id()) :
-                                   std::nullopt);
-    transfer_task.setTraceId(request.mem_request().transfer_trace_id());
-    transfer_task.setWorkflow(request.mem_request().transfer_workflow_id(), request.mem_request().transfer_parent_id());
-    auto         status          = block_tree_cache_->executeTransfer(std::move(transfer_task));
-    const size_t wire_item_count = static_cast<size_t>(request.mem_request().copy_items_size());
-    if (allow_absent_group_sets && wire_item_indices.size() != wire_item_count) {
-        // A PP stage can omit whole group sets. Restore the original wire order
-        // so skipped items remain no-ops without shifting another item's error.
-        status.expandBlockErrors(wire_item_indices.size());
-        if (status.block_errors.size() != wire_item_indices.size()) {
-            status = {ErrorInfo(ErrorCode::TRANSFER_COMPLETION_UNKNOWN, "invalid local block transfer result"),
-                      CacheCopyError::RPC_FAILED};
-            status.expandBlockErrors(wire_item_indices.size());
-        }
-        std::vector<CacheCopyError> wire_errors(wire_item_count, CacheCopyError::NONE);
-        for (size_t index = 0; index < wire_item_indices.size(); ++index) {
-            wire_errors[wire_item_indices[index]] = status.blockError(index);
-        }
-        status.block_errors = std::move(wire_errors);
-    }
-    BlockTransferRequestConverter::encodeTransferResult(*memory_response, status);
-    RTP_LLM_LOG_INFO("transfer_lifecycle event=rpc_execute_exit trace=%lu rank=%ld code=%ld buffer_safe=%d",
-                     request.mem_request().transfer_trace_id(),
-                     parallelism_config_.tp_rank,
-                     static_cast<int64_t>(status.status.code()),
-                     status.buffer_safe);
-    if (!status.ok()) {
-        RTP_LLM_LOG_WARNING("KVCacheManager::executeFunction: grouped transfer failed");
-        return true;
-    }
-    return true;
+    const int rank = parallelism_config_.pp_rank * parallelism_config_.tp_size + parallelism_config_.tp_rank;
+    return BlockTreeCache::executeFunction(block_tree_cache_.get(), rank, request, response,
+                                           std::chrono::steady_clock::time_point::max(), parallelism_config_.pp_size > 1);
 }
 
 void KVCacheManager::initCacheEventPublisher(std::shared_ptr<KVCacheEventReporter> reporter) {
@@ -1575,8 +1444,8 @@ bool KVCacheManager::initP2PConnector() {
         local_stage.add_worker_indices(pc.pp_rank * pc.tp_size + lane);
     }
     const auto append_layout = [&](const CacheConfig& cfg, uint32_t layers, P2PShardLayoutPB* out) {
-        auto shards =
-            ShardLayoutFactory::fromTopology(cfg.topology(), pc, pd_sep_config_.role_type, cfg.seq_size_per_block);
+        auto shards = ShardLayoutFactory::fromTopology(
+            cfg.topology(), pc, pd_sep_config_.role_type, cfg.seq_size_per_block, cfg.local_kv_cache_sharded);
         shards.use_group_cache_transfer_policy = config_.usesGroupCacheTransferPolicy();
         shards.use_mla                         = cfg.use_mla;
         encodeP2PShardLayout(shards, out);
@@ -1597,7 +1466,10 @@ bool KVCacheManager::initP2PConnector() {
     if (decode) {
         for (const auto& group : config_.topology().groups()) {
             // Capacity includes all allocated KV and scales, including extra draft modules.
-            (*startup.mutable_decode_block_bytes())[group.tag] = config_.blockSizeBytesForGroup(group.tag);
+            const auto bytes = config_.blockSizeBytesForGroup(group.tag);
+            if (bytes > 0) {
+                (*startup.mutable_decode_block_bytes())[group.tag] = bytes;
+            }
         }
     }
     P2PPipelineLayoutPB           pipeline;
@@ -1640,8 +1512,19 @@ bool KVCacheManager::initP2PConnector() {
     p2p_config.scheduler_config.pipeline_layout                 = p2p_pipeline_layout_;
     p2p_config.scheduler_config.use_group_cache_transfer_policy = config_.usesGroupCacheTransferPolicy();
     p2p_config.scheduler_config.use_mla                         = config_.use_mla;
+    p2p_config.scheduler_config.local_full_page_rr              = config_.local_kv_cache_sharded;
     p2p_config.worker_config.topology                           = config_.topologyPtr();
     p2p_config.worker_config.global_layer_begin                 = config_.global_layer_begin;
+    auto& linear_specs                                          = p2p_config.worker_config.linear_specs_by_layer;
+    linear_specs.resize(config_.topology().layers().size());
+    for (const auto& layer : config_.topology().layers()) {
+        for (const auto& tag : layer.group_tags) {
+            const auto& spec = config_.physicalGroupForLayer(layer.layer_id, tag).spec;
+            if (spec->tp_transfer.mode == TpCacheTransferMode::LINEAR_QKV) {
+                linear_specs[layer.layer_id].emplace(tag, spec);
+            }
+        }
+    }
     if (decode) {
         if (config_.mtp_sub_configs.size() > 1) {
             // Both MTP executors reuse module 0 for all proposal steps. The
@@ -1668,32 +1551,6 @@ bool KVCacheManager::initP2PConnector() {
     p2p_connector_ = std::move(p2p);
     RTP_LLM_LOG_INFO("KVCacheManager: P2PConnector initialized without coordinator");
     return true;
-}
-
-void KVCacheManager::stopMissingCleanup() {
-    {
-        std::lock_guard<std::mutex> lock(missing_cleanup_mutex_);
-        missing_cleanup_stopped_ = true;
-    }
-    missing_cleanup_cv_.notify_all();
-    if (missing_cleanup_thread_.joinable()) {
-        missing_cleanup_thread_.join();
-    }
-}
-
-void KVCacheManager::missingCleanupLoop() {
-    pthread_setname_np(pthread_self(), "kv_missing_gc");
-    std::unique_lock<std::mutex> lock(missing_cleanup_mutex_);
-    while (!missing_cleanup_cv_.wait_for(lock, std::chrono::minutes(1), [this] { return missing_cleanup_stopped_; })) {
-        lock.unlock();
-        block_tree_cache_->cleanupExpiredMissing();
-#ifdef RTP_LLM_USE_REMOTE_KV_CACHE
-        if (auto backend = std::dynamic_pointer_cast<KVCMStorageBackend>(block_tree_cache_->storageBackend())) {
-            backend->cleanupExpiredMissing();
-        }
-#endif
-        lock.lock();
-    }
 }
 
 void KVCacheManager::reportMetricsLoop() {
@@ -1741,9 +1598,6 @@ void KVCacheManager::reportMetricsLoop() {
         const std::vector<CachePoolMetrics> device_pool_metrics_list = coordinator_manager_->poolMetrics();
         const std::vector<CachePoolMetrics> report_metrics_list =
             mergeCachePoolMetrics(device_pool_metrics_list, tree_pool_metrics_list);
-        if (isAllocatorOwner()) {
-            block_tree_cache_->reportUnfreezeZeroMetrics(report_metrics_list);
-        }
         for (const CachePoolMetrics& report_metrics : report_metrics_list) {
             reportPoolCacheMetrics(metrics_reporter_, report_metrics, isAllocatorOwner());
         }

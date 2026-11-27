@@ -14,6 +14,7 @@
 #include "rtp_llm/cpp/cache/CacheGroupType.h"
 #include "rtp_llm/cpp/cache/KVCacheSpec.h"
 #include "rtp_llm/cpp/cache/CacheTopology.h"
+#include "rtp_llm/cpp/cache/LinearReplayPlan.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/models_py/bindings/core/Types.h"
@@ -35,6 +36,7 @@ inline void checkGroupResidencyBudget(const CacheGroupPolicy& policy, const std:
 
 struct CacheConfig {
 private:
+    /** Group tags describe the model's logical topology. Layer bindings identify groups with local storage. */
     std::shared_ptr<const CacheTopology> cache_topology;
 
 public:
@@ -48,13 +50,16 @@ public:
     bool use_typed_cache_regions                  = false;
     bool use_opaque_kv_cache_store                = false;
     bool disable_decode_first_malloc_device_reuse = false;
-    /** PP stages can own a single tag from a multi-tag model. Preserve the full-model
-     * transfer format so P and D use the same keys and block policy after partitioning. */
+    /** Keep the target's group transfer policy in the MTP cache config. */
     bool model_has_multiple_cache_groups = false;
+    // Resolved before allocator construction. Only FULL/BLOCK_ROUND_ROBIN
+    // groups use compact owned-page tables; LINEAR state keeps its own policy.
+    bool local_kv_cache_sharded = false;
 
     rtp_llm::DataType dtype              = rtp_llm::DataType::TYPE_INVALID;
     uint32_t          layer_num          = 0;  // the number of main model layers
     uint32_t          global_layer_begin = 0;
+    // Legacy model-level transport/event metadata; never determines per-group storage layout.
     bool              use_mla            = false;
     bool              is_sparse          = false;
 
@@ -68,6 +73,10 @@ public:
     int reuse_cache_tail_blocks = std::numeric_limits<int>::max();
     // Deployment sizing only; never part of a cache Spec or group policy identity.
     std::map<std::string, uint32_t> pool_block_weights;
+
+    // Accepted-prefix replay is enabled for target LINEAR groups during MTP.
+    // Group IDs follow the merged physical topology; the draft groups are excluded.
+    LinearReplayPlan linear_replay;
 
     // mtp-model configurations
     std::vector<std::shared_ptr<CacheConfig>> mtp_sub_configs;
@@ -124,6 +133,17 @@ public:
 
     const std::vector<GroupBase>& groups() const {
         return topology().groups();
+    }
+
+    // Startup resolves the replay switch for all eligible target LINEAR groups.
+    // Group consumers share that decision instead of checking runtime flags.
+    bool isLinearReplayGroup(int group_id) const {
+        return linear_replay.containsGroup(group_id);
+    }
+
+    bool isLegacyLinearGroup(int group_id) const {
+        return groups()[static_cast<size_t>(group_id)].policy.group_type == CacheGroupType::LINEAR
+               && !isLinearReplayGroup(group_id);
     }
 
     CacheTopology::GroupRefs groupsForLayer(int layer_id) const {

@@ -21,7 +21,7 @@
 
 namespace rtp_llm::test {
 
-// Used only when first-seen or merged publication order is itself the assertion.
+// Used when canonical topology publication order is itself the assertion.
 inline std::vector<std::string> publishedGroupTags(const CacheTopology& topology) {
     return topology.groupTags();
 }

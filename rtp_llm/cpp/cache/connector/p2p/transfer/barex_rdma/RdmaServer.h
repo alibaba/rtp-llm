@@ -6,6 +6,10 @@
 #include <memory>
 #include <string>
 
+namespace accl::barex {
+class AcclMetricReporter;
+}
+
 namespace rtp_llm {
 namespace transfer {
 namespace barex_rdma {
@@ -17,6 +21,8 @@ public:
     ~RdmaServer();
 
 public:
+    void stop() override;
+
     /// @brief 初始化 XServerTransport 并开始监听指定端口
     bool init(uint32_t listen_port, int io_thread_count, int worker_thread_count);
 
@@ -26,6 +32,7 @@ public:
 
 private:
     std::shared_ptr<::accl::barex::XServerTransport> server_;
+    std::weak_ptr<::accl::barex::AcclMetricReporter> barex_metrics_reporter_;
     std::shared_ptr<IRdmaMemoryManager>              memory_manager_;
     uint32_t                                         listen_port_    = 0;
     bool                                             initialized_    = false;

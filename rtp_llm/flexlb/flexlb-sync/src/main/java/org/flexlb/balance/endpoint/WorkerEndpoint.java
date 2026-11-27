@@ -54,11 +54,10 @@ public class WorkerEndpoint {
     // ==================== identity (delegated to status) ====================
 
     /**
-     * Returns the logical worker identity, including the engine index.
-     * Network calls use the separate IP and transport port accessors.
+     * Returns the worker's address in the routing directory.
      */
     public String ipPort() {
-        return status.getLogicalIpPort();
+        return status.routingAddress();
     }
 
     public String getIp() {

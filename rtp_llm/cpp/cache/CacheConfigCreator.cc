@@ -4,7 +4,6 @@
 #include <limits>
 #include <map>
 #include <numeric>
-#include <set>
 #include <utility>
 #include <cstring>
 #include <rapidjson/document.h>
@@ -22,19 +21,6 @@
 namespace rtp_llm {
 
 namespace {
-
-bool modelHasMultipleCacheGroups(const ModelConfig& model_config) {
-    std::set<std::string> tags;
-    for (const auto& layer_descs : model_config.kv_cache_spec_descs) {
-        for (const auto& desc : layer_descs) {
-            tags.insert(desc.tag);
-            if (tags.size() > 1) {
-                return true;
-            }
-        }
-    }
-    return false;
-}
 
 // Kernel blocks feeding a compressed (OpaqueKV) pool must be a whole number of
 // 128-token units: 128 is the HCA compression unit and also FlashMLA's block
@@ -72,6 +58,7 @@ void addBudgetBytes(size_t& total, size_t bytes, size_t count = 1) {
 KVCacheBlockBudget blockBudgetForConfig(const CacheConfig& config) {
     KVCacheBlockBudget budget;
     budget.max_baseline_block_num = config.maxBaselineBlockNum();
+    addBudgetBytes(budget.explicit_pool_reserve_bytes, config.linear_replay.reserve_bytes);
     for (size_t gid = 0; gid < config.topology().groups().size(); ++gid) {
         const auto& group          = config.topology().groups()[gid];
         size_t      group_bytes    = 0;
@@ -142,12 +129,7 @@ void resolvePoolBlockWeights(CacheConfig& config, const std::string& json, int64
                                         config.groups().end(),
                                         [&](const GroupBase& candidate) { return candidate.tag == tag; });
         if (group == config.groups().end()) {
-            // PP stages slice the merged topology down to their own layer
-            // range, while the weights JSON is broadcast verbatim to every
-            // rank. A tag missing from the local topology is still a legal
-            // global pool owned by another stage; finalizeBlockNums consumes
-            // the PP joint override table only through locally owned groups,
-            // so keep the weight and skip the local-only checks below.
+            /** PP accepts weight entries for pools outside the configured model. */
             RTP_LLM_CHECK_WITH_INFO(pp_size > 1,
                                     "KV_CACHE_POOL_BLOCK_WEIGHTS has unknown pool '%s' in merged target/draft topology",
                                     tag.c_str());
@@ -283,72 +265,50 @@ void validateDescs(const ModelConfig& model_config, uint32_t kernel_tokens_per_b
     }
 }
 
-void populateGroups(CacheConfig&                 config,
-                    const LayerKVCacheSpecDescs& descs_by_layer,
-                    const LayerKVCacheSpecs&     specs_by_layer,
-                    const ModelConfig&           model_config) {
-    struct BuildState {
-        KVCacheSpecPtr   spec;
-        std::string      fingerprint;
-        CacheGroupPolicy policy;
-    };
-    std::map<std::string, BuildState> groups_by_tag;
-    std::vector<std::string>          ordered_tags;
-    std::vector<LayerBase>            layers(static_cast<size_t>(config.layer_num));
-    for (uint32_t layer_id = 0; layer_id < config.layer_num; ++layer_id) {
-        layers[layer_id].layer_id = static_cast<int>(layer_id);
-        const auto& descs         = descs_by_layer[layer_id];
-        const auto& specs         = specs_by_layer[layer_id];
-        RTP_LLM_CHECK_WITH_INFO(descs.size() == specs.size(),
-                                "cache layer %u desc count %zu != spec count %zu",
-                                layer_id,
-                                descs.size(),
-                                specs.size());
-        std::set<std::string> layer_tags;
-        for (size_t i = 0; i < descs.size(); ++i) {
-            const auto& desc = descs[i];
-            const auto& spec = specs[i];
-            RTP_LLM_CHECK_WITH_INFO(spec != nullptr, "cache layer %u has null spec", layer_id);
-            RTP_LLM_CHECK_WITH_INFO(layer_tags.emplace(spec->tag).second,
-                                    "cache layer %u has duplicate tag=%s",
-                                    layer_id,
-                                    spec->tag.c_str());
-            auto policy = SpecBuilder::groupPolicy(desc);
-            checkGroupResidencyBudget(policy, spec->tag);
-            if (policy.group_type == CacheGroupType::SWA) {
-                RTP_LLM_CHECK_WITH_INFO(model_config.attn_config.sliding_window >= 0,
-                                        "SWA tag=%s has negative sliding window=%d",
-                                        spec->tag.c_str(),
-                                        model_config.attn_config.sliding_window);
-                policy.sliding_window_size = model_config.attn_config.sliding_window;
-            }
-            auto [it, inserted] = groups_by_tag.emplace(spec->tag, BuildState{});
-            if (inserted) {
-                it->second.spec        = spec;
-                it->second.fingerprint = spec->fingerprint();
-                it->second.policy      = policy;
-                ordered_tags.push_back(spec->tag);
-            } else {
-                RTP_LLM_CHECK_WITH_INFO(it->second.fingerprint == spec->fingerprint(),
-                                        "cache tag=%s has multiple physical prototypes",
-                                        spec->tag.c_str());
-                RTP_LLM_CHECK_WITH_INFO(CacheConfig::samePolicy(it->second.policy, policy),
-                                        "cache tag=%s has inconsistent policy",
-                                        spec->tag.c_str());
-            }
-            layers[layer_id].group_tags.push_back(spec->tag);
-        }
+CacheGroupPolicy makeGroupPolicy(const KVCacheSpecDesc& desc, int sliding_window) {
+    auto policy = SpecBuilder::groupPolicy(desc);
+    checkGroupResidencyBudget(policy, desc.tag);
+    if (policy.group_type == CacheGroupType::SWA) {
+        RTP_LLM_CHECK_WITH_INFO(
+            sliding_window >= 0, "SWA tag=%s has negative sliding window=%d", desc.tag.c_str(), sliding_window);
+        policy.sliding_window_size = sliding_window;
     }
+    return policy;
+}
 
+void populateGroups(CacheConfig&                 config,
+                    const ModelConfig&           model_config,
+                    const SpecBuildContext&      ctx,
+                    const StageLayerRange&       range) {
+    const auto& layer_descs = model_config.kv_cache_spec_descs;
+    std::map<std::string, size_t> group_ids;
     std::vector<GroupBase> groups;
-    groups.reserve(ordered_tags.size());
-    for (const auto& tag : ordered_tags) {
-        const auto& state = groups_by_tag.at(tag);
-        GroupBase   group;
-        group.tag    = tag;
-        group.spec   = state.spec;
-        group.policy = state.policy;
-        groups.push_back(std::move(group));
+    std::vector<LayerBase> layers;
+    layers.reserve(range.size);
+    for (size_t layer_id = 0; layer_id < layer_descs.size(); ++layer_id) {
+        const bool is_local = layer_id >= range.begin && layer_id < range.end();
+        if (is_local) {
+            layers.push_back({static_cast<int>(layer_id - range.begin), {}});
+        }
+        for (const auto& desc : layer_descs[layer_id]) {
+            const auto spec     = SpecBuilder::build(desc, ctx);
+            const auto policy   = makeGroupPolicy(desc, model_config.attn_config.sliding_window);
+            auto [it, inserted] = group_ids.try_emplace(desc.tag, groups.size());
+            if (inserted) {
+                groups.push_back({desc.tag, spec, policy});
+            } else {
+                const auto& group = groups[it->second];
+                RTP_LLM_CHECK_WITH_INFO(group.spec->fingerprint() == spec->fingerprint(),
+                                        "cache tag=%s has multiple physical prototypes",
+                                        desc.tag.c_str());
+                RTP_LLM_CHECK_WITH_INFO(CacheConfig::samePolicy(group.policy, policy),
+                                        "cache tag=%s has inconsistent policy",
+                                        desc.tag.c_str());
+            }
+            if (is_local) {
+                layers.back().group_tags.push_back(desc.tag);
+            }
+        }
     }
     config.setTopology(std::move(groups), std::move(layers));
 }
@@ -357,34 +317,44 @@ CacheConfig createConfigFromDescs(const ModelConfig&       model_config,
                                   const ParallelismConfig& parallelism_config,
                                   const KVCacheConfig&     kv_cache_config,
                                   int                      gen_num_per_cycle,
-                                  uint32_t                 global_layer_begin) {
+                                  const StageLayerRange&   range) {
     const auto [seq_size, kernel_seq_size] = resolveSeqSizes(model_config, kv_cache_config);
     validateDescs(model_config, kernel_seq_size);
     validateAttentionMetadata(model_config);
     const auto ctx =
         makeSpecBuildContext(model_config, parallelism_config, seq_size, kernel_seq_size, gen_num_per_cycle);
-    const auto specs =
-        CacheConfigCreator::buildLayerSpecsFromDescs(model_config.kv_cache_spec_descs, ctx, model_config.num_layers);
-
     CacheConfig config;
     config.dtype                   = ctx.dtype;
-    config.layer_num               = static_cast<uint32_t>(model_config.num_layers);
-    config.global_layer_begin      = global_layer_begin;
+    config.layer_num               = range.size;
+    config.global_layer_begin      = range.begin;
     config.cache_min_replay_tokens = std::max(1, model_config.cache_min_replay_tokens);
     config.cache_key_hash_seed     = model_config.cache_key_hash_seed;
+
+    const auto& cp = parallelism_config.prefill_cp_config;
+    config.local_kv_cache_sharded =
+        parallelism_config.tp_size > 1
+        && (model_config.use_page_rr_kv_cache
+            || (cp.kv_cache_sharded && (cp.is_enabled() || cp.is_prefill_enabled())
+                && parallelism_config.role_type != RoleType::DECODE));
+    RTP_LLM_CHECK_WITH_INFO(!config.local_kv_cache_sharded || cp.kv_cache_sharded,
+                            "local PageRR allocation requires kv_cache_sharded transport metadata");
 
     config.seq_size_per_block = seq_size;
     config.use_mla            = model_config.attn_config.use_mla;
     config.is_sparse          = model_config.attn_config.is_sparse;
-    populateGroups(config, model_config.kv_cache_spec_descs, specs, model_config);
+    populateGroups(config, model_config, ctx, range);
     for (const auto& group : config.topology().groups()) {
         const bool opaque =
             group.spec->type == KVCacheSpecType::OpaqueKV || group.spec->type == KVCacheSpecType::OpaqueState;
+        /** The first decode allocation decides reuse for all cache groups in the request. */
+        config.disable_decode_first_malloc_device_reuse |= opaque;
+        if (config.layerIdsForGroup(group.tag).empty()) {
+            continue;
+        }
         config.use_typed_cache_regions |= opaque;
         config.use_opaque_kv_cache_store |= opaque;
         config.is_sparse |= group.spec->type == KVCacheSpecType::OpaqueKV;
     }
-    config.disable_decode_first_malloc_device_reuse |= config.use_opaque_kv_cache_store;
     return config;
 }
 
@@ -408,63 +378,13 @@ uint32_t maxKVCacheBlockNumForBudget(size_t total_budget_bytes, const KVCacheBlo
     return low;
 }
 
-LayerKVCacheSpecs CacheConfigCreator::buildLayerSpecsFromDescs(const LayerKVCacheSpecDescs& layer_descs,
-                                                               const SpecBuildContext&      ctx,
-                                                               int64_t                      expected_layer_num) {
-    RTP_LLM_CHECK_WITH_INFO(layer_descs.size() == static_cast<size_t>(expected_layer_num),
-                            "kv_cache_spec_descs size %zu != num_layers %ld",
-                            layer_descs.size(),
-                            expected_layer_num);
-    LayerKVCacheSpecs layer_specs(layer_descs.size());
-    for (size_t layer_id = 0; layer_id < layer_descs.size(); ++layer_id) {
-        const auto& descs = layer_descs[layer_id];
-        RTP_LLM_CHECK_WITH_INFO(!descs.empty(), "kv_cache_spec_descs layer %zu has no descs", layer_id);
-        auto& specs = layer_specs[layer_id];
-        specs.reserve(descs.size());
-        for (const auto& desc : descs) {
-            specs.push_back(SpecBuilder::build(desc, ctx));
-        }
-    }
-    return layer_specs;
-}
-
-ModelConfig CacheConfigCreator::stageScopedModelConfig(const ModelConfig&       model_config,
-                                                       const ParallelismConfig& parallelism_config,
-                                                       bool                     is_draft_model) {
-    if (parallelism_config.pp_size <= 1 || is_draft_model) {
-        return model_config;
-    }
-
-    const auto range = stageLayerRange(parallelism_config, parallelism_config.pp_rank, model_config.num_layers);
-    RTP_LLM_CHECK_WITH_INFO(model_config.kv_cache_spec_descs.size() == static_cast<size_t>(model_config.num_layers),
-                            "kv_cache_spec_descs size %zu != num_layers %ld",
-                            model_config.kv_cache_spec_descs.size(),
-                            model_config.num_layers);
-
-    ModelConfig stage_config = model_config;
-    stage_config.num_layers  = range.size;
-    stage_config.kv_cache_spec_descs.assign(model_config.kv_cache_spec_descs.begin() + range.begin,
-                                            model_config.kv_cache_spec_descs.begin() + range.end());
-
-    auto& attention_types = stage_config.hybrid_attention_config.hybrid_attention_types;
-    if (!attention_types.empty()) {
-        RTP_LLM_CHECK_WITH_INFO(attention_types.size() == static_cast<size_t>(model_config.num_layers),
-                                "hybrid_attention_types size %zu != num_layers %ld",
-                                attention_types.size(),
-                                model_config.num_layers);
-        attention_types.assign(model_config.hybrid_attention_config.hybrid_attention_types.begin() + range.begin,
-                               model_config.hybrid_attention_config.hybrid_attention_types.begin() + range.end());
-    }
-    return stage_config;
-}
-
 CacheConfig CacheConfigCreator::createBasicConfig(const ModelConfig&       model_config,
                                                   const ParallelismConfig& parallelism_config,
                                                   const KVCacheConfig&     kv_cache_config,
                                                   int                      gen_num_per_cycle,
-                                                  uint32_t                 global_layer_begin) {
+                                                  const StageLayerRange&   range) {
     auto config =
-        createConfigFromDescs(model_config, parallelism_config, kv_cache_config, gen_num_per_cycle, global_layer_begin);
+        createConfigFromDescs(model_config, parallelism_config, kv_cache_config, gen_num_per_cycle, range);
     RTP_LLM_CHECK_WITH_INFO(kv_cache_config.reuse_cache_tail_blocks > 0, "reuse_cache_tail_blocks must be positive");
     config.reuse_cache_tail_blocks = kv_cache_config.reuse_cache_tail_blocks;
     {
@@ -525,15 +445,19 @@ CacheConfig CacheConfigCreator::createWarmupConfig(const ModelConfig&       mode
     return createWarmupConfig(model_config, parallelism_config, options, gen_num_per_cycle);
 }
 
+CacheConfig CacheConfigCreator::createMainModelCacheConfig(const ModelConfig&       model_config,
+                                                           const ParallelismConfig& parallelism_config,
+                                                           const KVCacheConfig&     kv_cache_config,
+                                                           int                      gen_num_per_cycle) {
+    const auto range = stageLayerRange(parallelism_config, parallelism_config.pp_rank, model_config.num_layers);
+    return createBasicConfig(model_config, parallelism_config, kv_cache_config, gen_num_per_cycle, range);
+}
+
 CacheConfig CacheConfigCreator::createWarmupConfig(const ModelConfig&       model_config,
                                                    const ParallelismConfig& parallelism_config,
                                                    const KVCacheConfig&     kv_cache_config,
                                                    int                      gen_num_per_cycle) {
-    const auto stage_model_config = stageScopedModelConfig(model_config, parallelism_config);
-    const auto range = stageLayerRange(parallelism_config, parallelism_config.pp_rank, model_config.num_layers);
-    auto       config =
-        createBasicConfig(stage_model_config, parallelism_config, kv_cache_config, gen_num_per_cycle, range.begin);
-    config.model_has_multiple_cache_groups = modelHasMultipleCacheGroups(model_config);
+    auto config = createMainModelCacheConfig(model_config, parallelism_config, kv_cache_config, gen_num_per_cycle);
     config.finalizeBlockNums(2, RuntimeConfig{});
     auto groups = config.topology().groups();
     for (auto& group : groups) {
@@ -557,17 +481,13 @@ CacheConfig CacheConfigCreator::createConfig(const ModelConfig&                 
             || (sp_config->gen_num_per_cycle >= 0 && sp_config->gen_num_per_cycle <= std::numeric_limits<int>::max()),
         "draft proposal token count must fit a non-negative int");
     const int  gen_num_per_cycle  = draft_model_config != nullptr ? sp_config->gen_num_per_cycle : 0;
-    const auto stage_model_config = stageScopedModelConfig(model_config, parallelism_config);
-    const auto range = stageLayerRange(parallelism_config, parallelism_config.pp_rank, model_config.num_layers);
-    auto       config =
-        createBasicConfig(stage_model_config, parallelism_config, kv_cache_config, gen_num_per_cycle, range.begin);
-    config.model_has_multiple_cache_groups = modelHasMultipleCacheGroups(model_config);
+    auto config = createMainModelCacheConfig(model_config, parallelism_config, kv_cache_config, gen_num_per_cycle);
     if (draft_model_config != nullptr) {
         const auto layout = RankLayout::fromParallelismConfig(parallelism_config);
         RTP_LLM_CHECK_WITH_INFO(layout.isLastStage(), "draft cache configuration is only valid on the last PP stage");
-        auto draft_model = stageScopedModelConfig(*draft_model_config, parallelism_config, true);
-        auto draft       = createBasicConfig(
-            draft_model, parallelism_config, kv_cache_config, gen_num_per_cycle, /*global_layer_begin=*/0);
+        const StageLayerRange draft_range{0, static_cast<uint32_t>(draft_model_config->num_layers)};
+        auto                  draft =
+            createBasicConfig(*draft_model_config, parallelism_config, kv_cache_config, gen_num_per_cycle, draft_range);
         // DSpARK/DFlash are single multi-layer block-draft models; gamma is
         // the proposal width, not a count of independent one-layer modules.
         int num_mtp_modules = is_mtp && !is_eagle && !isBlockDraftType(sp_config->type) ? gen_num_per_cycle : 1;
@@ -579,6 +499,66 @@ CacheConfig CacheConfigCreator::createConfig(const ModelConfig&                 
     }
     resolvePoolBlockWeights(config, kv_cache_config.kv_cache_pool_block_weights, parallelism_config.pp_size);
     return config;
+}
+
+void CacheConfigCreator::configureLinearReplay(CacheConfig&                                     config,
+                                               const ModelConfig&                               model_config,
+                                               const ParallelismConfig&                         parallelism_config,
+                                               const RuntimeConfig&                             runtime_config,
+                                               const std::optional<SpeculativeExecutionConfig>& sp_config,
+                                               bool                                             is_mtp) {
+    if (!runtime_config.enable_linear_replay || !is_mtp || parallelism_config.pp_size > 1
+        || parallelism_config.role_type == RoleType::PREFILL || !sp_config || sp_config->gen_num_per_cycle <= 0
+        || (sp_config->type != SP_TYPE_MTP && sp_config->type != SP_TYPE_EAGLE && sp_config->type != SP_TYPE_EAGLE3)) {
+        return;
+    }
+    std::vector<int> group_ids;
+    size_t           layer_count = 0;
+    for (size_t group_id = 0; group_id < config.groups().size(); ++group_id) {
+        const auto& group = config.groups()[group_id];
+        if (group.policy.group_type != CacheGroupType::LINEAR
+            || group.policy.memory_placement != CacheMemoryPlacement::DEVICE) {
+            continue;
+        }
+        const auto layers        = config.layerIdsForGroup(group.tag);
+        const auto target_layers = std::count_if(layers.begin(), layers.end(), [&](int layer) {
+            return layer >= 0 && static_cast<uint32_t>(layer) < config.layer_num;
+        });
+        if (target_layers > 0) {
+            group_ids.push_back(static_cast<int>(group_id));
+            layer_count += static_cast<size_t>(target_layers);
+        }
+    }
+    if (group_ids.empty()) {
+        return;
+    }
+#if !USING_CUDA || USE_PPU
+    // Replay kernels are CUDA-only; retain the normal LINEAR cache path elsewhere.
+    return;
+#endif
+    const int64_t slot_count =
+        runtime_config.use_batch_decode_scheduler ?
+            std::max(runtime_config.max_generate_batch_size,
+                     runtime_config.batch_decode_scheduler_config.batch_decode_scheduler_batch_size) :
+            runtime_config.max_generate_batch_size;
+    RTP_LLM_CHECK_WITH_INFO(slot_count > 0 && slot_count <= std::numeric_limits<int>::max(),
+                            "LINEAR replay requires a positive slot count fitting int");
+    RTP_LLM_CHECK_WITH_INFO(sp_config->gen_num_per_cycle < std::numeric_limits<int>::max(),
+                            "LINEAR replay verify width overflows int");
+    const auto& linear = model_config.linear_attention_config;
+    const auto  tp     = std::max<int64_t>(1, parallelism_config.get_attn_tp_size());
+    RTP_LLM_CHECK_WITH_INFO(linear.linear_num_key_heads > 0 && linear.linear_num_value_heads > 0
+                                && linear.linear_num_key_heads % tp == 0 && linear.linear_num_value_heads % tp == 0,
+                            "LINEAR replay requires head counts divisible by attention TP");
+    RTP_LLM_CHECK_WITH_INFO(linear.linear_conv_kernel_dim > 1, "LINEAR replay requires convolution history");
+    config.linear_replay = LinearReplayPlan::create(std::move(group_ids),
+                                                    slot_count,
+                                                    sp_config->gen_num_per_cycle + 1,
+                                                    {linear.linear_num_key_heads / tp, linear.linear_key_head_dim},
+                                                    {linear.linear_num_value_heads / tp, linear.linear_value_head_dim},
+                                                    linear.replay_vector_gate,
+                                                    linear.conv_state_dtype,
+                                                    layer_count);
 }
 
 uint32_t CacheConfigCreator::computeLocalBlockNum(const CacheConfig&                               config,
@@ -739,7 +719,7 @@ CacheConfigCreator::sizingSignature(const CacheConfig& config, uint32_t baseline
         number(policy.sliding_window_size);
         number(config.blockWeight(group.tag));
         if (baseline > 0) {
-            number(config.blockNumForGroup(group, baseline));
+            number(config.layerIdsForGroup(group.tag).empty() ? 0 : config.blockNumForGroup(group, baseline));
         }
     }
     SizingSignature result{};

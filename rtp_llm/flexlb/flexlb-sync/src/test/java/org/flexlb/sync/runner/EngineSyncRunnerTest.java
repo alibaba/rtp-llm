@@ -135,7 +135,7 @@ class EngineSyncRunnerTest {
 
     @Test
     void should_start_new_worker_expiration_window_at_discovery_time() {
-        String ipPort = "127.0.0.1:8080@0";
+        String ipPort = "127.0.0.1:8080";
         Mockito.when(workerAddressService.getEngineWorkerList(modelName, RoleType.VIT))
                 .thenReturn(List.of(WorkerHost.of("127.0.0.1", 8080)));
         EngineSyncRunner runner =

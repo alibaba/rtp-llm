@@ -41,6 +41,7 @@ from rtp_llm.multimodal.multimodal_mixins.multimodal_common import (
 )
 from rtp_llm.multimodal.multimodal_util import (
     collect_download_timing,
+    configure_oss_internal_endpoint_rewrite,
     maybe_tensor_to_list,
     trans_mm_input,
     url_data_cache_,
@@ -187,6 +188,9 @@ def _worker_initializer(
     global _worker_vit_config, _worker_preprocess_params, _worker_preprocess_func
     # 让工作进程忽略 SIGINT 信号，这样主进程的 Ctrl+C 不会杀死它们
     signal.signal(signal.SIGINT, signal.SIG_IGN)
+    configure_oss_internal_endpoint_rewrite(
+        vit_config.enable_oss_internal_endpoint_rewrite
+    )
     _worker_vit_config = vit_config
     _worker_preprocess_params = preprocess_params
     _worker_preprocess_func = preprocess_func
@@ -769,6 +773,9 @@ class MMProcessEngine:
                           - True: proxy 模式下的 worker 进程，QPS 由 proxy 层记录，此处不记录
                           - False: standalone 模式，需要在此处记录 QPS
         """
+        configure_oss_internal_endpoint_rewrite(
+            vit_config.enable_oss_internal_endpoint_rewrite
+        )
         # Resolve the provider before allocating pools or starting worker threads.
         self._greennet_provider = get_greennet_provider()
         self.server_id = server_id

@@ -1,8 +1,10 @@
+#include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeTaskPool.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/BlockTransferRequestConverter.h"
 
 #include <algorithm>
 #include <exception>
 #include <iterator>
+#include <limits>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -16,52 +18,35 @@ namespace rtp_llm {
 
 namespace {
 
-enum class GroupSetResolution {
-    MATCHED,
-    ABSENT,
-    INVALID
-};
-
-GroupSetResolution resolveGroupSet(const MemoryOperationRequestPB::CopyItem& item,
-                                   const std::vector<GroupSetPtr>&           group_sets,
-                                   const GroupSet*&                          match) {
-    match = nullptr;
+const GroupSet* resolveGroupSet(const MemoryOperationRequestPB::CopyItem& item,
+                                const std::vector<GroupSetPtr>&           group_sets) {
     if (item.group_tags_size() == 0) {
-        return GroupSetResolution::INVALID;
+        return nullptr;
     }
     std::unordered_set<std::string> requested_tags;
     for (const auto& tag : item.group_tags()) {
         if (tag.empty() || !requested_tags.emplace(tag).second) {
-            return GroupSetResolution::INVALID;
+            return nullptr;
         }
     }
-    bool            has_overlap = false;
-    const GroupSet* exact_match = nullptr;
+    const GroupSet* match = nullptr;
     for (const auto& candidate : group_sets) {
-        if (!candidate) {
+        if (!candidate || candidate->groupTags().size() != requested_tags.size()) {
             continue;
         }
-        const size_t overlap = static_cast<size_t>(std::count_if(
+        const bool same_members = std::all_of(
             candidate->groupTags().begin(), candidate->groupTags().end(), [&requested_tags](const std::string& tag) {
                 return requested_tags.find(tag) != requested_tags.end();
-            }));
-        if (overlap == 0) {
+            });
+        if (!same_members) {
             continue;
         }
-        has_overlap = true;
-        if (overlap != requested_tags.size() || overlap != candidate->groupTags().size()) {
-            continue;
+        if (match != nullptr) {
+            return nullptr;
         }
-        if (exact_match != nullptr) {
-            return GroupSetResolution::INVALID;
-        }
-        exact_match = candidate.get();
+        match = candidate.get();
     }
-    if (exact_match != nullptr) {
-        match = exact_match;
-        return GroupSetResolution::MATCHED;
-    }
-    return has_overlap ? GroupSetResolution::INVALID : GroupSetResolution::ABSENT;
+    return match;
 }
 
 }  // namespace
@@ -174,7 +159,6 @@ bool BlockTransferRequestConverter::encodeTransfer(MemoryOperationRequestPB&    
 bool BlockTransferRequestConverter::decodeTransfer(const MemoryOperationRequestPB&  request,
                                                    std::vector<TransferDescriptor>& descriptors,
                                                    const std::vector<GroupSetPtr>&  group_sets,
-                                                   bool                             allow_absent_group_sets,
                                                    std::vector<size_t>*             wire_item_indices) {
     // This boundary is shared by the real RPC service and native smoke workers.
     // group_set links in-process ranks to worker_init and dispatcher_init logs.
@@ -211,19 +195,11 @@ bool BlockTransferRequestConverter::decodeTransfer(const MemoryOperationRequestP
         decoded_item_indices.reserve(static_cast<size_t>(request.copy_items_size()));
     }
     for (int item_index = 0; item_index < request.copy_items_size(); ++item_index) {
-        const CopyItem&          item          = request.copy_items(item_index);
-        const GroupSet*          group_set_ptr = nullptr;
-        const GroupSetResolution resolution    = resolveGroupSet(item, group_sets, group_set_ptr);
-        if (resolution == GroupSetResolution::INVALID) {
-            RTP_LLM_LOG_WARNING("invalid or partially overlapping BlockTree GroupSet membership");
+        const auto&     item          = request.copy_items(item_index);
+        const GroupSet* group_set_ptr = resolveGroupSet(item, group_sets);
+        if (group_set_ptr == nullptr) {
+            RTP_LLM_LOG_WARNING("cannot resolve BlockTree GroupSet membership");
             return false;
-        }
-        if (resolution == GroupSetResolution::ABSENT) {
-            if (!allow_absent_group_sets) {
-                RTP_LLM_LOG_WARNING("cannot resolve BlockTree GroupSet membership");
-                return false;
-            }
-            continue;
         }
         const GroupSet&    group_set = *group_set_ptr;
         TransferDescriptor descriptor;
@@ -268,6 +244,9 @@ bool BlockTransferRequestConverter::decodeTransfer(const MemoryOperationRequestP
             }
             default:
                 return false;
+        }
+        if (group_set.payloadBytes() == 0) {
+            continue;
         }
         decoded.push_back(std::move(descriptor));
         if (wire_item_indices) {
@@ -318,6 +297,45 @@ CacheCopyError BlockTransferRequestConverter::decodeCode(MemoryOperationResponse
         default:
             return CacheCopyError::COPY_FAILED;
     }
+}
+
+std::optional<TransferTask>
+BlockTransferRequestConverter::decodeTransferTask(const MemoryOperationRequestPB&  request,
+                                                  const std::vector<GroupSetPtr>& group_sets,
+                                                  MemoryOperationResponsePB&      response,
+                                                  std::vector<size_t>*             wire_item_indices) {
+    const auto reject = [&](const char* message) {
+        TransferResult result(ErrorInfo(ErrorCode::INVALID_PARAMS, message));
+        result.buffer_safe = true;
+        result.expandBlockErrors(request.copy_items_size());
+        encodeTransferResult(response, result);
+        RTP_LLM_LOG_WARNING("%s", message);
+        return std::nullopt;
+    };
+    if (request.transfer_trace_id() == 0) {
+        return reject("transfer execution trace ID is required");
+    }
+    std::vector<TransferDescriptor> descriptors;
+    if (!decodeTransfer(request, descriptors, group_sets, wire_item_indices)) {
+        return reject("invalid grouped transfer request");
+    }
+    if (descriptors.empty()) {
+        auto result = TransferResult::emptyAggregate();
+        result.expandBlockErrors(request.copy_items_size());
+        encodeTransferResult(response, result);
+        return std::nullopt;
+    }
+    if (request.timeout_ms() > std::numeric_limits<int>::max()) {
+        return reject("transfer timeout exceeds supported range");
+    }
+    const auto timeout = request.timeout_ms() > 0 ? std::chrono::milliseconds(request.timeout_ms()) :
+                                                    BlockTreeTaskPool::kDefaultQueueWaitTimeout;
+    const auto request_id = request.has_transfer_request_id() ? std::optional<int64_t>(request.transfer_request_id()) :
+                                                               std::nullopt;
+    TransferTask task(std::move(descriptors), timeout, request_id);
+    task.setTraceId(request.transfer_trace_id());
+    task.setWorkflow(request.transfer_workflow_id(), request.transfer_parent_id());
+    return task;
 }
 
 void BlockTransferRequestConverter::encodeTransferResult(MemoryOperationResponsePB& response,
