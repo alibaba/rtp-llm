@@ -205,6 +205,11 @@ public:
     double predictBaseLatency(const NaviSchedLatencyFeatures &features) const;
     bool prepareLatencyPredictionFeatures(NaviSchedLatencyFeatures &features) const;
     int64_t getNativeStepTokenBudget() const { return _nativeStepTokenBudget; }
+    bool classifiesNewRequestKVLoad() const {
+        // Native model/policy metadata is stable capability. A temporary gap
+        // in observed workload coverage must not create more unmarked requests.
+        return _workload.executionLoadTracked || _nativeStepTokenBudget > 0;
+    }
     double predictLatency(const NaviSchedLatencyFeatures &features) const;
     bool usesUnifiedLatencyPrediction() const;
     const std::optional<TPUPrefillExecutionPolicyConfig> &getPrefillExecutionPolicy()

@@ -1112,3 +1112,102 @@ TEST(ExecutionLoadResourceTest, LegacyOptimizerBaselineKeepsItsOriginalPredictio
     EXPECT_DOUBLE_EQ(original, node.getExistingUnifiedLatencyMs());
 }
 }
+
+namespace navi_sched {
+namespace {
+void initUntrackedNativeKVLoadContext(NaviSchedScheduleContext &context,
+                                     const NaviSchedNodeConstPtr &source,
+                                     size_t requestCount,
+                                     bool declaredNative = true) {
+    auto snapshot = nativeStepForecastSnapshot();
+    auto info = std::make_shared<NaviSchedNodeInfo>(*snapshot.info);
+    info->bizName = "kv_load_test";
+    info->agentId = "agent_0";
+    info->serverAddress = "127.0.0.1:19001";
+    info->pdSeparated = true;
+    if (!declaredNative) info->latencyModelFingerprint = R"({"framework":"sglang"})";
+    snapshot.info = info;
+    snapshot.workload = {};
+    snapshot.workload.executionLoadTracked = false;
+    NaviSchedLatencyFeatures empty;
+    ASSERT_TRUE(empty.appendCapacitySplitAggregate(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0));
+    snapshot.workloadFeatures = empty;
+    snapshot.reportedWorkloadFeatures = empty;
+    snapshot.reservedWorkloadFeatures = empty;
+    snapshot.workloadRunningCapacitySlotCount = 0;
+    snapshot.kvPreparationEstimates.clear();
+    snapshot.kvPreparationSnapshotMonoUs = 0;
+    for (size_t i = 0; i < requestCount; ++i) {
+        NaviSchedScheduleItem item;
+        item.request.requestId = 201 + i;
+        item.request.promptTokenCount = 128;
+        item.request.blockSize = 32;
+        context._requests.emplace_back(std::move(item));
+    }
+    context.setNodes({source}, {snapshot});
+    ASSERT_TRUE(context.prepare());
+}
+}
+
+TEST(ExecutionLoadResourceTest, NativeKVLoadClassificationSurvivesUntrackedWorkload) {
+    auto source = std::make_shared<InitialKVLoadNode>();
+    source->totalBlocks = {0, 3, 3};
+    source->hbmBlocks = {0, 3, 1};
+    NaviSchedScheduleContext context;
+    initUntrackedNativeKVLoadContext(context, source, 3);
+    ASSERT_EQ(8192, context._scheduleNodes[0].getNativeStepTokenBudget());
+    ASSERT_FALSE(context._scheduleNodes[0]._workload.executionLoadTracked);
+    ASSERT_TRUE(context.getCacheHitBlockCountsSnapshot(0));
+    // Freeze the physical source before another cache update arrives.
+    source->totalBlocks = {0, 0, 0};
+    source->hbmBlocks = {0, 0, 0};
+    for (size_t i = 0; i < 3; ++i)
+        ASSERT_TRUE(context.selectNode(i, 0, "kv_load_test"));
+    ASSERT_TRUE(context.prepareResult(context.getScheduleTimeUs()));
+    const std::vector<bool> expected = {true, true, false};
+    for (size_t i = 0; i < 3; ++i) {
+        const auto &decision = context._decisions[i];
+        ASSERT_TRUE(decision.executionLoadIncluded.has_value()) << i;
+        EXPECT_EQ(expected[i], *decision.executionLoadIncluded);
+        auto response = context.makeResponse(decision, i);
+        ASSERT_TRUE(response);
+        autil::DataBuffer wire;
+        response->serialize(wire);
+        wire.write(uint64_t{817263});
+        MasterResponseToClientData decoded;
+        decoded.deserialize(wire);
+        EXPECT_EQ(decision.executionLoadIncluded, decoded.executionLoadIncluded);
+        uint64_t sentinel = 0;
+        wire.read(sentinel);
+        EXPECT_EQ(817263u, sentinel);
+    }
+    EXPECT_EQ(1u, source->richCalls);
+    EXPECT_EQ(0u, source->plainCalls);
+    // Classification capability does not fabricate a fully tracked observation.
+    EXPECT_FALSE(context._scheduleNodes[0]._workload.executionLoadTracked);
+    EXPECT_TRUE(context._scheduleNodes[0].getKVPreparationProbabilityAudits().empty());
+}
+
+TEST(ExecutionLoadResourceTest, NativeKVLoadUnknownHbmCannotDefaultToReady) {
+    auto source = std::make_shared<InitialKVLoadNode>();
+    source->totalBlocks = {3};
+    source->hbmBlocks = {-1};
+    NaviSchedScheduleContext context;
+    initUntrackedNativeKVLoadContext(context, source, 1);
+    ASSERT_TRUE(context.selectNode(0, 0, "kv_load_test"));
+    EXPECT_FALSE(context.prepareResult(context.getScheduleTimeUs()));
+    EXPECT_FALSE(context._decisions[0].executionLoadIncluded.has_value());
+}
+
+TEST(ExecutionLoadResourceTest, NativeKVLoadClassificationKeepsUndeclaredModelBehavior) {
+    auto source = std::make_shared<InitialKVLoadNode>();
+    NaviSchedScheduleContext context;
+    initUntrackedNativeKVLoadContext(context, source, 1, false);
+    ASSERT_EQ(0, context._scheduleNodes[0].getNativeStepTokenBudget());
+    ASSERT_TRUE(context.selectNode(0, 0, "kv_load_test"));
+    ASSERT_TRUE(context.prepareResult(context.getScheduleTimeUs()));
+    EXPECT_FALSE(context._decisions[0].executionLoadIncluded.has_value());
+    EXPECT_EQ(0u, source->richCalls);
+    EXPECT_EQ(1u, source->plainCalls);
+}
+}

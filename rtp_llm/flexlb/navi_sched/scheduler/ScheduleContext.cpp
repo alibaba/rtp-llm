@@ -1190,7 +1190,7 @@ NaviSchedScheduleContext::getCacheHitBlockCountsSnapshot(size_t nodeIndex) const
         std::atomic_compare_exchange_strong(&node._matchedBlockCounts, &published, immutable);
         return published ? published : immutable;
     }
-    if (node._remoteCacheReadyBlocks || node._workload.executionLoadTracked ||
+    if (node._remoteCacheReadyBlocks || node.classifiesNewRequestKVLoad() ||
         NonLinearPrefillModelR::usesGeometryForVersion(node.getLatencyBinaryVersion()) ||
         NonLinearPrefillModelR::usesNativePP4ForVersion(node.getLatencyBinaryVersion())) {
         const auto inputs = getExecutionCacheInputs(storageNode);
@@ -1214,7 +1214,7 @@ NaviSchedScheduleContext::getCacheHitBlockCountsSnapshot(size_t nodeIndex) const
             node._node->getMatchedBlockCounts(_requests, counts->data());
         }
     }
-    if (node._peerCacheSuffixLookup && !node._workload.executionLoadTracked &&
+    if (node._peerCacheSuffixLookup && !node.classifiesNewRequestKVLoad() &&
         !(NonLinearPrefillModelR::usesGeometryForVersion(
                                              node.getLatencyBinaryVersion()) ||
                                          NonLinearPrefillModelR::usesNativePP4ForVersion(
@@ -1290,7 +1290,7 @@ bool NaviSchedScheduleContext::getCacheHitBlockCounts(
         }
     }
     const auto &node = _scheduleNodes[storageNodeIndex];
-    if (std::atomic_load(&node._matchedBlockCounts) || node._workload.executionLoadTracked ||
+    if (std::atomic_load(&node._matchedBlockCounts) || node.classifiesNewRequestKVLoad() ||
         NonLinearPrefillModelR::usesGeometryForVersion(node.getLatencyBinaryVersion()) ||
         node._peerCacheSuffixLookup) {
         const auto counts = getCacheHitBlockCountsSnapshot(nodeIndex);
@@ -1375,7 +1375,7 @@ NaviSchedScheduleContext::getExecutionCacheInputs(size_t storageNodeIndex) const
     auto published = std::atomic_load(&node._executionCacheInputs);
     const bool nativePP4 =
         NonLinearPrefillModelR::usesNativePP4ForVersion(node.getLatencyBinaryVersion());
-    const bool tracksKVLoad = node._workload.executionLoadTracked;
+    const bool tracksKVLoad = node.classifiesNewRequestKVLoad();
     if (published &&
         (!(nativePP4 || tracksKVLoad) || published->peerCacheMerged || !node._peerCacheSuffixLookup)) {
         return {published, &published->inputs};
@@ -2347,7 +2347,7 @@ bool NaviSchedScheduleContext::prepareResult(int64_t queuePredictionTimeUs)
         if (!cacheCounts) {
             return preparationFailure("cache_inputs");
         }
-        if (_scheduleNodes[nodeIndex]._workload.executionLoadTracked)
+        if (_scheduleNodes[nodeIndex].classifiesNewRequestKVLoad())
             batchState.cacheCapture = std::atomic_load(&_scheduleNodes[nodeIndex]._executionCacheInputs);
         for (const auto requestIndex : batchState.requestIndexes) {
             matchedBlockCounts[requestIndex] = getCacheHitBlockCount(*cacheCounts, requestIndex);
@@ -2408,7 +2408,7 @@ bool NaviSchedScheduleContext::prepareResult(int64_t queuePredictionTimeUs)
         decision.predictedCacheHitTokenCount =
             matchedBlockCounts[requestIndex] * _requests[requestIndex].request.blockSize;
         decision.executionLoadIncluded.reset();
-        if (_scheduleNodes[nodeIndex]._workload.executionLoadTracked) {
+        if (_scheduleNodes[nodeIndex].classifiesNewRequestKVLoad()) {
             if (decision.predictedCacheHitTokenCount == 0) {
                 decision.executionLoadIncluded = true;
             } else {
