@@ -1,0 +1,47 @@
+--- a/atom/models/qwen4_exp.py
++++ b/atom/models/qwen4_exp.py
+@@ -718,6 +718,17 @@
+         self.pad = self.chunk * tp_size - num_tokens
+         self.start = tp_rank * self.chunk
+         self.group = get_tp_group()
++        self._direct_comm = None
++        if tp_size == 2 and torch.version.hip and not torch.compiler.is_compiling():
++            from atom.plugin.prepare import is_rtpllm
++
++            if is_rtpllm() and torch.cuda.get_device_properties(
++                torch.cuda.current_device()
++            ).gcnArchName.split(":")[0] == "gfx942":
++                comm = getattr(self.group.device_communicator, "pynccl_comm", None)
++                if comm is not None and not comm.disabled:
++                    self._direct_comm = comm
++
+ 
+     def shard(self, x: torch.Tensor) -> torch.Tensor:
+         """Replicated `[T, ...]` -> this rank's rows (a view unless padded).
+@@ -728,14 +739,22 @@
+ 
+     def gather(self, x: torch.Tensor) -> torch.Tensor:
+         """This rank's rows -> all `[T, ...]` rows."""
+-        out = self.group.all_gather(x.contiguous(), use_custom=False, dim=0)
++        x = x.contiguous()
++        if self._direct_comm is not None and x.dtype in (torch.bfloat16, torch.float16, torch.float32):
++            out = x.new_empty((self.chunk * self.group.world_size, *x.shape[1:]))
++            self._direct_comm.all_gather(out, x, stream=torch.cuda.current_stream(x.device))
++        else:
++            out = self.group.all_gather(x, use_custom=False, dim=0)
+         return out[: self.num_tokens] if self.pad else out
+ 
+     def scatter(self, x: torch.Tensor) -> torch.Tensor:
+         """Per-rank partial sums over all `[T, ...]` rows -> summed local rows."""
+-        return self.group.reduce_scatter_tensor(
+-            _pad_rows(x.contiguous(), self.pad), use_custom=False, dim=0
+-        )
++        x = _pad_rows(x.contiguous(), self.pad)
++        if self._direct_comm is not None and x.dtype in (torch.bfloat16, torch.float16, torch.float32):
++            out = x.new_empty((self.chunk, *x.shape[1:]))
++            self._direct_comm.reduce_scatter(out, x, stream=torch.cuda.current_stream(x.device))
++            return out
++        return self.group.reduce_scatter_tensor(x, use_custom=False, dim=0)
+ 
+     @staticmethod
+     def allowed_for_model(atom_config: Config) -> bool:
