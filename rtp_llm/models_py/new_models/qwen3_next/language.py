@@ -1012,26 +1012,11 @@ class Qwen3NextForCausalLM(ResidentDecoderOwner, DecoderHandlerOwner, Qwen3NextM
             weights_iter = weights
         has_lm_head = False
 
-        def _transform(it):
-            cfg = self._cfg
-            for name, tensor in it:
-                if is_grouped_q_gate(cfg, name):
-                    yield from split_grouped_q_gate(cfg, name, tensor)
-                    continue
-                if any(
-                    name.endswith(f"self_attn.q_proj.{suffix}")
-                    for suffix in (
-                        "weight",
-                        "weight_scale",
-                        "weight_scale_inv",
-                        "input_scale",
-                    )
-                ):
-                    yield from self._split_q_gate_yield(name, tensor, cfg)
-                    continue
-                yield name, tensor
-
-        mapped_iter = self.WEIGHTS_MAPPER.apply(_transform(self._capture_handler_inputs(weights_iter)))
+        mapped_iter = self.WEIGHTS_MAPPER.apply(
+            part
+            for name, tensor in self._capture_handler_inputs(weights_iter)
+            for part in self.expand_checkpoint_tensor(name, tensor)
+        )
 
         def _track_mapped_weights(it):
             nonlocal has_lm_head
@@ -1056,6 +1041,17 @@ class Qwen3NextForCausalLM(ResidentDecoderOwner, DecoderHandlerOwner, Qwen3NextM
                 "[Qwen3NextForCausalLM] lm_head not found; tying to embed_tokens"
             )
             self.lm_head._copy_local_tied_weight(self.embed_tokens.weight.data)
+
+    def expand_checkpoint_tensor(self, name, tensor):
+        """Use the checkpoint's interleaved head layout for both load and update."""
+        if is_grouped_q_gate(self._cfg, name):
+            yield from split_grouped_q_gate(self._cfg, name, tensor)
+        elif name.rpartition(".")[0].endswith(".self_attn.q_proj") and name.rsplit(".", 1)[-1] in (
+            "weight", "weight_scale", "weight_scale_inv", "input_scale",
+        ):
+            yield from self._split_q_gate_yield(name, tensor, self._cfg)
+        else:
+            yield name, tensor
 
     def process_weights_after_loading(self) -> None:
         self._finalize_resident_head()

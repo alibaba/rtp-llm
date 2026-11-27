@@ -184,6 +184,30 @@ def _mtp_config(model_type="qwen35_moe_mtp"):
 
 
 class Qwen3NextLoadTest(unittest.TestCase):
+    def test_online_hf_q_proj_matches_both_cold_loaded_leaves_on_each_rank(self):
+        from rtp_llm.models_py.new_weight_manager import NewLoaderWeightManager
+
+        cfg = _config(tie=False)
+        data = _dense_weights(include_lm_head=True)
+        q_name = "model.layers.0.self_attn.q_proj.weight"
+        changed = data[q_name].neg() - 1
+        with tempfile.TemporaryDirectory() as initial, tempfile.TemporaryDirectory() as updated:
+            save_file(data, os.path.join(initial, "model.safetensors"))
+            save_file({**data, q_name: changed}, os.path.join(updated, "model.safetensors"))
+            for rank in (0, 1):
+                load = _load_config(tp_size=2, tp_rank=rank)
+                loader = NewModelLoader(cfg, load, initial)
+                live = loader.load()
+                cold = NewModelLoader(cfg, load, updated).load()
+                manager = NewLoaderWeightManager(live, loader)
+                attn, ref = live.layers[0].self_attn, cold.layers[0].self_attn
+                with self.assertRaises(ValueError):
+                    manager.update_tensors({q_name: changed[:-1]})
+                self.assertEqual(manager.version, 0)
+                manager.update_tensors({q_name: changed})
+                for owner, expected in ((attn.qkv_proj, ref.qkv_proj), (attn.gate, ref.gate)):
+                    torch.testing.assert_close(owner.weight, expected.weight, rtol=0, atol=0)
+
     def test_nested_language_checkpoint_keeps_text_and_vision_ownership(self):
         from rtp_llm.models_py.new_weight_manager import NewLoaderWeightManager
         from rtp_llm.models_py.new_models.qwen_service_vision import load_service_vision

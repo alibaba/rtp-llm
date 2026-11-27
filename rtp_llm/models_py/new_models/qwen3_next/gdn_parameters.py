@@ -10,7 +10,7 @@ import torch
 import torch.nn as nn
 
 from rtp_llm.models_py.layers.linear import ColumnParallelLinear
-from rtp_llm.models_py.module_base import RtpModule, copy_weight_
+from rtp_llm.models_py.module_base import CheckpointLoadTarget, RtpModule, copy_weight_
 from rtp_llm.models_py.new_models.gdn_checkpoint_layout import (
     reorder_ba,
     reorder_qkvz,
@@ -44,8 +44,14 @@ class Qwen3NextGdnParameters(RtpModule):
         "norm.weight": "norm_w",
     }
 
-    def owns_online_checkpoint_name(self, name):
-        return name in self._state_parameters
+    def online_checkpoint_target(self, target):
+        name = target.name
+        if name in self._state_parameters or name in ("in_proj_b.weight", "in_proj_a.weight"):
+            return target
+        projection = name.partition(".")[0]
+        if projection in ("in_proj_qkv", "in_proj_z"):
+            return CheckpointLoadTarget(self.in_proj_qkvz, name, True)
+        return None  # Other projections resolve to the exact child parameter.
 
     def _local_state_tensor(self, name, tensor):
         if name == "in_proj_ba.weight":
@@ -62,13 +68,27 @@ class Qwen3NextGdnParameters(RtpModule):
 
     def prepare_weight_updates(self, weights):
         updates = []
+        split_ba = None
         for name, tensor in weights.items():
+            if name in ("in_proj_b.weight", "in_proj_a.weight"):
+                if "in_proj_ba.weight" in weights:
+                    raise ValueError("Cannot update fused and split B/A in one request")
+                if tensor.dtype != self.in_proj_ba_w.dtype:
+                    raise TypeError(f"{name} requires {self.in_proj_ba_w.dtype}, got {tensor.dtype}")
+                if split_ba is None:
+                    split_ba = self.in_proj_ba_w.detach().to(device="cpu", copy=True)
+                component = name.removeprefix("in_proj_").removesuffix(".weight")
+                local, offset = self._split_ba_component(component, tensor)
+                split_ba.narrow(1, offset, self.local_num_v_heads).copy_(local)
+                continue
             local = self._local_state_tensor(name, tensor)
             parameter = self._state_parameters[name]
             target = self._parameters[parameter]
             if tensor.dtype != target.dtype:
                 raise TypeError(f"{name} requires {target.dtype}, got {tensor.dtype}")
             updates.append(TensorUpdate(parameter, target, local))
+        if split_ba is not None:
+            updates.append(TensorUpdate("in_proj_ba_w", self.in_proj_ba_w, split_ba))
         return updates
 
     def __init__(
@@ -419,16 +439,7 @@ class Qwen3NextGdnParameters(RtpModule):
     def _load_split_qkvz(
         self, component: str, parameter: str, tensor: torch.Tensor
     ) -> None:
-        if parameter == "input_scale":
-            raise ValueError(
-                "Split QKV/Z input_scale cannot be represented by one fused runtime "
-                "scale; use a fused checkpoint or dynamic activation quantization"
-            )
-        if parameter == "weight_scale" and tensor.numel() == 1:
-            raise ValueError(
-                "Split QKV/Z scalar weight scales cannot be fused without "
-                "dequantization and requantization"
-            )
+        local, offset = self._split_projection_component(component, parameter, tensor)
         # Split QKV/Z checkpoints are copied into disjoint slices of one child
         # parameter.  Tell the FST coordinator to materialize that staged child
         # before taking the target reference; the second part can then mark the
@@ -444,6 +455,30 @@ class Qwen3NextGdnParameters(RtpModule):
         if component in loaded_parts:
             raise RuntimeError(f"Duplicate split QKV/Z tensor {component}.{parameter}")
 
+        target_slice = target.data.narrow(0, offset, local.shape[0])
+        if local.shape != target_slice.shape and local.numel() == target_slice.numel():
+            local = local.reshape(target_slice.shape)
+        copy_weight_(
+            target_slice,
+            local,
+            f"{self.in_proj_qkvz.prefix}.{component}.{parameter}",
+        )
+        loaded_parts.add(component)
+        if loaded_parts == {"qkv", "z"}:
+            self.in_proj_qkvz._record_parameter_loaded(parameter)
+        self._finalize_child_weight_loading(self.in_proj_qkvz)
+
+    def _split_projection_component(self, component, parameter, tensor):
+        if parameter == "input_scale":
+            raise ValueError(
+                "Split QKV/Z input_scale cannot be represented by one fused runtime "
+                "scale; use a fused checkpoint or dynamic activation quantization"
+            )
+        if parameter == "weight_scale" and tensor.numel() == 1:
+            raise ValueError(
+                "Split QKV/Z scalar weight scales cannot be fused without "
+                "dequantization and requantization"
+            )
         unit = 1
         if parameter == "weight":
             if tensor.dim() != 2 or tensor.shape[1] != self.hidden_size:
@@ -469,19 +504,7 @@ class Qwen3NextGdnParameters(RtpModule):
         else:
             raise RuntimeError(f"Unsupported split QKV/Z parameter {parameter!r}")
 
-        local, offset = self._split_qkv_or_z_rows(tensor, component, unit)
-        target_slice = target.data.narrow(0, offset, local.shape[0])
-        if local.shape != target_slice.shape and local.numel() == target_slice.numel():
-            local = local.reshape(target_slice.shape)
-        copy_weight_(
-            target_slice,
-            local,
-            f"{self.in_proj_qkvz.prefix}.{component}.{parameter}",
-        )
-        loaded_parts.add(component)
-        if loaded_parts == {"qkv", "z"}:
-            self.in_proj_qkvz._record_parameter_loaded(parameter)
-        self._finalize_child_weight_loading(self.in_proj_qkvz)
+        return self._split_qkv_or_z_rows(tensor, component, unit)
 
     def _load_split_ba(self, component: str, tensor: torch.Tensor) -> None:
         if self._ba_layout is not None and self._ba_layout != "split":
@@ -489,6 +512,17 @@ class Qwen3NextGdnParameters(RtpModule):
         self._ba_layout = "split"
         if component in self._ba_split_parts:
             raise RuntimeError(f"Duplicate split B/A tensor in_proj_{component}.weight")
+        local, offset = self._split_ba_component(component, tensor)
+        copy_weight_(
+            self.in_proj_ba_w.data.narrow(1, offset, self.local_num_v_heads),
+            local,
+            f"in_proj_{component}.weight",
+        )
+        self._ba_split_parts.add(component)
+        if self._ba_split_parts == {"a", "b"}:
+            self._mark_weight_loaded("in_proj_ba_w")
+
+    def _split_ba_component(self, component, tensor):
         global_heads = self.linear_attn_config.linear_num_value_heads
         expected = (global_heads, self.hidden_size)
         if tuple(tensor.shape) != expected:
@@ -499,14 +533,7 @@ class Qwen3NextGdnParameters(RtpModule):
         start = self.attn_tp_rank * self.local_num_v_heads
         local = tensor.narrow(0, start, self.local_num_v_heads).t().contiguous()
         offset = 0 if component == "b" else self.local_num_v_heads
-        copy_weight_(
-            self.in_proj_ba_w.data.narrow(1, offset, self.local_num_v_heads),
-            local,
-            f"in_proj_{component}.weight",
-        )
-        self._ba_split_parts.add(component)
-        if self._ba_split_parts == {"a", "b"}:
-            self._mark_weight_loaded("in_proj_ba_w")
+        return local, offset
 
     def _split_head_tensor(self, tensor: torch.Tensor, label: str) -> torch.Tensor:
         expected = self.linear_attn_config.linear_num_value_heads
@@ -624,7 +651,45 @@ class Qwen3NextGdnParameters(RtpModule):
             f"{name}.{parameter}": piece for name, piece in zip(names, pieces)
         })
 
+    def _split_projection_update(self, module, incoming):
+        from rtp_llm.models_py.quant_methods.unquantized import UnquantizedLinearMethod
+
+        fields = {}
+        dense = type(module.quant_method) is UnquantizedLinearMethod
+        for key, value in incoming.items():
+            source, _, field = key.partition(".")
+            if source not in ("in_proj_qkv", "in_proj_z"):
+                raise ValueError("Cannot update split and fused QKVZ in one request")
+            if dense and (field != "weight" or value.dtype != module.weight.dtype):
+                raise ValueError(f"Expected dense GDN weight with dtype {module.weight.dtype}")
+            component = source.removeprefix("in_proj_")
+            fields.setdefault(field, {})[component] = self._split_projection_component(
+                component, field, value
+            )
+        local = {}
+        for field, parts in fields.items():
+            if parts.keys() == {"qkv", "z"}:
+                qkv, z = parts["qkv"][0], parts["z"][0]
+                if qkv.dtype != z.dtype:
+                    raise TypeError("QKV/Z components must have the same dtype")
+                local[field] = torch.cat((qkv, z), dim=0)
+            elif dense:
+                # Preserve the untouched component in logical checkpoint layout;
+                # the leaf re-encodes it if the live weight is swizzled.
+                full = module.weight.detach().to(device="cpu", copy=True)
+                if getattr(module, "_dense_swizzled", False):
+                    from rtp_llm.models_py.quant_methods.dense_layout import decode_dense_weight
+                    full = decode_dense_weight(full)
+                part, offset = next(iter(parts.values()))
+                full.narrow(0, offset, part.shape[0]).copy_(part)
+                local[field] = full
+            else:
+                raise ValueError("Quantized GDN updates require complete QKV and Z components")
+        return module.prepare_weight_updates(local)
+
     def prepare_child_weight_updates(self, module, incoming):
+        if module is self.in_proj_qkvz and any(k.startswith("in_proj_") for k in incoming):
+            return self._split_projection_update(module, incoming)
         local = {
             name: self._projection_tensor(module, name, tensor)
             for name, tensor in incoming.items()

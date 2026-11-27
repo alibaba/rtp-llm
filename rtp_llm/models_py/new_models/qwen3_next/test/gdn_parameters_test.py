@@ -191,6 +191,49 @@ class GdnOwnershipTest(unittest.TestCase):
             "in_proj_b.weight": b,
             "in_proj_a.weight": a,
         }
+        # The service receives HF tensors individually. Each write must
+        # preserve the other component of the same live parameter.
+        from rtp_llm.models_py.model_loader import NewModelLoader
+
+        class Model(RtpModule):
+            def runtime_weight_view(self):
+                return {}
+
+        for rank in (0, 1):
+            root = Model()
+            root.linear_attn = live = self.model(rank)
+            current = {k: torch.zeros_like(v) for k, v in split.items()}
+            live.load_weights(current)
+            manager = NewLoaderWeightManager(root, SimpleNamespace(
+                _mapped_checkpoint_name=NewModelLoader._mapped_checkpoint_name
+            ))
+            projection, controls = live.in_proj_qkvz.weight, live.in_proj_ba_w
+            for key, value in reversed(split.items()):
+                current[key] = value
+                expected = self.model(rank)
+                expected.load_weights(current)
+                manager.update_tensors({"linear_attn." + key: value})
+                torch.testing.assert_close(projection, expected.in_proj_qkvz.weight, rtol=0, atol=0)
+                torch.testing.assert_close(controls, expected.in_proj_ba_w, rtol=0, atol=0)
+            with self.assertRaises(ValueError):
+                manager.update_tensors({
+                    "linear_attn.in_proj_qkv.weight": -split["in_proj_qkv.weight"],
+                    "linear_attn.in_proj_a.weight": split["in_proj_a.weight"][:-1],
+                })
+            torch.testing.assert_close(projection, expected.in_proj_qkvz.weight, rtol=0, atol=0)
+            with self.assertRaisesRegex(ValueError, "fused and split"):
+                manager.update_tensors({
+                    "linear_attn.in_proj_a.weight": a,
+                    "linear_attn.in_proj_ba.weight": fused["in_proj_ba.weight"],
+                })
+            with self.assertRaisesRegex(ValueError, "split and fused"):
+                manager.update_tensors({
+                    "linear_attn.in_proj_z.weight": z,
+                    "linear_attn.in_proj_qkvz.weight": fused["in_proj_qkvz.weight"],
+                })
+            manager.update_tensors({"linear_attn." + k: -v for k, v in split.items()})
+            torch.testing.assert_close(projection, -expected.in_proj_qkvz.weight, rtol=0, atol=0)
+            torch.testing.assert_close(controls, -expected.in_proj_ba_w, rtol=0, atol=0)
         conv = torch.arange(16 * 3, dtype=torch.float32).reshape(16, 1, 3)
         out = torch.arange(64, dtype=torch.float32).reshape(8, 8)
         common = {

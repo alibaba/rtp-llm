@@ -151,30 +151,7 @@ class NewLoaderWeightManager:
             tied_output = getattr(
                 self._model, "tie_word_embeddings", False
             ) and not getattr(output_head, "_explicit_checkpoint_loaded", False)
-            for name, tensor in weights.items():
-                if (
-                    not isinstance(name, str)
-                    or not name
-                    or not isinstance(tensor, torch.Tensor)
-                ):
-                    raise TypeError("Online updates require named checkpoint tensors")
-                canonical = _checkpoint_wire_name(name)
-                if (
-                    getattr(self._model, "_pipeline_partitioned", False)
-                    and getattr(self._model, "supports_pp_global_weight_aliases", False)
-                ):
-                    # Resolve published names before stage filtering: the
-                    # stage that does not export a view cannot reverse-map it.
-                    canonical = {
-                        "embedding": "embed_tokens.weight",
-                        "lm_head": "lm_head.weight",
-                        "final_layernorm.gamma": "norm.weight",
-                    }.get(canonical, canonical)
-                normalize = getattr(self._model, "online_checkpoint_name", None)
-                if normalize is not None:
-                    canonical = normalize(canonical)
-                if not self._local_request(canonical):
-                    continue
+            for name, canonical, tensor in self._local_checkpoint_tensors(weights):
                 mapped = self._loader._mapped_checkpoint_name(self._model, canonical)
                 if canonical in self._runtime_contract:
                     # Old RPC clients may pass a published global view name.
@@ -215,9 +192,9 @@ class NewLoaderWeightManager:
                     mapped, tuple(tensor.shape)
                 )
                 if target is not None:
-                    owns_name = getattr(target.module, "owns_online_checkpoint_name", None)
-                    if owns_name is not None and not owns_name(target.name):
-                        target = None  # Child projections keep their own conversion.
+                    route = getattr(target.module, "online_checkpoint_target", None)
+                    if route is not None:
+                        target = route(target)
                 if target is None or not callable(
                     getattr(target.module, "prepare_weight_updates", None)
                 ):
@@ -377,6 +354,38 @@ class NewLoaderWeightManager:
             transaction.install()
             transaction.commit()
             self.version += 1
+
+    def _local_checkpoint_tensors(self, weights):
+        expand = getattr(self._model, "expand_checkpoint_tensor", None)
+        for name, tensor in weights.items():
+            if (
+                not isinstance(name, str)
+                or not name
+                or not isinstance(tensor, torch.Tensor)
+            ):
+                raise TypeError("Online updates require named checkpoint tensors")
+            canonical = _checkpoint_wire_name(name)
+            if (
+                getattr(self._model, "_pipeline_partitioned", False)
+                and getattr(self._model, "supports_pp_global_weight_aliases", False)
+            ):
+                # Resolve published names before stage filtering: the
+                # stage that does not export a view cannot reverse-map it.
+                canonical = {
+                    "embedding": "embed_tokens.weight",
+                    "lm_head": "lm_head.weight",
+                    "final_layernorm.gamma": "norm.weight",
+                }.get(canonical, canonical)
+            normalize = getattr(self._model, "online_checkpoint_name", None)
+            if normalize is not None:
+                canonical = normalize(canonical)
+            if not self._local_request(canonical):
+                continue
+            if expand is None:
+                yield name, canonical, tensor
+            else:
+                for logical, part in expand(canonical, tensor):
+                    yield name, logical, part
 
     def _local_request(self, name):
         nonlocal_weight = getattr(self._model, "is_nonlocal_online_weight", None)
