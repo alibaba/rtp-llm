@@ -587,9 +587,10 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
             }
         }
 #elif USING_ASCEND
-        // Ascend ACL Graph: decode-only. Prefill graph mode is rejected in the
-        // runner constructor — fall back to eager forward in that case.
-        if (is_prefill_cuda_graph_mode) {
+        // Ascend ACL Graph: decode-phase only (plain decode / verify / dense
+        // draft re-prop); variable-length prefill stays eager.
+        const bool is_sp_draft_prefill = is_prefill_cuda_graph_mode && params.sp_config.type != SP_TYPE_NONE;
+        if (is_prefill_cuda_graph_mode && !is_sp_draft_prefill) {
             RTP_LLM_LOG_WARNING(
                 "Ascend ACL Graph does not support prefill cuda graph mode; "
                 "graph_runner_ will not be created, falling back to eager forward.");
@@ -649,7 +650,12 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
 
             graph_params.is_target_verify = use_spec_decoding;
             if (params.sp_config.type != SP_TYPE_NONE) {
-                graph_params.sp_steps          = params.sp_config.gen_num_per_cycle;
+                graph_params.sp_steps = params.sp_config.gen_num_per_cycle;
+            }
+            // K+1 tokens per stream for the target verify graph and the SP
+            // draft-prefill wrapper; the plain draft decode graph stays at 1.
+            if (params.sp_config.type != SP_TYPE_NONE && params.sp_config.gen_num_per_cycle > 0
+                && (!params.model_id || is_sp_draft_prefill)) {
                 graph_params.num_tokens_per_bs = params.sp_config.gen_num_per_cycle + 1;
             } else {
                 graph_params.num_tokens_per_bs = 1;

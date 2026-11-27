@@ -211,7 +211,19 @@ bool AscendGraphRunner::canRun(const PyModelInputs& inputs, CudaGraphState& stat
     if (!enable_graph_) {
         return false;
     }
-    // Decode only: any prefill goes to eager.
+    // Draft re-prop graph: accept only uniform bs * num_tokens_per_bs
+    // forwards; ragged inputs fall back to eager.
+    if (num_tokens_per_bs_ > 1) {
+        if (!inputs.attention_inputs.is_prefill) {
+            return false;
+        }
+        const int64_t bs = inputs.attention_inputs.input_lengths.size(0);
+        if (inputs.input_ids.size(0) != bs * static_cast<int64_t>(num_tokens_per_bs_)) {
+            return false;
+        }
+        return tryGetRealGraphDecodeBatchSize(inputs, state);
+    }
+    // Plain decode graph: any prefill goes to eager.
     if (inputs.attention_inputs.is_prefill) {
         return false;
     }
@@ -247,7 +259,9 @@ bool AscendGraphRunner::canRun(const PyModelInputs& inputs, CudaGraphState& stat
 
 void AscendGraphRunner::initCaptureAttentionInputs(PyModelInputs& inputs, int max_bs, int num_tokens_per_bs) {
     inputs.attention_inputs.is_target_verify = is_target_verify_;
-    // ACL Graph capture path is decode-only; is_prefill is forced false.
+    // Verify and draft re-prop capture prefill-shaped K+1 forwards; plain
+    // decode captures one token per stream; variable-length prefill stays
+    // eager (rejected in the constructor).
     inputs.attention_inputs.is_prefill = num_tokens_per_bs > 1;
 
     inputs.input_ids = torch::zeros({max_num_token_}, options_npu_int32_);
@@ -784,7 +798,9 @@ void AscendGraphRunner::prepareInputs(const PyModelInputs& inputs, CudaGraphStat
             copyTensorSlice(it->second.kv_cache_block_id, cap_group.kv_cache_block_id);
         }
     }
-    if (inputs.attention_inputs.sequence_lengths.defined()) {
+    // Multi-token graphs (verify / dense re-prop): the engine leaves
+    // sequence_lengths empty for these decode-loop forwards — skip the copy.
+    if (num_tokens_per_bs_ <= 1 && inputs.attention_inputs.sequence_lengths.defined()) {
         auto src = inputs.attention_inputs.sequence_lengths.slice(0, 0, state.current_batch_size);
         py_model_inputs.attention_inputs.sequence_lengths.slice(0, 0, state.current_batch_size).copy_(src);
     }
@@ -837,10 +853,17 @@ void AscendGraphRunner::prepareInputs(const PyModelInputs& inputs, CudaGraphStat
         }
     }
 
-    // Compute sequence_lengths_plus_1_device from sequence_lengths (engine doesn't populate it)
-    py_model_inputs.attention_inputs.sequence_lengths_plus_1_device.slice(0, 0, state.current_batch_size) =
-        py_model_inputs.attention_inputs.sequence_lengths.slice(0, 0, state.current_batch_size)
-            .to(options_npu_int32_.device()) + 1;
+    // Verify / draft re-prop graphs: plus_1 = prefix + 1 (sequence_lengths
+    // is empty for these forwards). Plain decode graph: plus_1 =
+    // sequence_lengths + 1 (engine doesn't populate plus_1 itself).
+    if (num_tokens_per_bs_ > 1) {
+        py_model_inputs.attention_inputs.sequence_lengths_plus_1_device.slice(0, 0, state.current_batch_size) =
+            py_model_inputs.attention_inputs.prefix_lengths_device.slice(0, 0, state.current_batch_size) + 1;
+    } else {
+        py_model_inputs.attention_inputs.sequence_lengths_plus_1_device.slice(0, 0, state.current_batch_size) =
+            py_model_inputs.attention_inputs.sequence_lengths.slice(0, 0, state.current_batch_size)
+                .to(options_npu_int32_.device()) + 1;
+    }
 
     // -------- Update attention impl with the freshly-copied inputs --------
     {
