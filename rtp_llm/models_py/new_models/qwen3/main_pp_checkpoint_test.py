@@ -171,6 +171,44 @@ class MainPPCheckpointTest(unittest.TestCase):
                         with self.assertRaisesRegex(ValueError, "non-owning"):
                             manager.update_tensors({"lm_head": replacement.float()})
 
+    def test_pp_head_updates_only_reach_the_last_stage(self):
+        values = checkpoint()
+        values["lm_head.weight"] = values["model.embed_tokens.weight"] + 100
+        with tempfile.TemporaryDirectory() as root:
+            save_file(values, os.path.join(root, "model.safetensors"))
+            for stage in range(3):
+                with self.subTest(stage=stage):
+                    parallel = self.stage_parallel(stage)
+                    parallel.pp_size = parallel.world_size = 3
+                    parallel.pp_stage_layer_counts = [1, 1, 1]
+                    load = NewLoaderConfig(
+                        device="cpu",
+                        load_method="scratch",
+                        compute_dtype=torch.float32,
+                        parallelism_config=parallel,
+                    )
+                    loader = NewModelLoader(model_config(), load, model_path=root)
+                    model = loader.load()
+                    manager = NewLoaderWeightManager(model, loader)
+                    self.assertEqual(model.lm_head is not None, stage == 2)
+                    before = {
+                        name: param.detach().clone()
+                        for name, param in model.named_parameters()
+                    }
+                    for epoch, alias in enumerate(
+                        ("lm_head.weight", "model.lm_head.weight", "lm_head"), 1
+                    ):
+                        updated = values["lm_head.weight"] + epoch
+                        manager.update_tensors({alias: updated})
+                        self.assertEqual(manager.version, epoch if stage == 2 else 0)
+                        for name, param in model.named_parameters():
+                            expected = (
+                                updated if name == "lm_head.weight" else before[name]
+                            )
+                            torch.testing.assert_close(param, expected)
+                    with self.assertRaisesRegex(RuntimeError, "no_such_weight"):
+                        manager.update_tensors({"model.lm_head.no_such_weight": updated})
+
     def test_non_generation_heads_are_handler_owned_and_norm_is_preserved(self):
         from rtp_llm.ops import TaskType
 

@@ -399,18 +399,17 @@ class NewLoaderWeightManager:
         if select is None:
             select = getattr(self._model, "checkpoint_weight_name_filter", None)
         owns = select() if callable(select) else None
-        # Use stage filtering only for known layer/global ownership, not to
-        # silently accept arbitrary unknown names rejected by a model's filter.
-        if layer or scoped in (
+        if owns is None:
+            return True
+        # Classify globals by the same model mapping that resolves the update;
+        # an unknown LM-head suffix must not become a successful no-op.
+        if layer or self._loader._mapped_checkpoint_name(self._model, name) in (
             "embed_tokens.weight",
             "norm.weight",
             "norm.bias",
-            "model.embed_tokens.weight",
-            "model.norm.weight",
-            "model.norm.bias",
             "lm_head.weight",
         ):
-            return owns is None or owns(name)
+            return owns(name)
         return True
 
     def update(self, req: dict[str, str]) -> None:
