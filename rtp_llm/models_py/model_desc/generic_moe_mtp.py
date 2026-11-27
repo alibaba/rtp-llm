@@ -6,11 +6,13 @@ from torch import nn
 
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.model_loader.model_weight_info import ModelWeights
+from rtp_llm.models_py.kernels.cuda.mtp_frontend import native, try_mtp_frontend
 from rtp_llm.models_py.model_desc.block_map import get_primary_attention_inputs
 from rtp_llm.models_py.model_desc.glm5 import Glm5ModelBase
 from rtp_llm.models_py.model_desc.module_base import GptModelBase
 from rtp_llm.models_py.modules import LinearFactory, RMSNorm, RMSResNorm
-from rtp_llm.ops import MoeConfig, ParallelismConfig
+from rtp_llm.models_py.utils.fuse_config import fuse_kernels_enabled
+from rtp_llm.ops import MoeConfig, ParallelismConfig, RoleType
 from rtp_llm.ops.compute_ops import PyModelInputs, PyModelOutputs
 from rtp_llm.utils.model_weight import W
 
@@ -64,6 +66,15 @@ class GenericMoeMTPModel(Glm5ModelBase):
             weights.global_weights[W.multi_tokens_predict_hnorm],
             eps=model_config.layernorm_eps,
         )
+        self._mtp_frontend_native = (
+            native()
+            if model_config.model_type in ("glm_5", "glm_5_mtp")
+            and parallelism_config.role_type == RoleType.DECODE
+            and parallelism_config.get_attn_tp_size() == 1
+            and fuse_kernels_enabled(py_hw_kernel_config)
+            and (py_hw_kernel_config is None or py_hw_kernel_config.glm5_eh_fusion)
+            else None
+        )
         self.fc = LinearFactory.create_linear_from_weights(
             weights.global_weights, W.multi_tokens_predict_eh_proj
         )
@@ -112,6 +123,7 @@ class GenericMoeMTPModel(Glm5ModelBase):
         clone.embed_tokens = self.embed_tokens
         clone.pre_fc_norm_embedding = self.pre_fc_norm_embedding
         clone.pre_fc_norm_hidden = self.pre_fc_norm_hidden
+        clone._mtp_frontend_native = self._mtp_frontend_native
         clone.fc = self.fc
         # Only the seed-decode clone shares communication state. The default
         # draft-prefill clone keeps its existing, separate communication arena.
@@ -233,24 +245,35 @@ class GenericMoeMTPModel(Glm5ModelBase):
         input_ids: torch.Tensor = inputs.input_ids
         if fmha_impl is None:
             fmha_impl = self.prepare_fmha_impl(inputs)
-        inputs_embeds = self.embed_tokens(input_ids)
         default_fmha = (
             fmha_impl["default"] if isinstance(fmha_impl, Mapping) else fmha_impl
         )
-        inputs_embeds = self._mask_position_zero_embeddings(inputs_embeds, default_fmha)
-        last_hidden_states = inputs.input_hiddens
-
-        e_norm = self.pre_fc_norm_embedding(inputs_embeds)
-        h_norm = self.pre_fc_norm_hidden(last_hidden_states)
-        cat_hidden_states = torch.cat([e_norm, h_norm], -1)
+        positions = getattr(
+            getattr(default_fmha, "fmha_params", None), "positions_d", None
+        )
+        frontend = try_mtp_frontend(
+            self._mtp_frontend_native,
+            self.embed_tokens,
+            inputs.input_hiddens,
+            self.pre_fc_norm_embedding,
+            self.pre_fc_norm_hidden,
+            input_ids,
+            positions,
+        )
+        residual = None
+        if frontend is None:
+            inputs_embeds = self._mask_position_zero_embeddings(
+                self.embed_tokens(input_ids), positions
+            )
+            e_norm = self.pre_fc_norm_embedding(inputs_embeds)
+            h_norm = self.pre_fc_norm_hidden(inputs.input_hiddens)
+            cat_hidden_states = torch.cat([e_norm, h_norm], -1)
+            del inputs_embeds, e_norm, h_norm
+        else:
+            cat_hidden_states, residual = frontend
+            del frontend
         hidden_states = self.fc(cat_hidden_states)
-
-        # These front-end activations are not consumed by the decoder layer.
-        # Without an explicit del, Python keeps their independent storages live
-        # until the whole MTP forward returns, overlapping every Indexer/SparseMLA
-        # layer. CUDA allocator stream tracking makes this release asynchronous
-        # and safe; do not synchronize or call empty_cache on the hot path.
-        del inputs_embeds, e_norm, h_norm, cat_hidden_states
+        del cat_hidden_states
 
         reuse_topk_indices = (
             self._mtp_indexer_share_enabled
@@ -267,6 +290,8 @@ class GenericMoeMTPModel(Glm5ModelBase):
             fmha_impl,
             prev_topk_indices,
             force_reuse_topk_indices=reuse_topk_indices,
+            residual=residual,
+            layer_progress=inputs.prefill_layer_progress,
         )
 
         if (
@@ -283,10 +308,8 @@ class GenericMoeMTPModel(Glm5ModelBase):
         return PyModelOutputs(hidden_states)
 
     def _mask_position_zero_embeddings(
-        self, inputs_embeds: torch.Tensor, fmha_impl: Any
+        self, inputs_embeds: torch.Tensor, positions: torch.Tensor | None
     ) -> torch.Tensor:
-        fmha_params = getattr(fmha_impl, "fmha_params", None)
-        positions = getattr(fmha_params, "positions_d", None)
         if (
             positions is None
             or not torch.is_tensor(positions)

@@ -603,23 +603,29 @@ void RtpLLMTokenPSMetrics::report(const kmonitor::MetricsTags* tags, RtpLLMToken
     }
 }
 
+// Report token increments, not precomputed rates. Kmonitor QPS divides their sum by its
+// fixed sampling period. Averaging token/report_window rates biases throughput when
+// long steps make the reporting windows unequal (even with a single priority).
 bool RtpLLMWallClockTokenPSMetrics::init(kmonitor::MetricsGroupManager* manager) {
-    REGISTER_GAUGE_MUTABLE_METRIC(context_wall_tps_metric, "rtp_llm_context_wall_tps");
-    REGISTER_GAUGE_MUTABLE_METRIC(context_wall_tps_with_cache_metric, "rtp_llm_context_wall_tps_with_cache");
+    REGISTER_QPS_MUTABLE_METRIC(context_wall_tps_metric, "rtp_llm_context_wall_tps");
+    REGISTER_QPS_MUTABLE_METRIC(context_wall_tps_with_cache_metric, "rtp_llm_context_wall_tps_with_cache");
     REGISTER_GAUGE_MUTABLE_METRIC(wall_tps_report_interval_us_metric, "rtp_llm_wall_tps_report_interval_us");
     return true;
 }
 
 void RtpLLMWallClockTokenPSMetrics::report(const kmonitor::MetricsTags*   tags,
                                            RtpLLMTokenPSMetricsCollector* collector) {
-    RTP_REPORT_MUTABLE_METRIC(wall_tps_report_interval_us_metric, collector->reportWindowUs());
+    // Active-step heartbeats keep QPS buckets alive but are not completed report windows.
+    if (collector->reportWindowUs() > 0) {
+        RTP_REPORT_MUTABLE_METRIC(wall_tps_report_interval_us_metric, collector->reportWindowUs());
+    }
     if (collector->reportZeroTPS()) {
         RTP_REPORT_MUTABLE_METRIC(context_wall_tps_metric, 0.0);
         RTP_REPORT_MUTABLE_METRIC(context_wall_tps_with_cache_metric, 0.0);
         return;
     }
-    RTP_REPORT_MUTABLE_METRIC(context_wall_tps_metric, collector->contextWallTPS());
-    RTP_REPORT_MUTABLE_METRIC(context_wall_tps_with_cache_metric, collector->contextWallTPSWithCache());
+    RTP_REPORT_MUTABLE_METRIC(context_wall_tps_metric, collector->contextTokens());
+    RTP_REPORT_MUTABLE_METRIC(context_wall_tps_with_cache_metric, collector->contextTokensWithCache());
 }
 
 bool RtpLLMCacheMetrics::init(kmonitor::MetricsGroupManager* manager) {

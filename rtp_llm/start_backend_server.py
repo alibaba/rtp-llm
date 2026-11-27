@@ -30,8 +30,11 @@ from rtp_llm.utils.concurrency_controller import (
     ConcurrencyController,
     set_global_controller,
 )
+from rtp_llm.utils.jit_cache_env import LocalJitDirectoryError
 from rtp_llm.utils.oom_diag import install_oom_dump
 from rtp_llm.utils.process_lifecycle import arm_parent_death_sigkill
+from rtp_llm.ops import RoleType
+from rtp_llm.utils.prefill_watchdog import PrefillWatchdog
 from rtp_llm.utils.process_manager import ProcessManager
 from rtp_llm.utils.util import copy_gemm_config
 
@@ -87,10 +90,12 @@ def local_rank_start(
     pipe_writer=None,
     expected_parent_pid: Optional[int] = None,
     service_draining=None,
+    prefill_progress_slot: Optional[str] = None,
 ):
     """Start local rank with proper signal handling for graceful shutdown"""
     if expected_parent_pid is not None:
         arm_parent_death_sigkill(expected_parent_pid)
+    py_env_configs.runtime_config.prefill_progress_slot = prefill_progress_slot or ""
     _install_hot_hook_runtime(f"backend_rank_{world_rank}", py_env_configs)
     backend_manager = None
     logging.info(f"[PROCESS_START]Start local rank process")
@@ -211,6 +216,7 @@ def _create_rank_processes(
     processes: List[BaseProcess],
     rank_pipe_readers: List[Connection],
     service_draining=None,
+    prefill_watchdog=None,
 ):
     """Create and start rank processes. Each proc is appended before start() so a
     mid-loop abort still leaves every spawned object in the caller's list; teardown
@@ -222,6 +228,12 @@ def _create_rank_processes(
 
     parent_pid = os.getpid()
     for world_rank in range(pc.world_rank, pc.world_rank + local_world_size):
+        slot_path = None
+        if prefill_watchdog is not None:
+            try:
+                slot_path = prefill_watchdog.create_slot(world_rank)
+            except OSError as error:
+                logging.warning("Cannot monitor Prefill rank %s: %s", world_rank, error)
         reader, writer = ctx.Pipe(duplex=False)
         rank_pipe_readers.append(reader)
         os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(cuda_device_list)
@@ -235,6 +247,7 @@ def _create_rank_processes(
                 writer,
                 parent_pid,
                 service_draining,
+                slot_path,
             ),
             name=f"rank-{world_rank}",
         )
@@ -242,7 +255,14 @@ def _create_rank_processes(
         try:
             proc.start()
         finally:
-            writer.close()  # drop parent copy so reader EOFs when the rank dies
+            writer.close()
+        if prefill_watchdog is not None:
+            try:
+                prefill_watchdog.register_process(world_rank, proc.pid)
+            except OSError as error:
+                logging.warning(
+                    "Cannot identify Prefill rank %s: %s", world_rank, error
+                )
 
 
 def _close_readers(readers: List[Connection]) -> None:
@@ -350,6 +370,19 @@ def multi_rank_start(
     """Start multi-rank backend server with proper process management"""
     ctx = multiprocessing.get_context("spawn")
     processes, rank_pipe_readers = [], []
+    prefill_watchdog = None
+    if (
+        not py_env_configs.distribute_config.fake_gang_env
+        and py_env_configs.role_config.role_type == RoleType.PREFILL
+        and py_env_configs.model_args.model_type == "glm_5"
+    ):
+        config = py_env_configs.server_config
+        prefill_watchdog = PrefillWatchdog.from_config(
+            config.prefill_stall_thresholds,
+            config.prefill_core_dir,
+            config.prefill_gpu_core,
+            config.prefill_core_timeout_s,
+        )
     try:
         _create_rank_processes(
             global_controller,
@@ -358,6 +391,7 @@ def multi_rank_start(
             processes,
             rank_pipe_readers,
             service_draining,
+            prefill_watchdog,
         )
         local_world_size = len(processes)
 
@@ -377,6 +411,7 @@ def multi_rank_start(
             monitor_interval=py_env_configs.server_config.monitor_interval,
             allow_defer_first_sigterm=True,
             pre_exit_cleanup=cleanup,
+            prefill_watchdog=prefill_watchdog,
             service_draining=service_draining,
         )
         manager.set_processes(processes, shutdown_group="backend")
@@ -390,6 +425,11 @@ def multi_rank_start(
     except BaseException as e:
         if service_draining is not None:
             service_draining.set()
+        if prefill_watchdog is not None:
+            try:
+                prefill_watchdog.close()
+            except Exception:
+                logging.exception("Failed to clean up the Prefill watchdog")
         error_msg = str(e) or type(e).__name__
         error_trace = traceback.format_exc()
         logging.error(f"Multi-rank startup failed: {error_msg}")
@@ -493,6 +533,8 @@ def start_backend_server(
             from rtp_llm.utils.jit_cache_manager import start_from_config
 
             manager = start_from_config(py_env_configs.jit_config)
+        except LocalJitDirectoryError:
+            raise
         except Exception:  # cold start; a signal instead unwinds to the finally
             logging.exception("JIT_CACHE_FAIL_OPEN: setup failed; cold start")
         if torch.cuda.device_count() > 1 and pc.world_size > 1:

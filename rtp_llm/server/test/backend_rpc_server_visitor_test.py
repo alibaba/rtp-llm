@@ -403,6 +403,27 @@ class BackendRPCServerVisitorRouteIpsTest(unittest.IsolatedAsyncioTestCase):
             b"serialized-input",
         )
 
+    async def test_empty_route_is_retryable_if_a_configured_master_is_unavailable(self):
+        visitor = BackendRPCServerVisitor.__new__(BackendRPCServerVisitor)
+        visitor._local_prefill_addresses = []
+        visitor.master_config = None
+        visitor.backend_role_list = []
+        visitor.host_service = MagicMock()
+        visitor.host_service.get_master_addr.return_value = None
+
+        for domain, error in (
+            ("master.vip", ExceptionType.MASTER_NO_AVAILABLE_WORKER),
+            ("", ExceptionType.ROUTE_ERROR),
+        ):
+            with self.subTest(domain=domain):
+                visitor.host_service.master_vip.domain = domain
+                with self.assertRaises(FtRuntimeException) as raised:
+                    await visitor.route_ips(_FakeInput())
+                self.assertEqual(raised.exception.exception_type, error)
+                self.assertEqual(
+                    visitor._is_retryable_route_rpc_error(raised.exception), bool(domain)
+                )
+
     async def test_route_ips_preserves_master_route_error_code_on_route_error(self):
         visitor = BackendRPCServerVisitor.__new__(BackendRPCServerVisitor)
         visitor._local_prefill_addresses = []

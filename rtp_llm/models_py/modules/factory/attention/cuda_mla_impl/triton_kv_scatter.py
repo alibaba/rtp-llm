@@ -1,13 +1,4 @@
-"""Triton scatter for KV-cache out[ids] = src.
-
-Replaces:
-    out = torch.zeros(total_q, H, D, dtype=src.dtype, device=src.device)
-    out[ids] = src
-
-A per-call reverse map keeps temporary memory bounded by the active forward.
-It is cleared inside graph capture so replay with changed ids cannot retain
-rows from an earlier invocation.
-"""
+"""Scatter KV rows through a request-owned reverse map, zero-filling unused rows."""
 
 import torch
 import triton
@@ -29,7 +20,6 @@ def _fused_scatter_kernel(
     out_ptr,
     src_ptr,
     rev_ptr,
-    total_q,
     HD: tl.constexpr,
     BLOCK_HD: tl.constexpr,
 ):
@@ -50,24 +40,51 @@ def _fused_scatter_kernel(
         tl.store(out_ptr + row_off + offs, z, mask=mask)
 
 
+def prepare_kv_scatter_indices(ids: torch.Tensor, total_q: int) -> torch.Tensor:
+    """Prepare a reverse map for unique ids in [0, total_q), with -1 for holes.
+
+    The caller owns this tensor and must rebuild it whenever ids change. Graph
+    callers copy a newly prepared map into their capture-stable plan buffer.
+    Preparation and consumption follow normal PyTorch stream ordering rules.
+    """
+    assert ids.is_cuda and ids.dim() == 1
+    assert ids.dtype in (torch.int32, torch.int64)
+    reverse_indices = torch.full((total_q,), -1, dtype=torch.int32, device=ids.device)
+    if ids.numel():
+        _populate_rev_kernel[(triton.cdiv(ids.numel(), 1024),)](
+            ids.contiguous(),
+            reverse_indices,
+            ids.numel(),
+            BLOCK=1024,
+            num_warps=4,
+        )
+    return reverse_indices
+
+
 def triton_kv_scatter(
     src: torch.Tensor,  # [N, H, D]
     ids: torch.Tensor,  # [N], indices into [0, total_q)
     total_q: int,
     out: torch.Tensor | None = None,
+    *,
+    reverse_indices: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Equivalent to:
     out = torch.zeros(total_q, *src.shape[1:], dtype=src.dtype, device=src.device)
     out[ids] = src
     return out
+
+    A supplied reverse_indices must describe these ids and remain unchanged
+    until all consuming scatters finish. When omitted, capture both clearing
+    and filling the reverse map so replay can supply different ids.
     """
     assert src.is_cuda and ids.is_cuda
+    assert src.device == ids.device
     assert src.dim() == 3
     N, H, D = src.shape
     assert ids.shape[0] == N
     HD = H * D
     src_c = src.contiguous()
-    ids_i64 = ids if ids.dtype == torch.int64 else ids.to(torch.int64)
 
     expected_shape = (total_q, H, D)
     if out is None:
@@ -84,18 +101,15 @@ def triton_kv_scatter(
             f"got {tuple(out.shape)}/{out.dtype}/{out.device}, "
             f"contiguous={out.is_contiguous()}"
         )
-    if total_q == 0:
+    if total_q == 0 or HD == 0:
         return out
-    rev = torch.full((total_q,), -1, dtype=torch.int32, device=src.device)
-
-    if N > 0:
-        _populate_rev_kernel[(triton.cdiv(N, 1024),)](
-            ids_i64,
-            rev,
-            N,
-            BLOCK=1024,
-            num_warps=4,
-        )
+    if reverse_indices is None:
+        reverse_indices = prepare_kv_scatter_indices(ids, total_q)
+    else:
+        assert reverse_indices.shape == (total_q,)
+        assert reverse_indices.dtype == torch.int32
+        assert reverse_indices.device == src.device
+        assert reverse_indices.is_contiguous()
 
     BLOCK_HD = triton.next_power_of_2(HD)
     if BLOCK_HD > 16384:
@@ -106,8 +120,7 @@ def triton_kv_scatter(
     _fused_scatter_kernel[(total_q, n_hd)](
         out.view(total_q, HD),
         src_c.view(N, HD),
-        rev,
-        total_q,
+        reverse_indices,
         HD=HD,
         BLOCK_HD=BLOCK_HD,
         num_warps=num_warps,

@@ -63,6 +63,28 @@ public:
     };
 };
 
+TEST(PrefillProgressInputTest, RequiresAnActualPdContextRequest) {
+    GptModelInputs inputs;
+    EXPECT_FALSE(hasRealPdPrefillRequest(inputs));
+    inputs.input_lengths    = torch::empty({2}, torch::kInt32);
+    inputs.sequence_lengths = torch::empty({1}, torch::kInt32);
+    EXPECT_FALSE(hasRealPdPrefillRequest(inputs));
+    inputs.request_pd_separation = torch::zeros({1}, torch::kInt32);
+    EXPECT_FALSE(hasRealPdPrefillRequest(inputs));
+    inputs.request_pd_separation = torch::zeros({1}, torch::kBool);
+    EXPECT_FALSE(hasRealPdPrefillRequest(inputs));
+    inputs.request_pd_separation.fill_(true);
+    EXPECT_TRUE(hasRealPdPrefillRequest(inputs));
+    inputs.is_fake_stream = true;
+    EXPECT_FALSE(hasRealPdPrefillRequest(inputs));
+    inputs.is_fake_stream = false;
+    inputs.warmup         = true;
+    EXPECT_FALSE(hasRealPdPrefillRequest(inputs));
+    inputs.warmup           = false;
+    inputs.sequence_lengths = torch::empty({2}, torch::kInt32);
+    EXPECT_FALSE(hasRealPdPrefillRequest(inputs));
+}
+
 class ModelDataTest: public DeviceTestBase {};
 
 TEST_F(ModelDataTest, testConstruct) {

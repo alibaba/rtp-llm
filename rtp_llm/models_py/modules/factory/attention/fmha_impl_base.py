@@ -11,6 +11,8 @@ from rtp_llm.ops.compute_ops import LayerKVCache, ParamsBase, PyAttentionInputs
 class MlaImplBase(object):
     """Base class for MLA attention implementations."""
 
+    overlap_kv_projections = False
+
     def __init__(
         self,
         attn_configs: AttentionConfigs,

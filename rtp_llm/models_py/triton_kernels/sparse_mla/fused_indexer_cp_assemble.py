@@ -180,13 +180,17 @@ def _all_gather_indexer_k_payload(
     local_k_quant: torch.Tensor,
     local_k_scale: torch.Tensor,
     group,
+    overlap_gather=None,
 ):
     """Pack K+scale and issue exactly one rank-major AllGather."""
     local_packed, q_cols, s_cols = _pack_indexer_k_payload(local_k_quant, local_k_scale)
     # This role is deliberately absent from the SYMM whitelist. Long-context
     # packed payloads can exceed a persistent window, while ordinary pynccl
     # still removes the second collective launch.
-    gathered_packed = all_gather(local_packed, group=group, role="indexer_k_packed")
+    gathered_packed = (
+        overlap_gather(local_packed, group) if overlap_gather is not None
+        else all_gather(local_packed, group=group, role="indexer_k_packed")
+    )
     return gathered_packed, q_cols, s_cols
 
 
@@ -194,13 +198,14 @@ def _all_gather_indexer_k(
     local_k_quant: torch.Tensor,
     local_k_scale: torch.Tensor,
     group,
+    overlap_gather=None,
 ):
     """Gather Indexer K using the master switch's packed or baseline path."""
     q_cols = int(local_k_quant.shape[1])
     s_cols = int(local_k_scale.shape[1])
     if cp_opt_enabled():
         gathered, q_cols, s_cols = _all_gather_indexer_k_payload(
-            local_k_quant, local_k_scale, group
+            local_k_quant, local_k_scale, group, overlap_gather
         )
         return gathered, None, q_cols, s_cols
 
@@ -218,6 +223,7 @@ def fused_copy_and_assemble_indexer_k(
     out_k_scale: torch.Tensor,
     copy_dst_idx: Optional[torch.Tensor] = None,
     src_for_padded: Optional[torch.Tensor] = None,
+    overlap_gather=None,
 ) -> None:
     """Fused copy_actual_to_padded + assemble_indexer_k.
 
@@ -285,7 +291,7 @@ def fused_copy_and_assemble_indexer_k(
     # Step 2: GLM5_CP_OPT packs K and scale into one collective. With the
     # master switch disabled, preserve the original two-gather behavior.
     gathered_k, gathered_s, q_cols, s_cols = _all_gather_indexer_k(
-        local_k, local_s, Group.TP
+        local_k, local_s, Group.TP, overlap_gather
     )
     if q_cols != head_dim or s_cols != scale_dim:
         raise RuntimeError(

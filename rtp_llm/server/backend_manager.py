@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING, Optional
 from rtp_llm.access_logger.access_logger import AccessLogger
 from rtp_llm.config.engine_config import EngineConfig, update_worker_addrs
 from rtp_llm.config.log_config import get_log_path
-from rtp_llm.config.mega_moe import MEGA_MOE_STRATEGIES
+from rtp_llm.config.mega_moe import is_mega_moe_strategy
 from rtp_llm.config.py_config_modules import PyEnvConfigs
 from rtp_llm.distribute.distributed_server import DistributedServer, get_world_info
 from rtp_llm.metrics import kmonitor
@@ -67,7 +67,10 @@ class BackendManager(object):
         from rtp_llm.models_py.distributed import pynccl_cp
 
         # Each spawned worker must publish this before CP communicators are built.
-        pynccl_cp.configure(self.py_env_configs.py_hw_kernel_config.glm5_cp_opt)
+        hw = self.py_env_configs.py_hw_kernel_config
+        pynccl_cp.configure(
+            hw.glm5_cp_opt, defer_padded_scatter=hw.glm5_cp_defer_padded_scatter
+        )
         if engine_config.parallelism_config.world_size > 1:
             init_distributed_environment(
                 engine_config.parallelism_config,
@@ -140,7 +143,7 @@ class BackendManager(object):
             # DeepEP/NVSHMEM wrapper. Initializing it anyway poisons the CUDA
             # context when unused NVSHMEM device state cannot start, so the
             # wrapper is skipped for those strategies.
-            skip_deepep = engine_config.moe_config.moe_strategy in MEGA_MOE_STRATEGIES
+            skip_deepep = is_mega_moe_strategy(engine_config.moe_config.moe_strategy)
             if skip_deepep and engine_config.moe_config.use_deepep_moe:
                 logging.info(
                     "moe_strategy=%s does not use DeepEP; skipping DeepEP wrapper "

@@ -260,6 +260,7 @@ def _fused_qk_rope_hadamard_quant_kernel(
     LOG2_HEAD_DIM: tl.constexpr,
     SCALE_UE8M0: tl.constexpr,
     USE_V2_QUANT: tl.constexpr,
+    K_ONLY: tl.constexpr = False,
 ):
     """Fused QK: K(RoPE+Hadamard→bf16) + Q(RoPE+Hadamard+FP8).
 
@@ -338,49 +339,54 @@ def _fused_qk_rope_hadamard_quant_kernel(
 
     tl.debug_barrier()
 
-    # ── Q path (all heads) ──
-    q_base = q_ptr + tok_idx * q_stride0 + head_idx * q_stride1
-    if IS_NEOX_STYLE:
-        x_first = tl.load(q_base + half_offset).to(tl.float32)
-        x_second = tl.load(q_base + half_offset + HALF_ROT_DIM).to(tl.float32)
-        r_first = tl.fma(x_first, cos, -x_second * sin).to(tl.bfloat16).to(tl.float32)
-        r_second = tl.fma(x_second, cos, x_first * sin).to(tl.bfloat16).to(tl.float32)
-        tl.store(scratch_base + half_offset, r_first)
-        tl.store(scratch_base + half_offset + HALF_ROT_DIM, r_second)
-    else:
-        x_even = tl.load(q_base + half_offset * 2).to(tl.float32)
-        x_odd = tl.load(q_base + half_offset * 2 + 1).to(tl.float32)
-        r_first = tl.fma(x_even, cos, -x_odd * sin).to(tl.bfloat16).to(tl.float32)
-        r_second = tl.fma(x_odd, cos, x_even * sin).to(tl.bfloat16).to(tl.float32)
-        tl.store(scratch_base + half_offset * 2, r_first)
-        tl.store(scratch_base + half_offset * 2 + 1, r_second)
+    if not K_ONLY:
+        # ── Q path (all heads) ──
+        q_base = q_ptr + tok_idx * q_stride0 + head_idx * q_stride1
+        if IS_NEOX_STYLE:
+            x_first = tl.load(q_base + half_offset).to(tl.float32)
+            x_second = tl.load(q_base + half_offset + HALF_ROT_DIM).to(tl.float32)
+            r_first = (
+                tl.fma(x_first, cos, -x_second * sin).to(tl.bfloat16).to(tl.float32)
+            )
+            r_second = (
+                tl.fma(x_second, cos, x_first * sin).to(tl.bfloat16).to(tl.float32)
+            )
+            tl.store(scratch_base + half_offset, r_first)
+            tl.store(scratch_base + half_offset + HALF_ROT_DIM, r_second)
+        else:
+            x_even = tl.load(q_base + half_offset * 2).to(tl.float32)
+            x_odd = tl.load(q_base + half_offset * 2 + 1).to(tl.float32)
+            r_first = tl.fma(x_even, cos, -x_odd * sin).to(tl.bfloat16).to(tl.float32)
+            r_second = tl.fma(x_odd, cos, x_even * sin).to(tl.bfloat16).to(tl.float32)
+            tl.store(scratch_base + half_offset * 2, r_first)
+            tl.store(scratch_base + half_offset * 2 + 1, r_second)
 
-    if NOPE_DIM > 0:
-        nope_offset = tl.arange(0, NOPE_DIM)
-        tl.store(
-            scratch_base + ROT_DIM + nope_offset,
-            tl.load(q_base + ROT_DIM + nope_offset).to(tl.float32),
-        )
+        if NOPE_DIM > 0:
+            nope_offset = tl.arange(0, NOPE_DIM)
+            tl.store(
+                scratch_base + ROT_DIM + nope_offset,
+                tl.load(q_base + ROT_DIM + nope_offset).to(tl.float32),
+            )
 
-    tl.debug_barrier()
-    for s_log in range(LOG2_HEAD_DIM):
-        stride = 1 << s_log
-        is_upper = (idx & stride) != 0
-        self_val = tl.load(scratch_base + idx)
-        partner_val = tl.load(scratch_base + (idx ^ stride))
         tl.debug_barrier()
-        tl.store(
-            scratch_base + idx,
-            tl.where(is_upper, partner_val - self_val, self_val + partner_val),
-        )
-        tl.debug_barrier()
+        for s_log in range(LOG2_HEAD_DIM):
+            stride = 1 << s_log
+            is_upper = (idx & stride) != 0
+            self_val = tl.load(scratch_base + idx)
+            partner_val = tl.load(scratch_base + (idx ^ stride))
+            tl.debug_barrier()
+            tl.store(
+                scratch_base + idx,
+                tl.where(is_upper, partner_val - self_val, self_val + partner_val),
+            )
+            tl.debug_barrier()
 
-    data = tl.load(scratch_base + idx) * (HEAD_DIM**-0.5)
+        data = tl.load(scratch_base + idx) * (HEAD_DIM**-0.5)
 
-    quantized, scale = _quantize_query(data, SCALE_UE8M0, USE_V2_QUANT)
-    fp8_base = q_fp8_ptr + tok_idx * q_fp8_stride0 + head_idx * q_fp8_stride1
-    tl.store(fp8_base + idx, quantized)
-    tl.store(q_scale_ptr + tok_idx * q_scale_stride0 + head_idx, scale)
+        quantized, scale = _quantize_query(data, SCALE_UE8M0, USE_V2_QUANT)
+        fp8_base = q_fp8_ptr + tok_idx * q_fp8_stride0 + head_idx * q_fp8_stride1
+        tl.store(fp8_base + idx, quantized)
+        tl.store(q_scale_ptr + tok_idx * q_scale_stride0 + head_idx, scale)
 
 
 def fused_qk_rope_quant(
@@ -468,3 +474,42 @@ def fused_qk_rope_quant(
         )
 
     return q_fp8, q_scale.unsqueeze(-1), k_out
+
+
+def fused_k_rope_hadamard(
+    k, positions, cos_sin_cache, index_head_dim, rope_head_dim, is_neox_style=True
+):
+    """Run the original fused-QK K branch before independent Q projection."""
+    n = k.shape[0]
+    log2_dim = int(math.log2(index_head_dim))
+    assert 2**log2_dim == index_head_dim
+    output = torch.empty((n, index_head_dim), device=k.device, dtype=torch.bfloat16)
+    scratch = torch.empty(n * index_head_dim, device=k.device, dtype=torch.float32)
+    if n:
+        _fused_qk_rope_hadamard_quant_kernel[(n, 1)](
+            positions,
+            None,
+            0,
+            0,
+            k,
+            k.stride(0),
+            cos_sin_cache,
+            cos_sin_cache.stride(0),
+            rope_head_dim // 2,
+            None,
+            0,
+            0,
+            None,
+            0,
+            output,
+            output.stride(0),
+            scratch,
+            index_head_dim,
+            is_neox_style,
+            log2_dim,
+            SCALE_UE8M0=True,
+            USE_V2_QUANT=False,
+            K_ONLY=True,
+            num_warps=1,
+        )
+    return output

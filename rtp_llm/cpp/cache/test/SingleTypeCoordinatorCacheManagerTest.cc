@@ -440,6 +440,7 @@ TEST_F(SingleTypeCoordinatorCacheManagerTest, ReserveBlocksOnlyAppliedToInitMall
 
     const size_t free_before = allocator_->freeBlocksNum();
     ASSERT_EQ(free_before, 9u);
+    EXPECT_EQ(allocator_->maxWarmupInputTokens(10, /*reserve_step=*/3), 4);
 
     // Init malloc requesting 8 blocks should fail: 9 < 8 + 2 reserved.
     {
@@ -765,6 +766,8 @@ TEST_F(SingleTypeCoordinatorCacheManagerTest, ResidentPrefixRemainsMatchableUnde
     EXPECT_TRUE(path.front()->is_resident);
     EXPECT_EQ(cache->getStats().device_heap_total_size, 0u);
     EXPECT_EQ(cache->groupSets().front()->devicePools().front()->refCount(seed_block), 1u);
+    // The resident CACHE-only block remains unavailable to an uncached warmup.
+    EXPECT_EQ(allocator_->maxWarmupInputTokens(12, 0), 8);
 
     const BatchKVCacheResourcePtr pressure = createBatchKVCacheResource(1, config);
     pressure->setBatchCacheKeys(0, CacheKeysType{200, 201, 202});
@@ -2088,6 +2091,7 @@ TEST_F(SingleTypeCoordinatorCacheManagerTest, CapacityAndNeedBlocksUseCPVirtualB
 
     EXPECT_EQ(allocator_->maxAvailableTokensNum(), (10u - 1u) * 16u);
     EXPECT_EQ(allocator_->availableTokensNum(), (10u - 1u) * 16u);
+    EXPECT_EQ(allocator_->maxWarmupInputTokens(512, /*reserve_step=*/6), 128);
 
     auto batch_resource = createBatchKVCacheResource(/*batch_size=*/1, config);
     EXPECT_EQ(allocator_->singleBatchNeedBlocks(batch_resource, /*seq_len=*/65, /*reserve_step=*/0), 5);

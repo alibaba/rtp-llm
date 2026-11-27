@@ -50,7 +50,7 @@ def transform_fp8_to_fp4_mega_weights(
     w3_fp8: torch.Tensor,  # [E_local, N_out, K_in] float8_e4m3fn (up projection)
     w3_scale: torch.Tensor,  # [E_local, N_out, K_in//128] float32
     *,
-    transform_name: str = "transform_weights_for_mega_moe",
+    transform=None,
 ) -> tuple[tuple[torch.Tensor, torch.Tensor], tuple[torch.Tensor, torch.Tensor]]:
     """Prepare weights from FP8 per-block format (GLM-5 checkpoint).
 
@@ -75,7 +75,8 @@ def transform_fp8_to_fp4_mega_weights(
     del w2_fp8, w2_scale
     s2 = prepare_fp4_weight_scale_for_deepgemm(s2, D, inter, E)
     torch.cuda.empty_cache()
-    transformed = getattr(deep_gemm, transform_name)((w13, s13), (w2, s2))
+    transform = transform or deep_gemm.transform_weights_for_mega_moe
+    transformed = transform((w13, s13), (w2, s2))
     del w13, s13, w2, s2
     torch.cuda.empty_cache()
     return transformed

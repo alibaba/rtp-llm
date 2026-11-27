@@ -20,6 +20,7 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeCacheFactory.h"
 #include "rtp_llm/cpp/engine_base/system_prompt/SystemPromptConstructor.h"
 #include "rtp_llm/cpp/models/GenerationPrefillCudaGraphEligibility.h"
+#include "rtp_llm/cpp/models/prefill_progress/PrefillProgress.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/DevicePin.h"
@@ -171,6 +172,59 @@ private:
     int64_t                      baseline_reserved_   = 0;
 };
 #endif
+#if USING_CUDA
+constexpr size_t kMiB = 1024 * 1024;
+
+void preallocateTorchCudaPoolForPrefill(RoleType role_type, int device_id, const RuntimeConfig& config) {
+    if (role_type != RoleType::PREFILL) {
+        return;
+    }
+
+    const int64_t max_mb    = config.torch_cuda_pool_prealloc_mb;
+    const int64_t safety_mb = config.torch_cuda_pool_prealloc_safety_mb;
+    RTP_LLM_CHECK_WITH_INFO(max_mb >= -1 && safety_mb >= 0, "invalid Torch CUDA pool preallocation config");
+    if (max_mb == 0) {
+        return;
+    }
+
+    c10::cuda::CUDAGuard device_guard(device_id);
+    const size_t cuda_free = getGpuExecStatus().device_memory_status.free_bytes;
+
+    // Match large_segment_size_mb=1024: never let allocator rounding consume the safety margin.
+    constexpr int64_t allocation_granularity_mb = 1024;
+    int64_t target_mb = std::max<int64_t>(0, static_cast<int64_t>(cuda_free / kMiB) - safety_mb);
+    if (max_mb > 0) {
+        target_mb = std::min(target_mb, max_mb);
+    }
+    target_mb = target_mb / allocation_granularity_mb * allocation_granularity_mb;
+    if (target_mb == 0) {
+        RTP_LLM_LOG_WARNING("skip Torch CUDA pool preallocation: free=%zu MiB safety=%ld MiB",
+                            cuda_free / kMiB,
+                            safety_mb);
+        return;
+    }
+
+    const int64_t target_bytes = target_mb * static_cast<int64_t>(kMiB);
+    {
+        auto buffer = torch::empty(
+            {target_bytes}, torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCUDA, device_id));
+    }
+
+    const auto stats        = c10::cuda::CUDACachingAllocator::getDeviceStats(device_id);
+    const auto cached_bytes = stats.reserved_bytes[0].current - stats.allocated_bytes[0].current;
+    RTP_LLM_CHECK_WITH_INFO(cached_bytes >= target_bytes,
+                            "Torch CUDA pool preallocation failed: target=%ld MiB cached=%ld MiB",
+                            target_mb,
+                            cached_bytes / static_cast<int64_t>(kMiB));
+    RTP_LLM_LOG_INFO("Torch CUDA pool ready: device=%d target=%ld MiB cached=%ld MiB free_before=%zu MiB "
+                     "safety=%ld MiB",
+                     device_id,
+                     target_mb,
+                     cached_bytes / static_cast<int64_t>(kMiB),
+                     cuda_free / kMiB,
+                     safety_mb);
+}
+#endif
 }  // anonymous namespace
 
 int NormalEngine::calculateReserveStep(const EngineInitParams& params) {
@@ -206,6 +260,7 @@ NormalEngine::NormalEngine(const EngineInitParams&                       params,
     step_profiler_(params.profiling_debug_logging_config.torch_cuda_profiler_dir,
                    params.parallelism_config.world_rank) {
     RTP_LLM_LOG_INFO(__PRETTY_FUNCTION__);
+    PrefillProgressScope::initialize(runtime_config.prefill_progress_slot.c_str());
     // As in PyWrappedModel, failed construction must release Python references under the GIL.
     auto cleanup_on_failure = [](NormalEngine* engine) noexcept {
         if (engine->custom_output_selector_) {
@@ -643,7 +698,11 @@ WarmUpResult NormalEngine::prefillWarmUp(const EngineInitParams& params) {
                                                    /*primary_graph_is_prefill=*/false,
                                                    params.parallelism_config.role_type,
                                                    params.sp_config.type);
-        if (!generation_prefill_cuda_graph_requested) {
+        // Sparse MLA CP eager warmup also plans and gathers paged KV.
+        const bool cp_sparse_warmup = params.parallelism_config.prefill_cp_config.is_enabled()
+                                      && params.model_config_.attn_config.is_sparse
+                                      && params.model_config_.attn_config.use_mla;
+        if (!generation_prefill_cuda_graph_requested && !cp_sparse_warmup) {
             if (parallelism_config.pp_size > 1) {
                 executor_.reset(new PPExecutor(params, nullptr, true));
             } else {
@@ -1115,6 +1174,12 @@ absl::Status NormalEngine::startLoop() {
     }
     // System prompts run on the constructor thread; keep Kineto on the engine loop.
     step_profiler_.configureFromConfig(profiling_debug_logging_config);
+#if USING_CUDA
+    // Run after KV cache, executor, scheduler and system-prompt initialization,
+    // but before the engine loop can accept work. The temporary torch::Tensor is
+    // released into the same CUDACachingAllocator used by Prefill model forwards.
+    preallocateTorchCudaPoolForPrefill(pd_sep_config.role_type, getDeviceId(), runtime_config);
+#endif
     RTP_LLM_LOG_INFO("start normal engine loop");
     running_     = true;
     loop_thread_ = autil::Thread::createThread(std::bind(&NormalEngine::loop, this), "normal_engine_loop");

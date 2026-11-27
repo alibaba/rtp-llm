@@ -1,9 +1,12 @@
+from contextlib import contextmanager
 from typing import Any, Dict, Optional, Tuple
 
 import torch
 from torch import nn
 
 from rtp_llm.device.device_type import DeviceType, get_device_type
+from rtp_llm.models_py.distributed import pynccl_cp
+from rtp_llm.models_py.distributed.collective_torch import Group
 from rtp_llm.models_py.modules import IndexerOp, LayerNorm
 from rtp_llm.models_py.modules.factory import LinearFactory
 from rtp_llm.ops import AttentionConfigs, HWKernelConfig, ParallelismConfig
@@ -17,6 +20,8 @@ if _DEVICE_TYPE == DeviceType.Cuda:
     )
     from rtp_llm.models_py.triton_kernels.sparse_mla.fused_logits_head_gate import (
         fused_logits_head_gate,
+        normalize_projected_key,
+        scale_projected_gate,
     )
 else:
     CudaFp8GEMMLinear = None  # type: ignore
@@ -95,43 +100,45 @@ class Indexer(nn.Module):
             hw_kernel_config=hw_kernel_config,
         )
 
-        self.wk = LinearFactory.create_linear_from_weights(
-            weights,
-            W.mla_indexer_k_w,
-            W.mla_indexer_k_s,
-            None,
-            quant_config=quant_config,
-            hw_kernel_config=hw_kernel_config,
-        )
-
         self.k_norm = LayerNorm(
             weights[W.mla_indexer_k_norm_w],
             weights[W.mla_indexer_k_norm_b],
             eps=layernorm_eps,
         )
 
-        self.weights_proj = LinearFactory.create_linear_from_weights(
-            weights,
-            W.mla_indexer_weights_proj_w,
-            None,
-            None,
-            quant_config=quant_config,
-            hw_kernel_config=hw_kernel_config,
-        )
-        # Pre-contiguify weight for the fused Triton kernel (one-time init
-        # copy). Production weight is often a transposed view [N, K] of
-        # underlying [K, N] storage; the small-T per-(t,n) kernel needs
-        # contiguous weight for coalesced 1D loads. Use plain attribute
-        # reassignment (not `.data = ...`) — the latter does an in-place
-        # `set_` of the underlying storage that leaves the tensor in a
-        # state where `F.linear` under cuda-graph capture + inference_mode
-        # trips PyTorch's version-counter check.
-        if (
-            self._fuse_logits_head_gate
-            and hasattr(self.weights_proj, "weight")
-            and not self.weights_proj.weight.is_contiguous()
-        ):
-            self.weights_proj.weight = self.weights_proj.weight.contiguous()
+        self.packed_index_weight = weights.get(W.mla_indexer_k_gate_w)
+        if self.packed_index_weight is None:
+            self.wk = LinearFactory.create_linear_from_weights(
+                weights,
+                W.mla_indexer_k_w,
+                W.mla_indexer_k_s,
+                None,
+                quant_config=quant_config,
+                hw_kernel_config=hw_kernel_config,
+            )
+
+            self.weights_proj = LinearFactory.create_linear_from_weights(
+                weights,
+                W.mla_indexer_weights_proj_w,
+                None,
+                None,
+                quant_config=quant_config,
+                hw_kernel_config=hw_kernel_config,
+            )
+            # Pre-contiguify weight for the fused Triton kernel (one-time init
+            # copy). Production weight is often a transposed view [N, K] of
+            # underlying [K, N] storage; the small-T per-(t,n) kernel needs
+            # contiguous weight for coalesced 1D loads. Use plain attribute
+            # reassignment (not `.data = ...`) — the latter does an in-place
+            # `set_` of the underlying storage that leaves the tensor in a
+            # state where `F.linear` under cuda-graph capture + inference_mode
+            # trips PyTorch's version-counter check.
+            if (
+                self._fuse_logits_head_gate
+                and hasattr(self.weights_proj, "weight")
+                and not self.weights_proj.weight.is_contiguous()
+            ):
+                self.weights_proj.weight = self.weights_proj.weight.contiguous()
         self.cos_sin_cache = global_weights[W.rope_cos_sin_cache]
 
         # Fused RoPE kernels use equal rotary/non-rotary halves and power-of-2
@@ -156,6 +163,12 @@ class Indexer(nn.Module):
             is_neox_style=self.is_neox_style,
             stable_topk=stable_topk,
             enable_fuse_kernels=self._fuse_kernels_enabled,
+            indexer_fused_topk=self._fuse_kernels_enabled
+            and hw_kernel_config is not None
+            and (
+                hw_kernel_config.indexer_fused_topk
+                or (stable_topk and hw_kernel_config.glm5_cp_opt)
+            ),
         )
 
     def _prefill_cp_enabled(self) -> bool:
@@ -169,13 +182,29 @@ class Indexer(nn.Module):
     def _is_sparse_prefill_cp(self, attention_inputs: Any) -> bool:
         return not _is_decode_phase(attention_inputs) and self._prefill_cp_enabled()
 
+    def _project_normalized_index_k(self, x, x_fp8=None, x_scale=None, *, gate_out=None):
+        if self.packed_index_weight is not None:
+            kg = torch.nn.functional.linear(x, self.packed_index_weight)
+            k, gate = kg.split((self.index_head_dim, self.index_n_heads), dim=-1)
+            if _DEVICE_TYPE == DeviceType.Cuda:
+                return normalize_projected_key(k, self.k_norm, gate_out), gate
+            return self.k_norm(k.contiguous()), gate
+        key = self._project_with_fp8(self.wk, x, x_fp8, x_scale)
+        return self.k_norm(key), None
+
     def _get_logits_head_gate(
-        self, x: torch.Tensor, q_scale: torch.Tensor
+        self, x: torch.Tensor, q_scale: torch.Tensor, projected_gate=None
     ) -> torch.Tensor:
         # F3: fused (cast + GEMV + 2 elementwise muls) into one Triton kernel.
         # ``self._fuse_logits_head_gate`` is resolved at __init__ from
         # ``HWKernelConfig.enable_fuse_kernels``.
         scale = self.softmax_scale * self.weights_scale
+        if projected_gate is not None:
+            if _DEVICE_TYPE == DeviceType.Cuda:
+                return scale_projected_gate(
+                    projected_gate, q_scale, self.softmax_scale, self.weights_scale
+                )
+            return projected_gate.float().unsqueeze(-1) * q_scale * scale
         if self._fuse_logits_head_gate and x.is_contiguous():
             return fused_logits_head_gate(
                 x,
@@ -218,10 +247,10 @@ class Indexer(nn.Module):
         x_scale: Optional[torch.Tensor],
         q_c_fp8: Optional[torch.Tensor],
         q_c_scale: Optional[torch.Tensor],
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+    ) -> Tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
         q = self._project_with_fp8(self.wq_b, q_lora, q_c_fp8, q_c_scale)
-        k = self._project_with_fp8(self.wk, x, x_fp8, x_scale)
-        return q.view(-1, self.index_n_heads, self.index_head_dim), self.k_norm(k)
+        k, gate = self._project_normalized_index_k(x, x_fp8, x_scale)
+        return q.view(-1, self.index_n_heads, self.index_head_dim), k, gate
 
     def _fused_forward_decode(
         self,
@@ -233,19 +262,19 @@ class Indexer(nn.Module):
         x_scale: Optional[torch.Tensor] = None,
         q_c_fp8: Optional[torch.Tensor] = None,
         q_c_scale: Optional[torch.Tensor] = None,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+    ) -> Tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
         """Fused decode: QK kernel does K(RoPE+Had→bf16) + Q(RoPE+Had+FP8).
 
         Returns (q_fp8, q_scale).
         """
-        q, k = self._project_q_k(q_lora, x, x_fp8, x_scale, q_c_fp8, q_c_scale)
+        q, k, gate = self._project_q_k(q_lora, x, x_fp8, x_scale, q_c_fp8, q_c_scale)
 
         q_fp8, q_scale, key = self.indexer_op.fused_rope_quant_qk(
             q, k, fmha_params.positions_d
         )
         self.indexer_op.quant_k_only(key, kv_cache, fmha_params.slot_mapping)
 
-        return q_fp8, q_scale
+        return q_fp8, q_scale, gate
 
     def _fused_forward_prefill_cp(
         self,
@@ -258,8 +287,8 @@ class Indexer(nn.Module):
         x_scale: Optional[torch.Tensor] = None,
         q_c_fp8: Optional[torch.Tensor] = None,
         q_c_scale: Optional[torch.Tensor] = None,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
-        q, k = self._project_q_k(q_lora, x, x_fp8, x_scale, q_c_fp8, q_c_scale)
+    ) -> Tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
+        q, k, gate = self._project_q_k(q_lora, x, x_fp8, x_scale, q_c_fp8, q_c_scale)
 
         q_fp8, q_scale, key = self.indexer_op.fused_rope_quant_qk(
             q,
@@ -268,7 +297,7 @@ class Indexer(nn.Module):
         )
         slot_mapping = (
             cp_params.sharded_slot_mapping
-            if bool(getattr(cp_params, "kv_cache_sharded", False))
+            if cp_params.kv_cache_sharded
             else fmha_params.slot_mapping
         )
         self.indexer_op.quant_k_cp_only(
@@ -277,7 +306,7 @@ class Indexer(nn.Module):
             slot_mapping,
             cp_params.kv_restore_unpad_indices,
         )
-        return q_fp8, q_scale
+        return q_fp8, q_scale, gate
 
     def _get_q_k_bf16(
         self,
@@ -289,8 +318,8 @@ class Indexer(nn.Module):
         x_scale: Optional[torch.Tensor] = None,
         q_c_fp8: Optional[torch.Tensor] = None,
         q_c_scale: Optional[torch.Tensor] = None,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
-        q, k = self._project_q_k(q_lora, x, x_fp8, x_scale, q_c_fp8, q_c_scale)
+    ) -> Tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
+        q, k, gate = self._project_q_k(q_lora, x, x_fp8, x_scale, q_c_fp8, q_c_scale)
 
         if cp_params is not None:
             query, key = self.indexer_op.apply_rope_and_rotate_q_k_cp(
@@ -302,15 +331,14 @@ class Indexer(nn.Module):
             positions = flashmla_params.positions_d
             query, key = self.indexer_op.apply_rope_and_rotate_q_k(q, k, positions)
 
-        return query, key
+        return query, key, gate
 
     def _get_k_bf16(
         self,
         x: torch.Tensor,
         flashmla_params: Any,
     ) -> torch.Tensor:
-        k = self.wk(x)
-        k = self.k_norm(k)
+        k, _ = self._project_normalized_index_k(x)
         return self.indexer_op.apply_rope_and_rotate_k(k, flashmla_params.positions_d)
 
     def _quantize_q_k(
@@ -326,7 +354,7 @@ class Indexer(nn.Module):
             assert cp_params is not None
             slot_mapping = (
                 cp_params.sharded_slot_mapping
-                if bool(getattr(cp_params, "kv_cache_sharded", False))
+                if cp_params.kv_cache_sharded
                 else fmha_params.slot_mapping
             )
             return self.indexer_op.quant_q_k_cp(
@@ -346,6 +374,7 @@ class Indexer(nn.Module):
         fmha_params: Any,
         attention_inputs: Any,
         cp_params: Optional[Any],
+        prepared_keys=None,
     ) -> torch.Tensor:
         if _is_decode_phase(attention_inputs):
             return self.indexer_op._get_topk_paged(
@@ -366,23 +395,94 @@ class Indexer(nn.Module):
                 cp_params.precomputed_ke,
                 cp_params.precomputed_lengths,
                 cp_params.precomputed_topk_off,
-                bool(getattr(cp_params, "kv_cache_sharded", False)),
-                int(getattr(cp_params, "cp_size", 1)),
-                int(getattr(cp_params, "cp_rank", 0)),
+                cp_params.kv_cache_sharded,
+                cp_params.cp_size,
+                cp_params.cp_rank,
+                prepared_keys=prepared_keys,
                 kv_owner_tokens_per_block=self._kv_owner_tokens_per_block,
-                indexer_cp_plan=getattr(cp_params, "indexer_cp_plan", None),
-                indexer_cp_local_cu=getattr(cp_params, "indexer_cp_local_cu", None),
-                indexer_copy_dst_idx=getattr(cp_params, "indexer_copy_dst_idx", None),
-                indexer_src_for_padded=getattr(
-                    cp_params, "indexer_src_for_padded", None
-                ),
-                total_local_ids_is_identity=bool(
-                    getattr(cp_params, "total_local_ids_is_identity", False)
-                ),
+                indexer_cp_plan=cp_params.indexer_cp_plan,
+                indexer_cp_local_cu=cp_params.indexer_cp_local_cu,
+                indexer_copy_dst_idx=cp_params.indexer_copy_dst_idx,
+                indexer_src_for_padded=cp_params.indexer_src_for_padded,
+                total_local_ids_is_identity=cp_params.total_local_ids_is_identity,
             )
         return self.indexer_op._get_topk_ragged(
             q_fp8, weights, kv_cache, fmha_params, attention_inputs
         )
+
+    @contextmanager
+    def prefetch_cp_k(self, hidden, kv_cache, fmha, x_fp8, x_scale):
+        cp = fmha.cp_params
+        if not (
+            cp is not None
+            and cp.kv_cache_sharded
+            and cp.cp_size > 1
+            and self._is_sparse_prefill_cp(fmha.attn_inputs)
+            and self._prefill_cp_fused_quant_enabled()
+            and cp.full_rope_pos_ids is not None
+            and hidden.is_cuda
+            and pynccl_cp.enabled()
+            and not torch.cuda.is_current_stream_capturing()
+        ):
+            yield None
+            return
+        side = pynccl_cp.indexer_overlap_stream(Group.TP, hidden.device)
+        if side is None:
+            yield None
+            return
+        compute = torch.cuda.current_stream(hidden.device)
+        try:
+            early = (
+                cp.indexer_cp_plan is not None
+                and cp.indexer_cp_plan.early_history is not None
+                and self.index_head_dim == self.block_size == 128
+            )
+            if early:
+                side.wait_stream(compute)
+                with torch.cuda.stream(side):
+                    keys = self.indexer_op.prepare_cp_history(
+                        kv_cache, fmha.attn_inputs, cp
+                    )
+            k, gate = self._project_normalized_index_k(hidden, x_fp8, x_scale)
+            key = self.indexer_op.fused_rope_hadamard_k(k, cp.full_rope_pos_ids)
+            del k
+            side.wait_stream(compute)
+            key.record_stream(side)
+            with torch.cuda.stream(side):
+                if early:
+                    self.indexer_op.finish_cp_history(
+                        key,
+                        kv_cache,
+                        cp.sharded_slot_mapping,
+                        cp.kv_restore_unpad_indices,
+                        cp,
+                        keys,
+                    )
+                else:
+                    self.indexer_op.quant_k_cp_only(
+                        key,
+                        kv_cache,
+                        cp.sharded_slot_mapping,
+                        cp.kv_restore_unpad_indices,
+                        overlap=True,
+                    )
+                    keys = self.indexer_op.gather_cp_keys(
+                        kv_cache,
+                        fmha.attn_inputs,
+                        cp.total_kv_len,
+                        hidden.device,
+                        True,
+                        cp.cu_kv_seqlens_global,
+                        cp.indexer_cp_plan,
+                        cp.indexer_cp_local_cu,
+                        cp.indexer_copy_dst_idx,
+                        cp.indexer_src_for_padded,
+                        pynccl_cp.all_gather_indexer_overlap,
+                    )
+                ready = side.record_event()
+            yield gate, keys, ready
+        finally:
+            compute.wait_stream(side)
 
     def forward(
         self,
@@ -397,23 +497,47 @@ class Indexer(nn.Module):
         x_scale: Optional[torch.Tensor] = None,
         q_c_fp8: Optional[torch.Tensor] = None,
         q_c_scale: Optional[torch.Tensor] = None,
+        prepared_cp_k=None,
     ) -> torch.Tensor:
+        if prepared_cp_k is not None:
+            gate, keys, ready = prepared_cp_k
+            q = self._project_with_fp8(self.wq_b, q_lora, q_c_fp8, q_c_scale)
+            q_fp8, scale = self.indexer_op.fused_rope_quant_q(
+                q.view(-1, self.index_n_heads, self.index_head_dim),
+                cp_params.full_rope_pos_ids,
+            )
+            weights = self._get_logits_head_gate(hidden_states, scale, gate)
+            compute = torch.cuda.current_stream(hidden_states.device)
+            compute.wait_event(ready)
+            for tensor in keys:
+                tensor.record_stream(compute)
+            return self._compute_topk(
+                q_fp8,
+                weights,
+                kv_cache,
+                fmha_params,
+                attention_inputs,
+                cp_params,
+                prepared_keys=keys,
+            )
+
         if use_fast_path:
             key = self._get_k_bf16(hidden_states, fmha_params)
             self.indexer_op.quant_k_only(key, kv_cache, fmha_params.slot_mapping)
             return None
 
-        if self._is_sparse_prefill_cp(attention_inputs):
+        sparse_prefill_cp = self._is_sparse_prefill_cp(attention_inputs)
+        if sparse_prefill_cp:
             assert cp_params is not None, "cp_params is required for sparse prefill CP"
 
         # Fused Q-RoPE-Hadamard-Quant path: single Triton kernel does
         # RoPE + 128-pt Hadamard + ue8m0 FP8 quant for Q (decode only).
         if (
-            self._is_sparse_prefill_cp(attention_inputs)
+            sparse_prefill_cp
             and self._prefill_cp_fused_quant_enabled()
             and cp_params.full_rope_pos_ids is not None
         ):
-            q_fp8, q_scale = self._fused_forward_prefill_cp(
+            q_fp8, q_scale, gate = self._fused_forward_prefill_cp(
                 q_lora,
                 hidden_states,
                 kv_cache,
@@ -430,7 +554,7 @@ class Indexer(nn.Module):
             and _is_decode_phase(attention_inputs)
             and cp_params is None
         ):
-            q_fp8, q_scale = self._fused_forward_decode(
+            q_fp8, q_scale, gate = self._fused_forward_decode(
                 q_lora,
                 hidden_states,
                 kv_cache,
@@ -441,7 +565,7 @@ class Indexer(nn.Module):
                 q_c_scale,
             )
         else:
-            query, key = self._get_q_k_bf16(
+            query, key, gate = self._get_q_k_bf16(
                 q_lora,
                 hidden_states,
                 fmha_params,
@@ -455,7 +579,39 @@ class Indexer(nn.Module):
                 query, key, kv_cache, fmha_params, attention_inputs, cp_params
             )
 
-        weights = self._get_logits_head_gate(hidden_states, q_scale)
+        if (
+            sparse_prefill_cp
+            and cp_params.kv_cache_sharded
+            and cp_params.cp_size > 1
+            and pynccl_cp.enabled()
+            and hidden_states.is_cuda
+            and not torch.cuda.is_current_stream_capturing()
+        ):
+            device = hidden_states.device
+            compute = torch.cuda.current_stream(device)
+            side = pynccl_cp.warmup_kv_overlap(Group.TP, device)
+            side.wait_stream(compute)
+            try:
+                with torch.cuda.stream(side):
+                    keys = self.indexer_op.gather_cp_keys(
+                        kv_cache, attention_inputs, cp_params.total_kv_len, device, True,
+                        cp_params.cu_kv_seqlens_global, cp_params.indexer_cp_plan,
+                        cp_params.indexer_cp_local_cu, cp_params.indexer_copy_dst_idx,
+                        cp_params.indexer_src_for_padded, pynccl_cp.all_gather_kv_overlap,
+                    )
+                    ready = side.record_event()
+                weights = self._get_logits_head_gate(hidden_states, q_scale, gate)
+            except BaseException:
+                compute.wait_stream(side)
+                raise
+            compute.wait_event(ready)
+            for key_tensor in keys:
+                key_tensor.record_stream(compute)
+            return self._compute_topk(
+                q_fp8, weights, kv_cache, fmha_params, attention_inputs, cp_params, prepared_keys=keys
+            )
+
+        weights = self._get_logits_head_gate(hidden_states, q_scale, gate)
         return self._compute_topk(
             q_fp8, weights, kv_cache, fmha_params, attention_inputs, cp_params
         )

@@ -1,3 +1,4 @@
+#include "rtp_llm/cpp/models/prefill_progress/PrefillProgress.h"
 #include "rtp_llm/cpp/observability/ExecutionRecorder.h"
 #include "rtp_llm/cpp/normal_engine/NormalExecutor.h"
 #include "rtp_llm/cpp/metrics/ServiceStatus.h"
@@ -381,6 +382,8 @@ absl::Status NormalExecutor::process(const ScheduleOutput& schedule_output, int6
         }
     }
 
+    PrefillProgressScope prefill_progress(role_type_ == RoleType::PREFILL && !warm_up_
+                                          && PrefillProgressScope::enabled() && hasRealPdPrefillRequest(model_input));
     // make sure last model input is released before forward
     // TensorHolder release point (NormalExecutor): after current TP sync has
     // consumed model-input H2D staging, advance the one-extra-round hold window
@@ -434,7 +437,9 @@ absl::Status NormalExecutor::process(const ScheduleOutput& schedule_output, int6
     }
 
     if (auto capture_error = model_->takeDeferredHiddenStateCaptureError(); capture_error.has_value()) {
+        PrefillProgressScope::mark(PrefillPhase::GPU_WAIT);
         cudaSyncAndCheck();
+        PrefillProgressScope::mark(PrefillPhase::GPU_DONE);
         model_->releaseBuffers();
         for (const auto& stream : streams) {
             stream->reportError(ErrorCode::EXECUTION_EXCEPTION, *capture_error);
@@ -456,7 +461,9 @@ absl::Status NormalExecutor::process(const ScheduleOutput& schedule_output, int6
 
     if (tp_rank_ > 0 || warm_up_ || streams.size() == 0) {
         // Make all model streams quiescent before releasing borrowed buffers.
+        PrefillProgressScope::mark(PrefillPhase::GPU_WAIT);
         cudaSyncAndCheck();
+        PrefillProgressScope::mark(PrefillPhase::GPU_DONE);
         // Warmup does not launch dispatch workers; non-root streams are empty.
         finish_snapshot_gather();
         model_->releaseBuffers();

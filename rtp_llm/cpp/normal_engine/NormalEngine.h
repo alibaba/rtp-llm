@@ -49,9 +49,9 @@ public:
     }
     bool updateEplbConfig(const EPLBConfig& config) override;
     void startTimelineProfiling(const std::string& trace_name, int start_step, int num_steps) override;
+    static int calculateReserveStep(const EngineInitParams& params);
 
 private:
-    static int calculateReserveStep(const EngineInitParams& params);
 #if USING_CUDA
     static std::vector<AccuracyScenario> accuracyScenariosForStartup(const ModelConfig& model_config,
                                                                     const RuntimeConfig& runtime_config,

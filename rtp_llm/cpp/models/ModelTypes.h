@@ -194,6 +194,7 @@ enum GptModelInputControlFlag : uint32_t {
     kControlShutdown            = 1u << 10,
     kControlMiddleChunkOnly     = 1u << 11,
     kControlDraftExtend         = 1u << 12,
+    kControlUniformVerify       = 1u << 13,
 };
 
 GptModelInputShapeHints getModelInputShapeHints(const GptModelInputs& inputs);
@@ -201,6 +202,7 @@ torch::Tensor           makeModelInputShapeHintsTensor(const GptModelInputs& inp
 std::array<int64_t, 2>  decodeMtpHiddenStatesShape(int64_t total_numel, int64_t rows);
 std::vector<int64_t> decodeKvBlockTableShape(int64_t rank, int64_t group_num, int64_t batch_size, int64_t max_blocks);
 
+bool hasRealPdPrefillRequest(const GptModelInputs& inputs);
 void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallelism_config);
 
 class ModelBase {

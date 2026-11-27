@@ -63,6 +63,7 @@ class IndexerCPChunkPlan:
     restore_indices: torch.Tensor  # [chunk_T] int64
     block_size: int
     owner_block_size: int
+    early_history: tuple[torch.Tensor, torch.Tensor] | None = None
 
 
 @dataclass
@@ -90,6 +91,7 @@ def build_indexer_cp_chunk_plan(
     device: torch.device,
     owner_block_size: Optional[int] = None,
     total_kv_len: Optional[int] = None,
+    per_req_total_kv_lens_host: Optional[torch.Tensor] = None,
 ) -> IndexerCPChunkPlan:
     """Build per-chunk indexer assembler plan (CPU; no NCCL)."""
     if cp_ctx.cp_size <= 0:
@@ -99,31 +101,50 @@ def build_indexer_cp_chunk_plan(
     owner_bs = int(owner_block_size or block_size)
     if owner_bs <= 0:
         raise ValueError(f"owner_block_size must be > 0, got {owner_bs}")
-    per_req = per_req_total_kv_lens.to(device=device, dtype=torch.int64).contiguous()
-    if int(per_req.numel()) == 1 and total_kv_len is not None:
-        total_local = cp_padded_local_kv_len(
-            int(total_kv_len), cp_ctx.cp_size, owner_bs
-        )
-        total_actual = cp_actual_owned_kv_len(
-            int(total_kv_len),
-            cp_ctx.cp_size,
-            owner_bs,
-            cp_ctx.cp_rank,
-        )
-        local_lens = torch.full((1,), total_local, dtype=torch.int64, device=device)
-        actual_lens = torch.full((1,), total_actual, dtype=torch.int64, device=device)
+    if per_req_total_kv_lens_host is not None:
+        host = per_req_total_kv_lens_host
+        if host.device.type != "cpu" or host.shape != per_req_total_kv_lens.shape:
+            raise ValueError("expected same-forward CPU lengths for every request")
+        host = host.to(torch.int64)
+        padded = cp_padded_local_kv_lens(host, cp_ctx.cp_size, owner_bs)
+        actual = cp_actual_owned_kv_lens(host, cp_ctx.cp_size, owner_bs, cp_ctx.cp_rank)
+        total_local, total_actual = int(padded.sum()), int(actual.sum())
+        total_kv_len = int(host.sum())
+        metadata = torch.stack((host, padded, actual))
+        if torch.device(device).type == "cuda":
+            metadata = metadata.pin_memory().to(device, non_blocking=True)
+        per_req, local_lens, actual_lens = metadata.unbind()
     else:
-        local_lens = cp_padded_local_kv_lens(
-            per_req, cp_ctx.cp_size, owner_bs
+        per_req = per_req_total_kv_lens.to(
+            device=device, dtype=torch.int64
         ).contiguous()
-        actual_lens = cp_actual_owned_kv_lens(
-            per_req, cp_ctx.cp_size, owner_bs, cp_ctx.cp_rank
-        ).contiguous()
-        # Host scalars size the rank-local all_gather buffers. Consolidate the
-        # multi-request fallback into one synchronization.
-        total_local, total_actual = (
-            int(v) for v in torch.stack([local_lens.sum(), actual_lens.sum()]).tolist()
-        )
+        if int(per_req.numel()) == 1 and total_kv_len is not None:
+            total_local = cp_padded_local_kv_len(
+                int(total_kv_len), cp_ctx.cp_size, owner_bs
+            )
+            total_actual = cp_actual_owned_kv_len(
+                int(total_kv_len),
+                cp_ctx.cp_size,
+                owner_bs,
+                cp_ctx.cp_rank,
+            )
+            local_lens = torch.full((1,), total_local, dtype=torch.int64, device=device)
+            actual_lens = torch.full(
+                (1,), total_actual, dtype=torch.int64, device=device
+            )
+        else:
+            local_lens = cp_padded_local_kv_lens(
+                per_req, cp_ctx.cp_size, owner_bs
+            ).contiguous()
+            actual_lens = cp_actual_owned_kv_lens(
+                per_req, cp_ctx.cp_size, owner_bs, cp_ctx.cp_rank
+            ).contiguous()
+            # Host scalars size the rank-local all_gather buffers. Consolidate the
+            # multi-request fallback into one synchronization.
+            total_local, total_actual = (
+                int(v)
+                for v in torch.stack([local_lens.sum(), actual_lens.sum()]).tolist()
+            )
     restore = build_kv_allgather_restore_indices(
         per_req,
         cp_ctx.cp_size,

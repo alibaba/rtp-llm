@@ -262,6 +262,7 @@ class PyAttentionInputs:
     is_prefill: bool
     is_s_padded: bool
     is_target_verify: bool
+    uniform_verify_lengths: bool
     is_draft_extend: bool
     mtp_indexer_seed_rows: torch.Tensor
     linear_replay: LinearReplayInputs | None
@@ -334,6 +335,8 @@ class PyModelInitResources:
     def max_context_batch_size(self) -> int: ...
 
 class PyModelInputs:
+    @property
+    def prefill_layer_progress(self) -> typing.Callable[[int], None] | None: ...
     need_all_hidden_states: bool
     need_all_logits: bool
     engram_token_windows: torch.Tensor

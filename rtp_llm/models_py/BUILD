@@ -192,6 +192,7 @@ py_library(
         "//conditions:default": [],
     }),
     data = [
+        "modules/hybrid/glm5_router.cc",
         ":cutlass_moe_config",
         ":dsv41_jit_sources",
         ":rocm_fp8_ptpc_hipb_solutions",
@@ -339,6 +340,7 @@ py_library(
     }),
     data = [
         "//rtp_llm/libs:marlin_nvfp4",
+        "kernels/cuda/mtp_frontend.cu",
         "kernels/cuda/marlin_nvfp4/marlin_kernels/LICENSE",
     ] + glob(["kernels/cuda/qsa/*.cu", "kernels/cuda/qsa/*.cuh"]),
     deps = [

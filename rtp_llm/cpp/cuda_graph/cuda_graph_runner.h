@@ -105,6 +105,8 @@ public:
         draft_prefill_uses_request_lanes_ =
             isMtpDraftPrefillCudaGraph() && py::hasattr(py_instance_, "cuda_graph_draft_prefill_uses_request_lanes")
             && py_instance_.attr("cuda_graph_draft_prefill_uses_request_lanes")().cast<bool>();
+        uses_glm5_buckets_ = py::hasattr(py_instance_, "cuda_graph_uses_glm5_buckets")
+                             && py_instance_.attr("cuda_graph_uses_glm5_buckets")().cast<bool>();
         if (role_ == CudaGraphRole::GENERATION_PREFILL) {
             RTP_LLM_CHECK_WITH_INFO(
                 request_max_seq_len_ > 0 && request_max_seq_len_ <= max_seq_len_,
@@ -259,6 +261,7 @@ private:
     bool                    is_prefill_cuda_graph_mode_{false};
     bool                    is_target_verify_{false};
     bool                    draft_prefill_uses_request_lanes_{false};
+    bool                    uses_glm5_buckets_{false};
     CudaGraphRole           role_{CudaGraphRole::AUTO};
     cuda_graph::GraphStream capture_stream_;
     bool                    enable_cuda_graph_debug_mode_{false};

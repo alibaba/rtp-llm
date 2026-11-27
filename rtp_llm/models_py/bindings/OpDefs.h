@@ -310,6 +310,7 @@ struct PyContextParallelParams {
 struct PyAttentionInputs {
     bool          is_prefill{false};
     bool          is_target_verify{false};
+    bool          uniform_verify_lengths{false};
     bool          is_draft_extend{false};
     std::optional<rtp_llm::LinearReplayInputs> linear_replay;
     torch::Tensor prefix_lengths;
@@ -400,6 +401,7 @@ struct PyModelInputs {
 
     // Internal homogeneous-batch signal; not part of the Generate RPC/config surface.
     bool capture_hidden_states = false;
+    void (*prefill_layer_progress)(int) = nullptr;
 
     /** PP boundary tensors received from the upstream stage; empty under pp_size=1. */
     PPIntermediates pp_intermediates;

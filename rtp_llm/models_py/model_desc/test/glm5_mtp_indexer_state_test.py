@@ -98,13 +98,43 @@ class Glm5MtpIndexerStateTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.model.set_mtp_indexer_role(3)
 
+    def test_graph_clone_runs_draft_forward_with_its_frontend(self):
+        model = self.model
+        model.config.num_layers = 0
+        model.config.vocab_size = 4
+        model.config.capture_aux_hidden_layer_ids = []
+        model.parallelism_config = model.weight = model.moe_config = None
+        model.fmha_config = model.py_hw_kernel_config = None
+        model.max_generate_batch_size = 2
+        model.device_type = torch.device("cpu")
+        model.layers = nn.ModuleList()
+        model.embed_tokens = nn.Embedding(4, 2)
+        model.embed_tokens.tp_size = 1
+        model.pre_fc_norm_embedding = model.pre_fc_norm_hidden = nn.Identity()
+        model.fc = nn.Identity()
+        model.norm = lambda hidden, residual: (hidden + residual, residual)
+        model._mtp_indexer_share_enabled = False
+        inputs = SimpleNamespace(
+            input_ids=torch.tensor([1]),
+            input_hiddens=torch.tensor([[2.0, 3.0]]),
+            prefill_layer_progress=None,
+        )
+        expected = torch.cat(
+            (model.embed_tokens(inputs.input_ids), inputs.input_hiddens), -1
+        )
+        for frontend in (None, object()):
+            with self.subTest(fused=frontend is not None):
+                model._mtp_frontend_native = frontend
+                clone = model.clone_for_cuda_graph()
+                actual = clone(inputs, fmha_impl=object()).hidden_states
+                torch.testing.assert_close(actual, expected)
+                self.assertIs(clone._mtp_frontend_native, frontend)
+
     def test_only_position_zero_embedding_is_masked(self):
         embeddings = torch.arange(12).reshape(3, 4).float()
         result = self.model._mask_position_zero_embeddings(
             embeddings,
-            SimpleNamespace(
-                fmha_params=SimpleNamespace(positions_d=torch.tensor([0, 5, 0]))
-            ),
+            torch.tensor([0, 5, 0]),
         )
         expected = embeddings.clone()
         expected[[0, 2]] = 0

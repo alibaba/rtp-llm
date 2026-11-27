@@ -74,6 +74,21 @@ def _check_eager(rank: int, group) -> None:
     torch.cuda.current_stream().wait_stream(stream)
     _assert_equal(output, expected)
 
+    # Both collectives are in flight and must keep their independent payloads.
+    side = pynccl_cp.indexer_overlap_stream(group, input_tensor.device)
+    mla = pynccl_cp.warmup_kv_overlap(group, input_tensor.device)
+    main = torch.cuda.current_stream()
+    side.wait_stream(main)
+    mla.wait_stream(main)
+    with torch.cuda.stream(side):
+        keys = pynccl_cp.all_gather_indexer_overlap(input_tensor * 2, group)
+    with torch.cuda.stream(mla):
+        history = pynccl_cp.all_gather_kv_overlap(input_tensor, group, output=output)
+    main.wait_stream(side)
+    main.wait_stream(mla)
+    _assert_equal(keys, expected * 2)
+    _assert_equal(history, expected)
+
 
 def _check_graph(rank: int, group) -> None:
     input_tensor = torch.full((7, 16), rank + 1, device="cuda", dtype=torch.bfloat16)

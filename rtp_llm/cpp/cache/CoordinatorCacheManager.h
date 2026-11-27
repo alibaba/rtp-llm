@@ -154,6 +154,8 @@ public:
     virtual size_t               totalTokensNum() const;
     virtual size_t               totalBlocksNum() const;
     virtual size_t               maxAvailableTokensNum() const;
+    // Prompt tokens that fit one uncached startup request, including the allocator's MTP and per-pool reserves.
+    int                          maxWarmupInputTokens(int max_input_tokens, int reserve_step) const;
     virtual KVCacheTokenCapacity tokenCapacity(size_t default_seq_size_per_block) const;
     virtual std::vector<CachePoolMetrics>          poolMetrics() const;
     std::vector<KVCachePoolCapacity>                poolCapacities() const;

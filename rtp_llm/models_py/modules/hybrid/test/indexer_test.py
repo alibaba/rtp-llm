@@ -68,6 +68,7 @@ class PagedMqaContextLensCompatibilityTest(TestCase):
             logits_calls.append(context_lens.dim())
             if context_lens.dim() != expected_dim:
                 raise RuntimeError(f"expected {expected_dim}D context_lens")
+            self.assertEqual(context_lens.shape, q.shape[:expected_dim])
             return torch.tensor([context_lens.dim(), max_context_len])
 
         return SimpleNamespace(
@@ -79,11 +80,12 @@ class PagedMqaContextLensCompatibilityTest(TestCase):
         )
 
     def _run_compat(self):
+        context_lens = torch.tensor([7, 11], dtype=torch.int32)
         return indexer_op_module._fp8_paged_mqa_logits_compat(
-            q=torch.empty(0),
+            q=torch.empty((context_lens.numel(), 1, 32, 128), dtype=torch.float8_e4m3fn),
             kv_cache=torch.empty(0),
             weights=torch.empty(0),
-            context_lens=torch.tensor([7, 11], dtype=torch.int32),
+            context_lens=context_lens,
             block_table=torch.empty(0),
             block_kv=64,
             max_context_len=4096,

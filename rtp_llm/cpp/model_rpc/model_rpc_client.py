@@ -28,6 +28,8 @@ from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import (
     MultimodalInputPB,
     MultimodalInputsPB,
     RoleAddrPB,
+    StatusVersionPB,
+    WorkerStatusPB,
 )
 from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2_grpc import (
     MultimodalRpcServiceStub,
@@ -1451,6 +1453,15 @@ class ModelRpcClient(object):
 
     async def close(self) -> None:
         await self._channel_pool.close()
+
+    async def get_worker_status(
+        self, address: str, timeout_s: float, *, include_warmup_input_limit: bool = False
+    ) -> WorkerStatusPB:
+        channel = await self._channel_pool.get(address)
+        return await RpcServiceStub(channel).GetWorkerStatus(
+            StatusVersionPB(include_warmup_input_limit=include_warmup_input_limit),
+            timeout=timeout_s,
+        )
 
     def _get_explicit_target(self, input_py: GenerateInput) -> RoleAddr | None:
         prefill = None

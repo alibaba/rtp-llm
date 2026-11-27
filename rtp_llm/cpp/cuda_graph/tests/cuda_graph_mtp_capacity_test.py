@@ -52,6 +52,20 @@ class DraftCapacityModel(PackedDraftCapacityModel):
 
 
 class MtpGraphCapacityTest(unittest.TestCase):
+    def test_glm5_draft_captures_decode_buckets_by_default(self):
+        class Glm5Draft(PackedDraftCapacityModel):
+            def cuda_graph_uses_glm5_buckets(self):
+                return True
+
+        torch.cuda.set_device(0)
+        model = Glm5Draft()
+        runner = CudaGraphRunner()
+        runner.init_mtp_draft_prefill(model, 32, 4, 4, model.hc_mult)
+        self.assertEqual(
+            {rows for rows, _ in model.shapes},
+            {4 * batch for batch in (1, 2, 3, 4, 5, 6, 7, 8, 16, 24, 32)},
+        )
+
     def test_request_capacity_shrink_and_grow_with_variable_acceptance(self):
         # HC width and speculative request lanes are independent dimensions.
         for lanes, hc_mult in ((1, 4), (2, 4), (3, 1), (4, 4)):

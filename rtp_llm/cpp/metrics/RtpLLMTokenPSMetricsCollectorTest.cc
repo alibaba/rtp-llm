@@ -138,7 +138,7 @@ private:
 };
 
 template<typename Reporter>
-void checkReporterResetsTokenCounts() {
+void checkReporterResetsTokenCounts(bool wall_clock = false) {
     ScopedServingMetrics serving_metrics;
     auto                 monitor = std::make_shared<kmonitor::KMonitor>("token_count_reset_test");
     auto  metrics_reporter       = std::make_shared<kmonitor::MetricsReporter>(monitor, "", kmonitor::MetricsTags());
@@ -160,7 +160,9 @@ void checkReporterResetsTokenCounts() {
                     .second);
         }
         EXPECT_EQ(actual, expected);
-        EXPECT_EQ(idle_report.priority, "0");
+        if (!wall_clock) {
+            EXPECT_EQ(idle_report.priority, "0");
+        }
         EXPECT_EQ(idle_report.context_tokens, 0);
         EXPECT_EQ(idle_report.context_tokens_with_cache, 0);
     };
@@ -329,7 +331,7 @@ TEST(RtpLLMTokenPSMetricsCollectorTest, LoopReporterResetsTokenCountsAfterReport
 
 TEST(RtpLLMTokenPSMetricsCollectorTest, WallClockReporterResetsTokenCountsAfterReport) {
     checkReporterResetsTokenCounts<
-        WallClockMetricsLoopReporter<RecordingTokenCountMetrics, RtpLLMTokenPSMetricsCollector>>();
+        WallClockMetricsLoopReporter<RecordingTokenCountMetrics, RtpLLMTokenPSMetricsCollector>>(true);
 }
 
 TEST(RtpLLMTokenPSMetricsCollectorTest, ReportsLongPrefillByExecutionTime) {
@@ -635,6 +637,80 @@ TEST(RtpLLMTokenPSMetricsCollectorTest, IgnoresNonPositiveContextTokenCounts) {
     EXPECT_FALSE(collector.hasMetrics());
     EXPECT_EQ(collector.priorityCollectorsForReport().at(30).contextTokens(), 0);
     EXPECT_EQ(collector.priorityCollectorsForReport().at(30).contextTokensWithCache(), 0);
+}
+
+namespace {
+
+RtpLLMTokenPSMetricsCollector wallBatch(int priority, int64_t tokens, int64_t with_cache) {
+    RtpLLMTokenPSMetricsCollector batch;
+    batch.addTokenSize(tokens, with_cache, 0, tokens, 1000);
+    batch.addPriorityTokenSize(priority, tokens, with_cache, 0, tokens, 1000);
+    return batch;
+}
+
+}  // namespace
+
+TEST(RtpLLMTokenPSMetricsCollectorTest, WallPrioritiesAreZeroFilledAcrossIdleAndUntaggedWindows) {
+    std::set<int32_t> known;
+    auto              first = wallBatch(39, 100, 150);
+    first.priorityCollectorsForReport(known);
+    auto next = wallBatch(50, 0, 250);
+    next.setReportWindowUs(2000000);
+    auto buckets = next.priorityCollectorsForReport(known);
+    ASSERT_EQ(buckets.size(), 2);
+    EXPECT_EQ(buckets.at(39).reportWindowUs(), 2000000);
+    EXPECT_DOUBLE_EQ(buckets.at(39).contextWallTPSWithCache(), 0);
+    EXPECT_DOUBLE_EQ(buckets.at(50).contextWallTPSWithCache(), 125);
+
+    RtpLLMTokenPSMetricsCollector idle;
+    idle.markIdleWindow();
+    buckets = idle.priorityCollectorsForReport(known);
+    ASSERT_EQ(buckets.size(), 2);
+    EXPECT_TRUE(buckets.at(39).reportZeroTPS());
+    EXPECT_TRUE(buckets.at(50).reportZeroTPS());
+
+    RtpLLMTokenPSMetricsCollector untagged;
+    untagged.addTokenSize(70, 90, 0, 70, 1000);
+    buckets = untagged.priorityCollectorsForReport(known);
+    ASSERT_EQ(buckets.size(), 3);
+    EXPECT_EQ(buckets.at(0).contextTokensWithCache(), 90);
+    EXPECT_EQ(buckets.at(39).contextTokensWithCache(), 0);
+    EXPECT_EQ(buckets.at(50).contextTokensWithCache(), 0);
+}
+
+TEST(RtpLLMTokenPSMetricsCollectorTest, KmonitorSnapshotsConserveMixedPriorityTokens) {
+    ScopedServingMetrics serving;
+    auto                 monitor = std::make_shared<kmonitor::KMonitor>("wall_metrics_test");
+    monitor->SetServiceName("");
+    kmonitor::MetricsReporter reporter(monitor, "", kmonitor::MetricsTags());
+    std::set<int32_t>         known;
+    auto report = [&](RtpLLMTokenPSMetricsCollector batch, int64_t window_us) {
+        batch.setReportWindowUs(window_us);
+        for (auto& [priority, bucket] : batch.priorityCollectorsForReport(known)) {
+            kmonitor::MetricsTags tags("priority", std::to_string(priority));
+            reporter.report<RtpLLMWallClockTokenPSMetrics>(&tags, &bucket);
+        }
+    };
+    report(wallBatch(39, 900, 1500), 1000000);
+    report(wallBatch(50, 1800, 2700), 9000000);
+
+    // KMonitor divides completed tokens by its ten-second sampling period.
+    kmonitor::MetricsCollector snapshot;
+    monitor->GetMetrics(&snapshot, {kmonitor::NORMAL}, 10000);
+    using Rates = std::map<std::string, double>;
+    Rates context, with_cache;
+    for (const auto* record : snapshot.GetRecords().getRecords()) {
+        const auto priority = record->Tags()->FindTag("priority");
+        for (const auto* sample : record->Values()) {
+            if (sample->Name() == "rtp_llm_context_wall_tps") {
+                EXPECT_TRUE(context.emplace(priority, std::stod(sample->Value())).second);
+            } else if (sample->Name() == "rtp_llm_context_wall_tps_with_cache") {
+                EXPECT_TRUE(with_cache.emplace(priority, std::stod(sample->Value())).second);
+            }
+        }
+    }
+    EXPECT_EQ(context, (Rates{{"39", 90}, {"50", 180}}));
+    EXPECT_EQ(with_cache, (Rates{{"39", 150}, {"50", 270}}));
 }
 
 }  // namespace rtp_llm

@@ -61,11 +61,11 @@ class EmbeddingEndpoint(object):
         # 创建到服务器的连接
         self.address = f"localhost:{server_config.embedding_rpc_server_port}"
         logging.info(f"embedding endpoint connect to rpc addresses: {self.address}")
-        self.options = []
-        client_config = grpc_config.get_client_config()
-        if client_config is not None:
-            for key, value in client_config.items():
-                self.options.append((key, value))
+        # Frontends probe before the local backend binds during model loading.
+        # Keep pooled channels responsive when that listener finally starts.
+        client_config = dict(grpc_config.get_client_config() or {})
+        client_config.setdefault("grpc.max_reconnect_backoff_ms", 1000)
+        self.options = list(client_config.items())
         host_args = HostServiceArgs.create_from_env()
         self.host_service = HostService(host_args)
         logging.info(f"embedding endpoint grpc options: {self.options}")
@@ -80,7 +80,9 @@ class EmbeddingEndpoint(object):
         try:
             channel = await self._channel_pool.get(self.address)
             stub = pb2_grpc.EmbeddingRpcServiceStub(channel)
-            await stub.health(pb2.EmbeddingHealthRequestPB(request_id=0), timeout=3)
+            await stub.health(
+                pb2.EmbeddingHealthRequestPB(request_id=0), timeout=3, wait_for_ready=True
+            )
             return True
         except Exception as e:
             logging.warning("embedding backend health check failed: %s", e)

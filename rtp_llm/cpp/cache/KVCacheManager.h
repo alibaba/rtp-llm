@@ -152,6 +152,9 @@ public:
     size_t      availableTokensNum() const;
     size_t      totalBlocksNum() const;
     size_t      maxAvailableTokensNum() const;
+    int         maxWarmupInputTokens(int max_input_tokens, int reserve_step) const {
+        return coordinator_manager_->maxWarmupInputTokens(max_input_tokens, reserve_step);
+    }
     KVCacheInfo getKVCacheInfo(int64_t latest_version, bool need_cache_keys) const;
 
     // 系统资源管理

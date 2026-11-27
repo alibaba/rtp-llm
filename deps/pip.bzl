@@ -1,3 +1,8 @@
+load(
+    "@rtp_cuda13_profile//:cuda13_requirements.bzl",
+    "CUDA13_ARM_REQUIREMENTS_LOCK",
+    "CUDA13_X86_REQUIREMENTS_LOCK",
+)
 load("@rules_python//python:pip.bzl", "package_annotation", "pip_parse")
 
 # Index selection is caller-injected, never file content. Locks carry no
@@ -109,7 +114,7 @@ def pip_deps():
     pip_parse(
         name = "pip_gpu_cuda13_torch",
         annotations = CUDA13_ANNOTATIONS,
-        requirements_lock = "@rtp_pip_deps//:requirements_lock_torch_gpu_cuda13.txt",
+        requirements_lock = CUDA13_X86_REQUIREMENTS_LOCK,
         python_interpreter = "/opt/conda310/bin/python3",
         extra_pip_args = PIP_EXTRA_ARGS + PIP_INDEX_ARGS + ["--quiet"],
         envsubst = PIP_INDEX_ENVSUBST,
@@ -131,7 +136,7 @@ def pip_deps():
     pip_parse(
         name = "pip_cuda13_arm_torch",
         annotations = FLASHINFER_069_ANNOTATIONS,
-        requirements_lock = "@rtp_pip_deps//:requirements_lock_cuda13_arm.txt",
+        requirements_lock = CUDA13_ARM_REQUIREMENTS_LOCK,
         python_interpreter = "/opt/conda310/bin/python3",
         extra_pip_args = PIP_EXTRA_ARGS + PIP_INDEX_ARGS,
         envsubst = PIP_INDEX_ENVSUBST,

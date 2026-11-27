@@ -36,6 +36,7 @@ class IndexerPagedContractTest(unittest.TestCase):
                     kvlen_d=lengths, expanded_seq_lens=lengths
                 )
                 inputs = SimpleNamespace(
+                    input_lengths=torch.empty(0, dtype=torch.int32),
                     is_prefill=phase != "decode",
                     is_target_verify=phase == "target_verify",
                     is_draft_extend=phase == "draft_extend",
@@ -59,6 +60,49 @@ class IndexerPagedContractTest(unittest.TestCase):
             self.assertEqual(
                 observed_dims, ([2, 1, 1] if expected_dim == 1 else [2, 2]) * 3
             )
+
+    def test_grouped_verify_schedule_preserves_rows_and_capture_storage(self):
+        from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl import (
+            flashmla_sparse_impl as sparse,
+        )
+
+        vendor = SimpleNamespace(
+            get_num_sms=lambda: 1,
+            get_paged_mqa_logits_metadata=lambda lengths, block, sms: lengths.clone(),
+        )
+        for target, widths, expected in (
+            (True, [3, 3], 3),
+            (True, [2, 4], 1),
+            (False, [3, 3], 1),
+        ):
+            with (
+                self.subTest(target=target, widths=widths),
+                patch.dict("sys.modules", {"deep_gemm": vendor}),
+                patch.object(indexer_op, "deep_gemm", vendor),
+                patch.object(indexer_op, "_paged_mqa_context_lens_dim", 2),
+                patch.object(sparse, "is_sm10x", return_value=True),
+            ):
+                impl = sparse.SparseMlaImpl.__new__(sparse.SparseMlaImpl)
+                impl.seq_size_per_block = 64
+                lengths = torch.arange(6, dtype=torch.int32)
+                impl.fmha_params = SimpleNamespace(expanded_seq_lens=lengths)
+                inputs = SimpleNamespace(
+                    is_prefill=True,
+                    is_cuda_graph=True,
+                    uniform_verify_lengths=False,
+                    is_target_verify=target,
+                    is_draft_extend=not target,
+                    input_lengths=torch.tensor(widths),
+                    kv_cache_block_id_device=torch.empty(len(widths), 2),
+                )
+                impl._refresh_paged_mqa_schedule_metadata(inputs, False)
+                captured = impl.fmha_params.schedule_metadata
+                self.assertEqual(impl.fmha_params.schedule_next_n, expected)
+                self.assertEqual(tuple(captured.shape), (6 // expected, expected))
+                lengths.add_(20)
+                impl._refresh_paged_mqa_schedule_metadata(inputs, True)
+                self.assertIs(captured, impl.fmha_params.schedule_metadata)
+                torch.testing.assert_close(captured.flatten(), lengths)
 
     def test_sm10x_accepts_old_and_new_context_abis_with_cached_metadata(self):
         lengths = torch.tensor([7, 11], dtype=torch.int32)
@@ -234,9 +278,10 @@ class IndexerPagedContractTest(unittest.TestCase):
         module._fuse_kernels_enabled = fuse
         module._prefill_cp_fused_quant_enabled = Mock(return_value=True)
         q, scales = torch.zeros(4, 2, 128), torch.ones(4, 2, 1)
-        module._fused_forward_decode = Mock(return_value=(q, scales))
-        module._fused_forward_prefill_cp = Mock(return_value=(q, scales))
-        module._get_q_k_bf16 = Mock(return_value=(q, q))
+        module._fused_forward_decode = Mock(return_value=(q, scales, None))
+        module._fused_forward_prefill_cp = Mock(return_value=(q, scales, None))
+        module.packed_index_weight = None
+        module._get_q_k_bf16 = Mock(return_value=(q, q, None))
         module._quantize_q_k = Mock(return_value=(q, scales))
         module._get_logits_head_gate = Mock(return_value=scales)
         module._compute_topk = Mock(return_value=torch.zeros(4, 2))
@@ -272,7 +317,7 @@ class IndexerPagedContractTest(unittest.TestCase):
         self.call_indexer(
             module,
             SimpleNamespace(is_prefill=True),
-            SimpleNamespace(full_rope_pos_ids=torch.arange(4)),
+            SimpleNamespace(full_rope_pos_ids=torch.arange(4), kv_cache_sharded=False),
         )
         module._fused_forward_prefill_cp.assert_called_once()
         module._fused_forward_decode.assert_not_called()
@@ -394,6 +439,7 @@ class IndexerPagedContractTest(unittest.TestCase):
         lengths = torch.arange(1, rows + 1, dtype=torch.int32)
         params = SimpleNamespace(
             expanded_seq_lens=lengths,
+            schedule_next_n=1,
             batch_indice_d=torch.arange(2, dtype=torch.int32).repeat_interleave(
                 tokens_per_request
             ),
@@ -451,6 +497,7 @@ class IndexerPagedContractTest(unittest.TestCase):
         mapping = torch.tensor([0, 0, 0, 1, 1, 2, 2, 2, 2, 2], dtype=torch.int32)
         lengths = torch.arange(10, dtype=torch.int32) + 64
         params = SimpleNamespace(
+            schedule_next_n=1,
             batch_indice_d=mapping,
             expanded_seq_lens=lengths,
             schedule_metadata=torch.ones(1, dtype=torch.int32),

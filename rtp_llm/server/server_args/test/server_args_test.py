@@ -20,6 +20,28 @@ from rtp_llm.utils.backend_registry import register_backend_hook
 
 
 class Glm5EnvironmentArgumentsTest(TestCase):
+    def test_independent_glm5_rollbacks_and_service_limits(self):
+        from rtp_llm.server.server_args.server_args import setup_args
+
+        with patch.dict(os.environ, {
+            "RTP_LLM_FUSED_ROUTER_PAD": "0",
+            "RTP_LLM_GLM5_CMP_MOE_DUAL_STREAM": "0",
+            "RTP_LLM_INDEXER_NATIVE_MTP": "0",
+            "RTP_LLM_GRPC_KEEPALIVE_TIME_MS": "1234",
+            "RTP_LLM_GRPC_KEEPALIVE_TIMEOUT_MS": "-1",
+            "RTP_LLM_PREFILL_CORE_TIMEOUT_S": "4.5",
+        }, clear=True):
+            config = setup_args([])
+            hw = pickle.loads(pickle.dumps(config.py_hw_kernel_config))
+            self.assertTrue(hw.glm5_eh_fusion)
+            self.assertFalse(hw.fused_router_pad)
+            self.assertFalse(hw.glm5_cmp_moe_dual_stream)
+            self.assertFalse(pickle.loads(pickle.dumps(config.fmha_config)).indexer_native_mtp)
+            server = config.server_config
+            self.assertEqual(server.grpc_keepalive_time_ms, 1234)
+            self.assertEqual(server.grpc_keepalive_timeout_ms, 5000)
+            self.assertEqual(server.prefill_core_timeout_s, 4.5)
+
     def test_registered_flags_cli_override_env_and_survive_pickle(self):
         from rtp_llm.server.server_args.server_args import setup_args
 
@@ -59,6 +81,52 @@ class Glm5EnvironmentArgumentsTest(TestCase):
             self.assertTrue(config.py_hw_kernel_config.enable_fuse_kernels)
             self.assertFalse(config.py_hw_kernel_config.glm5_cp_opt)
             self.assertFalse(config.py_hw_kernel_config.enable_glm5_cmp)
+
+    def test_prefill_runtime_options_use_registered_cli_and_env(self):
+        from rtp_llm.server.server_args.server_args import setup_args
+
+        def options(config):
+            return (
+                config.py_hw_kernel_config.indexer_fused_topk,
+                config.runtime_config.torch_cuda_pool_prealloc_mb,
+                config.runtime_config.torch_cuda_pool_prealloc_safety_mb,
+                config.server_config.prefill_stall_thresholds,
+                config.server_config.prefill_core_dir,
+                config.server_config.prefill_gpu_core,
+            )
+
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(
+                options(setup_args([])),
+                (False, -1, 8192, "", "/tmp/rtp_llm_prefill_cores", False),
+            )
+        env = {
+            "RTP_INDEXER_FUSED_TOPK": "1",
+            "TORCH_CUDA_POOL_PREALLOC_MB": "1024",
+            "TORCH_CUDA_POOL_PREALLOC_SAFETY_MB": "4096",
+            "RTP_LLM_PREFILL_STALL_THRESHOLDS": "layer=20",
+            "RTP_LLM_PREFILL_CORE_DIR": "/tmp/watchdog-env",
+            "RTP_LLM_PREFILL_GPU_CORE": "1",
+        }
+        with patch.dict(os.environ, env, clear=True):
+            self.assertEqual(
+                options(setup_args([])),
+                (True, 1024, 4096, "layer=20", "/tmp/watchdog-env", True),
+            )
+            config = setup_args(
+                [
+                    "--indexer_fused_topk=0",
+                    "--torch_cuda_pool_prealloc_mb=0",
+                    "--torch_cuda_pool_prealloc_safety_mb=2048",
+                    "--prefill_stall_thresholds=prepare=3",
+                    "--prefill_core_dir=/tmp/watchdog-cli",
+                    "--prefill_gpu_core=0",
+                ]
+            )
+            self.assertEqual(
+                options(config),
+                (False, 0, 2048, "prepare=3", "/tmp/watchdog-cli", False),
+            )
 
     def test_old_worker_config_state_defaults_new_options_off(self):
         from rtp_llm.ops import FMHAConfig
@@ -529,19 +597,31 @@ class LinearReplayArgumentsTest(TestCase):
 
     def test_legacy_runtime_config_pickle_uses_default_replay(self):
         config = RuntimeConfig()
-        config.enable_linear_replay = True
+        config.enable_linear_replay = False
+        config.torch_cuda_pool_prealloc_mb = 128
+        config.torch_cuda_pool_prealloc_safety_mb = 64
         config.max_generate_batch_size = 17
         config.model_name = "linear-replay-test"
         config.model_warm_up = False
         config.output_dispatcher_worker_count = 3
         state = config.__getstate__()
-        self.assertEqual(len(state), 15)
+        self.assertEqual(len(state), 17)
+        defaults = RuntimeConfig()
 
-        for size in (12, 13, 14):
+        for size in range(12, 18):
             with self.subTest(size=size):
                 restored = RuntimeConfig.__new__(RuntimeConfig)
-                restored.__setstate__(state[:size])
-                self.assertTrue(restored.enable_linear_replay)
+                legacy_state = state[:14] + (False,) if size == 15 else state[:size]
+                restored.__setstate__(legacy_state)
+                self.assertEqual(restored.enable_linear_replay, size not in (15, 17))
+                self.assertEqual(
+                    restored.torch_cuda_pool_prealloc_mb,
+                    128 if size >= 16 else defaults.torch_cuda_pool_prealloc_mb,
+                )
+                self.assertEqual(
+                    restored.torch_cuda_pool_prealloc_safety_mb,
+                    64 if size >= 16 else defaults.torch_cuda_pool_prealloc_safety_mb,
+                )
                 self.assertEqual(restored.max_generate_batch_size, 17)
                 self.assertEqual(restored.model_name, "linear-replay-test")
                 self.assertIs(restored.model_warm_up, size < 13)
@@ -1385,6 +1465,23 @@ class ServerArgsSetTest(TestCase):
     def test_invalid_cp_all_gather_impl_is_rejected(self):
         with self.assertRaises(argparse.ArgumentTypeError):
             str2_cp_all_gather_impl("fuse")
+
+    def test_grammar_sandbox_memory_default_and_overrides(self):
+        from rtp_llm.config.py_config_modules import GrammarAdmissionConfig
+        from rtp_llm.server.server_args.server_args import setup_args
+
+        self.assertEqual(GrammarAdmissionConfig().sandbox_process_memory_limit_mb, 8192)
+        flag = "--grammar_admission_sandbox_process_memory_limit_mb"
+        override = {"GRAMMAR_ADMISSION_SANDBOX_PROCESS_MEMORY_LIMIT_MB": "4096"}
+        for env, cli, expected in (
+            ({}, [], 8192),
+            (override, [], 4096),
+            (override, [flag, "16384"], 16384),
+            ({}, [flag, "0"], 0),
+        ):
+            with self.subTest(env=env, cli=cli), patch.dict(os.environ, env, clear=True):
+                admission = setup_args(cli).grammar_admission_config
+                self.assertEqual(admission.sandbox_process_memory_limit_mb, expected)
 
     def test_env_vars_set_to_py_env_configs(self):
         """Test that environment variables are correctly set to py_env_configs."""
