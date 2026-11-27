@@ -762,19 +762,12 @@ class Block(nn.Module):
                         c_q8 = plan.exchange.compact(q8.view(torch.uint8)).view(
                             q8.dtype
                         )
-                        c_sf_rm = plan.exchange.compact(sf.contiguous())
-                        t_c = c_sf_rm.shape[0]
-                        padded_t = (t_c + 3) // 4 * 4
-                        c_sf = torch.empty_strided(
-                            (padded_t, c_sf_rm.shape[1]),
-                            (1, padded_t or 1),
-                            device=c_sf_rm.device,
-                            dtype=c_sf_rm.dtype,
+                        from rtp_llm.models_py.modules.dsv41._v41_query_quant import (
+                            repack_mn_major_scales,
                         )
-                        if padded_t != t_c:
-                            c_sf = c_sf[:t_c]
-                        if t_c:
-                            c_sf.copy_(c_sf_rm)
+
+                        c_sf_rm = plan.exchange.compact(sf.contiguous())
+                        c_sf = repack_mn_major_scales(c_sf_rm)
                         compact_qr_q = (c_q8, c_sf)
                     if hasattr(qkv, "qr_quantized"):
                         qkv = qkv._replace(qr=compact_qr, qr_quantized=compact_qr_q)

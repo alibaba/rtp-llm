@@ -1165,15 +1165,11 @@ class AttentionV41FP8(AttentionFP8):
             n_chunks = (rows + chunk - 1) // chunk
             qr_chunks = (None,) * n_chunks
         if qr_q is not None and (rows <= chunk or chunk % 4 == 0):
-            q8, sf = qr_q
-            if rows <= chunk:
-                qr_q_chunks = (qr_q,)
-            else:
-                q8_chunks = q8.split(chunk)
-                qr_q_chunks = tuple(
-                    (q8_c, sf[s : s + q8_c.shape[0]])
-                    for s, q8_c in zip(range(0, rows, chunk), q8_chunks)
-                )
+            from rtp_llm.models_py.modules.dsv41._v41_query_quant import (
+                split_quantized_query,
+            )
+
+            qr_q_chunks = split_quantized_query(qr_q, rows, chunk)
         else:
             qr_q_chunks = (None,) * len(qr_chunks)
         out_chunks = (out,) if rows <= chunk else out.split(chunk)

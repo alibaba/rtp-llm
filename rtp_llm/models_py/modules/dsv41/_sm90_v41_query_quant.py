@@ -23,6 +23,7 @@ def _query_norm_quant_kernel(
     BLOCK: tl.constexpr,
     FP32_SCALES: tl.constexpr,
     PDL: tl.constexpr = False,
+    EMIT_NORM: tl.constexpr = True,
 ):
     row = tl.program_id(0).to(tl.int64)
     cols = tl.arange(0, BLOCK)
@@ -34,7 +35,8 @@ def _query_norm_quant_kernel(
     inv = tl.rsqrt(tl.sum(x * x, 0) / D + EPS)
     # Match the existing strided norm's materialized BF16 boundary.
     y = (x * inv * w).to(tl.bfloat16)
-    tl.store(Y + row * D + cols, y, cols < D)
+    if EMIT_NORM:
+        tl.store(Y + row * D + cols, y, cols < D)
     groups = tl.reshape(y.to(tl.float32), (BLOCK // 32, 32))
     amax = tl.max(tl.abs(groups), 1)
     # The legacy CUDA producer clamps the scale itself to 1e-10.
@@ -67,7 +69,13 @@ def _query_norm_quant_kernel(
         tl.store(SF + packs * stride_sf + row, packed, packs < triton.cdiv(D, 128))
 
 
-def query_norm_quant_mn_major(x: torch.Tensor, weight: torch.Tensor, eps: float, *, pdl: bool = False
+def query_norm_quant_mn_major(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    eps: float,
+    *,
+    pdl: bool = False,
+    emit_norm: bool = True,
 ):
     """Return BF16 Q plus FP8 Q and native FP32 MN-major scales.
 
@@ -76,11 +84,19 @@ def query_norm_quant_mn_major(x: torch.Tensor, weight: torch.Tensor, eps: float,
     differs. The SM90 DeepGEMM adapter consumes this layout directly, so the
     pack/unpack round trip and its launch disappear.
     """
-    return _query_norm_quant(x, weight, eps, fp32_scales=True, pdl=pdl)
+    return _query_norm_quant(
+        x, weight, eps, fp32_scales=True, pdl=pdl, emit_norm=emit_norm
+    )
 
 
 def _query_norm_quant(
-    x: torch.Tensor, weight: torch.Tensor, eps: float, *, fp32_scales: bool, pdl: bool
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    eps: float,
+    *,
+    fp32_scales: bool,
+    pdl: bool,
+    emit_norm: bool = True,
 ):
     import deep_gemm
 
@@ -103,7 +119,9 @@ def _query_norm_quant(
         result = try_query_norm_quant(x, weight, eps, pdl=pdl)
         if result is not None:
             return result
-    normalized = torch.empty(x.shape, device=x.device, dtype=x.dtype)
+    normalized = (
+        torch.empty(x.shape, device=x.device, dtype=x.dtype) if emit_norm else None
+    )
     quantized = torch.empty(x.shape, device=x.device, dtype=torch.float8_e4m3fn)
     if fp32_scales:
         scales = mn_major_scale_output(rows, width // 32, x.device)
@@ -117,7 +135,7 @@ def _query_norm_quant(
         _query_norm_quant_kernel[(rows,)](
             flat,
             weight,
-            normalized,
+            normalized if emit_norm else quantized,
             quantized,
             scales,
             flat.stride(0),
@@ -127,6 +145,7 @@ def _query_norm_quant(
             triton.next_power_of_2(width),
             FP32_SCALES=fp32_scales,
             PDL=pdl,
+            EMIT_NORM=emit_norm,
             launch_pdl=pdl,
             num_warps=8 if width > 1024 else 4,
             enable_fp_fusion=False,

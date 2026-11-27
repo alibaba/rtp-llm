@@ -318,9 +318,7 @@ def try_project_quantized_qkv(attn, x, quantized_input=None, *, pdl: bool = Fals
     # adapter on SM90; the SM10x merged Q-B linear (which needs packed words)
     # only exists where ``wq_b`` is not, so the two can never both apply.
     index_wq = getattr(attn, "index_wq", None)
-    fp32_scales = native_mn_major_scales(attn.wq_b) and (
-        index_wq is None or native_mn_major_scales(index_wq)
-    )
+    fp32_scales = uses_native_mn_major_scales(attn)
     quantize = query_norm_quant_mn_major if fp32_scales else query_norm_quant
     qr, quantized = quantize(
         projected[..., : attn.q_lora_rank], attn.q_norm, attn.eps, pdl=pdl
@@ -351,7 +349,7 @@ def try_project_prefill_quantized_qkv(
         return None
     if not is_supported(linear, x, attn.q_norm, attn.q_lora_rank):
         return None
-    if _device_capability(x.device.index)[0] != 10:
+    if _device_capability(x.device.index)[0] not in (9, 10):
         return None
     if attn.q_lora_rank % 128 != 0:
         return None
@@ -362,7 +360,9 @@ def try_project_prefill_quantized_qkv(
         if quantized_input is None
         else linear.forward_quantized(*quantized_input).view(*x.shape[:-1], linear.N)
     )
-    qr, quantized = query_norm_quant(
+    fp32_scales = uses_native_mn_major_scales(attn)
+    quantize = query_norm_quant_mn_major if fp32_scales else query_norm_quant
+    qr, quantized = quantize(
         projected[..., : attn.q_lora_rank],
         attn.q_norm,
         attn.eps,
@@ -372,10 +372,63 @@ def try_project_prefill_quantized_qkv(
     return qr, projected[..., attn.q_lora_rank :], quantized
 
 
-def query_norm_quant_mn_major(x, weight, eps, *, pdl=False):
+def query_norm_quant_mn_major(x, weight, eps, *, pdl=False, emit_norm=True):
     """SM90 native-scale producer; keep the packed SM100 kernel unchanged."""
     from rtp_llm.models_py.modules.dsv41._sm90_v41_query_quant import (
         query_norm_quant_mn_major as sm90_quantize,
     )
 
-    return sm90_quantize(x, weight, eps, pdl=pdl)
+    return sm90_quantize(x, weight, eps, pdl=pdl, emit_norm=emit_norm)
+
+
+def uses_native_mn_major_scales(attn) -> bool:
+    """Return whether all quantized-query consumers on ``attn`` use FP32 MN-major scales."""
+    if not native_mn_major_scales(getattr(attn, "wq_b", None)):
+        return False
+    index_wq = getattr(attn, "index_wq", None)
+    if index_wq is None or not getattr(attn, "is_index_source", True):
+        return True
+    return native_mn_major_scales(index_wq)
+
+
+def repack_mn_major_scales(sf_rm: torch.Tensor) -> torch.Tensor:
+    """Repack row-major or sliced scales into contiguous TMA MN-major layout."""
+    t_c, cols = sf_rm.shape
+    if sf_rm.dtype == torch.float32:
+        from rtp_llm.models_py.modules.dsv41._sm90_quant_scale_fused import (
+            mn_major_scale_output,
+        )
+
+        c_sf = mn_major_scale_output(t_c, cols, sf_rm.device)
+        if t_c:
+            c_sf.copy_(sf_rm)
+        return c_sf
+    padded_t = (t_c + 3) // 4 * 4
+    c_sf = torch.empty_strided(
+        (padded_t, cols),
+        (1, padded_t or 1),
+        device=sf_rm.device,
+        dtype=sf_rm.dtype,
+    )
+    if padded_t != t_c:
+        c_sf = c_sf[:t_c]
+    if t_c:
+        c_sf.copy_(sf_rm)
+    return c_sf
+
+
+def split_quantized_query(qr_q, rows: int, chunk: int):
+    """Split ``(q8, sf)`` into ``chunk``-sized pairs, repacking FP32 MN-major scales."""
+    if rows <= chunk:
+        return (qr_q,)
+    q8, sf = qr_q
+    q8_chunks = q8.split(chunk)
+    if sf.dtype != torch.float32:
+        return tuple(
+            (q8_c, sf[s : s + q8_c.shape[0]])
+            for s, q8_c in zip(range(0, rows, chunk), q8_chunks)
+        )
+    return tuple(
+        (q8_c, repack_mn_major_scales(sf[s : s + q8_c.shape[0]]))
+        for s, q8_c in zip(range(0, rows, chunk), q8_chunks)
+    )

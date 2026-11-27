@@ -21,6 +21,9 @@ from rtp_llm.models_py.modules.dsv41._sm90_quant_scale_fused import (
 from rtp_llm.models_py.modules.dsv41._v41_query_quant import (
     query_norm_quant,
     query_norm_quant_mn_major,
+    repack_mn_major_scales,
+    split_quantized_query,
+    try_project_prefill_quantized_qkv,
     try_project_quantized_qkv,
 )
 from rtp_llm.models_py.modules.dsv41.utils import V41MXFP8Linear
@@ -605,6 +608,71 @@ class QueryQuantCudaTest(unittest.TestCase):
         self.assertIsNone(try_project_prefill_quantized_qkv(attn_no_mxfp8_idx, x))
         attn_no_mxfp8_qb = SimpleNamespace(**{**attn.__dict__, "wq_b": object()})
         self.assertIsNone(try_project_prefill_quantized_qkv(attn_no_mxfp8_qb, x))
+
+    @unittest.skipUnless(
+        torch.cuda.is_available() and torch.cuda.get_device_capability()[0] == 9,
+        "requires SM90 CUDA",
+    )
+    def test_sm90_prefill_quantized_qkv_and_chunked_mn_major_scales(self):
+        from rtp_llm.models_py.modules.dsv41._sm90_quant_scale_fused import (
+            mn_major_row_stride,
+        )
+        from rtp_llm.models_py.modules.dsv41._v41_fused_qkv import try_project_qr_kv
+        from rtp_llm.models_py.modules.dsv41.utils import V41MXFP8Linear
+
+        def _make_sm90_linear(in_k, out_n):
+            w = torch.randn((out_n, in_k), device="cuda", dtype=torch.bfloat16).to(
+                torch.float8_e4m3fn
+            )
+            s = torch.ones((out_n // 32, in_k // 32), device="cuda", dtype=torch.float32).to(
+                torch.float8_e8m0fnu
+            )
+            return V41MXFP8Linear(w, s)
+
+        torch.manual_seed(0)
+        wq_a_wkv = _make_sm90_linear(5120, 1792)
+        wq_b = _make_sm90_linear(1280, 128)
+        index_wq = _make_sm90_linear(1280, 128)
+        q_norm = torch.randn(1280, device="cuda", dtype=torch.bfloat16)
+        attn = SimpleNamespace(
+            is_index_source=True,
+            wq_a_wkv=wq_a_wkv,
+            wq_b=wq_b,
+            index_wq=index_wq,
+            q_norm=q_norm,
+            q_lora_rank=1280,
+            eps=1e-6,
+        )
+        chunk = 4096
+        rows = chunk + 123
+        x = torch.randn(1, rows, 5120, device="cuda", dtype=torch.bfloat16)
+        ref_qr, ref_kv = try_project_qr_kv(wq_a_wkv, x, q_norm, 1280, 1e-6)
+        qr_fp8, kv_fp8, qr_q = try_project_prefill_quantized_qkv(
+            attn, x, emit_norm=False
+        )
+        self.assertIsNone(qr_fp8)
+        torch.testing.assert_close(kv_fp8, ref_kv, rtol=0, atol=0)
+        q8_2d, sf = qr_q[0].squeeze(0), qr_q[1]
+        self.assertEqual(sf.dtype, torch.float32)
+        chunks = split_quantized_query((q8_2d, sf), rows, chunk)
+        for s, (q8_c, sf_c) in zip(range(0, rows, chunk), chunks):
+            m = q8_c.shape[0]
+            ref_slice = ref_qr.squeeze(0)[s : s + m]
+            torch.testing.assert_close(
+                wq_b.forward_quantized(q8_c, sf_c), wq_b(ref_slice), rtol=0, atol=0
+            )
+            torch.testing.assert_close(
+                index_wq.forward_quantized(q8_c, sf_c),
+                index_wq(ref_slice),
+                rtol=0,
+                atol=0,
+            )
+        for r in (0, 1, 5, 8):
+            c_sf = repack_mn_major_scales(sf[:r].contiguous())
+            self.assertEqual(c_sf.stride(), (1, mn_major_row_stride(r)))
+            self.assertEqual(wq_b.forward_quantized(q8_2d[:r], c_sf).shape, (r, 128))
+        qr_dual, _, _ = try_project_prefill_quantized_qkv(attn, x, emit_norm=True)
+        torch.testing.assert_close(qr_dual, ref_qr, rtol=0, atol=0)
 
     @unittest.skipUnless(os.environ.get("V41_QUERY_QUANT_BENCH"), "opt-in benchmark")
     def test_benchmark(self):
