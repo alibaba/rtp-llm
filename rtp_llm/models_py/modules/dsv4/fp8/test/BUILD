@@ -205,3 +205,15 @@ dsv4_sm100_py_test(
     )
     for name in ["test_mega_csa_adapter", "test_mega_hca_adapter"]
 ]
+
+cuda13_sm100_py_test(
+    name = "test_indexer_q_fp8_quant_perf",
+    srcs = ["test_indexer_q_fp8_quant.py"],
+    legacy_create_init = 0,
+    main = "test_indexer_q_fp8_quant.py",
+    tags = [
+        "manual",
+        "perf",
+    ],
+    deps = _DSV4_FP8_TEST_DEPS + ["//rtp_llm:jit_cache_env"],
+)

@@ -1,4 +1,5 @@
 load(":defs.bzl", "dsv4_py_test", "dsv4_sm100_py_test")
+load("//rtp_llm/test/utils:cuda13_sm100_test.bzl", "cuda13_sm100_py_test")
 
 package(default_visibility = ["//visibility:public"])
 
@@ -235,3 +236,21 @@ dsv4_sm100_py_test(
     name = "test_mega_inv_rope_fp8_quant",
     deps = _DSV4_TEST_DEPS,
 )
+
+[
+    cuda13_sm100_py_test(
+        name = name + "_prefill_perf",
+        srcs = [name + ".py"],
+        legacy_create_init = 0,
+        main = name + ".py",
+        tags = [
+            "manual",
+            "perf",
+        ],
+        deps = _MODEL_TEST_DEPS + ["//rtp_llm:jit_cache_env"],
+    )
+    for name in [
+        "test_fused_rmsnorm_rope",
+        "test_fused_inv_rope_fp8_quant",
+    ]
+]

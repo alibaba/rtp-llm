@@ -8,6 +8,7 @@
 #include "rtp_llm/models_py/bindings/cuda/kernels/scaled_fp4_quant.h"
 #endif
 
+#include "rtp_llm/models_py/bindings/cuda/kernels/dsv4_prefill_rope_quant.h"
 #include "rtp_llm/models_py/bindings/cuda/kernels/scaled_fp8_quant.h"
 #include "rtp_llm/models_py/bindings/common/kernels/moe/ep_utils.h"
 
@@ -95,6 +96,49 @@ void registerPyModuleOps(py::module& rtp_ops_m) {
                   py::arg("expert_first_token_offset") = py::none(),
                   py::arg("topk"),
                   py::arg("hidden_states"));
+
+    rtp_ops_m.def("dsv4_fused_rmsnorm_rope",
+                  &torch_ext::dsv4_fused_rmsnorm_rope,
+                  "Fused RMSNorm + partial RoPE",
+                  py::arg("x"),
+                  py::arg("weight") = py::none(),
+                  py::arg("freqs_ri"),
+                  py::arg("position_ids") = py::none(),
+                  py::arg("out"),
+                  py::arg("freq_stride_n"),
+                  py::arg("rope_head_dim"),
+                  py::arg("eps"),
+                  py::arg("inverse") = false);
+
+    rtp_ops_m.def("dsv4_fused_inv_rope_fp8_quant",
+                  &torch_ext::dsv4_fused_inv_rope_fp8_quant,
+                  "Fused inverse-RoPE + block-128 UE8M0 FP8 quant",
+                  py::arg("o"),
+                  py::arg("freqs_ri"),
+                  py::arg("position_ids") = py::none(),
+                  py::arg("fp8_work"),
+                  py::arg("scale_work"),
+                  py::arg("q_len_per_b"),
+                  py::arg("n_groups"),
+                  py::arg("heads_per_group"),
+                  py::arg("nope_dim"),
+                  py::arg("rope_head_dim"),
+                  py::arg("quant_group_size"),
+                  py::arg("fp8_max"),
+                  py::arg("eps"),
+                  py::arg("scale_zero_rows"));
+
+    rtp_ops_m.def("dsv4_indexer_q_rope_fp8_fold",
+                  &torch_ext::dsv4_indexer_q_rope_fp8_fold,
+                  "Fused indexer Q RoPE + per-head FP8 quant + weight fold",
+                  py::arg("q_bf16"),
+                  py::arg("weights"),
+                  py::arg("freqs_ri"),
+                  py::arg("q_fp8"),
+                  py::arg("w_fold"),
+                  py::arg("freq_stride_n"),
+                  py::arg("rope_head_dim"),
+                  py::arg("fp8_max"));
 
     registerBaseCudaBindings(rtp_ops_m);
     registerAttnOpBindings(rtp_ops_m);

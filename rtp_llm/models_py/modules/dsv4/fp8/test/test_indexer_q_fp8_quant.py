@@ -247,6 +247,99 @@ def test_fused_rope_quant_group_heads_bit_exact_and_fallbacks():
     _assert_fused_rope_quant_matches_old(q_odd_h, w_odd_h, freqs_odd_h, 32)
 
 
+def _bench(fn, *args, warmup: int = 25, iters: int = 200) -> float:
+    for _ in range(warmup):
+        fn(*args)
+    torch.cuda.synchronize()
+    timings = []
+    for _ in range(5):
+        s = torch.cuda.Event(enable_timing=True)
+        e = torch.cuda.Event(enable_timing=True)
+        s.record()
+        for _ in range(iters):
+            fn(*args)
+        e.record()
+        e.synchronize()
+        timings.append(s.elapsed_time(e) / iters)
+    timings.sort()
+    return timings[len(timings) // 2]
+
+
+def bench_prefill_sweep():
+    """Measure SM103 latency (us) and algorithmic HBM bandwidth (TB/s) across T."""
+    props = torch.cuda.get_device_properties(0)
+    print(
+        f"  [Device] {props.name} SM={props.major}.{props.minor} "
+        f"SMs={props.multi_processor_count}"
+    )
+    H, D, RD = 64, INDEXER_HEAD_DIM, 64
+    Tlist = [1, 16, 256, 4096, 11548, 12288, 25410]
+
+    from rtp_llm.models_py.modules.dsv4.fp8._indexer_q_quant_triton import (
+        _get_cuda_indexer_q_rope_op,
+        _indexer_q_rope_fp8_quant_fold_triton,
+    )
+
+    backends = [("triton", _indexer_q_rope_fp8_quant_fold_triton)]
+    if _get_cuda_indexer_q_rope_op() is not None:
+        backends.append(("cuda", indexer_q_rope_fp8_quant_fold))
+
+    print("\n  [indexer_q_rope_fp8_quant_fold sweep: Triton vs CUDA]")
+    print(
+        "    {:>6}  {:>16}  {:>8}  {:>10}  {:>10}".format(
+            "T", "w_dtype", "backend", "lat_us", "bw_TB_s"
+        )
+    )
+    for w_dtype in (torch.bfloat16, torch.float32):
+        for T in Tlist:
+            q = (
+                torch.randn(1, T, H, D, dtype=torch.bfloat16, device="cuda") * 0.25
+            )
+            w = torch.randn(1, T, H, dtype=w_dtype, device="cuda")
+            freqs = _make_freqs(T, RD)
+            iters = 100 if T <= 256 else (30 if T <= 4096 else 15)
+            w_bytes = 2 if w_dtype == torch.bfloat16 else 4
+            total_bytes = T * H * (D * 3 + w_bytes + 4) + T * (RD // 2) * 8
+
+            for bname, fn in backends:
+                ms = _bench(
+                    lambda f=fn: f(q, w, freqs, RD),
+                    warmup=15 if T <= 4096 else 8,
+                    iters=iters,
+                )
+                us = ms * 1e3
+                tb_s = (total_bytes / (ms * 1e-3)) / 1e12
+                print(
+                    f"    {T:6d}  {str(w_dtype):>16}  {bname:>8}  {us:8.2f}us  {tb_s:8.3f}"
+                )
+            del q, w, freqs
+            torch.cuda.empty_cache()
+
+
+def test_cuda_vs_triton_and_w_dtype_parity():
+    from rtp_llm.models_py.modules.dsv4.fp8._indexer_q_quant_triton import (
+        _get_cuda_indexer_q_rope_op,
+        _indexer_q_rope_fp8_quant_fold_triton,
+    )
+
+    assert _get_cuda_indexer_q_rope_op() is not None, "CUDA indexer Q op missing"
+    torch.manual_seed(99)
+    for T in (1, 16, 256, 11548):
+        for w_dtype in (torch.bfloat16, torch.float32):
+            q = torch.randn(1, T, 64, INDEXER_HEAD_DIM, dtype=torch.bfloat16, device="cuda") * 0.25
+            w = torch.randn(1, T, 64, dtype=w_dtype, device="cuda")
+            freqs = _make_freqs(T, 64)
+            c_fp8, c_w = indexer_q_rope_fp8_quant_fold(q, w, freqs, 64)
+            t_fp8, t_w = _indexer_q_rope_fp8_quant_fold_triton(q, w, freqs, 64)
+            ulp = (
+                c_fp8.view(torch.uint8).to(torch.int16)
+                - t_fp8.view(torch.uint8).to(torch.int16)
+            ).abs()
+            assert int(ulp.max().item()) == 0, f"T={T} w_dtype={w_dtype} fp8_ulp={ulp.max().item()}"
+            assert torch.equal(c_w, t_w), f"T={T} w_dtype={w_dtype} w_fold mismatch"
+    print("  [CUDA vs Triton bit-exact parity] OK")
+
+
 if __name__ == "__main__":
     print("== Correctness ==")
     test_quant_round_trip()
@@ -256,4 +349,7 @@ if __name__ == "__main__":
     test_fused_rope_quant_matches_old_prefill_shape()
     test_fused_rope_quant_matches_old_batched_decode_shape()
     test_fused_rope_quant_group_heads_bit_exact_and_fallbacks()
+    test_cuda_vs_triton_and_w_dtype_parity()
+    print("\n== Benchmark ==")
+    bench_prefill_sweep()
     print("\nOK")

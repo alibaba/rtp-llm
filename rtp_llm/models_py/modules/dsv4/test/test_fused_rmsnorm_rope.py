@@ -86,14 +86,102 @@ def _bench(fn, *args, warmup: int = 25, iters: int = 200) -> float:
     for _ in range(warmup):
         fn(*args)
     torch.cuda.synchronize()
-    start = torch.cuda.Event(enable_timing=True)
-    end = torch.cuda.Event(enable_timing=True)
-    start.record()
-    for _ in range(iters):
-        fn(*args)
-    end.record()
-    end.synchronize()
-    return start.elapsed_time(end) / iters  # ms
+    timings = []
+    for _ in range(5):
+        start = torch.cuda.Event(enable_timing=True)
+        end = torch.cuda.Event(enable_timing=True)
+        start.record()
+        for _ in range(iters):
+            fn(*args)
+        end.record()
+        end.synchronize()
+        timings.append(start.elapsed_time(end) / iters)
+    timings.sort()
+    return timings[len(timings) // 2]  # ms
+
+
+def bench_prefill_sweep():
+    """Measure SM103 latency (us) and algorithmic HBM bandwidth (TB/s) across T."""
+    props = torch.cuda.get_device_properties(0)
+    print(
+        f"  [Device] {props.name} SM={props.major}.{props.minor} "
+        f"SMs={props.multi_processor_count}"
+    )
+    Tlist = [1, 16, 256, 4096, 11548, 12288, 25410]
+    rd = 64
+    D = 512
+
+    print("\n  [fused_rmsnorm_rope prefill sweep: CUDA vs Triton]")
+    print(
+        "    {:>6}  {:>28}  {:>8}  {:>10}  {:>10}".format(
+            "T", "case", "backend", "lat_us", "bw_TB_s"
+        )
+    )
+    from rtp_llm.models_py.modules.dsv4._fused_rmsnorm_rope_triton import (
+        _fused_rmsnorm_rope_triton,
+        _get_cuda_rmsnorm_rope_op,
+    )
+
+    has_cuda_op = _get_cuda_rmsnorm_rope_op() is not None
+    backends = [("triton", _fused_rmsnorm_rope_triton)]
+    if has_cuda_op:
+        backends.append(("cuda", fused_rmsnorm_rope))
+
+    for H, has_w, has_pos, out_alias, inplace, label in [
+        (64, False, False, True, False, "Q_H64_D512_out_alias"),
+        (64, False, False, False, True, "Q_H64_D512_inplace"),
+        (64, True, True, False, False, "Q_H64_D512_w_pos"),
+        (1, True, False, False, False, "KV_H1_D512_w"),
+        (1, True, True, False, False, "KV_H1_D512_w_pos"),
+    ]:
+        for T in Tlist:
+            x = (
+                torch.randn(1, T, H, D, dtype=torch.bfloat16, device="cuda") * 0.3
+                if H > 1
+                else torch.randn(1, T, D, dtype=torch.bfloat16, device="cuda") * 0.3
+            )
+            w = (
+                torch.rand(D, dtype=torch.bfloat16, device="cuda") + 0.5
+                if has_w
+                else None
+            )
+            if has_pos:
+                freqs = _build_freqs_prefill(max(T + 16, 4096), rd)
+                pos = torch.randint(
+                    0, freqs.shape[0], (T,), dtype=torch.int32, device="cuda"
+                )
+            else:
+                freqs = _build_freqs_prefill(T, rd)
+                pos = None
+            out = x if out_alias else (None if inplace else torch.empty_like(x))
+            iters = 100 if T <= 256 else (30 if T <= 4096 else 15)
+            total_bytes = (
+                2 * T * H * D * 2
+                + T * (rd // 2) * 8
+                + (T * 4 if has_pos else 0)
+                + (D * 2 if has_w else 0)
+            )
+            for bname, fn in backends:
+                ms = _bench(
+                    lambda f=fn: f(
+                        x,
+                        w,
+                        freqs,
+                        rd,
+                        out=out,
+                        inplace=inplace,
+                        position_ids=pos,
+                    ),
+                    warmup=15 if T <= 4096 else 8,
+                    iters=iters,
+                )
+                us = ms * 1e3
+                tb_s = (total_bytes / (ms * 1e-3)) / 1e12
+                print(
+                    f"    {T:6d}  {label:>28}  {bname:>8}  {us:8.2f}us  {tb_s:8.3f}"
+                )
+            del x, w, freqs, pos, out
+            torch.cuda.empty_cache()
 
 
 # ---------------------------------------------------------------------------
@@ -394,6 +482,65 @@ def bench_token_sweep():
     return q_results, kv_results
 
 
+def test_cuda_triton_and_eager_parity():
+    """Verify native CUDA path matches optimized Triton + eager across prefill/decode shapes."""
+    from rtp_llm.models_py.modules.dsv4._fused_rmsnorm_rope_triton import (
+        _fused_rmsnorm_rope_triton,
+        _get_cuda_rmsnorm_rope_op,
+    )
+
+    assert _get_cuda_rmsnorm_rope_op() is not None, "CUDA op dsv4_fused_rmsnorm_rope missing"
+    torch.manual_seed(123)
+    eps = 1e-6
+    for T in (1, 16, 256, 11548):
+        for H, D, rd in ((64, 512, 64), (1, 512, 64), (64, 128, 64)):
+            x = (
+                torch.randn(1, T, H, D, dtype=torch.bfloat16, device="cuda") * 0.4
+                if H > 1
+                else torch.randn(1, T, D, dtype=torch.bfloat16, device="cuda") * 0.4
+            )
+            freqs_direct = _build_freqs_prefill(T, rd)
+            w_bf16 = torch.rand(D, dtype=torch.bfloat16, device="cuda") + 0.5
+            for use_w, use_pos, inv in (
+                (False, False, False),
+                (True, True, False),
+                (True, False, True),
+            ):
+                w = w_bf16 if use_w else None
+                if use_pos:
+                    freqs = _build_freqs_prefill(max(T + 32, 2048), rd)
+                    pos = torch.randint(0, freqs.shape[0], (T,), dtype=torch.int32, device="cuda")
+                else:
+                    freqs = freqs_direct
+                    pos = None
+                y_cuda = fused_rmsnorm_rope(
+                    x.clone(), w, freqs, rd, eps=eps, inverse=inv, inplace=True, position_ids=pos
+                )
+                y_triton = _fused_rmsnorm_rope_triton(
+                    x, w, freqs, rd, eps=eps, inverse=inv, position_ids=pos
+                )
+                torch.testing.assert_close(
+                    y_cuda.float(),
+                    y_triton.float(),
+                    rtol=1e-2,
+                    atol=2e-2,
+                    msg=f"CUDA vs Triton mismatch T={T} H={H} D={D}",
+                )
+                if T <= 256:
+                    f_ref = freqs[pos] if pos is not None else freqs
+                    y_eager = ref_rmsnorm_rope(x, w, f_ref, rd, eps=eps, inverse=inv)
+                    e_diff = (y_cuda.float() - y_eager.float()).abs().max().item()
+                    assert e_diff <= 5e-2, f"CUDA vs eager mismatch T={T} H={H} D={D}: {e_diff}"
+    # FP32 weight + D=384 general CUDA path check.
+    x384 = torch.randn(2, 5, 8, 384, dtype=torch.bfloat16, device="cuda") * 0.4
+    w32 = torch.rand(384, dtype=torch.float32, device="cuda") + 0.5
+    f10 = _make_freqs(10, 64)
+    y_c = fused_rmsnorm_rope(x384.clone(), w32, f10, 64, inplace=True)
+    y_t = _fused_rmsnorm_rope_triton(x384, w32, f10, 64)
+    assert (y_c.float() - y_t.float()).abs().max().item() <= 2e-2
+    print("  [CUDA vs Triton/eager parity] OK")
+
+
 if __name__ == "__main__":
     print("== Correctness ==")
     test_q_correctness()
@@ -403,6 +550,9 @@ if __name__ == "__main__":
     test_group_heads_correctness()
     test_inverse_rope_path_correctness()
     test_prefill_d512_q_and_edge_dims_correctness()
+    test_cuda_triton_and_eager_parity()
+    print("\n== Benchmark (Prefill sweep) ==")
+    bench_prefill_sweep()
     print("\n== Benchmark (T sweep: covers decode + prefill paths) ==")
     q_res, kv_res = bench_token_sweep()
     # Hard perf assertion: fused must beat the eager baseline at every T.

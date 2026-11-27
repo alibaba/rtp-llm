@@ -29,6 +29,24 @@ import torch
 import triton
 import triton.language as tl
 
+_CACHED_CUDA_INV_ROPE_OP = False
+_CUDA_INV_ROPE_OP = None
+
+
+def _get_cuda_inv_rope_fp8_quant_op():
+    global _CACHED_CUDA_INV_ROPE_OP, _CUDA_INV_ROPE_OP
+    if not _CACHED_CUDA_INV_ROPE_OP:
+        try:
+            from rtp_llm.ops import rtp_llm_ops
+
+            _CUDA_INV_ROPE_OP = getattr(
+                rtp_llm_ops, "dsv4_fused_inv_rope_fp8_quant", None
+            )
+        except Exception:
+            _CUDA_INV_ROPE_OP = None
+        _CACHED_CUDA_INV_ROPE_OP = True
+    return _CUDA_INV_ROPE_OP
+
 
 def _is_blackwell_device(device: torch.device | int | None = None) -> bool:
     try:
@@ -242,7 +260,8 @@ def _fused_inv_rope_fp8_quant_group_heads(
         tl.store(fp8_heads_base + (col_base + q_off)[None, :], xc_quant)
         packed_val = packed_val | (exp << (chunk_idx * 8))
 
-    # Last 128-col quant chunk: apply inverse-RoPE ONLY to [D - ROPE_DIM : D).
+    # Last 128-col quant chunk: single coalesced 128-col load, in-register
+    # inverse-RoPE on [ROPE_START, QUANT_GROUP_SIZE), single absmax + store.
     b_idx = pid_token // q_len_per_b
     if HAS_POS:
         pos_val = tl.load(pos_ptr + b_idx).to(tl.int64)
@@ -250,48 +269,28 @@ def _fused_inv_rope_fp8_quant_group_heads(
     else:
         freq_row = b_idx
 
-    HALF_BLOCK_ROPE: tl.constexpr = BLOCK_ROPE // 2
+    HALF_CHUNK: tl.constexpr = QUANT_GROUP_SIZE // 2
+    NOPE_PAIRS: tl.constexpr = ROPE_START // 2
     HALF_ROPE: tl.constexpr = ROPE_DIM // 2
-    pair_off = tl.arange(0, HALF_BLOCK_ROPE)
-    pair_mask = pair_off < HALF_ROPE
-    freq_base = freqs_ri_ptr + freq_row * freqs_stride_b + pair_off * freqs_stride_k
-    cos_v = tl.load(freq_base, mask=pair_mask, other=1.0)
-    sin_v = tl.load(freq_base + 1, mask=pair_mask, other=0.0)
+    pair_off = tl.arange(0, HALF_CHUNK)
+    rope_pair = pair_off - NOPE_PAIRS
+    is_rope_pair = (rope_pair >= 0) & (rope_pair < HALF_ROPE)
+    cs_idx = tl.where(is_rope_pair, rope_pair, 0)
+    freq_base = freqs_ri_ptr + freq_row * freqs_stride_b + cs_idx * freqs_stride_k
+    cos_v = tl.load(freq_base, mask=is_rope_pair, other=1.0)
+    sin_v = tl.load(freq_base + 1, mask=is_rope_pair, other=0.0)
 
     last_col_base: tl.constexpr = (CHUNKS_PER_HEAD - 1) * QUANT_GROUP_SIZE
-    rope_abs_start: tl.constexpr = last_col_base + ROPE_START
-    rope_off = tl.arange(0, BLOCK_ROPE)
-    rope_mask = rope_off < ROPE_DIM
-    x_rope = tl.load(
-        o_heads_base + (rope_abs_start + rope_off)[None, :],
-        mask=rope_mask[None, :],
-        other=0.0,
-    ).to(tl.float32)
+    x_last = tl.load(o_heads_base + (last_col_base + q_off)[None, :]).to(tl.float32)
 
-    x_even, x_odd = tl.split(tl.reshape(x_rope, (HEADS_PER_CTA, HALF_BLOCK_ROPE, 2)))
+    x_even, x_odd = tl.split(tl.reshape(x_last, (HEADS_PER_CTA, HALF_CHUNK, 2)))
     rot_even = x_even * cos_v[None, :] + x_odd * sin_v[None, :]
     rot_odd = x_odd * cos_v[None, :] - x_even * sin_v[None, :]
-    x_rope_rot = tl.interleave(rot_even, rot_odd)
-    x_rope_rot = tl.where(rope_mask[None, :], x_rope_rot, 0.0)
+    new_even = tl.where(is_rope_pair[None, :], rot_even, x_even)
+    new_odd = tl.where(is_rope_pair[None, :], rot_odd, x_odd)
+    x_last_rot = tl.interleave(new_even, new_odd)
 
-    if ROPE_START > 0:
-        tail_off = tl.arange(0, BLOCK_TAIL_NOPE)
-        tail_mask = tail_off < ROPE_START
-        x_tail_nope = tl.load(
-            o_heads_base + (last_col_base + tail_off)[None, :],
-            mask=tail_mask[None, :],
-            other=0.0,
-        ).to(tl.float32)
-        absmax_last = tl.maximum(
-            tl.maximum(
-                tl.max(tl.abs(x_tail_nope), axis=1),
-                tl.max(tl.abs(x_rope_rot), axis=1),
-            ),
-            eps,
-        )
-    else:
-        absmax_last = tl.maximum(tl.max(tl.abs(x_rope_rot), axis=1), eps)
-
+    absmax_last = tl.maximum(tl.max(tl.abs(x_last_rot), axis=1), eps)
     scale_raw_last = absmax_last * (1.0 / fp8_max)
     scale_raw_bits_last = scale_raw_last.to(tl.int32, bitcast=True)
     exp_last = ((scale_raw_bits_last >> 23) & 0xFF) + (
@@ -301,24 +300,10 @@ def _fused_inv_rope_fp8_quant_group_heads(
     inv_bits_last = tl.where(exp_last == 254, 1 << 22, (254 - exp_last) << 23)
     inv_scale_last = inv_bits_last.to(tl.float32, bitcast=True)
 
-    if ROPE_START > 0:
-        tail_quant = tl.clamp(
-            x_tail_nope * inv_scale_last[:, None], -fp8_max, fp8_max
-        ).to(tl.float8e4nv)
-        tl.store(
-            fp8_heads_base + (last_col_base + tail_off)[None, :],
-            tail_quant,
-            mask=tail_mask[None, :],
-        )
-
-    rope_quant = tl.clamp(
-        x_rope_rot * inv_scale_last[:, None], -fp8_max, fp8_max
+    last_quant = tl.clamp(
+        x_last_rot * inv_scale_last[:, None], -fp8_max, fp8_max
     ).to(tl.float8e4nv)
-    tl.store(
-        fp8_heads_base + (rope_abs_start + rope_off)[None, :],
-        rope_quant,
-        mask=rope_mask[None, :],
-    )
+    tl.store(fp8_heads_base + (last_col_base + q_off)[None, :], last_quant)
 
     packed_val = packed_val | (exp_last << ((CHUNKS_PER_HEAD - 1) * 8))
     tl.store(scale_tok_base + h_idx * scale_stride_k, packed_val)
@@ -492,9 +477,57 @@ def fused_inv_rope_fp8_quant(
     if M == 0:
         return fp8_work.transpose(0, 1), scale_work.transpose(0, 1)
     tma_M = scale_work.stride(2)
+    scale_zero_rows = (
+        min(int(scale_buf.shape[1]), int(tma_M))
+        if scale_buf is not None
+        else int(tma_M)
+    )
 
-    selected_impl = (impl if impl is not None else "optimized").lower()
-    if selected_impl == "legacy":
+    cuda_op = _get_cuda_inv_rope_fp8_quant_op()
+    can_use_cuda = (
+        cuda_op is not None
+        and D == 512
+        and nope_dim == 448
+        and rope_head_dim == 64
+        and quant_group_size == 128
+        and o_flat.stride(2) == 1
+        and (o_flat.data_ptr() & 15) == 0
+        and (o_flat.stride(0) & 7) == 0
+        and (o_flat.stride(1) & 7) == 0
+        and fp8_work.stride(2) == 1
+        and (fp8_work.data_ptr() & 7) == 0
+        and (fp8_work.stride(0) & 7) == 0
+        and (fp8_work.stride(1) & 7) == 0
+        and scale_work.stride(1) == 1
+        and (freqs_cis_per_b.data_ptr() & 15) == 0
+    )
+
+    selected_impl = (
+        impl.lower() if impl is not None else ("cuda" if can_use_cuda else "optimized")
+    )
+    if selected_impl == "cuda":
+        if not can_use_cuda:
+            raise ValueError(
+                "impl='cuda' requested but CUDA kernel/constraints unavailable for this tensor shape"
+            )
+        freqs_ri = torch.view_as_real(freqs_cis_per_b)
+        cuda_op(
+            o_flat,
+            freqs_ri,
+            pos_flat,
+            fp8_work,
+            scale_work,
+            q_len_per_b,
+            n_groups,
+            heads_per_group,
+            nope_dim,
+            rope_head_dim,
+            quant_group_size,
+            fp8_max,
+            eps,
+            scale_zero_rows,
+        )
+    elif selected_impl == "legacy":
         # complex64 .real / .imag are stride-2 views; .contiguous() is a real
         # layout copy. Keep this path only as a correctness/perf baseline.
         cos = freqs_cis_per_b.real.contiguous()
@@ -580,7 +613,7 @@ def fused_inv_rope_fp8_quant(
         )
     else:
         raise ValueError(
-            f"invalid impl={selected_impl!r}; " "expected legacy|optimized"
+            f"invalid impl={selected_impl!r}; " "expected legacy|optimized|cuda"
         )
     # Transpose (0, 1) so the consumer sees [M, G, …]:
     #   fp8  : [M, G, d]          stride (d, M*d, 1)   — contiguous-like on inner

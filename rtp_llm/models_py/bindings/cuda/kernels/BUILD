@@ -277,6 +277,19 @@ cc_library(
 )
 
 cc_library(
+    name = "dsv4_prefill_rope_quant",
+    srcs = ["dsv4_prefill_rope_quant.cu"],
+    hdrs = ["dsv4_prefill_rope_quant.h"],
+    deps = [
+        "//rtp_llm/models_py/bindings/cuda:cuda_host_utils",
+        ":cuda_utils_common",
+        "//rtp_llm/cpp/utils:core_utils",
+    ] + torch_deps(),
+    copts = cuda_copts(),
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
     name = "mtp_target_verify_prepare",
     srcs = ["mtp_target_verify_prepare.cu"],
     hdrs = ["mtp_target_verify_prepare.h"],

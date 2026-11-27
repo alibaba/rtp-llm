@@ -32,6 +32,24 @@ import torch
 import triton
 import triton.language as tl
 
+_CACHED_CUDA_IDX_Q_OP = False
+_CUDA_IDX_Q_OP = None
+
+
+def _get_cuda_indexer_q_rope_op():
+    global _CACHED_CUDA_IDX_Q_OP, _CUDA_IDX_Q_OP
+    if not _CACHED_CUDA_IDX_Q_OP:
+        try:
+            from rtp_llm.ops import rtp_llm_ops
+
+            _CUDA_IDX_Q_OP = getattr(
+                rtp_llm_ops, "dsv4_indexer_q_rope_fp8_fold", None
+            )
+        except Exception:
+            _CUDA_IDX_Q_OP = None
+        _CACHED_CUDA_IDX_Q_OP = True
+    return _CUDA_IDX_Q_OP
+
 INDEXER_HEAD_DIM = 128
 FP8_E4M3_MAX = 448.0
 
@@ -150,17 +168,12 @@ def _indexer_q_rope_fp8_fold_kernel(
     cos = tl.load(freq_base, mask=is_rope_pair, other=1.0)
     sin = tl.load(freq_base + 1, mask=is_rope_pair, other=0.0)
 
-    # Rotate RoPE pairs in registers without a second global q_ptr read; NoPE
-    # pairs pass through bit-exact via tl.where before interleave.
     q_even, q_odd = tl.split(tl.reshape(q, (NUM_PAIRS, 2)))
     rot_even = q_even * cos - q_odd * sin
     rot_odd = q_odd * cos + q_even * sin
     new_even = tl.where(is_rope_pair, rot_even, q_even)
     new_odd = tl.where(is_rope_pair, rot_odd, q_odd)
     q = tl.interleave(new_even, new_odd)
-    # Old path stores the RoPE result back to a BF16 q tensor, then the
-    # quant-fold kernel reloads it.  Preserve that boundary rounding so the
-    # fused path keeps the same FP8/scale contract as closely as possible.
     q = q.to(tl.bfloat16).to(tl.float32)
 
     absmax = tl.max(tl.abs(q), axis=0)
@@ -195,9 +208,8 @@ def _indexer_q_rope_fp8_fold_group_heads_kernel(
 ):
     """Grouped-head RoPE + FP8 quant + scale fold.
 
-    Processes ``GROUP_HEADS`` heads sharing a single frequency slot per CTA so
-    ``cos``/``sin`` are loaded once, Q is loaded/stored via coalesced 128-bit
-    vector transactions, and RoPE runs purely in registers.
+    Single coalesced ``[GROUP_HEADS, D]`` load/store preserves full 128-col
+    memory bursts and exact 0-ULP BF16/FP8 parity across group sizes.
     """
     freq_idx = tl.program_id(0).to(tl.int64)
     head_tile = tl.program_id(1).to(tl.int64)
@@ -225,7 +237,6 @@ def _indexer_q_rope_fp8_fold_group_heads_kernel(
     new_even = tl.where(is_rope_pair[None, :], rot_even, q_even)
     new_odd = tl.where(is_rope_pair[None, :], rot_odd, q_odd)
     q = tl.interleave(new_even, new_odd)
-    # Preserve exact BF16 boundary rounding from separate RoPE + quant-fold.
     q = q.to(tl.bfloat16).to(tl.float32)
 
     absmax = tl.max(tl.abs(q), axis=1)
@@ -241,21 +252,15 @@ def _indexer_q_rope_fp8_fold_group_heads_kernel(
     tl.store(w_fold_ptr + rows, w * scale)
 
 
-def indexer_q_rope_fp8_quant_fold(
-    q_bf16: torch.Tensor,  # [B, S, H, D] bf16, D=128, pre-RoPE
-    weights: torch.Tensor,  # [B, S, H] bf16 or fp32
-    freqs_cis: torch.Tensor,  # complex [N_freq, RD/2]
+def _indexer_q_rope_fp8_quant_fold_impl(
+    q_bf16: torch.Tensor,
+    weights: torch.Tensor,
+    freqs_cis: torch.Tensor,
     rope_head_dim: int,
     *,
     group_heads: int | None = None,
+    allow_cuda: bool = True,
 ):
-    """Fused RoPE + per-(token, head) FP8 quant + scale fold.
-
-    Output contract is identical to :func:`indexer_q_fp8_quant_fold`.
-    ``freqs_cis`` follows the same flattened-frequency mapping as
-    ``rope_only_inplace``: each frequency row covers
-    ``(B*S*H) // N_freq`` consecutive q rows.
-    """
     assert q_bf16.dim() == 4 and q_bf16.shape[-1] == INDEXER_HEAD_DIM
     assert q_bf16.dtype == torch.bfloat16
     assert q_bf16.is_cuda
@@ -285,6 +290,27 @@ def indexer_q_rope_fp8_quant_fold(
     freqs_ri = torch.view_as_real(freqs_flat)
     freq_stride_n = BSH // n_freq
 
+    if allow_cuda and group_heads is None:
+        cuda_op = _get_cuda_indexer_q_rope_op()
+        if (
+            cuda_op is not None
+            and D == INDEXER_HEAD_DIM
+            and (q_bf16.data_ptr() & 15) == 0
+            and (q_fp8.data_ptr() & 7) == 0
+            and (rope_head_dim != 64 or (freqs_ri.data_ptr() & 15) == 0)
+        ):
+            cuda_op(
+                q_bf16.view(BSH, D),
+                weights.view(BSH),
+                freqs_ri,
+                q_fp8.view(BSH, D),
+                w_fold.view(BSH),
+                freq_stride_n,
+                rope_head_dim,
+                FP8_E4M3_MAX,
+            )
+            return q_fp8, w_fold
+
     if group_heads is not None:
         if group_heads not in (1, 2, 4, 8, 16):
             raise ValueError(
@@ -304,6 +330,7 @@ def indexer_q_rope_fp8_quant_fold(
                     selected_group_heads = candidate
                     break
 
+    rope_start = D - rope_head_dim
     can_group_heads = (
         selected_group_heads > 1
         and D == INDEXER_HEAD_DIM
@@ -324,7 +351,7 @@ def indexer_q_rope_fp8_quant_fold(
             D=D,
             RD=rope_head_dim,
             RD_HALF=rope_head_dim // 2,
-            ROPE_START=D - rope_head_dim,
+            ROPE_START=rope_start,
             fp8_max=FP8_E4M3_MAX,
             GROUP_HEADS=selected_group_heads,
             num_warps=4,
@@ -343,8 +370,51 @@ def indexer_q_rope_fp8_quant_fold(
             D=D,
             RD=rope_head_dim,
             RD_HALF=rope_head_dim // 2,
-            ROPE_START=D - rope_head_dim,
+            ROPE_START=rope_start,
             fp8_max=FP8_E4M3_MAX,
             num_warps=4,
         )
     return q_fp8, w_fold
+
+
+def _indexer_q_rope_fp8_quant_fold_triton(
+    q_bf16: torch.Tensor,
+    weights: torch.Tensor,
+    freqs_cis: torch.Tensor,
+    rope_head_dim: int,
+    *,
+    group_heads: int | None = None,
+):
+    return _indexer_q_rope_fp8_quant_fold_impl(
+        q_bf16,
+        weights,
+        freqs_cis,
+        rope_head_dim,
+        group_heads=group_heads,
+        allow_cuda=False,
+    )
+
+
+def indexer_q_rope_fp8_quant_fold(
+    q_bf16: torch.Tensor,  # [B, S, H, D] bf16, D=128, pre-RoPE
+    weights: torch.Tensor,  # [B, S, H] bf16/fp32
+    freqs_cis: torch.Tensor,  # complex [N_freq, RD/2]
+    rope_head_dim: int,
+    *,
+    group_heads: int | None = None,
+):
+    """Fused RoPE + per-(token, head) FP8 quant + scale fold.
+
+    Output contract is identical to :func:`indexer_q_fp8_quant_fold`.
+    ``freqs_cis`` follows the same flattened-frequency mapping as
+    ``rope_only_inplace``: each frequency row covers
+    ``(B*S*H) // N_freq`` consecutive q rows.
+    """
+    return _indexer_q_rope_fp8_quant_fold_impl(
+        q_bf16,
+        weights,
+        freqs_cis,
+        rope_head_dim,
+        group_heads=group_heads,
+        allow_cuda=True,
+    )

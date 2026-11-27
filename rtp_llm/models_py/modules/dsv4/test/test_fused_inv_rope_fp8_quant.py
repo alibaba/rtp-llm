@@ -331,14 +331,124 @@ def _bench(fn, *args, warmup: int = 25, iters: int = 200) -> float:
     for _ in range(warmup):
         fn(*args)
     torch.cuda.synchronize()
-    s = torch.cuda.Event(enable_timing=True)
-    e = torch.cuda.Event(enable_timing=True)
-    s.record()
-    for _ in range(iters):
-        fn(*args)
-    e.record()
-    e.synchronize()
-    return s.elapsed_time(e) / iters
+    timings = []
+    for _ in range(5):
+        s = torch.cuda.Event(enable_timing=True)
+        e = torch.cuda.Event(enable_timing=True)
+        s.record()
+        for _ in range(iters):
+            fn(*args)
+        e.record()
+        e.synchronize()
+        timings.append(s.elapsed_time(e) / iters)
+    timings.sort()
+    return timings[len(timings) // 2]
+
+
+def bench_prefill_sweep():
+    """Measure SM103 latency (us) and algorithmic HBM bandwidth (TB/s) across M."""
+    props = torch.cuda.get_device_properties(0)
+    print(
+        f"  [Device] {props.name} SM={props.major}.{props.minor} "
+        f"SMs={props.multi_processor_count}"
+    )
+    n_heads, head_dim, rope_dim = 64, 512, 64
+    nope_dim = head_dim - rope_dim
+    n_groups = 8
+    heads_per_group = n_heads // n_groups
+    Mlist = [1, 16, 256, 4096, 11548, 12288, 25410]
+
+    from rtp_llm.models_py.modules.dsv4._fused_inv_rope_fp8_quant_triton import (
+        _get_cuda_inv_rope_fp8_quant_op,
+    )
+
+    backends = ["optimized"]
+    if _get_cuda_inv_rope_fp8_quant_op() is not None:
+        backends.append("cuda")
+
+    print("\n  [fused_inv_rope_fp8_quant prefill sweep: Triton vs CUDA]")
+    print(
+        "    {:>6}  {:>20}  {:>10}  {:>10}  {:>10}".format(
+            "M", "mode", "backend", "lat_us", "bw_TB_s"
+        )
+    )
+    for use_pos, prealloc, label in [
+        (False, False, "prefill_alloc"),
+        (False, True, "prefill_buf"),
+        (True, True, "prefill_pos_buf"),
+    ]:
+        for M in Mlist:
+            o = (
+                torch.randn(
+                    M, n_heads, head_dim, dtype=torch.bfloat16, device="cuda"
+                )
+                * 0.3
+            )
+            if use_pos:
+                max_pos = max(M + 16, 4096)
+                ang = torch.rand(max_pos, rope_dim // 2, device="cuda") * 6.28
+                freqs = torch.polar(torch.ones_like(ang), ang).to(torch.complex64)
+                pos = torch.randint(0, max_pos, (M,), dtype=torch.int32, device="cuda")
+            else:
+                ang = torch.rand(M, rope_dim // 2, device="cuda") * 6.28
+                freqs = torch.polar(torch.ones_like(ang), ang).to(torch.complex64)
+                pos = None
+            tma_M = ((M + 3) // 4) * 4
+            d_per_group = heads_per_group * head_dim
+            fp8_buf = (
+                torch.empty(
+                    (n_groups, M, d_per_group),
+                    dtype=torch.float8_e4m3fn,
+                    device="cuda",
+                )
+                if prealloc
+                else None
+            )
+            scale_buf = (
+                torch.empty(
+                    n_groups * heads_per_group * tma_M,
+                    dtype=torch.int32,
+                    device="cuda",
+                ).as_strided(
+                    (n_groups, M, heads_per_group),
+                    (heads_per_group * tma_M, 1, tma_M),
+                )
+                if prealloc
+                else None
+            )
+            iters = 100 if M <= 256 else (30 if M <= 4096 else 15)
+            total_bytes = (
+                M * n_heads * head_dim * 3
+                + M * (rope_dim // 2) * 8
+                + tma_M * n_heads * 4
+                + (M * 4 if use_pos else 0)
+            )
+
+            for impl_name in backends:
+                ms = _bench(
+                    lambda b=impl_name: fused_inv_rope_fp8_quant(
+                        o,
+                        freqs,
+                        n_groups=n_groups,
+                        heads_per_group=heads_per_group,
+                        nope_dim=nope_dim,
+                        rope_head_dim=rope_dim,
+                        fp8_buf=fp8_buf,
+                        scale_buf=scale_buf,
+                        position_ids=pos,
+                        impl=b,
+                    ),
+                    warmup=15 if M <= 4096 else 8,
+                    iters=iters,
+                )
+                us = ms * 1e3
+                tb_s = (total_bytes / (ms * 1e-3)) / 1e12
+                blabel = "triton" if impl_name == "optimized" else "cuda"
+                print(
+                    f"    {M:6d}  {label:>20}  {blabel:>10}  {us:8.2f}us  {tb_s:8.3f}"
+                )
+            del o, freqs, pos, fp8_buf, scale_buf
+            torch.cuda.empty_cache()
 
 
 def bench_decode():
@@ -385,12 +495,94 @@ def bench_decode():
         )
 
 
+def test_cuda_vs_triton_and_non_aligned_m_parity():
+    """Verify CUDA path matches Triton (<=1 FP8 ULP) and zeroes TMA padding on non-4-aligned M."""
+    from rtp_llm.models_py.modules.dsv4._fused_inv_rope_fp8_quant_triton import (
+        _get_cuda_inv_rope_fp8_quant_op,
+    )
+
+    assert _get_cuda_inv_rope_fp8_quant_op() is not None, "CUDA inv_rope op missing"
+    torch.manual_seed(77)
+    n_heads, head_dim, rope_dim = 64, 512, 64
+    nope_dim = head_dim - rope_dim
+    n_groups, heads_per_group = 8, 8
+
+    for M in (1, 16, 17, 129, 256, 257, 11548):
+        o = torch.randn(M, n_heads, head_dim, dtype=torch.bfloat16, device="cuda") * 0.3
+        for use_pos, pos_dtype in ((False, None), (True, torch.int32), (True, torch.int64)):
+            if use_pos:
+                max_pos = 4096
+                ang = torch.rand(max_pos, rope_dim // 2, device="cuda") * 6.28
+                freqs = torch.polar(torch.ones_like(ang), ang).to(torch.complex64)
+                pos = torch.randint(0, max_pos, (M,), dtype=pos_dtype, device="cuda")
+            else:
+                ang = torch.rand(M, rope_dim // 2, device="cuda") * 6.28
+                freqs = torch.polar(torch.ones_like(ang), ang).to(torch.complex64)
+                pos = None
+
+            tma_M = ((M + 3) // 4) * 4
+            buf_M = tma_M + 4
+            sf_raw = torch.full(
+                (n_groups * heads_per_group * buf_M,),
+                0x5A5A5A5A,
+                dtype=torch.int32,
+                device="cuda",
+            )
+            scale_buf = sf_raw.as_strided(
+                (n_groups, buf_M, heads_per_group),
+                (heads_per_group * buf_M, 1, buf_M),
+            )
+            fp8_buf = torch.empty(
+                (n_groups, M, heads_per_group * head_dim),
+                dtype=torch.float8_e4m3fn,
+                device="cuda",
+            )
+
+            fp8_triton, sf_triton = fused_inv_rope_fp8_quant(
+                o,
+                freqs,
+                n_groups=n_groups,
+                heads_per_group=heads_per_group,
+                nope_dim=nope_dim,
+                rope_head_dim=rope_dim,
+                position_ids=pos,
+                impl="optimized",
+            )
+            fp8_cuda, sf_cuda = fused_inv_rope_fp8_quant(
+                o,
+                freqs,
+                n_groups=n_groups,
+                heads_per_group=heads_per_group,
+                nope_dim=nope_dim,
+                rope_head_dim=rope_dim,
+                fp8_buf=fp8_buf,
+                scale_buf=scale_buf,
+                position_ids=pos,
+                impl="cuda",
+            )
+            fp8_ulp = (
+                fp8_cuda.view(torch.uint8).to(torch.int16)
+                - fp8_triton.view(torch.uint8).to(torch.int16)
+            ).abs()
+            assert int(fp8_ulp.max().item()) <= 1, f"M={M} fp8_ulp={fp8_ulp.max().item()}"
+            assert torch.equal(sf_cuda, sf_triton), f"M={M} scale mismatch"
+
+            # Verify TMA padding rows [M, buf_M) were strictly zeroed in scale buffer.
+            if buf_M > M:
+                pad_slice = scale_buf[:, M:buf_M, :]
+                assert torch.all(pad_slice == 0), f"M={M} padding rows non-zero!"
+    print("  [CUDA vs Triton & non-4-aligned TMA zero-pad] OK")
+
+
 if __name__ == "__main__":
     print("== Correctness (direct fp8 + scale) ==")
     test_correctness_fp8_and_scale()
     test_group_heads_tma_padding_and_multi_step_correctness()
+    test_cuda_vs_triton_and_non_aligned_m_parity()
     print("\n== Correctness (end-to-end via fp8_einsum) ==")
     test_end_to_end_via_einsum()
+    print("\n== Benchmark (Prefill M sweep) ==")
+    bench_prefill_sweep()
     print("\n== Benchmark (decode B sweep) ==")
     bench_decode()
     print("\nOK")

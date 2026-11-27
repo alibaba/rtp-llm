@@ -14,6 +14,24 @@ import torch
 import triton
 import triton.language as tl
 
+_CACHED_CUDA_OP = False
+_CUDA_RMSNORM_ROPE_OP = None
+
+
+def _get_cuda_rmsnorm_rope_op():
+    global _CACHED_CUDA_OP, _CUDA_RMSNORM_ROPE_OP
+    if not _CACHED_CUDA_OP:
+        try:
+            from rtp_llm.ops import rtp_llm_ops
+
+            _CUDA_RMSNORM_ROPE_OP = getattr(
+                rtp_llm_ops, "dsv4_fused_rmsnorm_rope", None
+            )
+        except Exception:
+            _CUDA_RMSNORM_ROPE_OP = None
+        _CACHED_CUDA_OP = True
+    return _CUDA_RMSNORM_ROPE_OP
+
 
 # ---------------------------------------------------------------------------
 # Candidate fused kernel — RMSNorm over last D + partial RoPE on last RD dims.
@@ -42,6 +60,7 @@ def _fused_rmsnorm_rope_kernel(
     BLOCK_D: tl.constexpr,
     BLOCK_RD: tl.constexpr,
     BLOCK_RD_HALF: tl.constexpr,
+    EVEN_NOPE: tl.constexpr,
 ):
     # Cast pid to int64 BEFORE the row-stride multiply: the prefill Q
     # site flattens [B, S, H, D] to [B*S*H, D], so N can exceed 2^22 and
@@ -49,11 +68,6 @@ def _fused_rmsnorm_rope_kernel(
     # D=512: max pid * stride = 4198399 * 512 = 2.15B > INT32_MAX →
     # CUDA_ERROR_ILLEGAL_ADDRESS).  Same pitfall as v4_rmsnorm.
     pid = tl.program_id(0).to(tl.int64)
-    # Tokens per freq slot — decouples the kernel from decode/prefill layout:
-    #   decode Q  [B, 1, H, D] + freqs [B, RD/2]     -> freq_stride_n = H
-    #   decode KV [B, 1,    D] + freqs [B, RD/2]     -> freq_stride_n = 1
-    #   prefill Q [1, S, H, D] + freqs [S, RD/2]     -> freq_stride_n = H
-    #   prefill KV[1, S,    D] + freqs [S, RD/2]     -> freq_stride_n = 1
     freq_idx = pid // freq_stride_n
 
     d_off = tl.arange(0, BLOCK_D)
@@ -72,10 +86,35 @@ def _fused_rmsnorm_rope_kernel(
     out_row = out_ptr + pid * out_stride_n
     if RD == 0:
         tl.store(out_row + d_off, y, mask=d_mask)
+    elif EVEN_NOPE:
+        # Single-pass NoPE + RoPE: transform trailing RoPE pairs in registers
+        # without re-reading x_rope or recomputing inv/weight.
+        if HAS_POS:
+            pos_val = tl.load(pos_ptr + freq_idx).to(tl.int64)
+            row_idx = tl.maximum(tl.minimum(pos_val, max_pos - 1), 0)
+        else:
+            row_idx = freq_idx
+
+        NUM_PAIRS: tl.constexpr = BLOCK_D // 2
+        NOPE_PAIRS: tl.constexpr = NOPE_OFFSET // 2
+        pair_off = tl.arange(0, NUM_PAIRS)
+        rope_pair = pair_off - NOPE_PAIRS
+        is_rope_pair = (rope_pair >= 0) & (rope_pair < RD_HALF)
+        cs_idx = tl.where(is_rope_pair, rope_pair, 0)
+        freq_base = (
+            freqs_ri_ptr + row_idx * freqs_stride_b + cs_idx * freqs_stride_k
+        )
+        cos = tl.load(freq_base, mask=is_rope_pair, other=1.0)
+        sin = tl.load(freq_base + 1, mask=is_rope_pair, other=0.0)
+        if INVERSE:
+            sin = -sin
+
+        y_even, y_odd = tl.split(tl.reshape(y, (NUM_PAIRS, 2)))
+        rot_even = tl.where(is_rope_pair, y_even * cos - y_odd * sin, y_even)
+        rot_odd = tl.where(is_rope_pair, y_even * sin + y_odd * cos, y_odd)
+        out = tl.interleave(rot_even, rot_odd)
+        tl.store(out_row + d_off, out, mask=d_mask)
     else:
-        # Store NoPE prefix directly so the full [BLOCK_D] register live range
-        # ends before RoPE loads/rotates the trailing [NOPE_OFFSET, D) slice.
-        # RoPE columns remain untouched in x_row even when out aliases x.
         if NOPE_OFFSET > 0:
             nope_mask = d_mask & (d_off < NOPE_OFFSET)
             tl.store(out_row + d_off, y, mask=nope_mask)
@@ -140,6 +179,7 @@ def _fused_rmsnorm_rope_group_heads_kernel(
     BLOCK_RD: tl.constexpr,
     BLOCK_RD_HALF: tl.constexpr,
     GROUP_HEADS: tl.constexpr,
+    EVEN_NOPE: tl.constexpr,
 ):
     freq_idx = tl.program_id(0).to(tl.int64)
     head_tile = tl.program_id(1).to(tl.int64)
@@ -162,9 +202,36 @@ def _fused_rmsnorm_rope_group_heads_kernel(
 
     if RD == 0:
         tl.store(out_rows + d_off[None, :], y, mask=d_mask[None, :])
+    elif EVEN_NOPE:
+        # Single-pass NoPE + RoPE: entire row read into registers once before
+        # any store, making grouped-head execution safe for inplace=True and
+        # out=x aliasing while eliminating the global x_rope reload.
+        if HAS_POS:
+            pos_val = tl.load(pos_ptr + freq_idx).to(tl.int64)
+            row_idx = tl.maximum(tl.minimum(pos_val, max_pos - 1), 0)
+        else:
+            row_idx = freq_idx
+
+        NUM_PAIRS: tl.constexpr = BLOCK_D // 2
+        NOPE_PAIRS: tl.constexpr = NOPE_OFFSET // 2
+        pair_off = tl.arange(0, NUM_PAIRS)
+        rope_pair = pair_off - NOPE_PAIRS
+        is_rope_pair = (rope_pair >= 0) & (rope_pair < RD_HALF)
+        cs_idx = tl.where(is_rope_pair, rope_pair, 0)
+        freq_base = (
+            freqs_ri_ptr + row_idx * freqs_stride_b + cs_idx * freqs_stride_k
+        )
+        cos = tl.load(freq_base, mask=is_rope_pair, other=1.0)
+        sin = tl.load(freq_base + 1, mask=is_rope_pair, other=0.0)
+        if INVERSE:
+            sin = -sin
+
+        y_even, y_odd = tl.split(tl.reshape(y, (GROUP_HEADS, NUM_PAIRS, 2)))
+        rot_even = tl.where(is_rope_pair[None, :], y_even * cos[None, :] - y_odd * sin[None, :], y_even)
+        rot_odd = tl.where(is_rope_pair[None, :], y_even * sin[None, :] + y_odd * cos[None, :], y_odd)
+        out = tl.interleave(rot_even, rot_odd)
+        tl.store(out_rows + d_off[None, :], out, mask=d_mask[None, :])
     else:
-        # Pure scaled-RMSNorm store for NoPE columns [0, NOPE_OFFSET); skip
-        # tl.split/tl.interleave and cos/sin math on all non-RoPE columns.
         if NOPE_OFFSET > 0:
             nope_mask = d_mask & (d_off < NOPE_OFFSET)
             tl.store(out_rows + d_off[None, :], y, mask=nope_mask[None, :])
@@ -212,6 +279,230 @@ def _fused_rmsnorm_rope_group_heads_kernel(
         )
 
 
+def _fused_rmsnorm_rope_impl(
+    x: torch.Tensor,
+    weight: torch.Tensor | None,
+    freqs_cis: torch.Tensor,
+    rope_head_dim: int,
+    *,
+    eps: float = 1e-6,
+    inverse: bool = False,
+    out: torch.Tensor | None = None,
+    inplace: bool = False,
+    group_heads: int | None = None,
+    position_ids: torch.Tensor | None = None,
+    allow_cuda: bool = True,
+) -> torch.Tensor:
+    assert x.is_cuda
+    assert x.dtype in (torch.bfloat16, torch.float16, torch.float32)
+    assert x.is_contiguous()
+    assert freqs_cis.is_contiguous()
+    assert not (out is not None and inplace), "out and inplace are mutually exclusive"
+    orig_shape = x.shape
+    D = orig_shape[-1]
+    RD = rope_head_dim
+    assert RD % 2 == 0 and RD <= D
+    x_flat = x.view(-1, D)
+    N = x_flat.shape[0]
+    if inplace:
+        out_flat = x_flat
+    elif out is not None:
+        assert out.shape == x.shape
+        assert out.dtype == x.dtype and out.is_cuda and out.is_contiguous()
+        out_flat = out.view(-1, D)
+    else:
+        out_flat = torch.empty_like(x_flat)
+    if N == 0:
+        return out_flat.view(*orig_shape)
+
+    if weight is not None:
+        assert weight.shape == (D,) and weight.is_contiguous()
+        assert weight.is_cuda and weight.dtype in (
+            torch.bfloat16,
+            torch.float16,
+            torch.float32,
+        )
+        w_opt = weight
+        has_weight = True
+    else:
+        w_opt = None
+        has_weight = False
+
+    if position_ids is not None:
+        assert freqs_cis.dim() == 2
+        pos_flat = position_ids.reshape(-1)
+        if pos_flat.device != x.device:
+            pos_flat = pos_flat.to(device=x.device)
+        if pos_flat.dtype not in (torch.int32, torch.int64):
+            pos_flat = pos_flat.to(dtype=torch.int32)
+        if not pos_flat.is_contiguous():
+            pos_flat = pos_flat.contiguous()
+        N_freq = pos_flat.shape[0]
+        assert N % N_freq == 0, f"N_tokens={N} not divisible by pos_len={N_freq}"
+        freq_stride_n = N // N_freq
+        freqs_ri = torch.view_as_real(freqs_cis)
+        max_pos = freqs_ri.shape[0]
+        assert freqs_ri.shape[1:] == (RD // 2, 2)
+        has_pos = True
+    else:
+        pos_flat = None
+        freqs_flat = freqs_cis.view(-1, freqs_cis.shape[-1])
+        N_freq = freqs_flat.shape[0]
+        assert N % N_freq == 0, f"N_tokens={N} not divisible by N_freq={N_freq}"
+        freq_stride_n = N // N_freq
+        freqs_ri = torch.view_as_real(freqs_flat)
+        max_pos = 1
+        assert freqs_ri.shape == (N_freq, RD // 2, 2)
+        has_pos = False
+
+    if allow_cuda and group_heads is None:
+        cuda_op = _get_cuda_rmsnorm_rope_op()
+        if (
+            cuda_op is not None
+            and x.dtype in (torch.bfloat16, torch.float16)
+            and D <= 1024
+            and (D % 8 == 0)
+            and (x_flat.data_ptr() & 15) == 0
+            and (out_flat.data_ptr() & 15) == 0
+            and (w_opt is None or (w_opt.data_ptr() & 15) == 0)
+            and (RD != 64 or (freqs_ri.data_ptr() & 15) == 0)
+        ):
+            cuda_op(
+                x_flat,
+                w_opt,
+                freqs_ri,
+                pos_flat,
+                out_flat,
+                freq_stride_n,
+                RD,
+                eps,
+                inverse,
+            )
+            return out_flat.view(*orig_shape)
+
+    w = w_opt if w_opt is not None else torch.empty(1, dtype=torch.float32, device=x.device)
+
+    BLOCK_D = triton.next_power_of_2(D)
+    assert BLOCK_D <= 4096
+    BLOCK_RD = triton.next_power_of_2(max(RD, 2))
+    BLOCK_RD_HALF = BLOCK_RD // 2
+    even_nope = (D % 2) == 0
+
+    if group_heads is not None:
+        selected_group_heads = group_heads
+    else:
+        selected_group_heads = 1
+        if D <= 512:
+            for gh in (8, 4, 2):
+                if (
+                    gh * D <= 2048
+                    and freq_stride_n % gh == 0
+                    and (freq_stride_n // gh) <= 65535
+                ):
+                    selected_group_heads = gh
+                    break
+    if selected_group_heads not in (1, 2, 4, 8):
+        raise ValueError(
+            f"invalid group_heads={selected_group_heads}; " "expected 1, 2, 4, or 8"
+        )
+    can_group_heads = (
+        selected_group_heads in (2, 4, 8)
+        and freq_stride_n % selected_group_heads == 0
+        and (freq_stride_n // selected_group_heads) <= 65535
+        and D <= 512
+    )
+    if can_group_heads:
+        grid = (N_freq, freq_stride_n // selected_group_heads)
+        group_num_warps = (
+            8 if (BLOCK_D > 512 or selected_group_heads * BLOCK_D >= 4096) else 4
+        )
+        _fused_rmsnorm_rope_group_heads_kernel[grid](
+            x_flat,
+            w,
+            freqs_ri,
+            pos_flat,
+            out_flat,
+            x_flat.stride(0),
+            out_flat.stride(0),
+            freq_stride_n=freq_stride_n,
+            freqs_stride_b=freqs_ri.stride(0),
+            freqs_stride_k=freqs_ri.stride(1),
+            max_pos=max_pos,
+            D=D,
+            RD=RD,
+            RD_HALF=RD // 2,
+            NOPE_OFFSET=D - RD,
+            INVERSE=inverse,
+            EPS=eps,
+            HAS_WEIGHT=has_weight,
+            HAS_POS=has_pos,
+            BLOCK_D=BLOCK_D,
+            BLOCK_RD=BLOCK_RD,
+            BLOCK_RD_HALF=BLOCK_RD_HALF,
+            GROUP_HEADS=selected_group_heads,
+            EVEN_NOPE=even_nope,
+            num_warps=group_num_warps,
+            num_stages=1,
+        )
+    else:
+        _fused_rmsnorm_rope_kernel[(N,)](
+            x_flat,
+            w,
+            freqs_ri,
+            pos_flat,
+            out_flat,
+            x_flat.stride(0),
+            out_flat.stride(0),
+            freq_stride_n=freq_stride_n,
+            freqs_stride_b=freqs_ri.stride(0),
+            freqs_stride_k=freqs_ri.stride(1),
+            max_pos=max_pos,
+            D=D,
+            RD=RD,
+            RD_HALF=RD // 2,
+            NOPE_OFFSET=D - RD,
+            INVERSE=inverse,
+            EPS=eps,
+            HAS_WEIGHT=has_weight,
+            HAS_POS=has_pos,
+            BLOCK_D=BLOCK_D,
+            BLOCK_RD=BLOCK_RD,
+            BLOCK_RD_HALF=BLOCK_RD_HALF,
+            EVEN_NOPE=even_nope,
+            num_warps=4 if BLOCK_D <= 512 else 8,
+            num_stages=1,
+        )
+    return out_flat.view(*orig_shape)
+
+
+def _fused_rmsnorm_rope_triton(
+    x: torch.Tensor,
+    weight: torch.Tensor | None,
+    freqs_cis: torch.Tensor,
+    rope_head_dim: int,
+    *,
+    eps: float = 1e-6,
+    inverse: bool = False,
+    out: torch.Tensor | None = None,
+    inplace: bool = False,
+    group_heads: int | None = None,
+    position_ids: torch.Tensor | None = None,
+) -> torch.Tensor:
+    return _fused_rmsnorm_rope_impl(
+        x,
+        weight,
+        freqs_cis,
+        rope_head_dim,
+        eps=eps,
+        inverse=inverse,
+        out=out,
+        inplace=inplace,
+        group_heads=group_heads,
+        position_ids=position_ids,
+        allow_cuda=False,
+    )
+
+
 def fused_rmsnorm_rope(
     x: torch.Tensor,
     weight: torch.Tensor | None,
@@ -246,154 +537,16 @@ def fused_rmsnorm_rope(
     into ``x``.  ``group_heads`` groups Q-style rows sharing the same frequency
     slot; valid values are 1, 2, 4, and 8.
     """
-    assert x.is_cuda
-    assert x.dtype in (torch.bfloat16, torch.float16, torch.float32)
-    assert x.is_contiguous()
-    assert freqs_cis.is_contiguous()
-    assert not (out is not None and inplace), "out and inplace are mutually exclusive"
-    orig_shape = x.shape
-    D = orig_shape[-1]
-    RD = rope_head_dim
-    assert RD % 2 == 0 and RD <= D
-    x_flat = x.view(-1, D)
-    N = x_flat.shape[0]
-    if inplace:
-        out_flat = x_flat
-    elif out is not None:
-        assert out.shape == x.shape
-        assert out.dtype == x.dtype and out.is_cuda and out.is_contiguous()
-        out_flat = out.view(-1, D)
-    else:
-        out_flat = torch.empty_like(x_flat)
-    if N == 0:
-        return out_flat.view(*orig_shape)
-
-    if weight is not None:
-        assert weight.shape == (D,) and weight.is_contiguous()
-        assert weight.is_cuda and weight.dtype in (
-            torch.bfloat16,
-            torch.float16,
-            torch.float32,
-        )
-        w = weight
-        has_weight = True
-    else:
-        w = torch.empty(1, dtype=torch.float32, device=x.device)
-        has_weight = False
-
-    if position_ids is not None:
-        assert freqs_cis.dim() == 2
-        pos_flat = position_ids.reshape(-1)
-        if pos_flat.device != x.device:
-            pos_flat = pos_flat.to(device=x.device)
-        if pos_flat.dtype not in (torch.int32, torch.int64):
-            pos_flat = pos_flat.to(dtype=torch.int32)
-        if not pos_flat.is_contiguous():
-            pos_flat = pos_flat.contiguous()
-        N_freq = pos_flat.shape[0]
-        assert N % N_freq == 0, f"N_tokens={N} not divisible by pos_len={N_freq}"
-        freq_stride_n = N // N_freq
-        freqs_ri = torch.view_as_real(freqs_cis)
-        max_pos = freqs_ri.shape[0]
-        assert freqs_ri.shape[1:] == (RD // 2, 2)
-        has_pos = True
-    else:
-        pos_flat = None
-        freqs_flat = freqs_cis.view(-1, freqs_cis.shape[-1])
-        N_freq = freqs_flat.shape[0]
-        assert N % N_freq == 0, f"N_tokens={N} not divisible by N_freq={N_freq}"
-        freq_stride_n = N // N_freq
-        freqs_ri = torch.view_as_real(freqs_flat)
-        max_pos = 1
-        assert freqs_ri.shape == (N_freq, RD // 2, 2)
-        has_pos = False
-
-    BLOCK_D = triton.next_power_of_2(D)
-    assert BLOCK_D <= 4096
-    BLOCK_RD = triton.next_power_of_2(max(RD, 2))
-    BLOCK_RD_HALF = BLOCK_RD // 2
-
-    if group_heads is not None:
-        selected_group_heads = group_heads
-    else:
-        selected_group_heads = 1
-        if D <= 512 and not inplace:
-            for gh in (8, 4, 2):
-                if (
-                    gh * D <= 2048
-                    and freq_stride_n % gh == 0
-                    and (freq_stride_n // gh) <= 65535
-                ):
-                    selected_group_heads = gh
-                    break
-    if selected_group_heads not in (1, 2, 4, 8):
-        raise ValueError(
-            f"invalid group_heads={selected_group_heads}; " "expected 1, 2, 4, or 8"
-        )
-    can_group_heads = (
-        selected_group_heads in (2, 4, 8)
-        and not inplace
-        and freq_stride_n % selected_group_heads == 0
-        and (freq_stride_n // selected_group_heads) <= 65535
-        and D <= 512
+    return _fused_rmsnorm_rope_impl(
+        x,
+        weight,
+        freqs_cis,
+        rope_head_dim,
+        eps=eps,
+        inverse=inverse,
+        out=out,
+        inplace=inplace,
+        group_heads=group_heads,
+        position_ids=position_ids,
+        allow_cuda=True,
     )
-    if can_group_heads:
-        grid = (N_freq, freq_stride_n // selected_group_heads)
-        group_num_warps = (
-            8 if (BLOCK_D > 512 or selected_group_heads * BLOCK_D >= 4096) else 4
-        )
-        _fused_rmsnorm_rope_group_heads_kernel[grid](
-            x_flat,
-            w,
-            freqs_ri,
-            pos_flat,
-            out_flat,
-            x_flat.stride(0),
-            out_flat.stride(0),
-            freq_stride_n=freq_stride_n,
-            freqs_stride_b=freqs_ri.stride(0),
-            freqs_stride_k=freqs_ri.stride(1),
-            max_pos=max_pos,
-            D=D,
-            RD=RD,
-            RD_HALF=RD // 2,
-            NOPE_OFFSET=D - RD,
-            INVERSE=inverse,
-            EPS=eps,
-            HAS_WEIGHT=has_weight,
-            HAS_POS=has_pos,
-            BLOCK_D=BLOCK_D,
-            BLOCK_RD=BLOCK_RD,
-            BLOCK_RD_HALF=BLOCK_RD_HALF,
-            GROUP_HEADS=selected_group_heads,
-            num_warps=group_num_warps,
-            num_stages=1,
-        )
-    else:
-        _fused_rmsnorm_rope_kernel[(N,)](
-            x_flat,
-            w,
-            freqs_ri,
-            pos_flat,
-            out_flat,
-            x_flat.stride(0),
-            out_flat.stride(0),
-            freq_stride_n=freq_stride_n,
-            freqs_stride_b=freqs_ri.stride(0),
-            freqs_stride_k=freqs_ri.stride(1),
-            max_pos=max_pos,
-            D=D,
-            RD=RD,
-            RD_HALF=RD // 2,
-            NOPE_OFFSET=D - RD,
-            INVERSE=inverse,
-            EPS=eps,
-            HAS_WEIGHT=has_weight,
-            HAS_POS=has_pos,
-            BLOCK_D=BLOCK_D,
-            BLOCK_RD=BLOCK_RD,
-            BLOCK_RD_HALF=BLOCK_RD_HALF,
-            num_warps=4 if BLOCK_D <= 512 else 8,
-            num_stages=1,
-        )
-    return out_flat.view(*orig_shape)
