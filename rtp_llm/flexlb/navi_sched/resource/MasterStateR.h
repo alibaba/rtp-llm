@@ -14,6 +14,7 @@
 #include "aios/navi_sched/data/ClientRequestToMasterData.h"
 #include "aios/navi_sched/common/NaviSchedScheduleData.h"
 #include "aios/navi_sched/resource/MasterBatchReservation.h"
+#include "aios/navi_sched/resource/MasterKVPreparationForecasts.h"
 #include "aios/navi_sched/resource/MasterLatencyModelR.h"
 #include "aios/navi_sched/resource/MasterPendingCacheR.h"
 #include "aios/navi_sched/scheduler/ScheduleContext.h"
@@ -363,6 +364,7 @@ public:
                 std::make_shared<const LatencyResidualModel::RuntimeConfig>();
         mutable autil::ThreadMutex _runtimeLock;
         RuntimeState _runtimeState;
+        MasterKVPreparationForecasts _kvPreparationForecasts;
         ReservationList _pendingBatchReservations;
         std::unordered_map<int64_t, ReservationPtr> _reservationsById;
         bool _acceptReservations = true;

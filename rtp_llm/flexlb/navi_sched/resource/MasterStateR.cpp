@@ -514,6 +514,8 @@ bool MasterStateR::NodeState::getScheduleSnapshot(const std::string &bizName,
         snapshot.load.inflightPredictedLatencySumMs =
             static_cast<double>(effectivePredictedLatencySumMs);
         snapshot.workload = _runtimeState.workload;
+        snapshot.kvPreparationSnapshotMonoUs = autil::TimeUtility::monotonicTimeUs();
+        snapshot.kvPreparationEstimates = _kvPreparationForecasts.snapshot(snapshot.workload.executionLoadRequests);
         snapshot.unifiedLatencyPrediction = _runtimeState.unifiedLatencyPrediction;
         if (snapshot.unifiedLatencyPrediction) {
             if (!snapshot.workload.valid()) {
@@ -533,15 +535,20 @@ bool MasterStateR::NodeState::getScheduleSnapshot(const std::string &bizName,
                         snapshot.reportedWorkloadFeatures)) {
                     return false;
                 }
+                const bool projectPreparingReservations = snapshot.latencyModel &&
+                    snapshot.latencyModel->binaryVersion == NonLinearPrefillModelR::BINARY_VERSION &&
+                    NonLinearPrefillModelR::usesCapacitySplitParameters(snapshot.latencyModel->parameters);
                 for (const auto &reservationPtr : _pendingBatchReservations) {
                     const auto &reservation = *reservationPtr;
                     if (!reservation.batch.appendWaitingCapacityFeatures(
                             snapshot.workloadFeatures, snapshot.maxRunningRequestCount,
-                            workloadSlots, snapshot.workload.executionLoadTracked) ||
+                            workloadSlots, snapshot.workload.executionLoadTracked,
+                            projectPreparingReservations) ||
                         !reservation.batch.appendWaitingCapacityFeatures(
                             snapshot.reservedWorkloadFeatures,
                             snapshot.maxRunningRequestCount, reservedSlots,
-                            snapshot.workload.executionLoadTracked)) {
+                            snapshot.workload.executionLoadTracked,
+                            projectPreparingReservations)) {
                         return false;
                     }
                 }
@@ -794,6 +801,14 @@ bool MasterStateR::NodeState::reserveBatch(
         _pendingBatchReservations.insert(_pendingBatchReservations.end(), reservation);
     reservation->attached = true;
     _reservationsById.emplace(batchId, reservation);
+    if (_runtimeState.workload.executionLoadTracked && _runtimeState.agentStartTimeUs > 0) {
+        _kvPreparationForecasts.beginSession(uint64_t(_runtimeState.agentStartTimeUs));
+        for (const auto &entry : reservation->batch._requests) {
+            const auto &request=entry.request;
+            if(request.predictedExternalReadTokens>=0)
+                _kvPreparationForecasts.reserve(request.requestId,request.predictedExternalReadTokens,request.initialKVPreparationQueueMs);
+        }
+    }
     if (reserved) {
         *reserved = reservation;
     }
@@ -812,6 +827,8 @@ MasterStateR::NodeState::findReservationLocked(int64_t batchId)
 void MasterStateR::NodeState::eraseReservationLocked(PendingBatchReservation &reservation)
 {
     reservation.attached = false;
+    for(const auto &entry:reservation.batch._requests)
+        _kvPreparationForecasts.releaseReservation(entry.request.requestId);
     const auto batchId = reservation.batch.getBatchId();
     _pendingBatchReservations.erase(reservation.position);
     _reservationsById.erase(batchId);
@@ -819,6 +836,7 @@ void MasterStateR::NodeState::eraseReservationLocked(PendingBatchReservation &re
 
 void MasterStateR::NodeState::clearReservationsLocked()
 {
+    _kvPreparationForecasts.clearActive();
     for (const auto &reservation : _pendingBatchReservations) {
         reservation->attached = false;
     }
@@ -2615,6 +2633,7 @@ bool MasterStateR::reportAgent(const NodeStatePtr &state,
     auto receiveTimeUs = autil::TimeUtility::currentTime();
     decltype(state->_pendingBatchReservations) handshakeReservations;
     std::vector<navi::AsyncPipePtr> terminalDispatchPipes;
+    std::vector<MasterKVPreparationForecasts::AuditRecord> kvPreparationAudit;
     bool reservationStateValid = true;
     bool admissionObserved = false;
     int64_t admittedScheduleBatchId = 0;
@@ -2992,6 +3011,19 @@ bool MasterStateR::reportAgent(const NodeStatePtr &state,
             runtime.lastEvent = event;
             runtime.lastEventTimeUs = update->eventTimeUs;
             runtime.lastReceiveTimeUs = receiveTimeUs;
+            if (runtime.agentStartTimeUs > 0) {
+                state->_kvPreparationForecasts.beginSession(uint64_t(runtime.agentStartTimeUs));
+                if(event==NaviSchedAgentEvent::AGENT_HANDSHAKE) {
+                    for(const auto &reservation:handshakeReservations)
+                        for(const auto &entry:reservation->batch._requests)
+                            state->_kvPreparationForecasts.releaseReservation(entry.request.requestId);
+                }
+                if(runtime.workload.executionLoadTracked)
+                    state->_kvPreparationForecasts.observe(uint64_t(runtime.agentStartTimeUs),runtime.workload.revision,
+                        runtime.workload.executionLoadRequests,autil::TimeUtility::monotonicTimeUs(),
+                        &kvPreparationAudit);
+                else state->_kvPreparationForecasts.clearActive();
+            }
         } else {
             if (previousRuntime) {
                 runtime = std::move(*previousRuntime);
@@ -3011,6 +3043,11 @@ bool MasterStateR::reportAgent(const NodeStatePtr &state,
                         previousReservationOwner->batch.getBatchId(),
                         previousReservationOwner);
                 }
+                for(const auto &entry:previousReservation->batch._requests) {
+                    if(entry.request.predictedExternalReadTokens>=0)
+                        state->_kvPreparationForecasts.reserve(entry.request.requestId,
+                            entry.request.predictedExternalReadTokens,entry.request.initialKVPreparationQueueMs);
+                }
                 if (!state->updateReservationPendingCacheLocked(
                         previousReservation->batch)) {
                     reservationPendingCacheRestoreFailed = true;
@@ -3023,6 +3060,54 @@ bool MasterStateR::reportAgent(const NodeStatePtr &state,
             admittedScheduleBatchId = 0;
             admittedLocalBatchId = 0;
             admittedWorkloadRevision = 0;
+        }
+    }
+    for (const auto &audit : kvPreparationAudit) {
+        using Phase=MasterKVPreparationForecasts::AuditRecord::Phase;
+        const char *phase=audit.phase==Phase::START ? "start" :
+                          audit.phase==Phase::COMPLETE ? "complete" : "failed";
+        const double predicted=audit.estimate.totalMs.value_or(-1.0);
+        NAVI_KERNEL_LOG(INFO,
+            "[navi-master-kv-preparation] phase=%s agent=%s agent_session=%lu "
+            "workload_revision=%lu request_id=%lu load_generation=%lu "
+            "model_samples_before=%lu metadata_known=%d start_observed=%d trained=%d "
+            "frozen_total_ms=%.9f actual_total_ms=%.9f anchor_elapsed_ms=%.9f "
+            "anchor_master_mono_us=%ld "
+            "read_tokens=%.3f preceding_read_tokens=%.3f initial_queue_ms=%.9f",
+            phase,agentId.c_str(),audit.session,audit.revision,
+            audit.estimate.requestId,audit.estimate.generation,audit.modelSamplesBefore,
+            int(audit.metadataKnown),int(audit.observedPreparing),int(audit.trained),
+            predicted,audit.actualPreparationMs,audit.estimate.observedPreparationMs,
+            audit.estimate.receivedMonoUs,audit.metadataKnown ? audit.features[1]*4096.0 : -1.0,
+            audit.metadataKnown ? audit.features[2]*4096.0 : -1.0,
+            audit.metadataKnown ? audit.features[3]*1000.0 : -1.0);
+        if (!_metricsReporterR || !_metricsReporterR->getReporter()) continue;
+        const auto &reporter=_metricsReporterR->getReporter();
+        kmonitor::MetricsTags tags;tags.AddTag("agent_id",agentId);
+        const auto report=[&](double value,const char *name,kmonitor::MetricType type) {
+            reporter->report(value,name,type,&tags,kmonitor::MetricLevel::FATAL);
+        };
+        if(audit.phase==Phase::START) {
+            report(1,"master.kv_preparation_started_qps",kmonitor::MetricType::QPS);
+            if(audit.estimate.totalMs)
+                report(predicted,"master.kv_preparation_predicted_ms",kmonitor::MetricType::GAUGE);
+            else
+                report(1,"master.kv_preparation_unknown_forecast_qps",kmonitor::MetricType::QPS);
+        } else if(audit.phase==Phase::FAILED) {
+            report(1,"master.kv_preparation_failed_qps",kmonitor::MetricType::QPS);
+        } else {
+            report(1,"master.kv_preparation_completed_qps",kmonitor::MetricType::QPS);
+            report(audit.actualPreparationMs,"master.kv_preparation_observed_ms",kmonitor::MetricType::GAUGE);
+            if(audit.trained)
+                report(1,"master.kv_preparation_fit_qps",kmonitor::MetricType::QPS);
+            if(audit.estimate.totalMs) {
+                const double bias=predicted-audit.actualPreparationMs;
+                report(bias,"master.kv_preparation_prediction_bias_ms",kmonitor::MetricType::GAUGE);
+                report(std::abs(bias),"master.kv_preparation_prediction_absolute_error_ms",kmonitor::MetricType::GAUGE);
+                if(audit.actualPreparationMs>0.0)
+                    report(100.0*std::abs(bias)/audit.actualPreparationMs,
+                        "master.kv_preparation_prediction_mape",kmonitor::MetricType::GAUGE);
+            }
         }
     }
     if (staleInflightSnapshotIgnored) {
@@ -3902,6 +3987,19 @@ void MasterStateR::reserveScheduleNodeBatch(NaviSchedScheduleContext &context,
                  context._decisions[requestIndex].predictedExecutionLatencyMs,
              request.explicitCacheCheckpointPosition, request.nativePrefillSlotRelease,
              context._decisions[requestIndex].executionLoadIncluded});
+    }
+    if (context._scheduleNodes[nodeIndex]._workload.executionLoadTracked) {
+        const auto cacheInputs=context.getExecutionCacheInputs(nodeIndex);
+        if(cacheInputs && cacheInputs->size()==context._requests.size()) {
+            for(size_t i=0;i<requestIndexes.size();++i) {
+                const auto index=requestIndexes[i];const auto &d=context._decisions[index];
+                reservationRequests[i].predictedExternalReadTokens=(*cacheInputs)[index].externalReadTokens;
+                reservationRequests[i].initialKVPreparationQueueMs=d.predictedQueueLatencyMs;
+                if(d.latencyPrediction && d.latencyPrediction->recomputable && context._scheduleNodes[nodeIndex].usesUnifiedLatencyPrediction())
+                    reservationRequests[i].initialKVPreparationQueueMs=std::max(0.0,d.predictedExecutionLatencyMs-
+                        context._scheduleNodes[nodeIndex].predictLatency(d.latencyPrediction->floorFeatures));
+            }
+        }
     }
     const auto &decision = context._decisions[requestIndexes.front()];
     auto state =

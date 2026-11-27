@@ -63,12 +63,12 @@ public:
             double floorLinearCost = 0.0;
             double reportedLinearCost = 0.0;
             double workloadLinearCost = 0.0;
-            int64_t floorHitTokens = 0;
-            int64_t floorMissTokens = 0;
-            int64_t reportedHitTokens = 0;
-            int64_t reportedMissTokens = 0;
-            int64_t floorPrecedingRequests = 0;
-            int64_t workloadPrecedingRequests = 0;
+            double floorHitTokens = 0.0;
+            double floorMissTokens = 0.0;
+            double reportedHitTokens = 0.0;
+            double reportedMissTokens = 0.0;
+            double floorPrecedingRequests = 0.0;
+            double workloadPrecedingRequests = 0.0;
         };
 
         const NaviSchedScheduleContext *baselineContext = nullptr;

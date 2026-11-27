@@ -547,6 +547,15 @@ void MasterScheduleResultKernel::logAdmissionPredictions(
                                   : node.usesRunningElapsedProgress()
                                       ? "running_elapsed_progress"
                                       : "wall_clock_decay";
+        const auto expectedMoments=[](const NaviSchedLatencyFeatures &value) {
+            const auto expected=value.getExpectedKVWorkload();
+            if(!expected) return std::string("[]");
+            std::vector<double> moments(expected->running.begin(),expected->running.end());
+            moments.insert(moments.end(),expected->waiting.begin(),expected->waiting.end());
+            moments.push_back(expected->precedingRequests);
+            moments.push_back(expected->batchCount);
+            return autil::legacy::ToJsonString(moments,true);
+        };
         const auto geometrySuffix =
             NonLinearPrefillModelR::usesGeometryForVersion(node.getLatencyBinaryVersion())
                 ? std::string(" model_binary_version=") +
@@ -564,6 +573,9 @@ void MasterScheduleResultKernel::logAdmissionPredictions(
                       " max_external_read_tokens=" +
                       std::to_string(features.getMaxExternalReadTokens())
                 : std::string();
+        const auto workloadSuffix=geometrySuffix +
+            " kv_preparing_expected_moments="+expectedMoments(features)+
+            " kv_preparing_floor_expected_moments="+expectedMoments(floor);
         NAVI_KERNEL_LOG(
             INFO,
             "[navi-master-admission-prediction] admission_phase=%s schedule_time_us=%ld "
@@ -668,7 +680,7 @@ void MasterScheduleResultKernel::logAdmissionPredictions(
             floor.getRunningDecodeRemainingTokenBudget(), floor.getWaitingBatchSize(),
             floor.getWaitingCacheHitTokenCount(), floor.getWaitingCacheMissTokenCount(),
             floor.getWaitingCacheMissTokenSquareSum(),
-            floor.getWaitingCacheHitMissTokenProductSum(), geometrySuffix.c_str());
+            floor.getWaitingCacheHitMissTokenProductSum(), workloadSuffix.c_str());
         if (std::abs(audit.finalExecutionMs - decision.predictedExecutionLatencyMs) >
             1e-6) {
             NAVI_KERNEL_LOG(

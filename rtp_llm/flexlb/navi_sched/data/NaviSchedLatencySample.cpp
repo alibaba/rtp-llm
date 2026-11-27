@@ -218,9 +218,18 @@ bool NaviSchedLatencyFeatures::append(const NaviSchedLatencyFeatures &other)
             std::numeric_limits<int64_t>::max() - _runningDecodeRemainingTokenBudget) {
         return false;
     }
+    auto expected = _expectedKVWorkload;
+    if (other._expectedKVWorkload) {
+        if (expected) {
+            auto combined=*expected;
+            if (!combined.append(*other._expectedKVWorkload)) return false;
+            expected=std::make_shared<const NaviSchedExpectedKVWorkload>(combined);
+        } else { expected=other._expectedKVWorkload; }
+    }
     if (other._capacitySplit) {
         _capacitySplit = true;
     }
+    _expectedKVWorkload=std::move(expected);
     _executionStepCount += other._executionStepCount;
     _globalPaddedTokens += other._globalPaddedTokens;
     _batchCount += other._batchCount;
@@ -286,6 +295,17 @@ bool NaviSchedLatencyFeatures::subtract(const NaviSchedLatencyFeatures &other)
     if (remainingDecodeRequestCount == 0 && remainingDecodeTokenBudget != 0) {
         return false;
     }
+    auto expected = _expectedKVWorkload;
+    if (other._expectedKVWorkload) {
+        if (!expected) return false;
+        if (expected == other._expectedKVWorkload) { expected.reset(); }
+        else {
+            auto remaining=*expected;
+            if (!remaining.subtract(*other._expectedKVWorkload)) return false;
+            expected=remaining.empty() ? nullptr : std::make_shared<const NaviSchedExpectedKVWorkload>(remaining);
+        }
+    }
+    _expectedKVWorkload=std::move(expected);
     _executionStepCount -= other._executionStepCount;
     _globalPaddedTokens -= other._globalPaddedTokens;
     _batchCount -= other._batchCount;
@@ -433,6 +453,7 @@ void NaviSchedLatencyFeatures::serialize(autil::DataBuffer &dataBuffer) const
 void NaviSchedLatencyFeatures::deserialize(autil::DataBuffer &dataBuffer)
 {
     clearExecutionGeometry();
+    _expectedKVWorkload.reset();
     dataBuffer.read(_batchCount);
     dataBuffer.read(_batchSize);
     dataBuffer.read(_cacheHitTokenCount);
@@ -546,6 +567,44 @@ bool NaviSchedLatencyFeatures::deserializeWithExecutionCacheSource(
     }
     *this = decoded;
     return true;
+}
+
+
+bool NaviSchedLatencyFeatures::setExpectedKVWorkload(const NaviSchedExpectedKVWorkload &workload) {
+    if (!_capacitySplit || !workload.valid()) return false;
+    _expectedKVWorkload=workload.empty() ? nullptr : std::make_shared<const NaviSchedExpectedKVWorkload>(workload);
+    return true;
+}
+double NaviSchedLatencyFeatures::getPlanningCacheHitTokenCount() const {
+    return double(getCacheHitTokenCount()) + (_expectedKVWorkload ? _expectedKVWorkload->hitTokens() : 0.0);
+}
+double NaviSchedLatencyFeatures::getPlanningCacheMissTokenCount() const {
+    return double(getCacheMissTokenCount()) + (_expectedKVWorkload ? _expectedKVWorkload->missTokens() : 0.0);
+}
+double NaviSchedLatencyFeatures::getPlanningPrecedingRequestCount() const {
+    return double(getPrecedingRequestCount()) + (_expectedKVWorkload ? _expectedKVWorkload->precedingRequests : 0.0);
+}
+void NaviSchedLatencyFeatures::serializeWithExpectedKVWorkload(autil::DataBuffer &buffer) const {
+    serializeWithExecutionCacheSource(buffer);
+    buffer.write(bool(_expectedKVWorkload));
+    if (!_expectedKVWorkload) return;
+    for(auto v:_expectedKVWorkload->running) buffer.write(v);
+    for(auto v:_expectedKVWorkload->waiting) buffer.write(v);
+    buffer.write(_expectedKVWorkload->precedingRequests);
+    buffer.write(_expectedKVWorkload->batchCount);
+}
+bool NaviSchedLatencyFeatures::deserializeWithExpectedKVWorkload(autil::DataBuffer &buffer) {
+    NaviSchedLatencyFeatures decoded;
+    if (!decoded.deserializeWithExecutionCacheSource(buffer)) return false;
+    bool present=false;buffer.read(present);
+    if(present) {
+        NaviSchedExpectedKVWorkload expected;
+        for(auto &v:expected.running) buffer.read(v);
+        for(auto &v:expected.waiting) buffer.read(v);
+        buffer.read(expected.precedingRequests);buffer.read(expected.batchCount);
+        if(!decoded.setExpectedKVWorkload(expected)) return false;
+    }
+    *this=std::move(decoded);return true;
 }
 
 } // namespace navi_sched

@@ -242,6 +242,7 @@ struct ReplayKVPreparationJson : public autil::legacy::Jsonizable {
         json.Jsonize("request_id", value.requestId);
         json.Jsonize("local_batch_id", value.localBatchId);
         json.Jsonize("load_generation", value.loadGeneration);
+        json.Jsonize("preparation_elapsed_ms", value.preparationElapsedMs, -1.0);
         json.Jsonize("context_tokens", value.contextTokens);
         json.Jsonize("compute_tokens", value.computeTokens);
         json.Jsonize("running_capacity", value.runningCapacity);
@@ -373,6 +374,22 @@ struct ReplayWorkloadJson : public autil::legacy::Jsonizable {
     }
 };
 
+struct ReplayExpectedKVWorkloadJson : public autil::legacy::Jsonizable {
+    NaviSchedExpectedKVWorkload value;
+    void Jsonize(JsonWrapper &json) override {
+        std::vector<double> running(value.running.begin(),value.running.end());
+        std::vector<double> waiting(value.waiting.begin(),value.waiting.end());
+        json.Jsonize("running",running);json.Jsonize("waiting",waiting);
+        json.Jsonize("preceding_requests",value.precedingRequests);
+        json.Jsonize("batch_count",value.batchCount);
+        if(running.size()!=5 || waiting.size()!=5)
+            throw std::invalid_argument("expected KV workload requires five moments per capacity");
+        std::copy(running.begin(),running.end(),value.running.begin());
+        std::copy(waiting.begin(),waiting.end(),value.waiting.begin());
+        if(!value.valid()) throw std::invalid_argument("invalid expected KV workload");
+    }
+};
+
 struct ReplayLatencyFeaturesJson : public autil::legacy::Jsonizable {
     NaviSchedLatencyFeatures value;
     ReplayLatencyFeaturesJson() = default;
@@ -382,6 +399,15 @@ struct ReplayLatencyFeaturesJson : public autil::legacy::Jsonizable {
     }
     void Jsonize(JsonWrapper &json) override
     {
+        std::optional<NaviSchedExpectedKVWorkload> expected;
+        if(json.GetMode()==JsonMode::TO_JSON) {
+            if(const auto p=value.getExpectedKVWorkload()) {
+                ReplayExpectedKVWorkloadJson encoded;encoded.value=*p;
+                json.Jsonize("expected_kv_workload",encoded);
+            }
+        } else if(json.GetMap().count("expected_kv_workload")) {
+            ReplayExpectedKVWorkloadJson encoded;json.Jsonize("expected_kv_workload",encoded);expected=encoded.value;
+        }
         auto batchCount = value.getBatchCount();
         auto precedingRequestCount = value.getPrecedingRequestCount();
         auto runningElapsedTimeMs = value.getRunningElapsedTimeMs();
@@ -496,6 +522,8 @@ struct ReplayLatencyFeaturesJson : public autil::legacy::Jsonizable {
                 AUTIL_LEGACY_THROW(autil::legacy::NotJsonizableException,
                                    "invalid execution cache source");
             }
+            if(expected && !value.setExpectedKVWorkload(*expected))
+                throw std::invalid_argument("expected KV workload requires capacity features");
         }
     }
 };

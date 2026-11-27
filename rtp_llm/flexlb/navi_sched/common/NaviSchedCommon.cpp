@@ -102,8 +102,8 @@ bool NaviSchedLatencyPrediction::valid() const
 
 void NaviSchedLatencyPrediction::serialize(autil::DataBuffer &dataBuffer) const
 {
-    features.serializeWithExecutionCacheSource(dataBuffer);
-    floorFeatures.serializeWithExecutionCacheSource(dataBuffer);
+    features.serializeWithExpectedKVWorkload(dataBuffer);
+    floorFeatures.serializeWithExpectedKVWorkload(dataBuffer);
     dataBuffer.write(fixedLatencyMs);
     dataBuffer.write(hasFloor);
     dataBuffer.write(recomputable);
@@ -111,8 +111,8 @@ void NaviSchedLatencyPrediction::serialize(autil::DataBuffer &dataBuffer) const
 
 void NaviSchedLatencyPrediction::deserialize(autil::DataBuffer &dataBuffer)
 {
-    if (!features.deserializeWithExecutionCacheSource(dataBuffer) ||
-        !floorFeatures.deserializeWithExecutionCacheSource(dataBuffer)) {
+    if (!features.deserializeWithExpectedKVWorkload(dataBuffer) ||
+        !floorFeatures.deserializeWithExpectedKVWorkload(dataBuffer)) {
         AUTIL_LEGACY_THROW(autil::DataBufferCorruptedException,
                            "invalid latency prediction execution features");
     }
@@ -719,9 +719,9 @@ void NaviSchedNodeInfo::serialize(autil::DataBuffer &dataBuffer) const
     dataBuffer.write(pdSeparated);
     dataBuffer.write(unifiedLatencyPrediction);
     dataBuffer.write(workload);
-    dataBuffer.write(reservedWorkloadFeatures);
+    reservedWorkloadFeatures.serializeWithExpectedKVWorkload(dataBuffer);
     dataBuffer.write(workloadFeatureSnapshotValid);
-    dataBuffer.write(workloadFeatures);
+    workloadFeatures.serializeWithExpectedKVWorkload(dataBuffer);
     dataBuffer.write(maxRunningRequestCount);
     dataBuffer.write(workloadRunningCapacitySlotCount);
     dataBuffer.write(reservedRunningCapacitySlotCount);
@@ -782,9 +782,11 @@ void NaviSchedNodeInfo::deserialize(autil::DataBuffer &dataBuffer)
     dataBuffer.read(pdSeparated);
     dataBuffer.read(unifiedLatencyPrediction);
     dataBuffer.read(workload);
-    dataBuffer.read(reservedWorkloadFeatures);
+    if (!reservedWorkloadFeatures.deserializeWithExpectedKVWorkload(dataBuffer))
+        AUTIL_LEGACY_THROW(autil::DataBufferCorruptedException, "invalid replay expected KV workload");
     dataBuffer.read(workloadFeatureSnapshotValid);
-    dataBuffer.read(workloadFeatures);
+    if (!workloadFeatures.deserializeWithExpectedKVWorkload(dataBuffer))
+        AUTIL_LEGACY_THROW(autil::DataBufferCorruptedException, "invalid replay expected KV workload");
     dataBuffer.read(maxRunningRequestCount);
     dataBuffer.read(workloadRunningCapacitySlotCount);
     dataBuffer.read(reservedRunningCapacitySlotCount);

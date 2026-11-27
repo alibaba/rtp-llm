@@ -373,9 +373,15 @@ void AgentReportR::overlayKVPreparationStatesLocked(NaviSchedWorkloadSnapshot &s
     for (const auto &request : snapshot.executionLoadRequests)
         keys.push_back({uint64_t(_agentStartTimeUs), request.requestId, request.loadGeneration});
     const auto loads = _kvLoadTracker->snapshots(keys);
+    const auto observedNs = autil::TimeUtility::monotonicTimeNs();
     for (size_t i=0; i<loads.size(); ++i) {
         auto &request = snapshot.executionLoadRequests[i];
-        if (!loads[i] || request.state == NativeKVExecutionState::EXECUTING) continue;
+        if (!loads[i]) continue;
+        request.preparationElapsedMs =
+            request.state == NativeKVExecutionState::EXECUTING &&
+                    loads[i]->state != AgentKVLoadTracker::State::READY
+                ? -1.0 : loads[i]->preparationElapsedMs(observedNs);
+        if (request.state == NativeKVExecutionState::EXECUTING) continue;
         if (loads[i]->state == AgentKVLoadTracker::State::FAILED ||
             loads[i]->state == AgentKVLoadTracker::State::CANCELED)
             request.state = NativeKVExecutionState::FAILED;

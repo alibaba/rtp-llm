@@ -100,6 +100,7 @@ class VLLMV6DCacheSourceTest(unittest.TestCase):
         namespace = {"_WorkloadContribution": SimpleNamespace}
         exec(compile(ast.fix_missing_locations(module), str(SOURCE), "exec"), namespace)
         observer = namespace["Observer"]()
+        observer._native_pipeline_state = None
         observer._pp_capacity_unified = False
         observer._predicted_cache_hit_for_request = lambda request: 48
         observer._forward_request_state = lambda request_id: SimpleNamespace(batch_id=77)
@@ -129,7 +130,7 @@ class VLLMV6DCacheSourceTest(unittest.TestCase):
             with self.subTest(name=name):
                 request = SimpleNamespace(request_id="request", num_prompt_tokens=64,
                                           num_computed_tokens=computed, **fields)
-                result = observer._make_workload_contribution(request, 8)
+                result = observer._make_workload_contribution(request, 8, None)
                 self.assertEqual(expected_context, result.prefill_context_tokens)
                 self.assertEqual(64 - expected_context, result.remaining_prefill_tokens)
                 self.assertEqual(77, result.batch_id)
@@ -154,6 +155,7 @@ class VLLMV6DCacheSourceTest(unittest.TestCase):
         ]:
             with self.subTest(fields=fields):
                 observer = namespace["Observer"]()
+                observer._native_pipeline_state = None
                 observer._pp_capacity_unified = False
                 observer._predicted_cache_hit_for_request = lambda r: 48
                 observer._forward_request_state = lambda rid: SimpleNamespace(batch_id=77)

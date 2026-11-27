@@ -2,6 +2,8 @@
 
 #include <stdint.h>
 #include <memory>
+#include "aios/navi_sched/data/NaviSchedExpectedKVWorkload.h"
+#include <memory>
 
 namespace autil {
 class DataBuffer;
@@ -15,6 +17,14 @@ struct TPUPrefillPP4TimingObservation;
 
 class NaviSchedLatencyFeatures {
 public:
+    // Master planning only. Ordinary sample serialization omits this component.
+    const NaviSchedExpectedKVWorkload *getExpectedKVWorkload() const { return _expectedKVWorkload.get(); }
+    bool setExpectedKVWorkload(const NaviSchedExpectedKVWorkload &workload);
+    double getPlanningCacheHitTokenCount() const;
+    double getPlanningCacheMissTokenCount() const;
+    double getPlanningPrecedingRequestCount() const;
+    void serializeWithExpectedKVWorkload(autil::DataBuffer &buffer) const;
+    bool deserializeWithExpectedKVWorkload(autil::DataBuffer &buffer);
     // Geometry belongs to complete execution batches, not individual requests.
     bool setExecutionGeometry(int64_t executionStepCount, int64_t globalPaddedTokens);
     void clearExecutionGeometry();
@@ -89,6 +99,7 @@ public:
 
 private:
     friend class NonLinearPrefillModelR;
+    std::shared_ptr<const NaviSchedExpectedKVWorkload> _expectedKVWorkload;
     int64_t _executionStepCount = 0;
     int64_t _globalPaddedTokens = 0;
     int64_t _externalReadRequestCount = -1;

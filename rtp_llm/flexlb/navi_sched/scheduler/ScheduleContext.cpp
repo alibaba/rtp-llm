@@ -81,11 +81,70 @@ NaviSchedScheduleNode::NaviSchedScheduleNode(NaviSchedNodeConstPtr node,
             auto reportedFeatures = _reportedWorkloadFeatures;
             auto workloadFeatures = _workloadFeatures;
             if (reportedFeatures.appendRunningElapsedTimeMs(runningElapsedDeltaMs) &&
-                workloadFeatures.appendRunningElapsedTimeMs(runningElapsedDeltaMs)) {
+                ((_info && _info->workloadFeatureSnapshotValid) ||
+                 workloadFeatures.appendRunningElapsedTimeMs(runningElapsedDeltaMs))) {
                 _reportedWorkloadFeatures = std::move(reportedFeatures);
                 _workloadFeatures = std::move(workloadFeatures);
                 _runningElapsedProgressApplied = true;
             }
+        }
+    }
+    if (_unifiedLatencyPrediction && _workload.executionLoadTracked &&
+        _latencyModel && _latencyModel->binaryVersion==NonLinearPrefillModelR::BINARY_VERSION &&
+        NonLinearPrefillModelR::usesCapacitySplitParameters(_latencyModel->parameters)) {
+        if (_info && _info->workloadFeatureSnapshotValid) {
+            // A replay/explicit snapshot already contains the frozen projection,
+            // including a legitimate zero probability with no extra component.
+            NaviSchedExpectedKVWorkload reported;
+            if (const auto full = _workloadFeatures.getExpectedKVWorkload()) reported = *full;
+            if (const auto reserved = _reservedWorkloadFeatures.getExpectedKVWorkload()) {
+                if (!reported.subtract(*reserved))
+                    throw std::invalid_argument("inconsistent frozen reserved KV projection");
+            }
+            if (!_reportedWorkloadFeatures.setExpectedKVWorkload(reported))
+                throw std::invalid_argument("invalid frozen KV projection");
+        } else {
+        if(!snapshot.kvPreparationEstimates.empty() && snapshot.kvPreparationSnapshotMonoUs<=0)
+            throw std::invalid_argument("missing KV preparation snapshot clock");
+        NaviSchedLatencyFeatures floor;
+        if (!getUnifiedDecayFloorFeatures(floor)) throw std::invalid_argument("invalid ready workload floor");
+        // One-pass horizon fixed for the scheduling round. Candidate assignment
+        // gradients do not refit time or feed a changed horizon back into p.
+        const double horizon=std::max(0.0,predictLatency(_workloadFeatures)-predictLatency(floor));
+        NaviSchedExpectedKVWorkload expected;
+        size_t at=0;
+        for (const auto &request:_workload.executionLoadRequests) {
+            if(request.state!=NativeKVExecutionState::PREPARING) continue;
+            MasterKVPreparationForecasts::Estimate estimate;
+            if(!snapshot.kvPreparationEstimates.empty()) {
+                if(at>=snapshot.kvPreparationEstimates.size()) throw std::invalid_argument("missing KV preparation estimate identity");
+                estimate=snapshot.kvPreparationEstimates[at];
+                if(estimate.receivedMonoUs>snapshot.kvPreparationSnapshotMonoUs)
+                    throw std::invalid_argument("KV preparation clock regression");
+                if(estimate.requestId!=request.requestId || estimate.generation!=request.loadGeneration)
+                    throw std::invalid_argument("KV preparation estimate generation mismatch");
+            }
+            ++at;
+            const double p=estimate.weight(snapshot.kvPreparationSnapshotMonoUs,horizon);
+            expected.precedingRequests+=p;
+            if(request.computeTokens>0) {
+                auto &moments=request.runningCapacity ? expected.running : expected.waiting;
+                const double h=request.contextTokens,n=request.computeTokens;
+                moments[0]+=p;moments[1]+=p*h;moments[2]+=p*n;moments[3]+=p*n*n;moments[4]+=p*h*n;
+            }
+        }
+        if(!snapshot.kvPreparationEstimates.empty() && at!=snapshot.kvPreparationEstimates.size())
+            throw std::invalid_argument("unmatched KV preparation estimate");
+        // Preserve the existing logical batch/step axis in this isolation change.
+        // No per-request ceil(tokens/chunk) approximation is introduced here.
+        auto completeExpected = expected;
+        if (const auto reserved = _reservedWorkloadFeatures.getExpectedKVWorkload()) {
+            if (!completeExpected.append(*reserved))
+                throw std::invalid_argument("invalid reserved KV workload moments");
+        }
+        if(!_reportedWorkloadFeatures.setExpectedKVWorkload(expected) ||
+           !_workloadFeatures.setExpectedKVWorkload(completeExpected))
+            throw std::invalid_argument("invalid expected KV workload moments");
         }
     }
 }
@@ -547,10 +606,27 @@ bool NaviSchedScheduleNode::getUnifiedDecayFloorFeatures(
     NaviSchedLatencyFeatures &features) const
 {
     auto floorFeatures = _reservedWorkloadFeatures;
+    // Even an empty reservation floor must use the same feature family as the
+    // ready workload. Otherwise predict() silently returns zero for this floor.
+    const bool preparingKVProjection = _unifiedLatencyPrediction &&
+        _workload.executionLoadTracked &&
+        getLatencyBinaryVersion()==NonLinearPrefillModelR::BINARY_VERSION;
+    if (preparingKVProjection &&
+        NonLinearPrefillModelR::usesCapacitySplitParameters(getLatencyParameters()) &&
+        !floorFeatures.usesCapacitySplit() &&
+        !floorFeatures.appendCapacitySplitAggregate(0,0,0,0,0,0,0,0,0,0,0)) return false;
     if (NonLinearPrefillModelR::usesCapacitySplitParameters(getLatencyParameters()) &&
         !floorFeatures.appendPrecedingRequestCount(
             _reportedWorkloadFeatures.getPrecedingRequestCount())) {
         return false;
+    }
+    if (const auto expected=_reportedWorkloadFeatures.getExpectedKVWorkload()) {
+        NaviSchedExpectedKVWorkload floorExpected;
+        if (const auto reserved=floorFeatures.getExpectedKVWorkload()) floorExpected=*reserved;
+        floorExpected.precedingRequests+=expected->precedingRequests;
+        if(!floorFeatures.usesCapacitySplit() &&
+           !floorFeatures.appendCapacitySplitAggregate(0,0,0,0,0,0,0,0,0,0,0)) return false;
+        if(!floorFeatures.setExpectedKVWorkload(floorExpected)) return false;
     }
     features = std::move(floorFeatures);
     return true;
@@ -626,13 +702,13 @@ double NaviSchedScheduleNode::decayUnifiedLatency(double latencyWithReportedWork
         *usesReportedWorkload = true;
     }
     if (!usesUnifiedLatencyPrediction() || _workloadReportReceiveTimeUs <= 0 ||
-        _reportedWorkloadFeatures.getBatchCount() == 0) {
+        (_reportedWorkloadFeatures.getBatchCount() == 0 && !_reportedWorkloadFeatures.getExpectedKVWorkload())) {
         return latencyWithReportedWorkloadMs;
     }
     // An elapsed-aware model has already advanced running prefill progress.
     // Applying wall-clock decay as well would count the same progress twice.
     const auto decayedLatencyMs =
-        _runningElapsedProgressApplied
+        (_runningElapsedProgressApplied || _reportedWorkloadFeatures.getExpectedKVWorkload())
             ? latencyWithReportedWorkloadMs
             : latencyWithReportedWorkloadMs - getWorkloadReportAgeMs();
     if (decayedLatencyMs <= latencyWithoutReportedWorkloadMs) {
@@ -1854,8 +1930,10 @@ double NaviSchedScheduleContext::estimateBatchExecutionLatencyMs(
         latencyPrediction->features = std::move(withReportedWorkload);
         latencyPrediction->floorFeatures = std::move(withoutReportedWorkload);
         latencyPrediction->hasFloor = node._workloadReportReceiveTimeUs > 0 &&
-                                      node._reportedWorkloadFeatures.getBatchCount() > 0;
-        if (latencyPrediction->hasFloor && !node._runningElapsedProgressApplied) {
+                                      (node._reportedWorkloadFeatures.getBatchCount() > 0 ||
+                                       node._reportedWorkloadFeatures.getExpectedKVWorkload());
+        if (latencyPrediction->hasFloor && !node._runningElapsedProgressApplied &&
+            !node._reportedWorkloadFeatures.getExpectedKVWorkload()) {
             latencyPrediction->fixedLatencyMs = -node.getWorkloadReportAgeMs();
         }
         latencyPrediction->recomputable = true;

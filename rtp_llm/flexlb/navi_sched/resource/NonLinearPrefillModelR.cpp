@@ -574,7 +574,8 @@ bool NonLinearPrefillModelR::fitImpl(
     double totalSampleWeight = 0.0;
     for (size_t sampleIndex = 0; sampleIndex < samples.size(); ++sampleIndex) {
         const auto &sample = samples[sampleIndex];
-        if (sample.features.usesCapacitySplit() != _useCapacitySplitFeature) {
+        if (sample.features.getExpectedKVWorkload() ||
+            sample.features.usesCapacitySplit() != _useCapacitySplitFeature) {
             return false;
         }
         auto input = makeInput(sample.features, usesExecutionGeometry(),
@@ -1601,7 +1602,7 @@ NonLinearPrefillModelR::Input NonLinearPrefillModelR::makeInput(
         features.getWaitingCacheMissTokenSquareSum() / (TOKEN_SCALE * TOKEN_SCALE);
     auto waitingReuseCompute =
         features.getWaitingCacheHitMissTokenProductSum() / (TOKEN_SCALE * TOKEN_SCALE);
-    return {1.0,
+    Input input{1.0,
             static_cast<double>(batchSize),
             reuse,
             geometry ? features.getGlobalPaddedTokens() / TOKEN_SCALE : compute,
@@ -1621,11 +1622,20 @@ NonLinearPrefillModelR::Input NonLinearPrefillModelR::makeInput(
             reuse + compute + waitingReuse + waitingCompute,
             cacheSource && features.getExternalReadRequestCount() > 0 ? 1.0 : 0.0,
             cacheSource ? features.getMaxExternalReadTokens() / TOKEN_SCALE : 0.0};
+    if (const auto expected=features.getExpectedKVWorkload()) {
+        const double scale[5]={1.0,TOKEN_SCALE,TOKEN_SCALE,TOKEN_SCALE*TOKEN_SCALE,TOKEN_SCALE*TOKEN_SCALE};
+        for(size_t i=0;i<5;++i) { input[1+i]+=expected->running[i]/scale[i]; input[7+i]+=expected->waiting[i]/scale[i]; }
+        input[6]+=expected->batchCount;
+        input[12]+=expected->precedingRequests;
+        input[16]+=(expected->hitTokens()+expected->missTokens())/TOKEN_SCALE;
+    }
+    return input;
+
 }
 
 bool NonLinearPrefillModelR::isZeroWorkload(const NaviSchedLatencyFeatures &features)
 {
-    if (features.getBatchCount() != 0 || features.getPrecedingRequestCount() != 0 ||
+    if (features.getExpectedKVWorkload() || features.getBatchCount() != 0 || features.getPrecedingRequestCount() != 0 ||
         features.getRunningElapsedTimeMs() != 0.0 ||
         features.getRunningDecodeRequestCount() != 0 ||
         features.getRunningDecodeGeneratedTokenCount() != 0 ||

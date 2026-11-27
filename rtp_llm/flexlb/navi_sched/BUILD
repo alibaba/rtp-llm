@@ -2061,3 +2061,53 @@ py_test(
     python_version = "PY3",
     deps = [":py_sched_lib"],
 )
+
+cc_test(
+ name="expected_kv_features_test",
+ srcs=["test/ExpectedKVFeaturesTest.cpp"],
+ data=[":navi_sched_testdata"],
+ deps=[":navi_sched_role_lib", ":navi_sched_data_lib", "//aios/unittest_framework"],
+)
+
+cc_test(
+ name="master_kv_preparation_forecasts_test",
+ srcs=["test/MasterKVPreparationForecastsTest.cpp"],
+ data=[":navi_sched_testdata"],
+ deps=[":navi_sched_role_lib", ":navi_sched_data_lib", "//aios/unittest_framework"],
+)
+
+cc_test(
+    name = "agent_kv_load_tracker_test",
+    srcs = ["test/AgentKVLoadTrackerTest.cpp", "resource/AgentKVLoadTracker.h"],
+    deps = ["//aios/unittest_framework"],
+)
+
+cc_test(
+    name = "execution_load_protocol_test",
+    srcs = ["test/ExecutionLoadProtocolTest.cpp"],
+    deps = [
+        ":navi_sched_data_lib",
+        ":navi_sched_replay_debug_lib",
+        ":navi_sched_role_lib",
+        "//aios/unittest_framework",
+    ],
+)
+
+cc_test(
+    name = "execution_load_resource_test",
+    srcs = ["test/ExecutionLoadResourceTest.cpp"],
+    copts = ["-fno-access-control"],
+    data = [":navi_sched_testdata"] + select({
+        ":python312_wheel": [":wheel_python_runtime_py312"],
+        "//conditions:default": [":wheel_python_runtime"],
+    }),
+    deps = [":navi_sched_data_lib", ":navi_sched_role_lib", "//aios/unittest_framework"],
+)
+
+py_test(
+    name = "navi_sched_vllm_kv_load_readiness_test",
+    srcs = ["test/vllm/VLLMKVLoadReadinessTest.py"],
+    main = "test/vllm/VLLMKVLoadReadinessTest.py",
+    python_version = "PY3",
+    deps = [":py_sched_lib"],
+)

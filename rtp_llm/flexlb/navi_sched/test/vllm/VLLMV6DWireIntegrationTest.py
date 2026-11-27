@@ -260,9 +260,9 @@ class VLLMV6DWireIntegrationTest(unittest.TestCase):
                 )
                 self.assertEqual(
                     {
-                        "agent_update_protocol": 39,
-                        "agent_update_batch_protocol": 40,
-                        "request_data": 26,
+                        "agent_update_protocol": 43,
+                        "agent_update_batch_protocol": 44,
+                        "request_data": 28,
                     },
                     core.native_wire_versions(),
                 )

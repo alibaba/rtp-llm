@@ -37,6 +37,8 @@ autil::legacy::json::JsonMap MasterBatchReservation::makeReplayState() const
         if (entry.request.executionLoadIncluded)
             request["execution_load_included"] = ToJson(*entry.request.executionLoadIncluded);
         request["predicted_latency_ms"] = ToJson(entry.request.predictedLatencyMs);
+        request["predicted_external_read_tokens"] = ToJson(entry.request.predictedExternalReadTokens);
+        request["initial_kv_preparation_queue_ms"] = ToJson(entry.request.initialKVPreparationQueueMs);
         request["explicit_cache_checkpoint_position"] =
             ToJson(entry.request.explicitCacheCheckpointPosition);
         request["native_prefill_slot_release"] =
@@ -91,6 +93,10 @@ bool MasterBatchReservation::restoreReplayState(const autil::legacy::json::JsonM
                 request.executionLoadIncluded = included;
             }
             FromJson(request.predictedLatencyMs, record.at("predicted_latency_ms"));
+            const auto read=record.find("predicted_external_read_tokens");
+            if(read!=record.end()) FromJson(request.predictedExternalReadTokens,read->second);
+            const auto queue=record.find("initial_kv_preparation_queue_ms");
+            if(queue!=record.end()) FromJson(request.initialKVPreparationQueueMs,queue->second);
             const auto checkpoint = record.find("explicit_cache_checkpoint_position");
             if (checkpoint != record.end())
                 FromJson(request.explicitCacheCheckpointPosition, checkpoint->second);
@@ -642,7 +648,8 @@ bool MasterBatchReservation::recomputeWaitingFeatures(const CacheMatch &cacheMat
 
 bool MasterBatchReservation::appendWaitingCapacityFeatures(
     NaviSchedLatencyFeatures &features, int32_t maxRunningRequestCount,
-    int32_t &runningCapacitySlotCount, bool executionOnly) const
+    int32_t &runningCapacitySlotCount, bool executionOnly,
+    bool includeUnknownPreparingLoad) const
 {
     if (maxRunningRequestCount < 0 || runningCapacitySlotCount < 0 ||
         runningCapacitySlotCount > maxRunningRequestCount) {
@@ -653,6 +660,7 @@ bool MasterBatchReservation::appendWaitingCapacityFeatures(
     }
     NaviSchedLatencyFeatures running;
     NaviSchedLatencyFeatures waiting;
+    NaviSchedExpectedKVWorkload expectedPreparing;
     auto updatedRunningCapacitySlotCount = runningCapacitySlotCount;
     const bool reuseWaitingFeatures =
         !executionOnly && runningCapacitySlotCount == maxRunningRequestCount &&
@@ -662,6 +670,20 @@ bool MasterBatchReservation::appendWaitingCapacityFeatures(
             if (RequestState::WAITING != entry.state) continue;
             if (executionOnly && !entry.request.executionLoadIncluded.has_value()) return false;
             if (executionOnly && !*entry.request.executionLoadIncluded) {
+                if (includeUnknownPreparingLoad) {
+                    // No Native begin/elapsed observation yet. Keep unknown KV
+                    // duration at full planning weight until Agent owns it.
+                    // This neither invents READY nor consumes an actual slot.
+                    const double h = std::min(entry.request.totalTokenCount,
+                                              entry.request.predictedCacheHitTokenCount);
+                    const double n = entry.request.totalTokenCount - h;
+                    auto &m = expectedPreparing.waiting;
+                    expectedPreparing.precedingRequests += 1.0;
+                    if (n > 0.0) {
+                        m[0] += 1.0; m[1] += h; m[2] += n;
+                        m[3] += n*n; m[4] += h*n;
+                    }
+                }
                 continue;
             }
             const auto hit = std::min(entry.request.totalTokenCount,
@@ -677,19 +699,20 @@ bool MasterBatchReservation::appendWaitingCapacityFeatures(
     }
     const auto &waitingFeatures = reuseWaitingFeatures ? _waitingFeatures : waiting;
     const auto requestCount = running.getBatchSize() + waitingFeatures.getBatchSize();
-    if (0 == requestCount) {
+    if (0 == requestCount && expectedPreparing.empty()) {
         return true;
     }
     NaviSchedLatencyFeatures aggregate;
     if (!aggregate.appendCapacitySplitAggregate(
-            1, running.getBatchSize(), running.getCacheHitTokenCount(),
+            requestCount > 0 ? 1 : 0, running.getBatchSize(), running.getCacheHitTokenCount(),
             running.getCacheMissTokenCount(), running.getCacheMissTokenSquareSum(),
             running.getCacheHitMissTokenProductSum(), waitingFeatures.getBatchSize(),
             waitingFeatures.getCacheHitTokenCount(),
             waitingFeatures.getCacheMissTokenCount(),
             waitingFeatures.getCacheMissTokenSquareSum(),
             waitingFeatures.getCacheHitMissTokenProductSum()) ||
-        !aggregate.appendPrecedingRequestCount(requestCount)) {
+        !aggregate.appendPrecedingRequestCount(requestCount) ||
+        !aggregate.setExpectedKVWorkload(expectedPreparing)) {
         return false;
     }
     auto updatedFeatures = features;
@@ -760,6 +783,8 @@ bool MasterBatchReservation::sameDefinition(const MasterBatchReservation &other)
             lhs.blockSize != rhs.blockSize ||
             lhs.predictedCacheHitTokenCount != rhs.predictedCacheHitTokenCount ||
             lhs.executionLoadIncluded != rhs.executionLoadIncluded ||
+            lhs.predictedExternalReadTokens != rhs.predictedExternalReadTokens ||
+            lhs.initialKVPreparationQueueMs != rhs.initialKVPreparationQueueMs ||
             lhs.predictedLatencyMs != rhs.predictedLatencyMs ||
             ((!lhs.blockHashes || lhs.blockHashes->empty()) !=
              (!rhs.blockHashes || rhs.blockHashes->empty())) ||

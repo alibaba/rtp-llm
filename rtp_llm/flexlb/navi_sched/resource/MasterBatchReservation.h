@@ -38,6 +38,9 @@ public:
         NativePPPrefillSlotRelease nativePrefillSlotRelease =
             NativePPPrefillSlotRelease::UNKNOWN;
         std::optional<bool> executionLoadIncluded;
+        // Master-only frozen cache-query inputs; not client/Agent wire fields.
+        int64_t predictedExternalReadTokens = -1;
+        double initialKVPreparationQueueMs = 0.0;
     };
 
     // Request metadata remains needed after accepted-workload handoff. Native
@@ -80,7 +83,8 @@ public:
     bool appendWaitingCapacityFeatures(NaviSchedLatencyFeatures &features,
                                        int32_t maxRunningRequestCount,
                                        int32_t &runningCapacitySlotCount,
-                                       bool executionOnly = false) const;
+                                       bool executionOnly = false,
+                                       bool includeUnknownPreparingLoad = false) const;
     bool setPredictedLatencyMs(double predictedLatencyMs);
     bool sameDefinition(const MasterBatchReservation &other) const;
 

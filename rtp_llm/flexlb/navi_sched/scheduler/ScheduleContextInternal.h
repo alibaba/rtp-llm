@@ -5,6 +5,7 @@
 #include "aios/navi_sched/data/NaviSchedLatencySample.h"
 #include "aios/navi_sched/resource/LatencyResidualModel.h"
 #include "aios/navi_sched/resource/MasterBatchReservation.h"
+#include "aios/navi_sched/resource/MasterKVPreparationForecasts.h"
 
 #include "absl/container/flat_hash_set.h"
 #include <memory>
@@ -57,6 +58,8 @@ struct NaviSchedNodeSnapshot {
     LatencyResidualModel::RuntimeConfig residualRuntimeConfig;
     NaviSchedNodeLoad load;
     NaviSchedWorkloadSnapshot workload;
+    int64_t kvPreparationSnapshotMonoUs = 0;
+    std::vector<MasterKVPreparationForecasts::Estimate> kvPreparationEstimates;
     // Captured under the same runtime lock as workload, only for Native PP4.
     std::vector<MasterBatchReservation::UnfinishedRequest> nativePrefillReservations;
     NaviSchedLatencyFeatures workloadFeatures;

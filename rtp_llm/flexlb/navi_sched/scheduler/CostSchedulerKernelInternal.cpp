@@ -1110,9 +1110,9 @@ double CostSchedulerKernelInternal::forwardNodeRange(
                 return std::numeric_limits<double>::infinity();
             }
             precedingRequestsWithoutReportedWorkload =
-                floorWorkload.getPrecedingRequestCount();
+                floorWorkload.getPlanningPrecedingRequestCount();
             precedingRequestsWithReportedWorkload =
-                node.getWorkloadFeatures().getPrecedingRequestCount();
+                node.getWorkloadFeatures().getPlanningPrecedingRequestCount();
             if (capacitySplit) {
                 // Equal capacities use the same immutable rows and weights.
                 const auto reservedRequestCost =
@@ -1135,12 +1135,12 @@ double CostSchedulerKernelInternal::forwardNodeRange(
                     NonLinearPrefillModelR::calculateLinearCost(
                         node.getLatencyParameters(), node.getReportedWorkloadFeatures());
             }
-            promptTokensWithoutReportedWorkload += floorWorkload.getCacheHitTokenCount() +
-                                                   floorWorkload.getCacheMissTokenCount();
+            promptTokensWithoutReportedWorkload += floorWorkload.getPlanningCacheHitTokenCount() +
+                                                   floorWorkload.getPlanningCacheMissTokenCount();
             const auto &reportedWorkload = node.getReportedWorkloadFeatures();
             totalPromptTokenSum = promptTokensWithoutReportedWorkload +
-                                  reportedWorkload.getCacheHitTokenCount() +
-                                  reportedWorkload.getCacheMissTokenCount();
+                                  reportedWorkload.getPlanningCacheHitTokenCount() +
+                                  reportedWorkload.getPlanningCacheMissTokenCount();
             const auto candidateBatchActivation = std::min(1.0, std::max(0.0, weightSum));
             const auto batchCost =
                 node.getLatencyParameters()
@@ -1317,14 +1317,14 @@ double CostSchedulerKernelInternal::forwardDiscreteImpl(
             if (baseline.floorValid) {
                 baseline.floorLinearCost =
                     NonLinearPrefillModelR::calculateLinearCost(parameters, floor);
-                baseline.floorHitTokens = floor.getCacheHitTokenCount();
-                baseline.floorMissTokens = floor.getCacheMissTokenCount();
-                baseline.floorPrecedingRequests = floor.getPrecedingRequestCount();
+                baseline.floorHitTokens = floor.getPlanningCacheHitTokenCount();
+                baseline.floorMissTokens = floor.getPlanningCacheMissTokenCount();
+                baseline.floorPrecedingRequests = floor.getPlanningPrecedingRequestCount();
                 const auto &reported = node.getReportedWorkloadFeatures();
-                baseline.reportedHitTokens = reported.getCacheHitTokenCount();
-                baseline.reportedMissTokens = reported.getCacheMissTokenCount();
+                baseline.reportedHitTokens = reported.getPlanningCacheHitTokenCount();
+                baseline.reportedMissTokens = reported.getPlanningCacheMissTokenCount();
                 baseline.workloadPrecedingRequests =
-                    node.getWorkloadFeatures().getPrecedingRequestCount();
+                    node.getWorkloadFeatures().getPlanningPrecedingRequestCount();
                 if (baseline.capacitySplit) {
                     baseline.workloadLinearCost =
                         NonLinearPrefillModelR::calculateLinearCost(

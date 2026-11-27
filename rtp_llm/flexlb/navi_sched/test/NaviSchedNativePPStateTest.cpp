@@ -179,7 +179,7 @@ TEST(NaviSchedNativePPStateTest,
     update->serialize(ordinary);
     AgentUpdateToMasterData ordinaryReceived;
     ordinaryReceived.deserialize(ordinary);
-    ASSERT_EQ(41, ordinaryReceived.version);
+    ASSERT_EQ(43, ordinaryReceived.version);
     ASSERT_TRUE(ordinaryReceived.workload->sameWorkload(value));
     auto later = std::make_shared<AgentUpdateToMasterData>();
     later->event = update->event;
@@ -194,9 +194,9 @@ TEST(NaviSchedNativePPStateTest,
     AgentUpdateToMasterData received;
     received.deserialize(envelope);
     ASSERT_TRUE(received.valid());
-    ASSERT_EQ(42, received.version);
+    ASSERT_EQ(44, received.version);
     ASSERT_EQ(size_t(2), received.updates.size());
-    ASSERT_EQ(41, received.updates[0]->version);
+    ASSERT_EQ(43, received.updates[0]->version);
     ASSERT_TRUE(received.updates[0]->workload->sameWorkload(value));
     ASSERT_EQ(6000, received.updates[1]->workload->nativePPObservationAgeUs);
     ASSERT_EQ(received.updates[0]->workload->nativePPState->observationId,
@@ -353,7 +353,7 @@ TEST(NaviSchedNativePPStateTest, LoadCarrierIdsParticipateInValidationAndEqualit
 
 TEST(NaviSchedNativePPStateTest, RequestLifetimeSurvivesBothWireMessages)
 {
-    ASSERT_EQ(27, NAVI_SCHED_DATA_VERSION);
+    ASSERT_EQ(28, NAVI_SCHED_DATA_VERSION);
     for (const auto release : {NativePPPrefillSlotRelease::UNKNOWN,
                                NativePPPrefillSlotRelease::AFTER_PREFILL_RESULT,
                                NativePPPrefillSlotRelease::RETAINS_SLOT}) {
