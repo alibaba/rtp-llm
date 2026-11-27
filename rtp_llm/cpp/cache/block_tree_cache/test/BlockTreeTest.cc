@@ -4,6 +4,7 @@
 
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTree.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/ScopeRollback.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/load/LoadOperation.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/group_set/LinearGroupSet.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/test/BlockTreeCacheTestUtils.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/group_set/FullGroupSet.h"
@@ -88,7 +89,7 @@ BlockTreeInsertResult insertLowerTierPrefix(BlockTree& tree, const CacheKeysType
     auto result = tree.insertNode(keys, resources, true, false);
     for (size_t index = 0; index < keys.size(); ++index) {
         for (size_t group_id = 0; group_id < tree.groupSets().size(); ++group_id) {
-            tree.groupSets()[group_id]->releaseBlocks(
+            tree.groupSets()[group_id]->unreferenceBlocks(
                 tier, resources[index][group_id].getBlocks(tier), BlockTreeRefType::EVICT);
         }
     }
@@ -248,6 +249,48 @@ TEST(BlockTreeTest, InsertSinglePath) {
     auto* c = b->children.at(300);
     EXPECT_EQ(c->cache_key, 300);
     EXPECT_EQ(c, leaf);
+}
+
+TEST(BlockTreeTest, NewNodeImportsBlocksWithoutRuntimeState) {
+    for (const Tier tier : {Tier::NONE, Tier::DEVICE, Tier::HOST, Tier::DISK}) {
+        SCOPED_TRACE(tierName(tier));
+        BlockTree                                  tree(makeLowerTierFullGroupSets(1));
+        std::vector<std::vector<GroupSetResource>> resources(1, std::vector<GroupSetResource>(1));
+        auto&                                      incoming = resources[0][0];
+        incoming.device_blocks                              = {NULL_BLOCK_IDX};
+        if (tier == Tier::DEVICE) {
+            incoming.device_blocks = {10};
+        } else if (tier != Tier::NONE) {
+            const auto block = tree.groupSets()[0]->allocateSingleBlock(tier, BlockTreeRefType::EVICT);
+            ASSERT_NE(block, NULL_BLOCK_IDX);
+            incoming.setBlocks(tier, {block});
+        }
+        incoming.transfer_detached        = true;
+        incoming.generation               = 7;
+        incoming.eviction_access_seq      = 11;
+        incoming.candidate_meta.hit_count = 13;
+        incoming.load_operation           = block_tree_cache_test::makeLoadOperationForTest(Tier::HOST, 17);
+
+        const auto result = tree.insertNode({100}, resources, false, false);
+        ASSERT_EQ(result.inserted_nodes.size(), 1u);
+        const auto& resource = result.inserted_nodes[0]->group_set_resources[0];
+        EXPECT_EQ(resource.getTopTier(), tier);
+        EXPECT_EQ(resource.getBlocks(tier), incoming.getBlocks(tier));
+        EXPECT_EQ(resource.device_blocks, incoming.device_blocks);
+        EXPECT_EQ(resource.host_block, incoming.host_block);
+        EXPECT_EQ(resource.disk_block, incoming.disk_block);
+        EXPECT_EQ(resource.transfer_state, GroupSetTransferState::IDLE);
+        EXPECT_FALSE(resource.transfer_detached);
+        EXPECT_EQ(resource.generation, 0u);
+        EXPECT_EQ(resource.eviction_access_seq, 0u);
+        EXPECT_EQ(resource.candidate_meta.hit_count, 0u);
+        EXPECT_EQ(resource.load_operation, nullptr);
+        EXPECT_TRUE(incoming.transfer_detached);
+        EXPECT_NE(incoming.load_operation, nullptr);
+        if (tier == Tier::HOST || tier == Tier::DISK) {
+            tree.groupSets()[0]->unreferenceBlocks(tier, incoming.getBlocks(tier), BlockTreeRefType::EVICT);
+        }
+    }
 }
 
 TEST(BlockTreeTest, InsertForkPath) {
@@ -657,7 +700,7 @@ TEST(BlockTreeTest, ReplacedEvictionSourcesStayReferencedAcrossInsertExitPaths) 
         const auto original = tree.insertNode({100, 200, 300}, resources, true, false);
         ASSERT_EQ(original.path.size(), 3u);
         for (size_t group_id = 0; group_id < 2; ++group_id) {
-            tree.groupSets()[group_id]->releaseBlocks(Tier::HOST, source_blocks[group_id], BlockTreeRefType::EVICT);
+            tree.groupSets()[group_id]->unreferenceBlocks(Tier::HOST, source_blocks[group_id], BlockTreeRefType::EVICT);
             for (size_t index = 0; index < 2; ++index) {
                 original.path[index]->group_set_resources[group_id].transfer_state = GroupSetTransferState::EVICTING;
             }
@@ -682,7 +725,7 @@ TEST(BlockTreeTest, ReplacedEvictionSourcesStayReferencedAcrossInsertExitPaths) 
                 EXPECT_TRUE(pool->isAllocated(block));
                 EXPECT_EQ(pool->treeRefCount(block), 1u);
                 EXPECT_EQ(original.path[index]->group_set_resources[group_id].getTopTier(), Tier::DEVICE);
-                group->releaseBlocks(Tier::HOST, {block}, BlockTreeRefType::EVICT);
+                group->unreferenceBlocks(Tier::HOST, {block}, BlockTreeRefType::EVICT);
                 EXPECT_FALSE(pool->isAllocated(block));
             }
         }
@@ -737,7 +780,7 @@ TEST(BlockTreeTest, InsertBatchesReplacedReferencesByGroupAndTier) {
     for (const auto& per_node : original) {
         for (size_t group_id = 0; group_id < 2; ++group_id) {
             const Tier tier = per_node[group_id].getTopTier();
-            tree.groupSets()[group_id]->releaseBlocks(
+            tree.groupSets()[group_id]->unreferenceBlocks(
                 tier, per_node[group_id].getBlocks(tier), BlockTreeRefType::EVICT);
         }
     }

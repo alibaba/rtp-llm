@@ -160,7 +160,7 @@ BlockIdxType seedSingleTypeLowerTier(BlockTreeCache& cache, Tier source_tier, Ca
     const BlockTreeInsertResult insert_result =
         cache.tree()->insertNode(CacheKeysType{key}, resources, /*collect_path=*/false, /*is_resident=*/false);
     EXPECT_EQ(insert_result.inserted_nodes.size(), 1u);
-    group->releaseSingleBlock(source_tier, source_block, BlockTreeRefType::CACHE);
+    group->unreferenceBlocks(source_tier, {source_block}, BlockTreeRefType::CACHE);
     return insert_result.inserted_nodes.size() == 1u ? source_block : NULL_BLOCK_IDX;
 }
 
@@ -594,14 +594,14 @@ TEST_F(SingleTypeCoordinatorCacheManagerTest, ExternalAllocationLoadsLowerTierSu
             if (tier == Tier::DISK) {
                 const auto to_disk = TransferDescriptor::hostToDisk(group->groupSetId(), host, source);
                 const auto stored  = cache->executeTransfer(TransferTask({to_disk}, std::chrono::seconds(5)));
-                group->releaseSingleBlock(Tier::HOST, host, BlockTreeRefType::CACHE);
+                group->unreferenceBlocks(Tier::HOST, {host}, BlockTreeRefType::CACHE);
                 ASSERT_TRUE(stored.ok()) << stored.status.ToString();
             }
             slots[index][0].setBlocks(tier, {source});
         }
         cache->tree()->insertNode({11, 22, 33}, slots, /*collect_path=*/false, false);
         for (size_t index = 1; index < slots.size(); ++index) {
-            group->releaseSingleBlock(tier, slots[index][0].getBlocks(tier).front(), BlockTreeRefType::CACHE);
+            group->unreferenceBlocks(tier, slots[index][0].getBlocks(tier), BlockTreeRefType::CACHE);
         }
 
         KVCacheResourcePtr                resource;
@@ -701,7 +701,7 @@ TEST_F(SingleTypeCoordinatorCacheManagerTest, ExternalAllocationFailureAbortsPen
     std::vector<std::vector<GroupSetResource>> slots(2, std::vector<GroupSetResource>(1));
     slots[1][0].host_block = source;
     cache->tree()->insertNode({11, 22}, slots, /*collect_path=*/false, false);
-    group->releaseSingleBlock(Tier::HOST, source, BlockTreeRefType::CACHE);
+    group->unreferenceBlocks(Tier::HOST, {source}, BlockTreeRefType::CACHE);
     allocator_->cacheGroups().front()->setEvictCallback([](size_t) { return 0; });
     const auto         prefix = cache->tree()->findNode({11}).front()->group_set_resources[0].device_blocks[0];
     const auto         free   = allocator_->freeBlocksNum();

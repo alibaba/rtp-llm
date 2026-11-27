@@ -3,6 +3,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import torch
+
 from rtp_llm.config.quant_config import QWEN4_FP8_NVFP4_RECIPE
 from rtp_llm.config.qwen4_exp_config import resolve_qwen4_parallelism
 from rtp_llm.device.device_impl import CudaImpl
@@ -17,7 +18,6 @@ from rtp_llm.models_py.modules.factory.fused_moe.defs.quant_config import (
 )
 from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.cutlass_nvfp4_executor import (
     CutlassNvfp4Executor,
-    _prefill_library,
 )
 from rtp_llm.models_py.modules.factory.fused_moe.utils.nvfp4_weights import (
     Nvfp4WeightViews,
@@ -55,15 +55,6 @@ class CutlassNvfp4ExecutorTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "uniform finite positive"):
             views.cutlass_quant_scales()
 
-    def test_prefill_library_keeps_configured_path_and_checksum_together(self):
-        config = SimpleNamespace(
-            prefill_library="config.so", prefill_library_sha256="config-sha"
-        )
-        self.assertEqual(_prefill_library(config), ("config.so", "config-sha"))
-        self.assertEqual(_prefill_library(None), (None, None))
-        config.prefill_library_sha256 = None
-        self.assertEqual(_prefill_library(config), ("config.so", None))
-
     def test_marlin_layout_requires_matching_strategy_before_loading(self):
         import sys
 
@@ -97,65 +88,6 @@ class CutlassNvfp4ExecutorTest(unittest.TestCase):
                 self.assertEqual(
                     CudaImpl().py_env_configs.moe_config.fp4_moe_op, "marlin"
                 )
-
-    def test_prefill_runner_uses_bool_for_swizzled_input_scale(self):
-        from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.sm120_nvfp4_prefill import (
-            Sm120PrefillMoE,
-        )
-
-        class Runner:
-            # FlashInfer v0.7.0 fused_moe/core.py's non-min-latency run_moe ABI.
-            def run_moe(
-                self,
-                output,
-                x,
-                ids,
-                router,
-                w1,
-                bias1,
-                w2,
-                bias2,
-                scales,
-                input_sf,
-                alpha,
-                beta,
-                limit,
-                situ_beta,
-                situ_linear_beta,
-                swizzled_input_sf,
-                tp_size,
-                tp_rank,
-                ep_size,
-                ep_rank,
-                cluster_size,
-                cluster_rank,
-                alltoall,
-                min_latency,
-                tactics,
-                pdl,
-                activation,
-                workspace,
-            ):
-                if type(swizzled_input_sf) is not bool:
-                    raise TypeError("swizzled_input_sf must be bool")
-                output.fill_(7)
-
-        adapter = Sm120PrefillMoE.__new__(Sm120PrefillMoE)
-        adapter.runner = Runner()
-        x = torch.zeros(2, 16, dtype=torch.bfloat16)
-        out = adapter(
-            x,
-            torch.zeros(2, 1, dtype=torch.int32),
-            torch.ones(2, 1),
-            torch.empty(1, 2, 1, dtype=torch.int64),
-            torch.empty(1, 16, 1, dtype=torch.int64),
-            [],
-            tp_size=1,
-            tp_rank=0,
-            ep_size=1,
-            ep_rank=0,
-        )
-        self.assertTrue(torch.equal(out, torch.full_like(x, 7)))
 
     def test_selection_rejects_unquantized_bf16_models(self):
         from rtp_llm.config.model_config import ModelConfig

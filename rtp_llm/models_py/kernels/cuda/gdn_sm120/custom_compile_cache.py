@@ -159,10 +159,9 @@ def _sm12x_ptx_check(compiled_fn):
         raise RuntimeError("Unable to inspect generated PTX for the SM12x GDN kernel")
     if _TMA_CLUSTER_LOAD in ptx:
         raise RuntimeError(
-            "SM12x GDN kernel compilation produced unsupported cluster-scoped TMA loads. "
-            "Install the CUDA 13 CUTLASS DSL compiler with "
-            "`pip install --upgrade --force-reinstall 'nvidia-cutlass-dsl[cu13]'`. "
-            "See https://github.com/NVIDIA/cutlass/issues/3170."
+            "SM12x GDN generated unsupported cluster-scoped TMA loads. "
+            "Use the CUTLASS DSL versions in "
+            "deps/requirements_lock_torch_gpu_cuda13.txt."
         )
 
 

@@ -9,7 +9,6 @@
 #include "rtp_llm/cpp/cache/AsyncContext.h"
 #include "rtp_llm/cpp/cache/Types.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTree.h"
-#include "rtp_llm/cpp/cache/block_tree_cache/load/LoadJoinRegistry.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/metrics/BlockTreeCacheMetricsReporter.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/evict/BlockTreeEvictor.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/group_set/GroupSet.h"
@@ -72,34 +71,26 @@ private:
                                                  int64_t                                      access_time_us,
                                                  std::vector<BlockTreeCacheReuseTimeMetrics>& metrics_list);
     BlockTreeMatchResult createMatchResult(std::vector<TreeNode*>&            path,
+                                           const std::vector<bool>&           candidate_valid,
                                            const CacheKeysType&               cache_keys,
                                            const std::function<bool(size_t)>& valid_prefix,
                                            bool                               enable_storage_backend,
                                            std::optional<int64_t>             request_id,
                                            bool                               skip_linear);
-    StorageRequest       makeStorageRequest(const CacheKeysType& cache_keys,
-                                           size_t               local_matched_blocks_num,
-                                           bool                 skip_linear) const;
-    bool                 commitLoad(const std::shared_ptr<LoadAsyncContext>& context);
-    void                 abortLoadLocked(const std::vector<TransferDescriptor>& load_descs,
-                                         const std::vector<bool>&               joined_loads,
-                                         size_t                                 prepared_desc_count,
-                                         uint64_t                               context_id,
-                                         bool                                   release_transferred_refs);
-    void                 runLoadTask(const LoadTaskRunner::TaskPtr& task);
-    void                 scheduleContextSettlement(const LoadTaskRunner::TaskPtr&           task,
-                                                   const std::shared_ptr<LoadAsyncContext>& context);
-    bool                 validateLoadTaskLocked(const LoadTaskRunner::Task& task) const;
-    struct JoinedLoadCompletion {
-        std::shared_ptr<LoadAsyncContext> context;
-        Tier                              source_tier;
-        bool                              success;
-    };
-    bool settleLoadLocked(LoadTaskRunner::Task&              task,
-                          bool                               aggregate_success,
-                          bool&                              host_success,
-                          std::vector<JoinedLoadCompletion>& joined_contexts,
-                          const CacheStageContext&           stage_context);
+    StorageRequest
+         makeStorageRequest(const CacheKeysType& cache_keys, size_t local_matched_blocks_num, bool skip_linear) const;
+    bool commitLoad(const std::shared_ptr<LoadAsyncContext>& context);
+    void abortLoadLocked(const std::vector<TransferDescriptor>&             load_descs,
+                         const std::vector<bool>&                           joined_loads,
+                         const std::vector<std::shared_ptr<LoadOperation>>& operations,
+                         bool                                               release_transferred_refs);
+    void scheduleContextSettlement(const std::shared_ptr<LoadTask>&         task,
+                                   const std::shared_ptr<LoadAsyncContext>& context);
+    bool validateLoadTaskLocked(const LoadTask& task) const;
+    bool settleLoadLocked(LoadTask&                task,
+                          bool                     aggregate_success,
+                          bool&                    host_success,
+                          const CacheStageContext& stage_context);
 
     bool changeTransferState(TreeNode*             node,
                              size_t                group_set_id,
@@ -108,15 +99,15 @@ private:
 
     BlockTree*                              tree_;
     BlockTreeEvictor&                       evictor_;
-    BlockTransferDispatcher*                transfer_dispatcher_;
     BlockTreeTaskPool*                      task_pool_;
     BlockTreeCacheMetricsReporter&          metrics_reporter_;
     std::mutex&                             mutex_;
+    const int                               host_timeout_ms_;
+    const int                               disk_timeout_ms_;
     bool                                    enable_device_cache_{true};
     std::shared_ptr<StorageBackend>         storage_backend_;
     SettledFn                               settled_;
     LoadTaskRunner                          load_task_runner_;
-    LoadJoinRegistry                        load_join_registry_;
     std::shared_ptr<LoadContextCoordinator> load_context_coordinator_;
 };
 

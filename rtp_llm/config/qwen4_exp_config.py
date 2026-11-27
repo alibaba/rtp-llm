@@ -269,8 +269,6 @@ def build_qwen4_quant_config(quantization, source_fp8):
             is_quanted=False,
             activation_amax=32.0,
             online_cache_dir=getattr(requested, "online_cache_dir", None),
-            prefill_library=getattr(requested, "prefill_library", None),
-            prefill_library_sha256=getattr(requested, "prefill_library_sha256", None),
             source_fp8_block_size=128,
             require_contiguous_experts=True,
             model_recipe=QWEN4_FP8_NVFP4_RECIPE,

@@ -2041,7 +2041,7 @@ TEST_F(BlockTreeCacheFactoryTest, ReinsertRefillsOnlyEmptyIdleGroupSetResource) 
     EXPECT_FALSE(node->group_set_resources[0].hasTier(Tier::DEVICE));
     EXPECT_EQ(group_set_a->hostPool()->treeRefCount(host_a), 1u);
     node->group_set_resources[0].host_block = NULL_BLOCK_IDX;
-    group_set_a->releaseSingleBlock(Tier::HOST, host_a, BlockTreeRefType::CACHE);
+    group_set_a->unreferenceBlocks(Tier::HOST, {host_a}, BlockTreeRefType::CACHE);
     for (const auto state : {GroupSetTransferState::EVICTING, GroupSetTransferState::LOADING}) {
         SCOPED_TRACE(transferStateName(state));
         node->group_set_resources[0].transfer_state = state;
@@ -3071,8 +3071,8 @@ TEST_F(BlockTreeCacheFactoryTest, LowerTiersRoundTripWithoutCrc) {
     write(0);
     ASSERT_TRUE(transfer(TransferDescriptor::diskToDevice(0, disk, blocks.front())));
     verify(0x31);
-    group->releaseSingleBlock(Tier::DISK, disk, BlockTreeRefType::EVICT);
-    group->releaseSingleBlock(Tier::HOST, host, BlockTreeRefType::EVICT);
+    group->unreferenceBlocks(Tier::DISK, {disk}, BlockTreeRefType::EVICT);
+    group->unreferenceBlocks(Tier::HOST, {host}, BlockTreeRefType::EVICT);
     block_tree_cache_test::unreferenceDeviceBlocksForTest(*group, blocks);
 }
 
@@ -3246,10 +3246,10 @@ void verifyCrcLocalTierBudgets(int tokens_per_block = 64) {
             }
         }
         for (const auto block : host_blocks) {
-            group->releaseSingleBlock(Tier::HOST, block, BlockTreeRefType::EVICT);
+            group->unreferenceBlocks(Tier::HOST, {block}, BlockTreeRefType::EVICT);
         }
         for (const auto block : disk_blocks) {
-            group->releaseSingleBlock(Tier::DISK, block, BlockTreeRefType::EVICT);
+            group->unreferenceBlocks(Tier::DISK, {block}, BlockTreeRefType::EVICT);
         }
         block_tree_cache_test::unreferenceDeviceBlocksForTest(*group, device_blocks);
     }
@@ -3333,9 +3333,9 @@ void verifyLocalTierIntegrityProtection() {
         ASSERT_TRUE(cache->executeTransfer(block_transfer_engine_test::makeTransferTask({load})).ok());
         expectDevicePattern(first_layer, layer_bytes, 0x35);
         expectDevicePattern(second_layer, layer_bytes, 0x79);
-        group->releaseSingleBlock(tier, lower_block, BlockTreeRefType::EVICT);
+        group->unreferenceBlocks(tier, {lower_block}, BlockTreeRefType::EVICT);
         if (tier == Tier::DISK)
-            group->releaseSingleBlock(Tier::HOST, host_block, BlockTreeRefType::EVICT);
+            group->unreferenceBlocks(Tier::HOST, {host_block}, BlockTreeRefType::EVICT);
         block_tree_cache_test::unreferenceDeviceBlocksForTest(*group, device_blocks);
     }
 }

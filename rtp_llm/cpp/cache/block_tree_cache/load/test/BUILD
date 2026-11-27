@@ -21,6 +21,7 @@ cuda13_torch_link_deps = select({
 
 test_deps = [
     "//rtp_llm/cpp/cache/block_tree_cache",
+    "//rtp_llm/cpp/cache/block_tree_cache/test:block_tree_cache_test_utils",
     "@com_google_googletest//:gtest",
     "@com_google_googletest//:gtest_main",
 ] + cuda13_torch_link_deps + torch_deps() + no_block_copy_link_deps()
@@ -34,7 +35,7 @@ cc_test(
         "L20_CU13",
         "exclusive-if-local",
     ],
-    deps = test_deps + ["//rtp_llm/cpp/cache/block_tree_cache/test:block_tree_cache_test_utils"],
+    deps = test_deps,
     env = {},
 )
 
@@ -53,18 +54,28 @@ cc_test(
     exec_properties = {"gpu": "L20_CU13"},
     srcs = ["LoadTaskRunnerTest.cc"],
     copts = test_copts,
+    deps = test_deps + ["//rtp_llm/cpp/cache/block_tree_cache/transfer/test:block_transfer_engine_test_utils"],
+    tags = ["L20_CU13"],
+)
+
+cc_test(
+    name = "load_operation_test",
+    testonly = True,
+    exec_properties = {"gpu": "L20_CU13"},
+    srcs = ["LoadOperationTest.cc"],
+    copts = test_copts,
     deps = test_deps + [
-        "//rtp_llm/cpp/cache/block_tree_cache/test:block_tree_cache_test_utils",
         "//rtp_llm/cpp/cache/block_tree_cache/transfer/test:block_transfer_engine_test_utils",
+        "//rtp_llm/cpp/cache/block_tree_cache/test:bounded_thread_test_utils",
     ],
     tags = ["L20_CU13"],
 )
 
 cc_test(
-    name = "load_join_registry_test",
-    exec_properties = {"gpu": "L20_CU13"},
-    srcs = ["LoadJoinRegistryTest.cc"],
+    name = "load_task_test",
+    srcs = ["LoadTaskTest.cc"],
     copts = test_copts,
-    deps = test_deps + ["//rtp_llm/cpp/cache/block_tree_cache/transfer/test:block_transfer_engine_test_utils"],
+    deps = test_deps,
+    exec_properties = {"gpu": "L20_CU13"},
     tags = ["L20_CU13"],
 )

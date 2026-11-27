@@ -690,9 +690,11 @@ protected:
         }
         cache->tree()->insertNode(
             CacheKeysType(keys_.begin(), keys_.begin() + count), slots, /*collect_path=*/false, false);
+        BlockIdList host_blocks;
         for (size_t i = 1; i < count; ++i) {
-            group->releaseSingleBlock(Tier::HOST, slots[i][0].host_block, BlockTreeRefType::CACHE);
+            host_blocks.push_back(slots[i][0].host_block);
         }
+        group->unreferenceBlocks(Tier::HOST, host_blocks, BlockTreeRefType::CACHE);
         const auto coordinator        = cache->loader_.load_context_coordinator_;
         const auto commit             = coordinator->commit_callback_;
         coordinator->commit_callback_ = [this, commit](const auto& load) {
