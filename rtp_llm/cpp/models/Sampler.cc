@@ -130,7 +130,9 @@ SamplerOutput Sampler::forward(const SamplerInputs& inputs) {
     auto inputs_token_ids_cuda = inputs.token_ids.to(torch::kCUDA);
 #else
     torch::Tensor inputs_token_ids_cuda;
-    {
+    if (inputs.token_ids.is_cuda()) {
+        inputs_token_ids_cuda = inputs.token_ids;
+    } else {
         auto main_stream     = cuda_graph::graphGetCurrentStream();
         auto copy_done_event = cuda_graph::makeGraphEvent();
         {
@@ -318,12 +320,22 @@ SamplerOutput Sampler::forward(const SamplerInputs& inputs) {
         from_batch_idx_out = to_batch_idx_out;
     }
 
-    return SamplerOutput({std::move(all_token_ids_out),
+    bool token_ids_are_point_mass = false;
+    if (!has_num_beams && !inputs.all_probs.defined() && !inputs.cum_log_probs.defined()
+        && !inputs.return_original_all_probs && inputs.batch_size > 0) {
+        const auto* top_k_ptr = inputs.top_k.data_ptr<int32_t>();
+        token_ids_are_point_mass =
+            std::all_of(top_k_ptr, top_k_ptr + inputs.batch_size, [](int32_t k) { return k == 1; });
+    }
+
+    SamplerOutput output({std::move(all_token_ids_out),
                           std::move(all_cum_log_probs_out),
                           std::move(inputs.all_probs),
                           std::move(all_beam_indices),
                           std::move(all_success),
                           std::move(processor_errors)});
+    output.token_ids_are_point_mass = token_ids_are_point_mass;
+    return output;
 }
 
 std::vector<std::optional<ErrorInfo>> Sampler::preprocessLogits(const SamplerInputs& inputs) {

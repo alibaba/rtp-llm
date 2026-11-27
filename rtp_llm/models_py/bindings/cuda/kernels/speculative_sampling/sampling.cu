@@ -248,7 +248,9 @@ __global__ void rejection_sampling_kernel(DType*  draft_probs,
                                           int     batch_size,
                                           int     num_speculative_tokens,
                                           int     target_vocab_size,
-                                          bool    draft_probs_point_mass) {
+                                          bool    draft_probs_point_mass,
+                                          bool    target_probs_point_mass,
+                                          IdType  rejected_pad_token_id) {
     const uint32_t bx = blockIdx.x, tx = threadIdx.x;
     const uint32_t row_idx = bx;
 
@@ -268,30 +270,34 @@ __global__ void rejection_sampling_kernel(DType*  draft_probs,
     if (tx == 0) {
         bool direct_target_fallback = false;
         int  pos                    = num_speculative_tokens;
+        const bool stochastic       = do_sample[row_idx];
         for (int i = 0; i < num_speculative_tokens; ++i) {
             IdType draft_id  = draft_token_ids[row_idx * num_speculative_tokens + i];
             IdType target_id = target_token_ids[(row_idx * (num_speculative_tokens + 1) + i) * target_token_stride
                                                 + target_token_stride - 1];
 
-            float q = target_probs[(row_idx * (num_speculative_tokens + 1) + i) * target_vocab_size + draft_id];
-            float p = draft_probs_point_mass ?
-                          1.0f :
-                          draft_probs[(row_idx * num_speculative_tokens + i) * target_vocab_size + draft_id];
-            DType u = uniform_samples[row_idx * (num_speculative_tokens + 1) + i];
-
             bool same_token = target_id == draft_id;
-            bool accept     = (do_sample[row_idx] && u * p < q) || (!do_sample[row_idx] && same_token);
+            bool accept     = false;
+            if (target_probs_point_mass || !stochastic) {
+                accept = same_token;
+            } else {
+                float q = target_probs[(row_idx * (num_speculative_tokens + 1) + i) * target_vocab_size + draft_id];
+                float p = draft_probs_point_mass ?
+                              1.0f :
+                              draft_probs[(row_idx * num_speculative_tokens + i) * target_vocab_size + draft_id];
+                DType u = uniform_samples[row_idx * (num_speculative_tokens + 1) + i];
+                accept  = (u * p < q);
+            }
             if (accept) {
                 output_token_ids[row_idx * (num_speculative_tokens + 1) + i] = draft_id;
             } else {
                 pos = i;
-                // Greedy verification already has the exact target token.
-                // Rejection-residual sampling is only valid for stochastic
-                // speculative decoding.
-                if (!do_sample[row_idx]) {
+                // Greedy verification and point-mass target distributions already
+                // identify the exact target token without residual vocabulary scans.
+                if (!stochastic || target_probs_point_mass) {
                     output_token_ids[row_idx * (num_speculative_tokens + 1) + i] = target_id;
                     for (int p = i + 1; p < num_speculative_tokens + 1; ++p) {
-                        output_token_ids[row_idx * (num_speculative_tokens + 1) + p] = -1;
+                        output_token_ids[row_idx * (num_speculative_tokens + 1) + p] = rejected_pad_token_id;
                     }
                     direct_target_fallback = true;
                 }
@@ -400,9 +406,9 @@ __global__ void rejection_sampling_kernel(DType*  draft_probs,
     if (tx == 0) {
         // set the first rejected token
         output_token_ids[row_idx * (num_speculative_tokens + 1) + pos] = temp_storage.sampled_id;
-        // pad remaining tokens with -1
+        // pad remaining tokens with rejected_pad_token_id
         for (int p = pos + 1; p < num_speculative_tokens + 1; ++p) {
-            output_token_ids[row_idx * (num_speculative_tokens + 1) + p] = -1;
+            output_token_ids[row_idx * (num_speculative_tokens + 1) + p] = rejected_pad_token_id;
         }
     }
 }
@@ -424,7 +430,8 @@ __global__ void rejectionResidualTileSums(const float* draft_probs,
                                           int          vocab,
                                           bool         point_mass,
                                           float*       tile_sums,
-                                          int*         rejected_positions) {
+                                          int*         rejected_positions,
+                                          int          rejected_pad_token_id) {
     constexpr int     Threads = 1024;
     constexpr int     Vec     = 4;
     extern __shared__ __align__(alignof(SamplingTempStorage<float, Threads, SCAN_ALGO, REDUCE_ALGO>)) uint8_t bytes[];
@@ -449,7 +456,7 @@ __global__ void rejectionResidualTileSums(const float* draft_probs,
                 if (!stochastic && tile == 0) {
                     output_ids[row * (steps + 1) + i] = target;
                     for (int j = i + 1; j <= steps; ++j)
-                        output_ids[row * (steps + 1) + j] = -1;
+                        output_ids[row * (steps + 1) + j] = rejected_pad_token_id;
                 }
                 break;
             }
@@ -499,7 +506,8 @@ __global__ void rejectionSelectResidualTile(const float* draft_probs,
                                             bool         point_mass,
                                             const float* tile_sums,
                                             const int*   rejected_positions,
-                                            int          tiles) {
+                                            int          tiles,
+                                            int          rejected_pad_token_id) {
     constexpr int     Threads = 1024;
     constexpr int     Vec     = 4;
     extern __shared__ __align__(alignof(SamplingTempStorage<float, Threads, SCAN_ALGO, REDUCE_ALGO>)) uint8_t bytes[];
@@ -556,7 +564,7 @@ __global__ void rejectionSelectResidualTile(const float* draft_probs,
     if (tx == 0) {
         output_ids[row * (steps + 1) + pos] = temp.sampled_id;
         for (int i = pos + 1; i <= steps; ++i)
-            output_ids[row * (steps + 1) + i] = -1;
+            output_ids[row * (steps + 1) + i] = rejected_pad_token_id;
     }
 }
 
@@ -575,7 +583,8 @@ cudaError_t invokeSplitRejectionSampling(const float* draft_probs,
                                          bool         point_mass,
                                          float*       tile_sums,
                                          int*         rejected_positions,
-                                         cudaStream_t stream) {
+                                         cudaStream_t stream,
+                                         int          rejected_pad_token_id) {
     if (batch == 0)
         return cudaSuccess;
     if (batch < 0 || steps != 3 || vocab != 248320 || target_stride <= 0 || (!point_mass && draft_probs == nullptr))
@@ -600,7 +609,8 @@ cudaError_t invokeSplitRejectionSampling(const float* draft_probs,
                                                                               vocab,
                                                                               point_mass,
                                                                               tile_sums,
-                                                                              rejected_positions);
+                                                                              rejected_positions,
+                                                                              rejected_pad_token_id);
     FLASHINFER_CUDA_CALL(cudaGetLastError());
     rejectionSelectResidualTile<<<batch, Threads, bytes, stream>>>(draft_probs,
                                                                    draft_ids,
@@ -612,8 +622,45 @@ cudaError_t invokeSplitRejectionSampling(const float* draft_probs,
                                                                    point_mass,
                                                                    tile_sums,
                                                                    rejected_positions,
-                                                                   tiles);
+                                                                   tiles,
+                                                                   rejected_pad_token_id);
     return cudaGetLastError();
+}
+
+template<typename IdType>
+__global__ void rejection_sampling_point_mass_kernel(const IdType* __restrict__ draft_token_ids,
+                                                     const IdType* __restrict__ target_token_ids,
+                                                     int                        target_token_stride,
+                                                     IdType* __restrict__       output_token_ids,
+                                                     IdType* __restrict__       output_accepted_token_num,
+                                                     int                        batch_size,
+                                                     int                        num_speculative_tokens,
+                                                     IdType                     rejected_pad_token_id) {
+    const int row_idx = static_cast<int>(blockIdx.x * blockDim.x + threadIdx.x);
+    if (row_idx >= batch_size) {
+        return;
+    }
+    const int row_out_base = row_idx * (num_speculative_tokens + 1);
+    int       pos          = num_speculative_tokens;
+    for (int i = 0; i < num_speculative_tokens; ++i) {
+        const IdType draft_id  = draft_token_ids[row_idx * num_speculative_tokens + i];
+        const IdType target_id = target_token_ids[(row_out_base + i) * target_token_stride + target_token_stride - 1];
+        if (target_id == draft_id) {
+            output_token_ids[row_out_base + i] = draft_id;
+        } else {
+            pos                                = i;
+            output_token_ids[row_out_base + i] = target_id;
+            for (int p = i + 1; p < num_speculative_tokens + 1; ++p) {
+                output_token_ids[row_out_base + p] = rejected_pad_token_id;
+            }
+            break;
+        }
+    }
+    output_accepted_token_num[row_idx] = pos + 1;
+    if (pos == num_speculative_tokens) {
+        output_token_ids[row_out_base + pos] =
+            target_token_ids[(row_out_base + pos) * target_token_stride + target_token_stride - 1];
+    }
 }
 
 template<typename DType, typename IdType>
@@ -630,13 +677,32 @@ cudaError_t invokeRejectionSampling(DType*       draft_probs,
                                     int          num_speculative_tokens,
                                     int          target_vocab_size,
                                     cudaStream_t stream,
-                                    bool         draft_probs_point_mass) {
+                                    bool         draft_probs_point_mass,
+                                    bool         target_probs_point_mass,
+                                    IdType       rejected_pad_token_id) {
     if (batch_size == 0) {
         return cudaSuccess;
     }
 
+    if (target_probs_point_mass) {
+        constexpr int kPointMassThreads = 256;
+        const int     num_blocks        = (batch_size + kPointMassThreads - 1) / kPointMassThreads;
+        rejection_sampling_point_mass_kernel<IdType><<<num_blocks, kPointMassThreads, 0, stream>>>(
+            draft_token_ids,
+            target_token_ids,
+            target_token_stride,
+            output_token_ids,
+            output_accepted_token_num,
+            batch_size,
+            num_speculative_tokens,
+            rejected_pad_token_id);
+        return cudaGetLastError();
+    }
+
     constexpr uint32_t BLOCK_THREADS = 1024;
-    const uint32_t     vec_size      = std::gcd(16 / sizeof(DType), target_vocab_size);
+    const uint32_t     vec_size      = target_vocab_size > 0 ?
+                                           std::gcd(16 / sizeof(DType), static_cast<size_t>(target_vocab_size)) :
+                                           static_cast<uint32_t>(16 / sizeof(DType));
 
     const uint32_t smem_size = sizeof(SamplingTempStorage<DType, BLOCK_THREADS, SCAN_ALGO, REDUCE_ALGO>);
     dim3           nblks(batch_size);
@@ -654,7 +720,9 @@ cudaError_t invokeRejectionSampling(DType*       draft_probs,
                     &batch_size,
                     &num_speculative_tokens,
                     &target_vocab_size,
-                    &draft_probs_point_mass};
+                    &draft_probs_point_mass,
+                    &target_probs_point_mass,
+                    &rejected_pad_token_id};
 
     DISPATCH_ALIGNED_VEC_SIZE(vec_size, VEC_SIZE, {
         auto kernel = rejection_sampling_kernel<BLOCK_THREADS, SCAN_ALGO, REDUCE_ALGO, VEC_SIZE, false, DType, IdType>;
@@ -679,7 +747,9 @@ cudaError_t invokeRejectionSampling(DType*       draft_probs,
                                                  int          num_speculative_tokens,                                  \
                                                  int          target_vocab_size,                                       \
                                                  cudaStream_t stream,                                                  \
-                                                 bool         draft_probs_point_mass);
+                                                 bool         draft_probs_point_mass,                                  \
+                                                 bool         target_probs_point_mass,                                 \
+                                                 IdType       rejected_pad_token_id);
 
 INSTANTIATE_REJECTION_SAMPLING(float, int);
 }  // namespace rtp_llm

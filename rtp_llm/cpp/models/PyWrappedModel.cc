@@ -1703,8 +1703,14 @@ GptModelOutputs PyWrappedModel::forwardPostLayers(torch::Tensor         hidden,
             RTP_LLM_PROFILE_SCOPE("py_model.forwardPostLayers(tp_sync_logits)");
             if (use_bf16_tp_head && !need_all_logits && dspark_model_role_ == DSparkModelRole::NONE) {
                 py::gil_scoped_acquire gil;
+                const char* argmax_method = nullptr;
                 if (py::hasattr(py_model_, "try_argmax_fp8_lm_head_for_tp")) {
-                    auto argmax_res = py_model_.attr("try_argmax_fp8_lm_head_for_tp")(
+                    argmax_method = "try_argmax_fp8_lm_head_for_tp";
+                } else if (inputs.lm_head_argmax_only && py::hasattr(py_model_, "try_target_argmax_fp8_lm_head_for_tp")) {
+                    argmax_method = "try_target_argmax_fp8_lm_head_for_tp";
+                }
+                if (argmax_method != nullptr) {
+                    auto argmax_res = py_model_.attr(argmax_method)(
                         logits, static_cast<int64_t>(description_.output_vocab_size));
                     if (!argmax_res.is_none()) {
                         auto token_ids = argmax_res.cast<torch::Tensor>();

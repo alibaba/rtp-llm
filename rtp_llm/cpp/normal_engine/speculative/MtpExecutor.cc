@@ -1749,7 +1749,8 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
     } else {
         {
             RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(prepare_decode_input_and_tp_sync)");
-            model_input.is_target_verify = false;
+            model_input.is_target_verify    = false;
+            model_input.lm_head_argmax_only = false;
             if (isTpRank0()) {
                 if (propose_step_ == 1) {
                     batch_stream_processor_->prepareOneStepSpecDecodeModelInput(
@@ -1760,6 +1761,20 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
                 if (!refresh_reused_cache) {
                     ensureModelInputsOnCuda(model_input, "decode.prepare_decode_input");
                 }
+#if USING_CUDA
+                model_input.lm_head_argmax_only =
+                    !warm_up_ && !model_input.is_fake_stream && !streams.empty() && !hasSpecLogitsProcessor(streams)
+                    && std::all_of(streams.begin(), streams.end(), [](const auto& s) {
+                           const auto& cfg         = *s->generateConfig();
+                           const bool  greedy_top1 = !cfg.do_sample || (cfg.top_k == 1 && cfg.temperature > 0.0f);
+                           return greedy_top1 && cfg.repetition_penalty == 1.0f && cfg.presence_penalty == 0.0f
+                                  && cfg.frequency_penalty == 0.0f && cfg.no_repeat_ngram_size.value_or(0) == 0
+                                  && cfg.return_all_probs == ReturnAllProbsMode::NONE
+                                  && s->getReturnAllProbs() != ReturnAllProbsMode::ORIGINAL && !s->returnLogits()
+                                  && !s->calculateLoss() && !s->calculateSoftmaxProbs() && !s->returnCumLogProbs()
+                                  && !s->hasNumBeams() && s->maxBatchSize() == 1;
+                       });
+#endif
             }
             bool                                       resumed = false;
             std::function<void(GptModelInputs&, bool)> resume;
@@ -2035,16 +2050,27 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
                 }
 
                 // target model sample
+#if USING_CUDA
+                constexpr bool allow_point_mass_target_probs = true;
+#else
+                constexpr bool allow_point_mass_target_probs = false;
+#endif
                 auto sampler_input_status = batch_stream_processor_->gatherSpecSamplerInput(
-                    stream_groups, model_output, *spec_logits_result, draft_sampler_output.token_ids);
+                    stream_groups,
+                    model_output,
+                    *spec_logits_result,
+                    draft_sampler_output.token_ids,
+                    allow_point_mass_target_probs);
                 if (!sampler_input_status.ok()) {
                     return sampler_input_status.status();
                 }
                 auto& sampler_input = sampler_input_status.value();
                 holdSamplerInputHostBuffers(buffer_holder_, sampler_input);
-                sampler_output           = std::move(sampler_->forward(sampler_input));
-                sampler_output.all_probs = sampler_output.all_probs.reshape(
-                    {(int64_t)batch_size, (int64_t)(propose_step_ + 1), (int64_t)vocab_size_});
+                sampler_output = std::move(sampler_->forward(sampler_input));
+                if (sampler_output.all_probs.defined()) {
+                    sampler_output.all_probs = sampler_output.all_probs.reshape(
+                        {(int64_t)batch_size, (int64_t)(propose_step_ + 1), (int64_t)vocab_size_});
+                }
 
                 // rejection sampling
                 speculative_sampler_output =
@@ -2623,7 +2649,8 @@ GptModelOutputs MtpExecutor::runTargetVerifyForward(GptModelInputs& model_input,
     }
     GptModelOutputs model_output = forwardModel(model_.get(), model_input, ModelInputsModelRole::TARGET);
     RTP_LLM_LOG_DEBUG("[MTP decode] target model verify forward end");
-    model_input.is_target_verify = false;
+    model_input.is_target_verify    = false;
+    model_input.lm_head_argmax_only = false;
     return model_output;
 }
 

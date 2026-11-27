@@ -104,7 +104,8 @@ struct GptModelInputs {
     // to extra kv_cache blocks when normal inference only write last token mamba state.
     // So, the model has different inference logic for target verify and normal inference.
     // To select correct inference mode, we need to set this flag manually.
-    bool is_target_verify = false;
+    bool is_target_verify    = false;
+    bool lm_head_argmax_only = false;
 
     // not sync to other tp rank
     std::vector<std::string> trace_ids;
@@ -378,7 +379,9 @@ struct RejectionSamplingParams {
     // True when draft_probs_d is a degenerate point mass on draft_token_ids_d
     // (in-model proposers such as DSpARK emit tokens, not per-vocab probs).
     // The kernel then treats q(draft) == 1 instead of reading draft_probs_d.
-    bool draft_probs_point_mass = false;
+    bool    draft_probs_point_mass  = false;
+    bool    target_probs_point_mass = false;
+    int32_t rejected_pad_token_id   = -1;
 };
 
 struct MappingDraft2TargetParams {

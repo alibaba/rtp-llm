@@ -191,6 +191,7 @@ GptModelInputShapeHints getModelInputShapeHints(const GptModelInputs& inputs) {
     encode_flag(inputs.pd_separation, GptModelInputControlFlag::kControlPdSeparation);
     encode_flag(inputs.decode_entrance, GptModelInputControlFlag::kControlDecodeEntrance);
     encode_flag(inputs.use_opaque_kv_cache_store, GptModelInputControlFlag::kControlOpaqueKvCacheStore);
+    encode_flag(inputs.lm_head_argmax_only, GptModelInputControlFlag::kControlLmHeadArgmaxOnly);
     shape_hints[GptModelInputIndex::modelControlFlags]     = static_cast<int64_t>(control_flags);
     shape_hints[GptModelInputIndex::kvBlockStrideBytes]    = static_cast<int64_t>(inputs.kv_block_stride_bytes);
     shape_hints[GptModelInputIndex::kvScaleStrideBytes]    = static_cast<int64_t>(inputs.kv_scale_stride_bytes);
@@ -276,9 +277,11 @@ void tpSyncModelInputs(GptModelInputs&                                   inputs,
                        bool                                              refresh_reused_cache) {
     if (parallelism_config.tp_size <= 1) {
         if (reuse_local_inputs && !inputs.skip_run) {
+            const bool lm_head_argmax_only = inputs.lm_head_argmax_only;
             auto physical = inputs.kv_cache_block_id;
             auto kernel   = inputs.kv_cache_kernel_block_id;
             reuse_local_inputs(inputs, !refresh_reused_cache);
+            inputs.lm_head_argmax_only = lm_head_argmax_only;
             if (refresh_reused_cache) {
                 inputs.kv_cache_block_id        = std::move(physical);
                 inputs.kv_cache_kernel_block_id = std::move(kernel);
@@ -336,7 +339,10 @@ void tpSyncModelInputs(GptModelInputs&                                   inputs,
         auto       physical      = inputs.kv_cache_block_id;
         auto       kernel        = inputs.kv_cache_kernel_block_id;
         const bool refresh_cache = shape_hints_ptr[GptModelInputIndex::modelControlFlags] & kControlRefreshReusedCache;
+        const bool lm_head_argmax_only =
+            (shape_hints_ptr[GptModelInputIndex::modelControlFlags] & kControlLmHeadArgmaxOnly) != 0;
         reuse_local_inputs(inputs, !refresh_cache);
+        inputs.lm_head_argmax_only = lm_head_argmax_only;
         if (refresh_cache) {
             RTP_LLM_PROFILE_SCOPE("model_inputs.refresh_reused_cache");
             const auto groups         = shape_hints_ptr[GptModelInputIndex::kvCacheGroupNum];
@@ -408,6 +414,7 @@ void tpSyncModelInputs(GptModelInputs&                                   inputs,
     inputs.pd_separation             = has_flag(GptModelInputControlFlag::kControlPdSeparation);
     inputs.decode_entrance           = has_flag(GptModelInputControlFlag::kControlDecodeEntrance);
     inputs.use_opaque_kv_cache_store = has_flag(GptModelInputControlFlag::kControlOpaqueKvCacheStore);
+    inputs.lm_head_argmax_only       = has_flag(GptModelInputControlFlag::kControlLmHeadArgmaxOnly);
     inputs.kv_block_stride_bytes =
         static_cast<size_t>(checkedHint(GptModelInputIndex::kvBlockStrideBytes, "kvBlockStrideBytes"));
     inputs.kv_scale_stride_bytes =

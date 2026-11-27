@@ -85,7 +85,8 @@ public:
     absl::StatusOr<SamplerInputs> gatherSpecSamplerInput(const StreamGroups&                         stream_groups,
                                                          const GptModelOutputs&                      model_output,
                                                          const SpecLogitsVerifyRunner::LaunchResult& spec_logits_result,
-                                                         const torch::Tensor& draft_token_ids) const;
+                                                         const torch::Tensor&                        draft_token_ids,
+                                                         bool allow_point_mass_target_probs = false) const;
 
     void prepareDecodeDraftModelInput(const StreamGroups& stream_groups,
                                       GptModelInputs&     model_input,
@@ -226,5 +227,6 @@ protected:
     torch::Tensor dspark_combo_cache_;
     torch::Tensor dspark_input_lengths_cache_;
     torch::Tensor dspark_lm_indexes_cache_;
+    torch::Tensor post_draft_lm_base_cache_;
 };
 }  // namespace rtp_llm

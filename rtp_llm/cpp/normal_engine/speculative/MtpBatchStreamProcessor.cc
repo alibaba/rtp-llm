@@ -1091,7 +1091,8 @@ absl::StatusOr<SamplerInputs>
 MtpBatchStreamProcessor::gatherSpecSamplerInput(const StreamGroups&                         stream_groups,
                                                 const GptModelOutputs&                      model_output,
                                                 const SpecLogitsVerifyRunner::LaunchResult& spec_logits_result,
-                                                const torch::Tensor&                        draft_token_ids) const {
+                                                const torch::Tensor&                        draft_token_ids,
+                                                bool allow_point_mass_target_probs) const {
     RTP_LLM_PROFILE_SCOPE("mtp_batch_stream_processor.gather_spec_sampler_input");
     RTP_LLM_CHECK(!stream_groups.empty());
     auto               all_streams      = stream_groups.allStreams();
@@ -1116,13 +1117,29 @@ MtpBatchStreamProcessor::gatherSpecSamplerInput(const StreamGroups&             
         allocateSamplerInputs(stream_groups, total_batch_size, total_batch_size, propose_step_, include_token_history);
     fillSamplerCommonInputs(sampler_inputs, all_streams, true, propose_step_);
 
-    RTP_LLM_CHECK_WITH_INFO(model_output.logits.dim() == 2
-                                && model_output.logits.size(1) >= static_cast<int64_t>(vocab_size_),
-                            "MTP target logits width %ld is smaller than vocab size %zu",
-                            model_output.logits.dim() == 2 ? model_output.logits.size(1) : -1,
-                            vocab_size_);
+    const auto* top_k_ptr = sampler_inputs.top_k.data_ptr<int32_t>();
+    const bool  all_top_k_one =
+        total_batch_size > 0
+        && std::all_of(top_k_ptr, top_k_ptr + total_batch_size, [](int32_t k) { return k == 1; });
+    const bool target_probs_point_mass =
+        allow_point_mass_target_probs && all_top_k_one && !sampler_inputs.cum_log_probs.defined()
+        && return_all_probs != ReturnAllProbsMode::ORIGINAL
+        && std::none_of(all_streams.begin(), all_streams.end(), [](const auto& stream) {
+               return stream->generateConfig()->return_all_probs != ReturnAllProbsMode::NONE;
+           });
+    const bool precomputed_argmax = target_probs_point_mass && !include_token_history
+                                    && !spec_logits_result.has_active_processor && model_output.logits.dim() == 2
+                                    && model_output.logits.scalar_type() == torch::kInt64
+                                    && model_output.logits.size(1) == 1;
+    if (!precomputed_argmax) {
+        RTP_LLM_CHECK_WITH_INFO(model_output.logits.dim() == 2
+                                    && model_output.logits.size(1) >= static_cast<int64_t>(vocab_size_),
+                                "MTP target logits width %ld is smaller than vocab size %zu",
+                                model_output.logits.dim() == 2 ? model_output.logits.size(1) : -1,
+                                vocab_size_);
+    }
     sampler_inputs.vocab_size = vocab_size_;
-    if (return_all_probs != ReturnAllProbsMode::NONE) {
+    if (return_all_probs != ReturnAllProbsMode::NONE && !target_probs_point_mass) {
         sampler_inputs.all_probs = torch::zeros({(int64_t)total_batch_size, (int64_t)vocab_size_},
                                                 torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));
         if (return_all_probs == ReturnAllProbsMode::ORIGINAL) {
@@ -1178,7 +1195,16 @@ MtpBatchStreamProcessor::gatherSpecSamplerInput(const StreamGroups&             
 
     // lm_head shards may contain TP-alignment padding. Synthetic columns must
     // not participate in target sampling or the rejection distribution.
-    sampler_inputs.logits = model_output.logits.narrow(1, 0, static_cast<int64_t>(vocab_size_)).clone();
+    if (precomputed_argmax) {
+        sampler_inputs.logits = model_output.logits;
+    } else if (allow_point_mass_target_probs && !spec_logits_result.has_active_processor
+               && model_output.logits.size(1) == static_cast<int64_t>(vocab_size_)
+               && model_output.logits.is_contiguous()) {
+        // MtpExecutor consumes model_output.logits exclusively via sampler_inputs.
+        sampler_inputs.logits = model_output.logits;
+    } else {
+        sampler_inputs.logits = model_output.logits.narrow(1, 0, static_cast<int64_t>(vocab_size_)).clone();
+    }
     if (spec_logits_result.has_active_processor) {
         // The runner uploads packed masks on its own (worker) stream; order this
         // stream's mask application after the uploads, then apply on GPU.
@@ -1190,8 +1216,13 @@ MtpBatchStreamProcessor::gatherSpecSamplerInput(const StreamGroups&             
 
     // TODO(async): debug formatting is CPU-only. Keep the .cpu() explicit
     // and do not route this through the model-input fast path.
-    RTP_LLM_LOG_DEBUG("sampler inputs logits [%s]",
-                      tensorDebugStringWithData<float>(sampler_inputs.logits.cpu(), 10).c_str());
+    if (precomputed_argmax) {
+        RTP_LLM_LOG_DEBUG("sampler inputs precomputed argmax [%s]",
+                          tensorDebugStringWithData<int64_t>(sampler_inputs.logits.cpu(), 10).c_str());
+    } else {
+        RTP_LLM_LOG_DEBUG("sampler inputs logits [%s]",
+                          tensorDebugStringWithData<float>(sampler_inputs.logits.cpu(), 10).c_str());
+    }
 
     RTP_LLM_LOG_DEBUG("gatherSamplerInput done");
     return sampler_inputs;
@@ -1867,10 +1898,18 @@ void MtpBatchStreamProcessor::updateDecodePostDraftModelInput(
     model_input.combo_tokens =
         toCudaInt32(speculative_sampler_output.accept_tokens.reshape({(int64_t)total_tokens}), host_holder);
     auto accept_len_d = toCudaInt32(speculative_sampler_output.accept_len, host_holder);
-    model_input.lm_output_indexes =
-        torch::arange(
-            0, total_tokens, propose_step_ + 1, torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA))
-        + (accept_len_d - 1);
+    const int64_t batch_i64 = static_cast<int64_t>(batch_size);
+    const int64_t stride    = static_cast<int64_t>(propose_step_ + 1);
+    if (!post_draft_lm_base_cache_.defined() || post_draft_lm_base_cache_.size(0) < batch_i64
+        || post_draft_lm_base_cache_.device() != accept_len_d.device()) {
+        const int64_t cap = std::max<int64_t>(batch_i64, 64);
+        post_draft_lm_base_cache_ =
+            torch::arange(-1,
+                          cap * stride - 1,
+                          stride,
+                          torch::TensorOptions().dtype(torch::kInt32).device(accept_len_d.device()));
+    }
+    model_input.lm_output_indexes  = post_draft_lm_base_cache_.narrow(0, 0, batch_i64) + accept_len_d;
     model_input.last_hidden_states = model_output.all_hidden_states;
 }
 

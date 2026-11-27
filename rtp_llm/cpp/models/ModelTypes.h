@@ -181,6 +181,7 @@ enum GptModelInputControlFlag : uint32_t {
     // Transport-only decision: every rank continues from its committed local state.
     kControlReuseLocalInputs   = 1u << 10,
     kControlRefreshReusedCache = 1u << 11,
+    kControlLmHeadArgmaxOnly   = 1u << 12,
 };
 
 GptModelInputShapeHints getModelInputShapeHints(const GptModelInputs& inputs);

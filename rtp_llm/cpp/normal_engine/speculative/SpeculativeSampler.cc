@@ -123,12 +123,12 @@ void SpeculativeSampler::batchSample(SpeculativeSamplerOutput&           sample_
 
     int batch_size = streams.size();
 
-    auto draft_token_ids  = draft_sampler_output.token_ids;
-    auto target_token_ids = target_sampler_output.token_ids;
+    auto draft_token_ids = draft_sampler_output.token_ids;
 
-    auto       draft_token_probs      = draft_sampler_output.all_probs;
-    auto       target_token_probs     = target_sampler_output.all_probs;
-    const bool draft_probs_point_mass = draft_sampler_output.token_ids_are_point_mass;
+    auto       draft_token_probs       = draft_sampler_output.all_probs;
+    auto       target_token_probs      = target_sampler_output.all_probs;
+    const bool draft_probs_point_mass  = draft_sampler_output.token_ids_are_point_mass;
+    const bool target_probs_point_mass = target_sampler_output.token_ids_are_point_mass;
 
     buffer_holder_.hold_host(draft_token_ids);
     auto draft_token_ids_d_t = draft_token_ids.to(target_device, true);
@@ -140,43 +140,57 @@ void SpeculativeSampler::batchSample(SpeculativeSamplerOutput&           sample_
     }
 
     torch::Tensor do_sample =
-        torch::zeros({(long)batch_size}, torch::TensorOptions().dtype(torch::kBool).pinned_memory(true));
-    int stream_idx = 0;
+        torch::empty({(long)batch_size}, torch::TensorOptions().dtype(torch::kBool).pinned_memory(true));
+    bool* do_sample_ptr = do_sample.data_ptr<bool>();
+    bool  any_do_sample = false;
+    bool  any_generator = false;
+    bool  has_force     = false;
+    int   stream_idx    = 0;
     for (const GenerateStreamPtr& stream : streams) {
-        do_sample[stream_idx] = stream->generateConfig()->stochastic();
+        const bool stochastic     = stream->generateConfig()->stochastic();
+        do_sample_ptr[stream_idx] = stochastic;
+        any_do_sample |= stochastic;
+        any_generator |= stream->getGenerator().defined();
+        has_force |= stream->forceSpAccept();
         stream_idx++;
     }
     buffer_holder_.hold_host(do_sample);
     auto do_sample_d = do_sample.to(target_device, true);
 
-    auto          rand_options      = torch::TensorOptions().device(target_device).dtype(torch::kFloat);
-    torch::Tensor uniform_samples_d = torch::rand({(long)batch_size, (long)propose_step_ + 1}, rand_options);
-
-    // Override per-stream uniform samples with seeded generator when random_seed is set,
-    // ensuring deterministic acceptance for reproducible iter_count.
-    {
-        int idx = 0;
-        for (const auto& stream : streams) {
-            auto gen = stream->getGenerator();
-            if (gen.defined()) {
-                uniform_samples_d[idx] = torch::rand({(long)propose_step_ + 1}, gen, std::nullopt, rand_options);
+    auto          rand_options = torch::TensorOptions().device(target_device).dtype(torch::kFloat);
+    torch::Tensor uniform_samples_d;
+    if ((any_do_sample && !target_probs_point_mass) || any_generator) {
+        uniform_samples_d = torch::rand({(long)batch_size, (long)propose_step_ + 1}, rand_options);
+        // Override per-stream uniform samples with seeded generator when random_seed is set,
+        // ensuring deterministic acceptance for reproducible iter_count.
+        if (any_generator) {
+            int idx = 0;
+            for (const auto& stream : streams) {
+                auto gen = stream->getGenerator();
+                if (gen.defined()) {
+                    uniform_samples_d[idx] = torch::rand({(long)propose_step_ + 1}, gen, std::nullopt, rand_options);
+                }
+                idx++;
             }
-            idx++;
         }
+    } else {
+        // Greedy / point-mass target verification never consumes uniform draws.
+        uniform_samples_d = torch::empty({(long)batch_size, (long)propose_step_ + 1}, rand_options);
     }
 
     auto          draft_token_probs_d_t  = draft_token_probs;
     auto          target_token_probs_d_t = target_token_probs;
     torch::Tensor output_token_ids_d =
-        torch::zeros({(long)batch_size, (long)propose_step_ + 1},
+        torch::empty({(long)batch_size, (long)propose_step_ + 1},
                      torch::TensorOptions().device(target_device).dtype(torch::kInt32).requires_grad(false));
-    torch::Tensor output_accepted_token_num_d = torch::zeros(
+    torch::Tensor output_accepted_token_num_d = torch::empty(
         {(long)batch_size}, torch::TensorOptions().device(target_device).dtype(torch::kInt32).requires_grad(false));
 
     RTP_LLM_CHECK_WITH_INFO(draft_probs_point_mass
                                 || (draft_token_probs_d_t.defined() && draft_token_probs_d_t.dim() == 3),
                             "draft probabilities must be [B, steps, vocab] unless token ids define a point mass");
-    if (!draft_probs_point_mass && draft_token_probs_d_t.size(2) != target_token_probs_d_t.size(2)) {
+    if (!draft_probs_point_mass && !target_probs_point_mass
+        && draft_token_probs_d_t.size(2) != target_token_probs_d_t.size(2)) {
         const int64_t target_vocab_size = target_token_probs_d_t.size(2);
         const int64_t num_spec          = draft_token_probs_d_t.size(1);
 
@@ -207,6 +221,8 @@ void SpeculativeSampler::batchSample(SpeculativeSamplerOutput&           sample_
 
     {
         RTP_LLM_PROFILE_SCOPE("speculative_sampler.batchSample.execRejectionSampling");
+        // Write 0 directly into rejected tail slots so async sampling does not
+        // need a follow-up (output == -1) + masked_fill_ pass.
         execRejectionSampling({
             draft_token_probs_d_t,
             draft_token_ids_d_t,
@@ -217,6 +233,8 @@ void SpeculativeSampler::batchSample(SpeculativeSamplerOutput&           sample_
             output_accepted_token_num_d,
             do_sample_d,
             draft_probs_point_mass,
+            target_probs_point_mass,
+            /*rejected_pad_token_id=*/0,
         });
     }
 
@@ -224,40 +242,33 @@ void SpeculativeSampler::batchSample(SpeculativeSamplerOutput&           sample_
 
     // forceSpAccept: override rejection sampling results for streams that requested
     // forced acceptance — accept all draft tokens plus the target bonus token.
-    {
-        bool has_force = false;
-        auto force_mask =
-            torch::zeros({(long)batch_size}, torch::TensorOptions().dtype(torch::kBool).device(target_device));
-        int idx = 0;
+    if (has_force) {
+        RTP_LLM_PROFILE_SCOPE("speculative_sampler.batchSample.post_rejection_sampling.forceSpAccept");
+        auto force_mask_cpu =
+            torch::zeros({(long)batch_size}, torch::TensorOptions().dtype(torch::kBool).pinned_memory(true));
+        auto* force_ptr = force_mask_cpu.data_ptr<bool>();
+        int   idx       = 0;
         for (const auto& stream : streams) {
-            if (stream->forceSpAccept()) {
-                force_mask[idx] = true;
-                has_force       = true;
-            }
-            idx++;
+            force_ptr[idx++] = stream->forceSpAccept();
         }
-        if (has_force) {
-            RTP_LLM_PROFILE_SCOPE("speculative_sampler.batchSample.post_rejection_sampling.forceSpAccept");
-            // target_token_ids_d_t layout: [batch_size * (propose_step+1), token_stride]
-            // Extract the bonus token at position propose_step for each batch item.
-            int64_t token_stride = target_token_ids_d_t.size(1);
-            auto    target_bonus_t =
-                target_token_ids_d_t.reshape({(long)batch_size, (long)(propose_step_ + 1), token_stride});
-            auto target_bonus = target_bonus_t.select(1, propose_step_).select(1, token_stride - 1).unsqueeze(1);
-            // forced_tokens: draft tokens [0..propose_step-1] + target bonus
-            auto forced_tokens = torch::cat({draft_token_ids_d_t, target_bonus}, 1);
-            auto force_mask_2d = force_mask.unsqueeze(1).expand_as(output_token_ids_d);
-            output_token_ids_d = torch::where(force_mask_2d, forced_tokens, output_token_ids_d);
-            output_accepted_token_num_d =
-                torch::where(force_mask,
-                             torch::full_like(output_accepted_token_num_d, (int32_t)(propose_step_ + 1)),
-                             output_accepted_token_num_d);
-        }
+        buffer_holder_.hold_host(force_mask_cpu);
+        auto force_mask = force_mask_cpu.to(target_device, true);
+        // target_token_ids_d_t layout: [batch_size * (propose_step+1), token_stride]
+        // Extract the bonus token at position propose_step for each batch item.
+        int64_t token_stride = target_token_ids_d_t.size(1);
+        auto    target_bonus_t =
+            target_token_ids_d_t.reshape({(long)batch_size, (long)(propose_step_ + 1), token_stride});
+        auto target_bonus = target_bonus_t.select(1, propose_step_).select(1, token_stride - 1).unsqueeze(1);
+        // forced_tokens: draft tokens [0..propose_step-1] + target bonus
+        auto forced_tokens = torch::cat({draft_token_ids_d_t, target_bonus}, 1);
+        auto force_mask_2d = force_mask.unsqueeze(1).expand_as(output_token_ids_d);
+        output_token_ids_d = torch::where(force_mask_2d, forced_tokens, output_token_ids_d);
+        output_accepted_token_num_d =
+            torch::where(force_mask,
+                         torch::full_like(output_accepted_token_num_d, (int32_t)(propose_step_ + 1)),
+                         output_accepted_token_num_d);
     }
 
-    // use async sample here, we assume accept all tokens
-    // so we need to reset -1 to 0 in output_token_ids_d
-    output_token_ids_d.masked_fill_(output_token_ids_d == -1, 0);
     sample_output.accept_tokens = output_token_ids_d;
     sample_output.accept_len    = output_accepted_token_num_d;
 }

@@ -27,7 +27,9 @@ cudaError_t invokeRejectionSampling(DType*       draft_probs,
                                     int          num_speculative_tokens,
                                     int          target_vocab_size,
                                     cudaStream_t stream,
-                                    bool         draft_probs_point_mass = false);
+                                    bool         draft_probs_point_mass  = false,
+                                    bool         target_probs_point_mass = false,
+                                    IdType       rejected_pad_token_id   = static_cast<IdType>(-1));
 
 cudaError_t invokeSplitRejectionSampling(const float* draft_probs,
                                          const int*   draft_ids,
@@ -44,5 +46,6 @@ cudaError_t invokeSplitRejectionSampling(const float* draft_probs,
                                          bool         point_mass,
                                          float*       tile_sums,
                                          int*         rejected_positions,
-                                         cudaStream_t stream);
+                                         cudaStream_t stream,
+                                         int          rejected_pad_token_id = -1);
 }  // namespace rtp_llm
