@@ -1,6 +1,7 @@
 """Whole tiny Kimi vision/text loading; explicit CPU MLA reference, not GPU smoke."""
 
 import json
+import math
 import os
 import tempfile
 import types
@@ -263,6 +264,7 @@ class KimiLanguageTest(unittest.TestCase):
                 model_config.model_type = "kimi_k25"
                 model_config.max_seq_len = seq
                 model_config.attn_config.kernel_tokens_per_block = 64
+                self.assertEqual(model_config.attn_config.rope_config.base, expected)
                 owner = NewModelLoader(
                     model_config, load_config(), model_path=root
                 ).load()
@@ -278,6 +280,20 @@ class KimiLanguageTest(unittest.TestCase):
                 torch.testing.assert_close(
                     owner.cos_sin_cache[:seq], cache, rtol=0, atol=0
                 )
+
+    def test_top_level_modern_yarn_reaches_native_attention(self):
+        cfg = config()
+        cfg["rope_parameters"] = {
+            "rope_type": "yarn", "factor": 4, "original_max_position_embeddings": 32,
+            "mscale": 0.75, "mscale_all_dim": 1.25,
+        }
+        with tempfile.TemporaryDirectory() as root:
+            with open(os.path.join(root, "config.json"), "w") as f:
+                json.dump(cfg, f)
+            attn = KimiK25._create_config(root).attn_config
+            self.assertAlmostEqual(
+                attn.softmax_extra_scale, (1 + 0.1 * 1.25 * math.log(4)) ** 2, places=6
+            )
 
     def test_explicit_mm_service_uses_direct_projector_without_old_weight_loader(self):
         cfg = config()

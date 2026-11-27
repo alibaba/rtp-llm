@@ -6,6 +6,10 @@ from typing import TYPE_CHECKING, List, Optional
 
 import torch
 
+from rtp_llm.config.deepseek_yarn import (
+    checkpoint_rope_parameters,
+    resolve_yarn_parameters,
+)
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.model_factory_register import register_model
 from rtp_llm.model_loader.attn_weight import MlaAttnAtomicWeight, MlaConfig
@@ -48,6 +52,25 @@ from rtp_llm.utils.model_weight import (
     yarn_get_mscale,
     zeros,
 )
+
+
+def configure_mla_rope(config: ModelConfig, fields: dict, *, default_base: int) -> None:
+    """Keep native attention scaling and the explicit MLA RoPE cache in sync."""
+    rope = config.attn_config.rope_config
+    modern = checkpoint_rope_parameters(fields)
+    rope.base = int(modern.get("rope_theta", fields.get("rope_theta", default_base)))
+    yarn = resolve_yarn_parameters(fields)
+    if yarn is None:
+        return
+    rope.scale = yarn["factor"]
+    rope.factor1 = float(yarn.get("beta_slow", 1))
+    rope.factor2 = float(yarn.get("beta_fast", 32))
+    rope.max_pos = yarn["original_max_position_embeddings"]
+    config.deepseek_rope_mscale = yarn["mscale"]
+    config.deepseek_mscale_all_dim = yarn["mscale_all_dim"]
+    softmax_mscale = yarn_get_mscale(yarn["factor"], yarn["mscale_all_dim"])
+    rope.mscale = yarn_get_mscale(yarn["factor"], yarn["mscale"]) / softmax_mscale
+    config.attn_config.softmax_extra_scale = softmax_mscale * softmax_mscale
 
 
 class DeepSeekV2Weight(ModelDeployWeightInfo):
@@ -638,15 +661,9 @@ class DeepSeekV2(BaseModel):
                 "num_key_value_heads", config.attn_config.head_num
             )
             config.num_layers = config_json["num_hidden_layers"]
-            # Check rope_parameters for GLM-5 style config
-            rope_parameters = config_json.get("rope_parameters", {})
-            rope_theta = rope_parameters.get("rope_theta")
-            if rope_theta is not None:
-                config.attn_config.rope_config.base = rope_theta
-            else:
-                config.attn_config.rope_config.base = int(
-                    config_json.get("rope_theta", config.attn_config.rope_config.base)
-                )
+            configure_mla_rope(
+                config, config_json, default_base=config.attn_config.rope_config.base
+            )
             logging.info(
                 f"config.attn_config.rope_config.base: {config.attn_config.rope_config.base}"
             )
@@ -686,33 +703,6 @@ class DeepSeekV2(BaseModel):
 
             # yarn rotary config
             config.attn_config.rope_config.style = 0
-            # Check rope_scaling for YaRN (DeepSeek V2/V3 style)
-            rope_scaling = config_json.get("rope_scaling")
-            if rope_scaling is not None:
-                config.attn_config.rope_config.scale = rope_scaling["factor"]
-                config.attn_config.rope_config.factor1 = float(
-                    rope_scaling.get("beta_slow", 1)
-                )
-                config.attn_config.rope_config.factor2 = float(
-                    rope_scaling.get("beta_fast", 32)
-                )
-                config.attn_config.rope_config.max_pos = rope_scaling[
-                    "original_max_position_embeddings"
-                ]
-
-                scaling_factor = rope_scaling["factor"]
-                mscale = rope_scaling["mscale"]
-                mscale_all_dim = rope_scaling["mscale_all_dim"]
-                config.deepseek_rope_mscale = mscale
-                config.deepseek_mscale_all_dim = mscale_all_dim
-                config.attn_config.rope_config.mscale = yarn_get_mscale(
-                    scaling_factor, mscale
-                ) / yarn_get_mscale(scaling_factor, mscale_all_dim)
-
-                # softmax scale config (only for YaRN models)
-                softmax_mscale = yarn_get_mscale(scaling_factor, mscale_all_dim)
-                config.attn_config.softmax_extra_scale = softmax_mscale * softmax_mscale
-
             config.attn_config.rope_config.offset = config.attn_config.nope_head_dim
             # rope interleave config
             # default params for deepseek, override params for glm5

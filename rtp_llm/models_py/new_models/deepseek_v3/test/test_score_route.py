@@ -151,12 +151,20 @@ class ScoreRouteTest(unittest.TestCase):
             )
 
     def test_main_config_load_and_sparse_runtime_ownership(self):
+        self._check_score_routes(yarn=False)
+
+    def test_legacy_and_modern_yarn_load_cache_and_attention_scale(self):
+        self._check_score_routes(yarn=True)
+
+    def _check_score_routes(self, *, yarn):
         for tag, hf, sparse, interleave in (
             ("deepseek2", "deepseek_v2", False, False),
             ("deepseek3", "deepseek_v3", False, False),
             ("deepseek_v32", "deepseek_v32", True, False),
             ("glm_5", "glm_moe_dsa", True, True),
         ):
+            if yarn and tag not in ("deepseek2", "deepseek3"):
+                continue
             data = _score_weights()
             cfg = dict(
                 model_type=hf,
@@ -188,6 +196,17 @@ class ScoreRouteTest(unittest.TestCase):
                 rope_theta=10000,
                 torch_dtype="bfloat16",
             )
+            # Two equivalent YaRN schemas must reach both the model-owned
+            # cache and the native attention configuration, not just one.
+            if yarn:
+                schema = "rope_scaling" if tag == "deepseek2" else "rope_parameters"
+                cfg[schema] = dict(
+                    rope_type="yarn",
+                    factor=4,
+                    original_max_position_embeddings=32,
+                    mscale=0.75,
+                    mscale_all_dim=1.25,
+                )
             if tag == "deepseek2":
                 # V2-Lite: the checkpoint has a direct Q projection, not Q-LoRA.
                 cfg["q_lora_rank"] = None
@@ -257,6 +276,26 @@ class ScoreRouteTest(unittest.TestCase):
                         load_owned_model(service)
                         model = service.py_model
                         self.assertIsInstance(model, DeepSeekV32ForCausalLM)
+                        if yarn:
+                            from rtp_llm.models.rotary_embedding.deepseek_rotary_embedding import (
+                                DeepseekV3YarnRotaryEmbedding,
+                            )
+
+                            ref = DeepseekV3YarnRotaryEmbedding(
+                                4, 128, 10000, scaling_factor=4,
+                                original_max_position_embeddings=32,
+                                mscale=0.75, mscale_all_dim=1.25,
+                            )
+                            expected = torch.cat(
+                                [ref.cos_cached[:, :2], ref.sin_cached[:, :2]], dim=-1
+                            )
+                            torch.testing.assert_close(
+                                model.cos_sin_cache, expected, rtol=0, atol=0
+                            )
+                            self.assertAlmostEqual(
+                                config.attn_config.softmax_extra_scale,
+                                (1 + 0.1 * 1.25 * math.log(4)) ** 2, places=6,
+                            )
                         self.assertEqual(
                             service.model_weights_loader.loaded_method,
                             NewLoaderLoadMethod(method),

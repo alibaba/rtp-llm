@@ -24,6 +24,16 @@ class MlaRopeConfigTest(unittest.TestCase):
                 torch.cat([freqs.cos(), freqs.sin()], dim=-1),
             )
         )
+        self.assertTrue(
+            torch.equal(
+                plain,
+                build_rope_cache(
+                    {"qk_rope_head_dim": rope_dim, "rope_parameters": None},
+                    max_seq_len,
+                    torch.device("cpu"),
+                ),
+            )
+        )
 
         factor = 8.0
         original_max = 16
