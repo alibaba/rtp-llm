@@ -59,8 +59,7 @@ struct NegotiatedCapacity {
     uint32_t                paged_block_num = 0;
     PPBlockNumOverrides     block_num_overrides;
     BlockTreeCacheBlockNums block_tree;
-    /** HOST-to-DISK eviction charge per block, averaged over stages that write this GroupSet. */
-    std::unordered_map<CacheGroupType, size_t> disk_eviction_block_bytes;
+    std::unordered_map<CacheGroupType, size_t> eviction_block_bytes;
 };
 
 /**

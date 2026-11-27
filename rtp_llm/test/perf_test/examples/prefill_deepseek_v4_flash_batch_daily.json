@@ -29,7 +29,7 @@
       "kernel_seq_size_per_block": 128,
       "seq_size_per_block": 256,
       "dsv4_hca_state_pool_blocks": 200,
-      "memory_cache_sync_timeout_ms": 60000,
+      "device_host_timeout_ms": 60000,
       "max_batch_tokens_without_cache": 150000
     },
     "env": {

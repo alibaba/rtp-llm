@@ -766,15 +766,17 @@ class KVCacheConfig:
     memory_cache_size_mb: int
     memory_cache_swa_block_ratio: float
     dsv41_decoder_swa_pool_blocks: int
-    memory_cache_sync_timeout_ms: int
+    device_host_timeout_ms: int
     disk_cache_paths: str
     disk_cache_size_mb: int
     disk_cache_buffered_io: bool
-    disk_cache_sync_timeout_ms: int
-    disk_cache_evict_timeout_ms: int
-    disk_cache_evict_max_pending_bytes: int
-    disk_cache_staging_block_count: int
+    disk_to_device_timeout_ms: int
+    host_to_disk_timeout_ms: int
+    block_tree_last_tier_evict_strategy: str
+    device_cache_evict_max_pending_bytes: int
     memory_cache_max_descriptors_per_transfer_batch: int
+    host_cache_evict_max_pending_bytes: int
+    disk_cache_staging_block_count: int
     multi_task_prompt: str
     multi_task_prompt_str: str
     multi_task_prompt_tokens: dict[str, list[int]]

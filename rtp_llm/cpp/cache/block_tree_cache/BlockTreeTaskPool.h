@@ -20,6 +20,7 @@ namespace rtp_llm {
 enum class BlockTreeTaskClass {
     LOAD,
     BACKGROUND,
+    CAPACITY_CHECK,
 };
 
 struct BlockTreeQueueSizes {
@@ -86,6 +87,7 @@ private:
     std::deque<QueuedTask>                     load_queue_;
     std::deque<QueuedTask>                     background_queue_;
     std::deque<std::function<void()>>          completion_queue_;
+    const QueuedTask*                          queued_capacity_check_{nullptr};
     size_t                                     consecutive_load_dispatches_{0};
     bool                                       started_{false};
     bool                                       admission_stopped_{false};

@@ -10,12 +10,12 @@ BlockTreeStorer::BlockTreeStorer(BlockTree*                      tree,
                                  BlockTreeEvictor&               evictor,
                                  BlockTreeCacheMetricsReporter&  metrics_reporter,
                                  std::shared_ptr<StorageBackend> storage_backend,
-                                 SettledFn                       settled):
+                                 std::function<void()>           schedule_capacity_check):
     tree_(tree),
     evictor_(evictor),
     metrics_reporter_(metrics_reporter),
     storage_backend_(std::move(storage_backend)),
-    settled_(std::move(settled)) {}
+    schedule_capacity_check_(std::move(schedule_capacity_check)) {}
 
 StorageWriteTask BlockTreeStorer::storeLocked(const CacheKeysType&                              cache_keys,
                                               const std::vector<std::vector<GroupSetResource>>& resources,
@@ -46,7 +46,7 @@ void BlockTreeStorer::publishDeviceLocked(const CacheKeysType&                  
         evictor_.onInserted(insert_result);
     }
     if (resources_inserted) {
-        settled_(true);
+        schedule_capacity_check_();
     }
     resident_prefix_length = insert_result.resident_prefix_length;
 }

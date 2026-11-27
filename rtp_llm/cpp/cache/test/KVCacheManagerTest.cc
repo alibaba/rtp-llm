@@ -538,7 +538,7 @@ TEST_F(KVCacheManagerTest, DisabledEventsWithoutRemoteBackendDoNotCreateControlP
     KVCacheManager manager(config, false, nullptr, KVCacheConfig{});
     auto           full = std::make_shared<FullGroupSet>(
         std::vector<DeviceBlockPoolPtr>{block_tree_cache_test::makeStructuralDevicePool(0)}, nullptr, nullptr);
-    full->initialize(0, config.topologyPtr(), {"default"});
+    full->initialize(0, config.topologyPtr(), {"default"}, {}, 0);
     manager.block_tree_cache_ = block_tree_cache_test::makeBlockTreeCacheForTest({full});
     auto reporter             = std::make_shared<EventPublicationReporter>();
     manager.initCacheEventPublisher(reporter);
@@ -553,7 +553,7 @@ TEST_F(KVCacheManagerTest, EventControlUpdatesRemoteBackendThroughRegistrationAn
     KVCacheManager manager(config, false, nullptr, makeEventPublicationRuntimeConfig(), {}, runtime);
     auto           full = std::make_shared<FullGroupSet>(
         std::vector<DeviceBlockPoolPtr>{block_tree_cache_test::makeStructuralDevicePool(0)}, nullptr, nullptr);
-    full->initialize(0, config.topologyPtr(), {"default"});
+    full->initialize(0, config.topologyPtr(), {"default"}, {}, 0);
     manager.block_tree_cache_                   = block_tree_cache_test::makeBlockTreeCacheForTest({full});
     auto backend                                = std::make_shared<EventControlStorageBackend>();
     manager.block_tree_cache_->storage_backend_ = backend;
@@ -605,7 +605,7 @@ TEST_F(KVCacheManagerTest, EventPublisherWiresEligibleGroupsInTopologyOrder) {
                     nullptr)};
             const std::vector<std::string> group_tags{"full", "swa", "csa_state"};
             for (size_t i = 0; i < groups.size(); ++i) {
-                groups[i]->initialize(i, config.topologyPtr(), {group_tags[i]});
+                groups[i]->initialize(i, config.topologyPtr(), {group_tags[i]}, {}, 0);
             }
             manager.block_tree_cache_ = block_tree_cache_test::makeBlockTreeCacheForTest(std::move(groups));
             const auto cache          = manager.block_tree_cache_;
@@ -679,8 +679,8 @@ TEST_F(KVCacheManagerTest, EventPublisherFiltersHostGroupsWithoutChangingDeviceS
                 std::vector<DeviceBlockPoolPtr>{block_tree_cache_test::makeStructuralDevicePool(2)},
                 nullptr,
                 nullptr);
-            full->initialize(0, config.topologyPtr(), {"full", "second_full"});
-            swa->initialize(1, config.topologyPtr(), {"swa"});
+            full->initialize(0, config.topologyPtr(), {"full", "second_full"}, {}, 0);
+            swa->initialize(1, config.topologyPtr(), {"swa"}, {}, 0);
             manager.block_tree_cache_ = block_tree_cache_test::makeBlockTreeCacheForTest({full, swa});
             const auto cache          = manager.block_tree_cache_;
             ASSERT_NE(cache, nullptr);
@@ -2062,10 +2062,10 @@ TEST_F(KVCacheManagerTest, InitRejectsInvalidRemoteExecutorConfigurationBeforeAl
 TEST_F(KVCacheManagerTest, Init_Throws_WhenHostCacheEnabledButSizeMissing) {
     auto          cache_config = makeSimpleMhaCacheConfig(1, 4, 2, rtp_llm::DataType::TYPE_INT8);
     KVCacheConfig kv_cache_config;
-    kv_cache_config.enable_memory_cache          = true;
-    kv_cache_config.reuse_cache                  = true;
-    kv_cache_config.memory_cache_size_mb         = 0;
-    kv_cache_config.memory_cache_sync_timeout_ms = 1;
+    kv_cache_config.enable_memory_cache    = true;
+    kv_cache_config.reuse_cache            = true;
+    kv_cache_config.memory_cache_size_mb   = 0;
+    kv_cache_config.device_host_timeout_ms = 1;
 
     auto kv_cache_manager = std::make_shared<KVCacheManager>(cache_config, false, nullptr, kv_cache_config);
     EXPECT_FALSE(kv_cache_manager->init());
@@ -2074,10 +2074,10 @@ TEST_F(KVCacheManagerTest, Init_Throws_WhenHostCacheEnabledButSizeMissing) {
 TEST_F(KVCacheManagerTest, Init_Throws_WhenHostCacheEnabledButSyncTimeoutInvalid) {
     auto          cache_config = makeSimpleMhaCacheConfig(1, 4, 2, rtp_llm::DataType::TYPE_INT8);
     KVCacheConfig kv_cache_config;
-    kv_cache_config.enable_memory_cache          = true;
-    kv_cache_config.reuse_cache                  = true;
-    kv_cache_config.memory_cache_size_mb         = 10;
-    kv_cache_config.memory_cache_sync_timeout_ms = 0;  // mock coordinator init failed
+    kv_cache_config.enable_memory_cache    = true;
+    kv_cache_config.reuse_cache            = true;
+    kv_cache_config.memory_cache_size_mb   = 10;
+    kv_cache_config.device_host_timeout_ms = 0;  // mock coordinator init failed
 
     auto kv_cache_manager = std::make_shared<KVCacheManager>(cache_config, false, nullptr, kv_cache_config);
     EXPECT_THROW(kv_cache_manager->init(), std::runtime_error);
@@ -2248,11 +2248,11 @@ protected:
     void roundTrip(bool concurrent) {
         auto          config = makeSimpleMhaCacheConfig(3, 17, 8, DataType::TYPE_INT8, 2, 64);
         KVCacheConfig options;
-        options.enable_memory_cache          = true;
-        options.reuse_cache                  = true;
-        options.memory_cache_size_mb         = 4;
-        options.memory_cache_sync_timeout_ms = 30000;
-        manager_                             = std::make_shared<KVCacheManager>(config, false, nullptr, options);
+        options.enable_memory_cache    = true;
+        options.reuse_cache            = true;
+        options.memory_cache_size_mb   = 4;
+        options.device_host_timeout_ms = 30000;
+        manager_                       = std::make_shared<KVCacheManager>(config, false, nullptr, options);
         ASSERT_TRUE(manager_->init());
         for (bool scale : {false, true}) {
             // Regression for the old 8-bit additive pattern's exact collision.
@@ -2392,8 +2392,8 @@ protected:
             ASSERT_NO_FATAL_FAILURE(hostPayload(a));
             ASSERT_NO_FATAL_FAILURE(hostPayload(b));
         }
-        BlockTreeCacheTestPeer::reclaimBlocksForTest(*cache, 100, Tier::DEVICE);
-        BlockTreeCacheTestPeer::reclaimBlocksForTest(*cache, 100, Tier::HOST);
+        BlockTreeCacheTestPeer::dropBlocksForTest(*cache, 100, Tier::DEVICE);
+        BlockTreeCacheTestPeer::dropBlocksForTest(*cache, 100, Tier::HOST);
         EXPECT_EQ(manager_->freeBlocksNum(), 16u);
         EXPECT_EQ(cache->groupSets()[0]->hostPool()->usedBlocksNum(), 0u);
     }
@@ -3156,7 +3156,7 @@ TEST_F(KVCacheManagerTest, StorePublishesFullBlocksOnlyAndLookupLeavesOneToken) 
     EXPECT_EQ(longer_result.reuse_len, 8);
     manager->free(FreeInfo{longer_resource, longer_tokens});
 
-    BlockTreeCacheTestPeer::reclaimBlocksForTest(*manager->blockTreeCache(), /*num_blocks=*/100, Tier::DEVICE);
+    BlockTreeCacheTestPeer::dropBlocksForTest(*manager->blockTreeCache(), /*num_blocks=*/100, Tier::DEVICE);
 }
 
 TEST_F(KVCacheManagerTest, GetKVCacheInfoReadsCurrentKeysAndSkipsUnchangedVersion) {
@@ -3220,7 +3220,7 @@ TEST_F(KVCacheManagerTest, GetKVCacheInfoReadsCurrentKeysAndSkipsUnchangedVersio
     EXPECT_EQ(ahead.cached_keys, updated.cached_keys);
 
     kv_cache_manager->free(FreeInfo{resource, tokens});
-    BlockTreeCacheTestPeer::reclaimBlocksForTest(*kv_cache_manager->blockTreeCache(), /*num_blocks=*/100, Tier::DEVICE);
+    BlockTreeCacheTestPeer::dropBlocksForTest(*kv_cache_manager->blockTreeCache(), /*num_blocks=*/100, Tier::DEVICE);
     const auto cleared = kv_cache_manager->getKVCacheInfo(updated.version, /*need_cache_keys=*/true);
     EXPECT_GT(cleared.version, updated.version);
     EXPECT_TRUE(cleared.cached_keys.empty());
@@ -3296,11 +3296,11 @@ TEST_F(KVCacheManagerTest, GetKVCacheInfo_IncludesMemoryBlocksInTotalAndAvailabl
     KVCacheConfig kv_cache_config;
     RuntimeConfig runtime_config;
 
-    kv_cache_config.enable_memory_cache          = true;
-    kv_cache_config.reuse_cache                  = true;
-    kv_cache_config.memory_cache_size_mb         = 1;
-    kv_cache_config.memory_cache_sync_timeout_ms = 1;
-    runtime_config.worker_grpc_addrs             = {"127.0.0.1:12345"};
+    kv_cache_config.enable_memory_cache    = true;
+    kv_cache_config.reuse_cache            = true;
+    kv_cache_config.memory_cache_size_mb   = 1;
+    kv_cache_config.device_host_timeout_ms = 1;
+    runtime_config.worker_grpc_addrs       = {"127.0.0.1:12345"};
 
     auto kv_cache_manager = std::make_shared<KVCacheManager>(
         cache_config, false, nullptr, kv_cache_config, ParallelismConfig{}, runtime_config);
@@ -3430,7 +3430,7 @@ TEST_F(KVCacheManagerTest, DSV4AllocationPressureEvictsCachedResources) {
     EXPECT_GE(manager->freeBlocksNum(), free_after_b);
 
     // --- Reclaim all remaining BlockTreeCache holders and verify full pool recovery ---
-    BlockTreeCacheTestPeer::reclaimBlocksForTest(*manager->blockTreeCache(), /*num_blocks=*/4096);
+    BlockTreeCacheTestPeer::dropBlocksForTest(*manager->blockTreeCache(), /*num_blocks=*/4096);
     EXPECT_EQ(manager->freeBlocksNum(), free_before);
 }
 
@@ -3505,7 +3505,7 @@ TEST_F(KVCacheManagerTest, DSV4MaxConcurrencyOneReuseOneBlockAndAllocTwoTailBloc
     }
 
     manager->free(FreeInfo{reuse_res, reuse_tokens});
-    BlockTreeCacheTestPeer::reclaimBlocksForTest(*manager->blockTreeCache(), /*num_blocks=*/4096);
+    BlockTreeCacheTestPeer::dropBlocksForTest(*manager->blockTreeCache(), /*num_blocks=*/4096);
     EXPECT_EQ(manager->freeBlocksNum(), free_before);
 }
 
@@ -3746,7 +3746,7 @@ TEST_F(KVCacheManagerTest, DSV4EvictionOnSWAGroupsDuringInferenceWithDecodeConti
     manager->free(FreeInfo{res_c, tokens_c});
 
     // Reclaim remaining declarative cache holders to restore every physical pool.
-    BlockTreeCacheTestPeer::reclaimBlocksForTest(*manager->blockTreeCache(), /*num_blocks=*/4096);
+    BlockTreeCacheTestPeer::dropBlocksForTest(*manager->blockTreeCache(), /*num_blocks=*/4096);
     EXPECT_EQ(manager->freeBlocksNum(), free_before);
 }
 TEST_F(KVCacheManagerTest, DSV4InitThenIncrWithRemoveSkippedBlocksFullLifecycle) {

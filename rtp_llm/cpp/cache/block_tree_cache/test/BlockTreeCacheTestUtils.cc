@@ -446,7 +446,7 @@ void prepareGroupSets(std::vector<GroupSetPtr>& group_sets) {
 
     auto topology = block_transfer_engine_test::makeTestTopology(std::move(groups));
     for (size_t group_set_id = 0; group_set_id < group_sets.size(); ++group_set_id) {
-        group_sets[group_set_id]->initialize(group_set_id, topology, {topology->groupTags()[group_set_id]});
+        group_sets[group_set_id]->initialize(group_set_id, topology, {topology->groupTags()[group_set_id]}, {}, 0);
     }
 }
 
@@ -469,7 +469,8 @@ std::vector<GroupSetPtr> workLoopTestGroups(std::vector<GroupSetPtr> groups) {
         if (real_gpu) {
             auto layout = block_transfer_engine_test::makeTestBackingLayout(
                 group->payloadBytes(), true, group->usesPhysicalPayloadGeometry());
-            group->initialize(group->groupSetId(), group->topologyPtr(), group->groupTags(), layout);
+            group->initialize(
+                group->groupSetId(), group->topologyPtr(), group->groupTags(), layout, group->evictionBlockBytes());
         }
     }
     return groups;
@@ -494,11 +495,8 @@ std::unique_ptr<BlockTreeCache> makeBlockTreeCacheForTest(std::vector<GroupSetPt
                                                           std::shared_ptr<kmonitor::MetricsReporter> metrics_reporter,
                                                           RecoveryTestOptions                        recovery) {
     group_sets = workLoopTestGroups(std::move(group_sets));
-    if (config.disk_cache_evict_max_pending_bytes == 0) {
-        config.disk_cache_evict_max_pending_bytes = KVCacheConfig{}.disk_cache_evict_max_pending_bytes;
-    }
     // Fixtures bypass the factory; a full-capacity low watermark suppresses automatic eviction.
-    for (auto* watermark : {&config.watermark_device, &config.watermark_host, &config.watermark_disk}) {
+    for (auto* watermark : {&config.device_watermark, &config.host_watermark, &config.disk_watermark}) {
         if (watermark->low_ratio == 0.0 && watermark->high_ratio == 0.0) {
             *watermark = {1.0, 1.0};
         }
@@ -628,13 +626,13 @@ void BlockTreeCacheTestPeer::setTierWatermarkForTest(BlockTreeCache& cache,
         low_ratio == 0.0 && high_ratio == 0.0 ? TierWatermark{1.0, 1.0} : TierWatermark{low_ratio, high_ratio};
     switch (tier) {
         case Tier::DEVICE:
-            cache.config_.watermark_device = watermark;
+            cache.config_.device_watermark = watermark;
             break;
         case Tier::HOST:
-            cache.config_.watermark_host = watermark;
+            cache.config_.host_watermark = watermark;
             break;
         case Tier::DISK:
-            cache.config_.watermark_disk = watermark;
+            cache.config_.disk_watermark = watermark;
             break;
         default:
             break;
@@ -667,7 +665,7 @@ void BlockTreeCacheTestPeer::markPathMatchedForTest(BlockTreeCache& cache, const
 }
 
 size_t BlockTreeCacheTestPeer::pendingEvictionReleasesForTest(const BlockTreeCache& cache) {
-    std::lock_guard<std::mutex> lock(cache.evictor_.pending_release_mutex_);
+    std::lock_guard<std::mutex> lock(cache.mutex_);
     size_t                      pending = 0;
     for (const auto& [_, count] : cache.evictor_.pending_release_counts_) {
         pending += count;
@@ -676,8 +674,7 @@ size_t BlockTreeCacheTestPeer::pendingEvictionReleasesForTest(const BlockTreeCac
 }
 
 void BlockTreeCacheTestPeer::runMaintenanceForTest(BlockTreeCache& cache) {
-    std::lock_guard<std::mutex> lock(cache.mutex_);
-    cache.checkWatermark();
+    cache.evictor_.checkCapacity();
 }
 
 bool BlockTreeCacheTestPeer::evictOneForGroupSetForTest(BlockTreeCache& cache,
@@ -689,12 +686,17 @@ bool BlockTreeCacheTestPeer::evictOneForGroupSetForTest(BlockTreeCache& cache,
         return false;
     }
     if (force_drop) {
-        return cache.evictor_.dropLocked(group_set_id, tier, /*notify_settled=*/true);
+        auto victim = cache.evictor_.chooseVictim(group_set_id, tier, /*force_drop=*/true);
+        if (!victim) {
+            return false;
+        }
+        cache.evictor_.runDropTask(std::move(*victim));
+        return true;
     }
-    return cache.evictor_.batchEvictLocked(group_set_id, tier, /*max_victim_count=*/1).madeProgress();
+    return cache.evictor_.batchEvictLocked(group_set_id, tier, /*max_victim_count=*/1);
 }
 
-int BlockTreeCacheTestPeer::reclaimBlocksForTest(BlockTreeCache& cache, size_t num_blocks, Tier tier) {
+int BlockTreeCacheTestPeer::dropBlocksForTest(BlockTreeCache& cache, size_t num_blocks, Tier tier) {
     std::lock_guard<std::mutex> lock(cache.mutex_);
     if (!cache.config_.isTierEnabled(tier)) {
         return 0;
@@ -704,7 +706,8 @@ int BlockTreeCacheTestPeer::reclaimBlocksForTest(BlockTreeCache& cache, size_t n
     for (size_t attempt = 0; attempt < num_blocks; ++attempt) {
         bool evicted = false;
         for (const GroupSetPtr& group_set : cache.tree_->groupSets()) {
-            if (cache.evictor_.dropLocked(group_set->groupSetId(), tier, /*notify_settled=*/true)) {
+            if (auto victim = cache.evictor_.chooseVictim(group_set->groupSetId(), tier, /*force_drop=*/true)) {
+                cache.evictor_.runDropTask(std::move(*victim));
                 evicted = true;
                 break;
             }
@@ -1060,11 +1063,11 @@ void FullSWAEnvironment::evictAll(Tier tier) {
     setTierWatermark(tier, 0.0);
 }
 
-void FullSWAEnvironment::reclaimAll() {
+void FullSWAEnvironment::dropAll() {
     releaseRequestRefs();
     for (Tier tier : {Tier::DEVICE, Tier::HOST, Tier::DISK}) {
         for (size_t attempt = 0; attempt < options_.path_length * groups.size() * 4; ++attempt) {
-            if (BlockTreeCacheTestPeer::reclaimBlocksForTest(*cache, 1, tier) == 0) {
+            if (BlockTreeCacheTestPeer::dropBlocksForTest(*cache, 1, tier) == 0) {
                 break;
             }
             block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache);
@@ -1175,7 +1178,7 @@ void FullSWAEnvironment::expectPoolFreeCounts(const std::vector<size_t>& device_
     }
 }
 
-void FullSWAEnvironment::expectFullyReclaimed() const {
+void FullSWAEnvironment::expectAllBlocksFree() const {
     EXPECT_EQ(cache->getStats().tree_node_count, 0u);
     expectPoolFreeCounts(std::vector<size_t>(device_pools.size(), options_.usable_device_blocks),
                          std::vector<size_t>{options_.usable_host_blocks,

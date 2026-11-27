@@ -614,7 +614,7 @@ class CacheConfigArgumentsTest(TestCase):
         "enable_memory_cache": ("enable_host_cache", True),
         "enable_disk_cache": ("enable_memory_cache_disk", True),
         "memory_cache_size_mb": ("host_cache_size_mb", 1024),
-        "memory_cache_sync_timeout_ms": ("host_cache_sync_timeout_ms", 1234),
+        "device_host_timeout_ms": ("host_cache_sync_timeout_ms", 1234),
         "block_tree_memory_evict_low_watermark_ratio": (
             "block_tree_host_evict_low_watermark_ratio",
             0.72,
@@ -626,7 +626,7 @@ class CacheConfigArgumentsTest(TestCase):
         "disk_cache_paths": ("memory_cache_disk_paths", "/tmp/cache-args-test"),
         "disk_cache_size_mb": ("memory_cache_disk_size_mb", 2048),
         "disk_cache_buffered_io": ("memory_cache_disk_buffered_io", False),
-        "disk_cache_sync_timeout_ms": ("memory_cache_disk_sync_timeout_ms", 2345),
+        "disk_to_device_timeout_ms": ("memory_cache_disk_sync_timeout_ms", 2345),
     }
 
     @classmethod
@@ -674,36 +674,28 @@ class CacheConfigArgumentsTest(TestCase):
     def test_disk_timeouts_support_independent_env_and_cli_overrides(self):
         cases = (
             ([], {}, (3000, 3000)),
-            ([], {"DISK_CACHE_SYNC_TIMEOUT_MS": "4321"}, (4321, 3000)),
+            ([], {"DISK_TO_DEVICE_TIMEOUT_MS": "4321"}, (4321, 3000)),
             (
                 [],
                 {
-                    "DISK_CACHE_SYNC_TIMEOUT_MS": "4321",
-                    "DISK_CACHE_EVICT_TIMEOUT_MS": "-1",
-                },
-                (4321, -1),
-            ),
-            (
-                [],
-                {
-                    "DISK_CACHE_SYNC_TIMEOUT_MS": "200",
-                    "DISK_CACHE_EVICT_TIMEOUT_MS": "45000",
+                    "DISK_TO_DEVICE_TIMEOUT_MS": "200",
+                    "HOST_TO_DISK_TIMEOUT_MS": "45000",
                 },
                 (200, 45000),
             ),
             (
-                ["--disk_cache_sync_timeout_ms", "100"],
+                ["--disk_to_device_timeout_ms", "100"],
                 {
-                    "DISK_CACHE_SYNC_TIMEOUT_MS": "200",
-                    "DISK_CACHE_EVICT_TIMEOUT_MS": "45000",
+                    "DISK_TO_DEVICE_TIMEOUT_MS": "200",
+                    "HOST_TO_DISK_TIMEOUT_MS": "45000",
                 },
                 (100, 45000),
             ),
             (
-                ["--disk_cache_evict_timeout_ms", "60000"],
+                ["--host_to_disk_timeout_ms", "60000"],
                 {
-                    "DISK_CACHE_SYNC_TIMEOUT_MS": "200",
-                    "DISK_CACHE_EVICT_TIMEOUT_MS": "45000",
+                    "DISK_TO_DEVICE_TIMEOUT_MS": "200",
+                    "HOST_TO_DISK_TIMEOUT_MS": "45000",
                 },
                 (200, 60000),
             ),
@@ -714,8 +706,8 @@ class CacheConfigArgumentsTest(TestCase):
                 config = pickle.loads(pickle.dumps(config))
                 self.assertEqual(
                     (
-                        config.disk_cache_sync_timeout_ms,
-                        config.disk_cache_evict_timeout_ms,
+                        config.disk_to_device_timeout_ms,
+                        config.host_to_disk_timeout_ms,
                     ),
                     expected,
                 )
@@ -734,8 +726,8 @@ class CacheConfigArgumentsTest(TestCase):
             with self.subTest(args=args, env=env):
                 config = self.parse_cache_config(args, env)
                 self.assertEqual(config.kvcm_task_timeout_ms, expected)
-                self.assertEqual(config.memory_cache_sync_timeout_ms, 10000)
-                self.assertEqual(config.disk_cache_sync_timeout_ms, 3000)
+                self.assertEqual(config.device_host_timeout_ms, 10000)
+                self.assertEqual(config.disk_to_device_timeout_ms, 3000)
                 self.assertEqual(config.kvcm_get_timeout_ms, 12000)
                 self.assertEqual(config.kvcm_put_timeout_ms, 12000)
 
@@ -748,6 +740,9 @@ class CacheConfigArgumentsTest(TestCase):
             ("btc_crc_slot_count", "3"),
             ("disk_cache_read_thread_count", "4"),
             ("disk_cache_write_thread_count", "6"),
+            ("memory_cache_sync_timeout_ms", "1234"),
+            ("disk_cache_sync_timeout_ms", "2345"),
+            ("disk_cache_evict_timeout_ms", "45000"),
             ("block_tree_frozen_recovery_interval_ms", "0"),
             ("block_tree_frozen_recovery_query_timeout_ms", "750"),
             ("block_pool_frozen_abort_lower_ratio", "0.35"),

@@ -216,7 +216,7 @@ TEST_F(SystemPromptConstructorTest, testSecondTaskFailureReleasesEarlierRequestO
     EXPECT_EQ(pool->referencedBlocksNum(BlockTreeRefType::CACHE), 1u);
     EXPECT_EQ(manager->blockTreeCache()->getStats().device_heap_total_size, 0u);
 
-    EXPECT_EQ(block_tree_cache_test::BlockTreeCacheTestPeer::reclaimBlocksForTest(
+    EXPECT_EQ(block_tree_cache_test::BlockTreeCacheTestPeer::dropBlocksForTest(
                   *manager->blockTreeCache(), /*num_blocks=*/100, Tier::DEVICE),
               0);
     EXPECT_EQ(manager->freeBlocksNum(), free_before - 1);

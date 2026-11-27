@@ -33,8 +33,6 @@ struct BlockTreeMatchResult {
 class BlockTreeLoader {
 public:
     // Invoked with the shared cache mutex held.
-    using SettledFn = std::function<void(bool check_watermark)>;
-
     BlockTreeLoader(BlockTree*                      tree,
                     BlockTreeEvictor&               evictor,
                     BlockTransferDispatcher*        transfer_dispatcher,
@@ -45,7 +43,7 @@ public:
                     int                             host_timeout_ms,
                     bool                            enable_device_cache,
                     std::shared_ptr<StorageBackend> storage_backend,
-                    SettledFn                       settled);
+                    std::function<void()>           schedule_capacity_check);
 
     // The caller must hold the shared BlockTreeCache mutex.
     BlockTreeMatchResult matchLocked(const CacheKeysType&               cache_keys,
@@ -82,8 +80,8 @@ private:
                          const std::vector<bool>&                           joined_loads,
                          const std::vector<std::shared_ptr<LoadOperation>>& operations,
                          bool                                               release_transferred_refs);
-    void scheduleContextSettlement(const std::shared_ptr<LoadTask>&         task,
-                                   const std::shared_ptr<LoadAsyncContext>& context);
+    void scheduleLoadSettlement(const std::shared_ptr<LoadTask>&         task,
+                                const std::shared_ptr<LoadAsyncContext>& context);
     bool validateLoadTaskLocked(const LoadTask& task) const;
     bool settleLoadLocked(LoadTask&                task,
                           bool                     aggregate_success,
@@ -104,7 +102,7 @@ private:
     const int                               disk_timeout_ms_;
     bool                                    enable_device_cache_{true};
     std::shared_ptr<StorageBackend>         storage_backend_;
-    SettledFn                               settled_;
+    std::function<void()>                   schedule_capacity_check_;
     LoadTaskRunner                          load_task_runner_;
     std::shared_ptr<LoadContextCoordinator> load_context_coordinator_;
 };

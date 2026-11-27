@@ -22,12 +22,12 @@ class StorageBackend;
 
 /** Group-set packing plan, built once before PP negotiation and then consumed read-only by the factory. */
 struct BlockTreeCacheLayout {
-    std::vector<std::vector<std::string>> group_members;
-    std::vector<BackingLayout>            backing_layouts;
-    BlockTreeCacheSizing                   sizing;
-    std::optional<BlockTreeCacheBlockNums> block_nums;
-    BlockTreeCrcWorkspacePlan              crc_workspaces;
-    std::unordered_map<CacheGroupType, size_t> disk_eviction_block_bytes;
+    std::vector<std::vector<std::string>>      group_members;
+    std::vector<BackingLayout>                 backing_layouts;
+    BlockTreeCacheSizing                       sizing;
+    std::optional<BlockTreeCacheBlockNums>     block_nums;
+    BlockTreeCrcWorkspacePlan                  crc_workspaces;
+    std::unordered_map<CacheGroupType, size_t> eviction_block_bytes;
 };
 
 using BlockTreeCacheLayoutPtr = std::shared_ptr<BlockTreeCacheLayout>;

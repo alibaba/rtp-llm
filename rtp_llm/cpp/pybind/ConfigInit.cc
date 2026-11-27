@@ -486,13 +486,15 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("memory_cache_size_mb", &KVCacheConfig::memory_cache_size_mb)
         .def_readwrite("memory_cache_swa_block_ratio", &KVCacheConfig::memory_cache_swa_block_ratio)
         .def_readwrite("dsv41_decoder_swa_pool_blocks", &KVCacheConfig::dsv41_decoder_swa_pool_blocks)
-        .def_readwrite("memory_cache_sync_timeout_ms", &KVCacheConfig::memory_cache_sync_timeout_ms)
+        .def_readwrite("device_host_timeout_ms", &KVCacheConfig::device_host_timeout_ms)
         .def_readwrite("disk_cache_paths", &KVCacheConfig::disk_cache_paths)
         .def_readwrite("disk_cache_size_mb", &KVCacheConfig::disk_cache_size_mb)
         .def_readwrite("disk_cache_buffered_io", &KVCacheConfig::disk_cache_buffered_io)
-        .def_readwrite("disk_cache_sync_timeout_ms", &KVCacheConfig::disk_cache_sync_timeout_ms)
-        .def_readwrite("disk_cache_evict_timeout_ms", &KVCacheConfig::disk_cache_evict_timeout_ms)
-        .def_readwrite("disk_cache_evict_max_pending_bytes", &KVCacheConfig::disk_cache_evict_max_pending_bytes)
+        .def_readwrite("disk_to_device_timeout_ms", &KVCacheConfig::disk_to_device_timeout_ms)
+        .def_readwrite("host_to_disk_timeout_ms", &KVCacheConfig::host_to_disk_timeout_ms)
+        .def_readwrite("block_tree_last_tier_evict_strategy", &KVCacheConfig::block_tree_last_tier_evict_strategy)
+        .def_readwrite("device_cache_evict_max_pending_bytes", &KVCacheConfig::device_cache_evict_max_pending_bytes)
+        .def_readwrite("host_cache_evict_max_pending_bytes", &KVCacheConfig::host_cache_evict_max_pending_bytes)
         .def_readwrite("disk_cache_staging_block_count", &KVCacheConfig::disk_cache_staging_block_count)
         .def_readwrite("memory_cache_max_descriptors_per_transfer_batch",
                        &KVCacheConfig::memory_cache_max_descriptors_per_transfer_batch)
@@ -589,7 +591,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def(py::pickle(
             [](const KVCacheConfig& self) {
                 return py::make_tuple(std::string("KVCacheConfig"),
-                                      25,
+                                      28,
                                       self.reuse_cache,
                                       self.multi_task_prompt,
                                       self.multi_task_prompt_str,
@@ -597,7 +599,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.reserve_block_ratio,
                                       py::int_(16),
                                       self.memory_cache_size_mb,
-                                      self.memory_cache_sync_timeout_ms,
+                                      self.device_host_timeout_ms,
                                       self.reuse_cache_tail_blocks,
                                       self.fp8_kv_cache,
                                       self.ssm_state_dtype,
@@ -613,7 +615,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.disk_cache_paths,
                                       self.disk_cache_size_mb,
                                       self.disk_cache_buffered_io,
-                                      self.disk_cache_sync_timeout_ms,
+                                      self.disk_to_device_timeout_ms,
                                       self.disk_cache_staging_block_count,
                                       self.device_eviction_policy,
                                       self.memory_eviction_policy,
@@ -663,15 +665,17 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.dsv41_decoder_swa_pool_blocks,
                                       self.kvcm_task_timeout_ms,
                                       self.kv_cache_event_snapshot_interval_ms,
-                                      self.disk_cache_evict_timeout_ms,
-                                      self.disk_cache_evict_max_pending_bytes,
+                                      self.host_to_disk_timeout_ms,
+                                      self.host_cache_evict_max_pending_bytes,
                                       self.block_tree_task_pool_size,
                                       self.block_tree_frozen_force_release_timeout_ms,
                                       // v24 appends the linear history reclaim flag and v25
                                       // the per-pool block weights at the tail so indices 0-78
                                       // stay identical to main's v23.
                                       self.enable_linear_cache_reclaim,
-                                      self.kv_cache_pool_block_weights);
+                                      self.kv_cache_pool_block_weights,
+                                      self.block_tree_last_tier_evict_strategy,
+                                      self.device_cache_evict_max_pending_bytes);
             },
             [](py::tuple t) {
                 // Pickle version ladder after merging main #1643 (dsv41 btc):
@@ -685,6 +689,15 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                 //       (size 81).
                 // Each step strips its tail fields and steps the version down so
                 // both families' older states keep decoding through main's ladder.
+                const py::tuple eviction_state = t;
+                const auto eviction_version    = t.size() > 1 && py::isinstance<py::int_>(t[1]) ? t[1].cast<int>() : -1;
+                const bool has_eviction_fields = (eviction_version == 28 && t.size() == 83)
+                                                 || (eviction_version == 27 && t.size() == 86)
+                                                 || (eviction_version == 26 && t.size() == 85);
+                if (has_eviction_fields) {
+                    t    = t[py::slice(0, 81, 1)].cast<py::tuple>();
+                    t[1] = py::int_(25);
+                }
                 const py::tuple pool_weights_v25_state = t;
                 const bool      has_v25_pool_weights_field =
                     t.size() == 81 && py::isinstance<py::int_>(t[1]) && t[1].cast<int>() == 25;
@@ -776,13 +789,10 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                     c.kv_cache_event_snapshot_interval_ms = field(compact_state ? 75 : 83).cast<int>();
                 }
                 if (version >= 14) {
-                    c.disk_cache_evict_timeout_ms = field(compact_state ? 76 : 88).cast<int64_t>();
-                } else {
-                    // Older states shared a single disk timeout for loads and evictions.
-                    c.disk_cache_evict_timeout_ms = -1;
+                    c.host_to_disk_timeout_ms = field(compact_state ? 76 : 88).cast<int64_t>();
                 }
                 if (version >= 17) {
-                    c.disk_cache_evict_max_pending_bytes =
+                    c.host_cache_evict_max_pending_bytes =
                         field(compact_state ? 77 + retired_abort_slots : 91).cast<int64_t>();
                 }
                 if (version >= 19) {
@@ -803,13 +813,13 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                     return field(index + 2 - (version >= 4 && index > 18 ? 1 : 0)
                                  - (version >= 5 && index > 49 ? 1 : 0));
                 };
-                c.reuse_cache                  = value(0).cast<bool>();
-                c.multi_task_prompt            = value(1).cast<std::string>();
-                c.multi_task_prompt_str        = value(2).cast<std::string>();
-                c.multi_task_prompt_tokens     = value(3).cast<std::map<std::string, std::vector<int>>>();
-                c.reserve_block_ratio          = value(4).cast<int64_t>();
-                c.memory_cache_size_mb         = value(6).cast<int64_t>();
-                c.memory_cache_sync_timeout_ms = value(7).cast<int64_t>();
+                c.reuse_cache              = value(0).cast<bool>();
+                c.multi_task_prompt        = value(1).cast<std::string>();
+                c.multi_task_prompt_str    = value(2).cast<std::string>();
+                c.multi_task_prompt_tokens = value(3).cast<std::map<std::string, std::vector<int>>>();
+                c.reserve_block_ratio      = value(4).cast<int64_t>();
+                c.memory_cache_size_mb     = value(6).cast<int64_t>();
+                c.device_host_timeout_ms   = value(7).cast<int64_t>();
                 if (version >= 9) {
                     c.reuse_cache_tail_blocks = t[10].cast<int>();
                     c.linear_pool_blocks      = field(70).cast<uint32_t>();
@@ -833,7 +843,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                 c.disk_cache_paths                                = value(21).cast<std::string>();
                 c.disk_cache_size_mb                              = value(22).cast<int64_t>();
                 c.disk_cache_buffered_io                          = value(23).cast<bool>();
-                c.disk_cache_sync_timeout_ms                      = value(24).cast<int64_t>();
+                c.disk_to_device_timeout_ms                       = value(24).cast<int64_t>();
                 c.disk_cache_staging_block_count                  = value(25).cast<int64_t>();
                 c.device_eviction_policy                          = value(26).cast<std::string>();
                 c.memory_eviction_policy                          = value(27).cast<std::string>();
@@ -896,6 +906,10 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                 if (has_v25_pool_weights_field) {
                     // v25 appended the per-pool weights at index 80 after v24.
                     c.kv_cache_pool_block_weights = pool_weights_v25_state[80].cast<std::string>();
+                }
+                if (has_eviction_fields) {
+                    c.block_tree_last_tier_evict_strategy  = eviction_state[81].cast<std::string>();
+                    c.device_cache_evict_max_pending_bytes = eviction_state[82].cast<int64_t>();
                 }
                 if (has_pool_weights_field) {
                     c.kv_cache_pool_block_weights = pool_weights_state[71].cast<std::string>();

@@ -416,18 +416,21 @@ class GenerateConfigTest(TestCase):
             "DISK_CACHE_PATHS": "/tmp/cache-a,/tmp/cache-b",
             "DISK_CACHE_SIZE_MB": "4096",
             "DISK_CACHE_BUFFERED_IO": "0",
-            "DISK_CACHE_SYNC_TIMEOUT_MS": "12345",
-            "DISK_CACHE_EVICT_TIMEOUT_MS": "45000",
+            "DISK_TO_DEVICE_TIMEOUT_MS": "12345",
+            "HOST_TO_DISK_TIMEOUT_MS": "45000",
             "DISK_CACHE_STAGING_BLOCK_COUNT": "8",
             "ENABLE_MEMORY_CACHE": "1",
             "MEMORY_CACHE_SIZE_MB": "2048",
-            "MEMORY_CACHE_SYNC_TIMEOUT_MS": "6789",
+            "DEVICE_HOST_TIMEOUT_MS": "6789",
             "BLOCK_TREE_FULL_PREFIX_SCAN_INTERVAL_MS": "5000",
             "BLOCK_TREE_TASK_POOL_SIZE": "6",
             "BLOCK_TREE_TRANSFER_WORKER_COUNT": "7",
             "BLOCK_TREE_BUSINESS_QUEUE_MAX_SIZE": "211",
             "BLOCK_TREE_TRANSFER_QUEUE_MAX_SIZE": "307",
-            "DISK_CACHE_EVICT_MAX_PENDING_BYTES": "83886080",
+            "HOST_CACHE_EVICT_MAX_PENDING_BYTES": "83886080",
+            "DEVICE_CACHE_EVICT_MAX_PENDING_BYTES": "456",
+            "MEMORY_CACHE_MAX_DESCRIPTORS_PER_TRANSFER_BATCH": "3",
+            "BLOCK_TREE_LAST_TIER_EVICT_STRATEGY": "watermark",
             "BLOCK_TREE_DEVICE_EVICT_LOW_WATERMARK_RATIO": "0.71",
             "BLOCK_TREE_DEVICE_EVICT_HIGH_WATERMARK_RATIO": "0.81",
             "BLOCK_TREE_MEMORY_EVICT_LOW_WATERMARK_RATIO": "0.72",
@@ -445,18 +448,25 @@ class GenerateConfigTest(TestCase):
         self.assertEqual(config.disk_cache_paths, "/tmp/cache-a,/tmp/cache-b")
         self.assertEqual(config.disk_cache_size_mb, 4096)
         self.assertFalse(config.disk_cache_buffered_io)
-        self.assertEqual(config.disk_cache_sync_timeout_ms, 12345)
-        self.assertEqual(config.disk_cache_evict_timeout_ms, 45000)
+        self.assertEqual(config.disk_to_device_timeout_ms, 12345)
+        self.assertEqual(config.host_to_disk_timeout_ms, 45000)
         self.assertEqual(config.disk_cache_staging_block_count, 8)
         self.assertTrue(config.enable_memory_cache)
         self.assertEqual(config.memory_cache_size_mb, 2048)
-        self.assertEqual(config.memory_cache_sync_timeout_ms, 6789)
+        self.assertEqual(config.device_host_timeout_ms, 6789)
         self.assertEqual(config.block_tree_full_prefix_scan_interval_ms, 5000)
         self.assertEqual(config.block_tree_task_pool_size, 6)
         self.assertEqual(config.block_tree_transfer_worker_count, 7)
         self.assertEqual(config.block_tree_business_queue_max_size, 211)
         self.assertEqual(config.block_tree_transfer_queue_max_size, 307)
-        self.assertEqual(config.disk_cache_evict_max_pending_bytes, 80 * 1024 * 1024)
+        self.assertEqual(config.host_cache_evict_max_pending_bytes, 80 * 1024 * 1024)
+        self.assertEqual(config.device_cache_evict_max_pending_bytes, 456)
+        self.assertEqual(config.memory_cache_max_descriptors_per_transfer_batch, 3)
+        cli_config = setup_args(
+            ["--memory_cache_max_descriptors_per_transfer_batch", "7"]
+        ).kv_cache_config
+        self.assertEqual(cli_config.memory_cache_max_descriptors_per_transfer_batch, 7)
+        self.assertEqual(config.block_tree_last_tier_evict_strategy, "watermark")
         self.assertEqual(config.block_tree_device_evict_low_watermark_ratio, 0.71)
         self.assertEqual(config.block_tree_device_evict_high_watermark_ratio, 0.81)
         self.assertEqual(config.block_tree_memory_evict_low_watermark_ratio, 0.72)
@@ -471,6 +481,7 @@ class GenerateConfigTest(TestCase):
         self.assertEqual(config.block_tree_task_pool_size, 4)
         self.assertEqual(config.block_tree_transfer_worker_count, 2)
         self.assertFalse(config.enable_memory_cache)
+        self.assertEqual(config.memory_cache_max_descriptors_per_transfer_batch, 32)
         self.assertEqual(config.disk_cache_staging_block_count, 128)
         self.assertEqual(config.device_eviction_policy, "lru")
         self.assertEqual(config.memory_eviction_policy, "lru")
@@ -499,13 +510,27 @@ class GenerateConfigTest(TestCase):
                 0,
             )
 
+    def test_disk_evict_budget_alias_is_removed(self):
+        with patch.dict(
+            "os.environ", _jit_env(DISK_CACHE_EVICT_MAX_PENDING_BYTES="123"), clear=True
+        ):
+            config = setup_args([]).kv_cache_config
+            self.assertEqual(
+                config.host_cache_evict_max_pending_bytes, 100 * 1024 * 1024
+            )
+            self.assertFalse(hasattr(config, "disk_cache_evict_max_pending_bytes"))
+            with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(
+                SystemExit
+            ):
+                setup_args(["--disk_cache_evict_max_pending_bytes", "456"])
+
     def test_transfer_pool_defaults_and_worker_cli_overrides(self):
         with patch.dict("os.environ", _jit_env(), clear=True):
             config = setup_args([]).kv_cache_config
             self.assertEqual(config.block_tree_task_pool_size, 4)
             self.assertEqual(config.block_tree_transfer_worker_count, 2)
             self.assertEqual(
-                config.disk_cache_evict_max_pending_bytes, 100 * 1024 * 1024
+                config.host_cache_evict_max_pending_bytes, 100 * 1024 * 1024
             )
         with patch.dict(
             "os.environ",
@@ -619,11 +644,13 @@ class GenerateConfigTest(TestCase):
     def test_canonical_kv_cache_cli_names(self):
         config = setup_args(
             [
+                "--host_cache_evict_max_pending_bytes",
+                "456",
                 "--enable_memory_cache",
                 "1",
                 "--memory_cache_size_mb",
                 "2048",
-                "--memory_cache_sync_timeout_ms",
+                "--device_host_timeout_ms",
                 "6789",
                 "--block_tree_memory_evict_low_watermark_ratio",
                 "0.72",
@@ -638,9 +665,10 @@ class GenerateConfigTest(TestCase):
             ]
         ).kv_cache_config
 
+        self.assertEqual(config.host_cache_evict_max_pending_bytes, 456)
         self.assertTrue(config.enable_memory_cache)
         self.assertEqual(config.memory_cache_size_mb, 2048)
-        self.assertEqual(config.memory_cache_sync_timeout_ms, 6789)
+        self.assertEqual(config.device_host_timeout_ms, 6789)
         self.assertEqual(config.block_tree_memory_evict_low_watermark_ratio, 0.72)
         self.assertEqual(config.block_tree_memory_evict_high_watermark_ratio, 0.82)
         self.assertTrue(config.enable_disk_cache)
@@ -716,8 +744,8 @@ class GenerateConfigTest(TestCase):
         config.block_tree_disk_evict_high_watermark_ratio = 0.83
 
         state = config.__getstate__()
-        self.assertEqual(len(state), 81)
-        self.assertEqual(state[:2], ("KVCacheConfig", 25))
+        self.assertEqual(len(state), 83)
+        self.assertEqual(state[:2], ("KVCacheConfig", 28))
 
         restored = pickle.loads(pickle.dumps(config))
         self.assertEqual(restored.disk_cache_staging_block_count, 8)
@@ -751,17 +779,9 @@ class GenerateConfigTest(TestCase):
             value.__setstate__(pickle_state)
             return value
 
-        # Legacy payloads share the load deadline for eviction and omit later fields.
-        legacy_defaults = KVCacheConfig()
-        legacy_defaults.disk_cache_evict_timeout_ms = -1
         # The v25 tail flags (linear reclaim, pool weights) also fall back to
         # their defaults after a legacy v6 state round-trips.
-        event_state = (
-            *state[:63],
-            *legacy_defaults.__getstate__()[:79][63:],
-            legacy_defaults.__getstate__()[79],
-            legacy_defaults.__getstate__()[80],
-        )
+        event_state = (*state[:63], *KVCacheConfig().__getstate__()[63:])
         # Version 6 carried the retired host-placement flag at index 53.
         state = (state[0], 6, *state[2:53], True, *state[53:63])
         self.assertEqual(restore(state).__getstate__(), event_state)
@@ -793,9 +813,7 @@ class GenerateConfigTest(TestCase):
         restored_source = restore(source_state)
         self.assertEqual(restored_source.dsv4_fixed_pool_blocks, 512)
         self.assertEqual(restored_source.dsv4_hca_state_pool_blocks, 256)
-        self.assertEqual(
-            restored_source.memory_cache_max_descriptors_per_transfer_batch, 17
-        )
+        self.assertEqual(restored_source.memory_cache_max_descriptors_per_transfer_batch, 17)
         self.assertFalse(hasattr(restored_source, "write_cache_sync"))
 
         write_sync_state = (state[0], 2, *legacy_state[2:57], True)
@@ -815,8 +833,8 @@ class GenerateConfigTest(TestCase):
         ):
             self.assertTrue(legacy_config.enable_crc)
             self.assertEqual(
-                legacy_config.disk_cache_evict_max_pending_bytes,
-                default_config.disk_cache_evict_max_pending_bytes,
+                legacy_config.host_cache_evict_max_pending_bytes,
+                default_config.host_cache_evict_max_pending_bytes,
             )
 
     def test_kv_cache_config_pickle_rejects_incompatible_states(self):

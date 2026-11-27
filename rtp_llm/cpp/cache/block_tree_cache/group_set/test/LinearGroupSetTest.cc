@@ -20,7 +20,7 @@ protected:
         group_        = std::make_shared<LinearGroupSet>(std::vector<DeviceBlockPoolPtr>{pool_}, nullptr, nullptr);
         auto group    = makeTestGroupBase(defaultCacheGroupPolicy(CacheGroupType::LINEAR), {0}, 1);
         auto topology = makeTestTopology({std::move(group)});
-        group_->initialize(0, topology, topology->groupTags());
+        group_->initialize(0, topology, topology->groupTags(), {}, 0);
     }
 
     void TearDown() override {

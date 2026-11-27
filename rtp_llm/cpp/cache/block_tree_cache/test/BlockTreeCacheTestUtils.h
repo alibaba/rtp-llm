@@ -190,7 +190,7 @@ public:
     static void   runMaintenanceForTest(BlockTreeCache& cache);
     static bool
     evictOneForGroupSetForTest(BlockTreeCache& cache, size_t group_set_id, Tier tier, bool force_drop = false);
-    static int  reclaimBlocksForTest(BlockTreeCache& cache, size_t num_blocks, Tier tier = Tier::DEVICE);
+    static int  dropBlocksForTest(BlockTreeCache& cache, size_t num_blocks, Tier tier = Tier::DEVICE);
     static void waitForTaskPoolIdleForTest(const BlockTreeCache& cache);
     static void setTransferDrainObserverForTest(BlockTreeCache& cache, std::function<void()> observer);
     static std::unique_lock<std::mutex> lockForTest(const BlockTreeCache& cache);
@@ -249,11 +249,11 @@ public:
 
     void evictAll(Tier tier);
     void runMaintenance();
-    void reclaimAll();
+    void dropAll();
 
     bool allResourcesAtTier(Tier tier) const;
     void expectPayloads() const;
-    void expectFullyReclaimed() const;
+    void expectAllBlocksFree() const;
     void expectPoolFreeCounts(const std::vector<size_t>& device_free,
                               const std::vector<size_t>& host_free,
                               const std::vector<size_t>& disk_free) const;

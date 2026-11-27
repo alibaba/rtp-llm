@@ -37,8 +37,8 @@ public:
     bool updateIfPresent(TreeNode* node, const CandidateMeta& meta);
     // Remove a node's entry if present. Idempotent.
     void erase(TreeNode* node);
-    // Read the best matching victim without changing heap membership.
-    std::optional<EvictionEntry> best(const std::function<bool(TreeNode*)>& can_evict) const;
+    // A non-null after must still be in the heap.
+    std::optional<EvictionEntry> best(const std::function<bool(TreeNode*)>& can_evict, TreeNode* after) const;
 
     // Collect all current nodes. Used for read-only capacity queries.
     std::vector<TreeNode*> nodes() const {

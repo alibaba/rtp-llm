@@ -1,6 +1,7 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/evict/EvictionHeap.h"
 
 #include <functional>
+#include <iterator>
 
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 
@@ -77,10 +78,12 @@ void EvictionHeap::erase(TreeNode* node) {
     index_.erase(it);
 }
 
-std::optional<EvictionEntry> EvictionHeap::best(const std::function<bool(TreeNode*)>& can_evict) const {
-    for (const EvictionEntry& entry : ordered_) {
-        if (can_evict(entry.node)) {
-            return entry;
+std::optional<EvictionEntry> EvictionHeap::best(const std::function<bool(TreeNode*)>& can_evict,
+                                                TreeNode*                             after) const {
+    auto it = after ? std::next(index_.at(after)) : ordered_.begin();
+    for (; it != ordered_.end(); ++it) {
+        if (can_evict(it->node)) {
+            return *it;
         }
     }
     return std::nullopt;

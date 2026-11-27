@@ -64,17 +64,24 @@ bool BlockTreeTaskPool::submit(BlockTreeTaskClass               task_class,
         } catch (...) {}
         return true;
     }
-    if (queue_size_ != 0) {
-        if (normalQueueSizeLocked() >= queue_size_) {
+    if (task_class == BlockTreeTaskClass::CAPACITY_CHECK && queued_capacity_check_) {
+        return true;
+    }
+    if (queue_size_ != 0 && task_class != BlockTreeTaskClass::CAPACITY_CHECK) {
+        const size_t background = background_queue_.size() - (queued_capacity_check_ != nullptr);
+        if (load_queue_.size() + background >= queue_size_) {
             return false;
         }
-        if (task_class == BlockTreeTaskClass::BACKGROUND && background_queue_.size() >= backgroundLimit()) {
+        if (task_class == BlockTreeTaskClass::BACKGROUND && background >= backgroundLimit()) {
             return false;
         }
     }
 
     auto& queue = task_class == BlockTreeTaskClass::LOAD ? load_queue_ : background_queue_;
     queue.push_back(QueuedTask{std::move(task), std::move(on_timeout), std::move(deadline)});
+    if (task_class == BlockTreeTaskClass::CAPACITY_CHECK) {
+        queued_capacity_check_ = &queue.back();
+    }
     taskStarted();
     queue_cv_.notify_one();
     return true;
@@ -116,6 +123,9 @@ BlockTreeTaskPool::QueuedTask BlockTreeTaskPool::popNextNormalTaskLocked() {
     const bool take_background =
         !background_queue_.empty() && (load_queue_.empty() || consecutive_load_dispatches_ >= kMaxLoadBurst);
     if (take_background) {
+        if (queued_capacity_check_ == &background_queue_.front()) {
+            queued_capacity_check_ = nullptr;
+        }
         QueuedTask task = std::move(background_queue_.front());
         background_queue_.pop_front();
         consecutive_load_dispatches_ = 0;
@@ -199,6 +209,7 @@ void BlockTreeTaskPool::shutdown() {
         dropped_tasks      = normalQueueSizeLocked() + completion_queue_.size();
         dropped_load.swap(load_queue_);
         dropped_background.swap(background_queue_);
+        queued_capacity_check_ = nullptr;
         dropped_completions.swap(completion_queue_);
         thread_pool = thread_pool_;
         was_started = started_;

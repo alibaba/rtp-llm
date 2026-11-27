@@ -402,8 +402,8 @@ void CoordinatorCacheManager::attachBlockTreeCache(BlockTreeCachePtr block_tree_
     for (const auto& group : cacheGroups()) {
         const std::string tag = group->tag();
         group->setEvictCallback([cache = block_tree_cache_, tag](size_t need_blocks) {
-            const int reclaimed = cache->evictForGroup(tag, need_blocks);
-            return reclaimed > 0 ? static_cast<size_t>(reclaimed) : 0;
+            const int freed = cache->evictForGroup(tag, need_blocks);
+            return freed > 0 ? static_cast<size_t>(freed) : 0;
         });
     }
 }

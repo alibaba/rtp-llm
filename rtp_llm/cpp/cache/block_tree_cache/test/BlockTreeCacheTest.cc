@@ -177,7 +177,7 @@ void initializeTestGroupSet(const GroupSetPtr&                     group_set,
     for (const auto& group : topology->groups()) {
         group_tags.push_back(group.tag);
     }
-    group_set->initialize(group_set_id, topology, group_tags);
+    group_set->initialize(group_set_id, topology, group_tags, {}, 0);
 }
 
 void initializeSingleMemberGroupSets(const std::vector<GroupSetPtr>&        group_sets,
@@ -208,7 +208,7 @@ void initializeSingleMemberGroupSets(const std::vector<GroupSetPtr>&        grou
     auto   topology     = block_transfer_engine_test::makeTestTopology(std::move(groups));
     size_t group_set_id = 0;
     for (const auto& tag : topology->groupTags()) {
-        group_sets[group_set_id]->initialize(group_set_id, topology, {tag});
+        group_sets[group_set_id]->initialize(group_set_id, topology, {tag}, {}, 0);
         ++group_set_id;
     }
 }
@@ -250,14 +250,16 @@ protected:
         resetCache();
     }
 
-    void resetCache(std::shared_ptr<kmonitor::MetricsReporter> metrics_reporter = nullptr) {
+    void resetCache(std::shared_ptr<kmonitor::MetricsReporter> metrics_reporter = nullptr,
+                    LastTierEvictionMode                       mode             = LastTierEvictionMode::ON_DEMAND) {
         cache_.reset();
         auto full_group = std::make_shared<FullGroupSet>(
             std::vector<DeviceBlockPoolPtr>{block_tree_cache_test::makeStructuralDevicePool(0)}, nullptr, nullptr);
         std::vector<GroupSetPtr> groups = {full_group};
 
-        cache_ = makeBlockTreeCacheForTest(
-            std::move(groups), BlockTreeCacheConfig{}, nullptr, nullptr, std::move(metrics_reporter));
+        BlockTreeCacheConfig config;
+        config.last_tier_evict_mode = mode;
+        cache_ = makeBlockTreeCacheForTest(std::move(groups), config, nullptr, nullptr, std::move(metrics_reporter));
     }
 
     std::unique_ptr<BlockTreeCache> cache_;
@@ -285,7 +287,7 @@ TEST_F(BlockTreeCacheTest, IncompleteResidentInsertKeepsPrefixProtectedAndRetryS
     }
     EXPECT_TRUE(path[1]->is_resident);
     EXPECT_EQ(cache_->getStats().device_heap_total_size, 0u);
-    EXPECT_EQ(BlockTreeCacheTestPeer::reclaimBlocksForTest(*cache_, 2, Tier::DEVICE), 0);
+    EXPECT_EQ(BlockTreeCacheTestPeer::dropBlocksForTest(*cache_, 2, Tier::DEVICE), 0);
     {
         const size_t resident_prefix_length = cache_->insert({100, 200}, resources, Tier::DEVICE, true);
         EXPECT_EQ(resident_prefix_length, 2u);
@@ -983,7 +985,7 @@ TEST_F(BlockTreeCacheTest, InsertReplacesIdleLowerTierFullRefillsSwaAndRefreshes
         EXPECT_GT(path[0]->group_set_resources[0].candidate_meta.tier_enter_time_us, 1);
         EXPECT_EQ(metricSeriesCount(reporter->getMetricsGroup<RtpLLMCacheInsertMetrics>()->insert_hard_stop_qps_metric),
                   0u);
-        EXPECT_EQ(BlockTreeCacheTestPeer::reclaimBlocksForTest(*cache, 1, tier), 0);
+        EXPECT_EQ(BlockTreeCacheTestPeer::dropBlocksForTest(*cache, 1, tier), 0);
 
         auto after = cache->match({100, 200, 300});
         EXPECT_EQ(after.matched_device_blocks, 3u);
@@ -1225,19 +1227,20 @@ TEST_F(BlockTreeCacheMetricsTest, CacheLockStagesShareBoundaryAndPreserveTraceId
     }
 }
 
-TEST_F(BlockTreeCacheMetricsTest, WatermarkDropLocksKeepSourceAndTargetLabels) {
+TEST_F(BlockTreeCacheMetricsTest, WatermarkLocksReportUpperTierEvictionRoutes) {
     auto                          raw = std::make_shared<kmonitor::MetricsReporter>("", "", kmonitor::MetricsTags{});
     BlockTreeCacheMetricsReporter reporter(raw, true, std::chrono::hours(1));
     std::mutex                    mutex;
-    for (Tier source : {Tier::DEVICE, Tier::HOST, Tier::DISK}) {
-        CacheLockGuard lock(mutex, "watermark", CacheStageContext::forLock(&reporter, "watermark", source, Tier::NONE));
+    const std::pair<Tier, Tier>   routes[] = {{Tier::DEVICE, Tier::HOST}, {Tier::HOST, Tier::DISK}};
+    for (const auto& [source, target] : routes) {
+        CacheLockGuard lock(mutex, "watermark", CacheStageContext::forLock(&reporter, "watermark", source, target));
     }
     reporter.flushStageMetrics();
     auto* metrics = raw->getMetricsGroup<RtpLLMCacheTransferMetrics>();
-    EXPECT_EQ(metricSeriesCount(metrics->transfer_stage_qps_metric), 6u);
-    for (Tier source : {Tier::DEVICE, Tier::HOST, Tier::DISK}) {
+    EXPECT_EQ(metricSeriesCount(metrics->transfer_stage_qps_metric), 4u);
+    for (const auto& [source, target] : routes) {
         for (const char* stage : {"lock_wait", "lock_hold"}) {
-            const auto tags = lockStageTags("watermark", stage, true, tierName(source), "NONE");
+            const auto tags = lockStageTags("watermark", stage, true, tierName(source), tierName(target));
             EXPECT_DOUBLE_EQ(snapshotQps(metrics->transfer_stage_qps_metric, tags), 1);
         }
     }
@@ -2219,7 +2222,7 @@ TEST_F(BlockTreeCacheTest, WatermarkTriggerQpsCountsOneSuccessfulSchedulingRound
     kmonitor::MetricsTags                       tags;
     std::shared_ptr<kmonitor::MetricsReporter>  metrics_reporter =
         std::make_shared<kmonitor::MetricsReporter>("", "", tags);
-    resetCache(metrics_reporter);
+    resetCache(metrics_reporter, LastTierEvictionMode::WATERMARK);
 
     std::vector<std::vector<GroupSetResource>> first_resources(1, std::vector<GroupSetResource>(1));
     first_resources[0][0].device_blocks = {42};
@@ -2228,6 +2231,7 @@ TEST_F(BlockTreeCacheTest, WatermarkTriggerQpsCountsOneSuccessfulSchedulingRound
     second_resources[0][0].device_blocks = {43};
     cache_->insert({200}, second_resources, Tier::DEVICE);
 
+    BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache_);
     BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache_, Tier::DEVICE, 0.99);
     BlockTreeCacheTestPeer::runMaintenanceForTest(*cache_);
     EXPECT_EQ(cache_->getStats().tree_node_count, 0u);
@@ -2250,6 +2254,34 @@ TEST_F(BlockTreeCacheTest, WatermarkTriggerQpsCountsOneSuccessfulSchedulingRound
     selection_tags.AddTag("selected", "true");
     EXPECT_DOUBLE_EQ(snapshotQps(eviction_metrics->choose_victim_qps_metric, selection_tags), 2);
     EXPECT_EQ(metricSeriesCount(eviction_metrics->choose_victim_qps_metric), 2u);
+}
+
+TEST_F(BlockTreeCacheTest, LastDeviceTierReportsNoWatermarkEviction) {
+    block_tree_cache_test::ScopedServingMetrics serving_metrics;
+    std::shared_ptr<kmonitor::MetricsReporter>  metrics_reporter =
+        std::make_shared<kmonitor::MetricsReporter>("", "", kmonitor::MetricsTags{});
+    resetCache(metrics_reporter);
+
+    std::vector<std::vector<GroupSetResource>> first_resources(1, std::vector<GroupSetResource>(1));
+    first_resources[0][0].device_blocks = {42};
+    cache_->insert({100}, first_resources, Tier::DEVICE);
+    std::vector<std::vector<GroupSetResource>> second_resources(1, std::vector<GroupSetResource>(1));
+    second_resources[0][0].device_blocks = {43};
+    cache_->insert({200}, second_resources, Tier::DEVICE);
+
+    BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache_, Tier::DEVICE, 0.99);
+    BlockTreeCacheTestPeer::runMaintenanceForTest(*cache_);
+    EXPECT_EQ(cache_->getStats().tree_node_count, 2u);
+
+    RtpLLMCacheEvictionMetrics* eviction_metrics = metrics_reporter->getMetricsGroup<RtpLLMCacheEvictionMetrics>();
+    ASSERT_NE(eviction_metrics, nullptr);
+    cache_->reportMetrics();
+    kmonitor::MetricsTags tags("trigger_type", "watermark");
+    tags.AddTag("tier", tierName(Tier::DEVICE));
+    tags.AddTag("group_type", metricCacheGroupTypeName(CacheGroupType::FULL));
+    EXPECT_DOUBLE_EQ(snapshotQps(eviction_metrics->eviction_trigger_qps_metric, tags), 0);
+    EXPECT_EQ(metricSeriesCount(eviction_metrics->evicted_block_lifetime_ms_metric), 0u);
+    EXPECT_EQ(metricSeriesCount(eviction_metrics->choose_victim_qps_metric), 0u);
 }
 
 TEST_F(BlockTreeCacheTest, KeySnapshotTracksKeyVersionAndReturnsAllKeys) {
@@ -2496,7 +2528,7 @@ TEST_F(BlockTreeCacheTest, DuplicateInsertDoesNotCreateNodes) {
     EXPECT_EQ(find_result[1]->group_set_resources[0].device_blocks, (BlockIndicesType{11}));
 }
 
-TEST_F(BlockTreeCacheTest, ReclaimCascadesToLowerPriorityGroup) {
+TEST_F(BlockTreeCacheTest, DropCascadesToLowerPriorityGroup) {
     // Build a cache with Full + SWA groups
 
     auto full_group = std::make_shared<FullGroupSet>(
@@ -2516,9 +2548,9 @@ TEST_F(BlockTreeCacheTest, ReclaimCascadesToLowerPriorityGroup) {
 
     multi_cache->insert({100}, resources, Tier::DEVICE);
 
-    // Reclaim Full group at DEVICE → should cascade to SWA.
-    int reclaimed = BlockTreeCacheTestPeer::reclaimBlocksForTest(*multi_cache, 1, Tier::DEVICE);
-    EXPECT_EQ(reclaimed, 1);
+    // Drop Full group at DEVICE → should cascade to SWA.
+    int dropped = BlockTreeCacheTestPeer::dropBlocksForTest(*multi_cache, 1, Tier::DEVICE);
+    EXPECT_EQ(dropped, 1);
 
     block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*multi_cache);
 }
@@ -2636,7 +2668,7 @@ TEST_F(BlockTreeCacheTest, ConcurrentDoubleMatch_PreventsDropUntilLastRelease) {
 
     const DeviceBlockPoolPtr& pool = cache_->groupSets()[0]->devicePools()[0];
     EXPECT_EQ(pool->refCount(42), 3u);
-    EXPECT_EQ(BlockTreeCacheTestPeer::reclaimBlocksForTest(*cache_, 1, Tier::DEVICE), 0);
+    EXPECT_EQ(BlockTreeCacheTestPeer::dropBlocksForTest(*cache_, 1, Tier::DEVICE), 0);
     block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache_);
     EXPECT_EQ(cache_->getStats().device_heap_total_size, 1u);
     EXPECT_EQ(cache_->getStats().tree_node_count, 1u);
@@ -2651,7 +2683,7 @@ TEST_F(BlockTreeCacheTest, ConcurrentDoubleMatch_PreventsDropUntilLastRelease) {
         std::unique_lock<std::mutex> lock(mutex);
         cv.wait(lock, [&] { return released_count == 1; });
     }
-    EXPECT_EQ(BlockTreeCacheTestPeer::reclaimBlocksForTest(*cache_, 1, Tier::DEVICE), 0);
+    EXPECT_EQ(BlockTreeCacheTestPeer::dropBlocksForTest(*cache_, 1, Tier::DEVICE), 0);
     EXPECT_EQ(cache_->getStats().device_heap_total_size, 1u);
     EXPECT_TRUE(pool->isAllocated(42));
     EXPECT_EQ(pool->refCount(42), 2u);
@@ -2666,13 +2698,14 @@ TEST_F(BlockTreeCacheTest, ConcurrentDoubleMatch_PreventsDropUntilLastRelease) {
     }
     EXPECT_EQ(released_count, 2u);
     EXPECT_EQ(pool->refCount(42), 1u);
-    EXPECT_EQ(BlockTreeCacheTestPeer::reclaimBlocksForTest(*cache_, 1, Tier::DEVICE), 1);
+    EXPECT_EQ(BlockTreeCacheTestPeer::dropBlocksForTest(*cache_, 1, Tier::DEVICE), 1);
     EXPECT_EQ(cache_->getStats().device_heap_total_size, 0u);
     EXPECT_EQ(cache_->getStats().tree_node_count, 0u);
     EXPECT_FALSE(pool->isAllocated(42));
 }
 
 TEST_F(BlockTreeCacheTest, WatermarkDirectDropSkipsHeldLruCandidateUntilLastRequestReleasesIt) {
+    resetCache(nullptr, LastTierEvictionMode::WATERMARK);
     const auto& pool = cache_->groupSets()[0]->devicePools()[0];
     pool->incRef(42);
     pool->incRef(42);
@@ -2683,7 +2716,7 @@ TEST_F(BlockTreeCacheTest, WatermarkDirectDropSkipsHeldLruCandidateUntilLastRequ
     idle[0][0].device_blocks = {43};
     cache_->insert({200}, idle, Tier::DEVICE);
 
-    // No lower tier is enabled, so maintenance must drop rather than migrate.
+    BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache_);
     BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache_, Tier::DEVICE, 0.99);
     const size_t initial_free = pool->freeBlocksNum();
     BlockTreeCacheTestPeer::runMaintenanceForTest(*cache_);
@@ -2717,6 +2750,7 @@ TEST_F(BlockTreeCacheTest, WatermarkDirectDropSkipsHeldLruCandidateUntilLastRequ
 }
 
 TEST_F(BlockTreeCacheTest, CapacityReleaseRetriesWatermarkWithoutDroppingHeldOrFrozenBlocks) {
+    resetCache(nullptr, LastTierEvictionMode::WATERMARK);
     std::shared_ptr<BlockTreeCache> cache = std::move(cache_);
     const auto&                     pool  = cache->groupSets()[0]->devicePools()[0];
     pool->incRef(42, DeviceBlockRefType::REQUEST);
@@ -2727,12 +2761,13 @@ TEST_F(BlockTreeCacheTest, CapacityReleaseRetriesWatermarkWithoutDroppingHeldOrF
     cache->insert({100}, resources, Tier::DEVICE);
     resources[0][0].device_blocks = {43};
     cache->insert({200}, resources, Tier::DEVICE);
+    BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache);
     BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache, Tier::DEVICE, 0.99);
     BlockTreeCacheTestPeer::runMaintenanceForTest(*cache);
     EXPECT_FALSE(cache->tree()->findNode({100}).empty());
 
-    const auto capacity_changed = cache->capacityChangeCallback();
-    pool->setCapacityChangeCallback(capacity_changed);
+    const auto schedule_capacity_check = cache->capacityChangeCallback();
+    pool->setCapacityChangeCallback(schedule_capacity_check);
     pool->decRef(42, DeviceBlockRefType::REQUEST);
     BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache);
     EXPECT_FALSE(cache->tree()->findNode({100}).empty());
@@ -2749,14 +2784,16 @@ TEST_F(BlockTreeCacheTest, CapacityReleaseRetriesWatermarkWithoutDroppingHeldOrF
     const std::weak_ptr<BlockTreeCache> cache_lifetime = cache;
     cache.reset();
     ASSERT_TRUE(cache_lifetime.expired());
-    EXPECT_NO_THROW(capacity_changed());
+    EXPECT_NO_THROW(schedule_capacity_check());
 }
 
 TEST_F(BlockTreeCacheTest, WatermarkDirectDropPreservesDeviceBlockWithTreeOperationReference) {
+    resetCache(nullptr, LastTierEvictionMode::WATERMARK);
     const auto&                                pool = cache_->groupSets()[0]->devicePools()[0];
     std::vector<std::vector<GroupSetResource>> resources(1, std::vector<GroupSetResource>(1));
     resources[0][0].device_blocks = {42};
     cache_->insert({100}, resources, Tier::DEVICE);
+    BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache_);
     BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache_, Tier::DEVICE, 0.99);
 
     const size_t initial_free = pool->freeBlocksNum();
@@ -2790,6 +2827,39 @@ TEST_F(BlockTreeCacheTest, WatermarkDirectDropPreservesDeviceBlockWithTreeOperat
     EXPECT_EQ(cache_->getKeySnapshot().version, frozen_version);
     EXPECT_TRUE(pool->isFrozen(43));
     EXPECT_FALSE(cache_->tree()->findNode({200}).empty());
+}
+
+TEST_F(BlockTreeCacheTest, LastDeviceTierWaitsForDemandAfterCapacityRelease) {
+    std::shared_ptr<BlockTreeCache> cache = std::move(cache_);
+    const auto&                     pool  = cache->groupSets()[0]->devicePools()[0];
+    pool->incRef(42, DeviceBlockRefType::REQUEST);
+    pool->incRef(42, DeviceBlockRefType::REMOTE_CONNECTOR);
+    pool->freezeBlock(43);
+    std::vector<std::vector<GroupSetResource>> resources(1, std::vector<GroupSetResource>(1));
+    resources[0][0].device_blocks = {42};
+    cache->insert({100}, resources, Tier::DEVICE);
+    resources[0][0].device_blocks = {43};
+    cache->insert({200}, resources, Tier::DEVICE);
+    BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache, Tier::DEVICE, 0.99);
+    BlockTreeCacheTestPeer::runMaintenanceForTest(*cache);
+    EXPECT_FALSE(cache->tree()->findNode({100}).empty());
+
+    pool->setCapacityChangeCallback(cache->capacityChangeCallback());
+    pool->decRef(42, DeviceBlockRefType::REQUEST);
+    BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache);
+    EXPECT_FALSE(cache->tree()->findNode({100}).empty());
+    EXPECT_TRUE(pool->isAllocated(42));
+
+    pool->decRef(42, DeviceBlockRefType::REMOTE_CONNECTOR);
+    BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache);
+    EXPECT_TRUE(pool->isAllocated(42));
+    EXPECT_EQ(cache->evictForGroup("group0", 1), 1);
+    EXPECT_TRUE(cache->tree()->findNode({100}).empty());
+    EXPECT_FALSE(pool->isAllocated(42));
+    EXPECT_FALSE(cache->tree()->findNode({200}).empty());
+    EXPECT_TRUE(pool->isAllocated(43));
+    EXPECT_TRUE(pool->isFrozen(43));
+    pool->setCapacityChangeCallback({});
 }
 
 TEST_F(BlockTreeCacheTest, ForceDropSkipsHeldLruCandidateUntilLastRequestReleasesIt) {
@@ -3153,10 +3223,10 @@ TEST_F(BlockTreeCacheTest, ConcurrentMatchInsertSameAndForkedPrefixes) {
         EXPECT_EQ(pool->refCount(fork_block), 1u);
     }
 
-    // Final reclaim: drain leaves first, then the promoted shared parent, until
+    // Final drop: drain leaves first, then the promoted shared parent, until
     // the tree is empty and every cache hold is released back to the pool.
     for (size_t attempt = 0; attempt < (kThreadCount + 2) * 2; ++attempt) {
-        if (BlockTreeCacheTestPeer::reclaimBlocksForTest(*cache_, 1, Tier::DEVICE) == 0) {
+        if (BlockTreeCacheTestPeer::dropBlocksForTest(*cache_, 1, Tier::DEVICE) == 0) {
             break;
         }
         block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache_);
@@ -3253,6 +3323,7 @@ TEST(BlockTreeCacheFinalizationTest, EvictionQueueRejectionSettlesPendingRelease
 
     environment->insertRequestPath();
     environment->releaseRequestRefs();
+    BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*environment->cache);
     ASSERT_TRUE(environment->allResourcesAtTier(Tier::DEVICE));
     BlockTreeCacheTestPeer::setTierWatermarkForTest(*environment->cache, Tier::DEVICE, 0.01);
 
@@ -3314,7 +3385,7 @@ TEST_F(BlockTreeCacheTest, FullMatch_PreservesPathAndPoolOrder) {
               (BlockIndicesType{a_pool1, b_pool1}));
     block_tree_cache_test::releaseRequestRefsForTest(*cache, result.matched_device_resources);
 
-    EXPECT_EQ(BlockTreeCacheTestPeer::reclaimBlocksForTest(*cache, 2, Tier::DEVICE), 2);
+    EXPECT_EQ(BlockTreeCacheTestPeer::dropBlocksForTest(*cache, 2, Tier::DEVICE), 2);
     block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache);
     EXPECT_FALSE(pool0->isAllocated(a_pool0));
     EXPECT_FALSE(pool0->isAllocated(b_pool0));
@@ -3378,7 +3449,7 @@ TEST_F(BlockTreeCacheTest, DuplicateInsert_KeepsExistingResourceAndCallerOwnsLos
     EXPECT_FALSE(pool->isAllocated(loser_block));
     EXPECT_TRUE(pool->isAllocated(existing_block));
 
-    EXPECT_EQ(BlockTreeCacheTestPeer::reclaimBlocksForTest(*cache, 1, Tier::DEVICE), 1);
+    EXPECT_EQ(BlockTreeCacheTestPeer::dropBlocksForTest(*cache, 1, Tier::DEVICE), 1);
     block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache);
     EXPECT_FALSE(pool->isAllocated(existing_block));
     EXPECT_EQ(pool->freeBlocksNum(), kUsableBlocks);
@@ -3421,7 +3492,7 @@ TEST_F(BlockTreeCacheTest, DuplicateInsert_FillsExistingEmptyGroupAndAddsOneCach
         *cache, {makeMultiNodeResourceForTest(full->groupSetId(), Tier::DEVICE, {existing_node}, request_blocks)});
     EXPECT_EQ(pool->refCount(block), 1u);
 
-    EXPECT_EQ(BlockTreeCacheTestPeer::reclaimBlocksForTest(*cache, 1, Tier::DEVICE), 1);
+    EXPECT_EQ(BlockTreeCacheTestPeer::dropBlocksForTest(*cache, 1, Tier::DEVICE), 1);
     block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache);
     EXPECT_FALSE(pool->isAllocated(block));
     EXPECT_EQ(cache->getStats().tree_node_count, 0u);
@@ -3459,7 +3530,7 @@ TEST_F(BlockTreeCacheTest, InsertFailsFastForPartialMultiPoolGroupWithoutAddingC
     EXPECT_FALSE(pool1->isAllocated(block1));
 }
 
-TEST_F(BlockTreeCacheTest, InsertMatchReclaimRelease_RefcountLifecycle) {
+TEST_F(BlockTreeCacheTest, InsertMatchDropRelease_RefcountLifecycle) {
     if (!cudaAvailable()) {
         GTEST_SKIP() << "CUDA not available";
     }
@@ -3498,7 +3569,7 @@ TEST_F(BlockTreeCacheTest, InsertMatchReclaimRelease_RefcountLifecycle) {
     EXPECT_EQ(result.matched_device_resources[0].node_blocks[0].second, (std::vector<BlockIdxType>{block}));
     EXPECT_EQ(pool->refCount(block), 2u);
 
-    EXPECT_EQ(BlockTreeCacheTestPeer::reclaimBlocksForTest(*cache, 1, Tier::DEVICE), 0);
+    EXPECT_EQ(BlockTreeCacheTestPeer::dropBlocksForTest(*cache, 1, Tier::DEVICE), 0);
     block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache);
     EXPECT_TRUE(pool->isAllocated(block));
     EXPECT_EQ(pool->refCount(block), 2u);
@@ -3508,18 +3579,18 @@ TEST_F(BlockTreeCacheTest, InsertMatchReclaimRelease_RefcountLifecycle) {
     result.matched_device_resources.clear();
     EXPECT_TRUE(pool->isAllocated(block));
     EXPECT_EQ(pool->refCount(block), 1u);
-    EXPECT_EQ(BlockTreeCacheTestPeer::reclaimBlocksForTest(*cache, 1, Tier::DEVICE), 1);
+    EXPECT_EQ(BlockTreeCacheTestPeer::dropBlocksForTest(*cache, 1, Tier::DEVICE), 1);
     EXPECT_FALSE(pool->isAllocated(block));
     EXPECT_EQ(pool->freeBlocksNum(), kUsableBlocks);
     EXPECT_EQ(cache->getStats().tree_node_count, 0u);
 }
 
-TEST_F(BlockTreeCacheTest, SequentialReclaimDrainsChainWithoutHostBlocks) {
+TEST_F(BlockTreeCacheTest, SequentialDropDrainsChainWithoutHostBlocks) {
     auto full = std::make_shared<FullGroupSet>(
         std::vector<DeviceBlockPoolPtr>{block_tree_cache_test::makeStructuralDevicePool(0)}, nullptr, nullptr);
     std::vector<GroupSetPtr> groups = {full};
 
-    // No Host pool, Host disabled → direct release on reclaim.
+    // No Host pool, Host disabled → direct release on drop.
     BlockTreeCacheConfig seq_cfg;
     seq_cfg.task_pool_size      = 2;
     seq_cfg.enable_device_cache = true;
@@ -3533,10 +3604,10 @@ TEST_F(BlockTreeCacheTest, SequentialReclaimDrainsChainWithoutHostBlocks) {
     resources[2][0].device_blocks = {44};
     ce_cache->insert({100, 200, 300}, resources, Tier::DEVICE);
 
-    // Reclaim all 3 nodes sequentially (synchronous direct release)
+    // Drop all 3 nodes sequentially (synchronous direct release)
     for (int i = 0; i < 3; ++i) {
-        int reclaimed = BlockTreeCacheTestPeer::reclaimBlocksForTest(*ce_cache, 1, Tier::DEVICE);
-        EXPECT_EQ(reclaimed, 1) << "Reclaim " << i << " should succeed";
+        int dropped = BlockTreeCacheTestPeer::dropBlocksForTest(*ce_cache, 1, Tier::DEVICE);
+        EXPECT_EQ(dropped, 1) << "Drop " << i << " should succeed";
         block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*ce_cache);
     }
 
@@ -3550,7 +3621,7 @@ TEST_F(BlockTreeCacheTest, HostDisabledDirectRelease) {
         std::vector<DeviceBlockPoolPtr>{block_tree_cache_test::makeStructuralDevicePool(0)}, nullptr, nullptr);
     std::vector<GroupSetPtr> groups = {full};
 
-    // Host disabled (default): Device reclaim → direct release.
+    // Host disabled (default): Device drop → direct release.
     std::unique_ptr<BlockTreeCache> cache =
         makeBlockTreeCacheForTest(std::move(groups), BlockTreeCacheConfig{.task_pool_size = 2});
 
@@ -3558,7 +3629,7 @@ TEST_F(BlockTreeCacheTest, HostDisabledDirectRelease) {
     resources[0][0].device_blocks = {42};
     cache->insert({100}, resources, Tier::DEVICE);
 
-    BlockTreeCacheTestPeer::reclaimBlocksForTest(*cache, 1, Tier::DEVICE);
+    BlockTreeCacheTestPeer::dropBlocksForTest(*cache, 1, Tier::DEVICE);
     block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache);
 
     // No host block allocated (Host disabled → direct release)
@@ -3605,8 +3676,8 @@ TEST_F(BlockTreeCacheTest, NodeDeletedWhenAllGroupsEmpty) {
 
     EXPECT_EQ(cache->getStats().tree_node_count, 1u);
 
-    // Reclaim device data.
-    BlockTreeCacheTestPeer::reclaimBlocksForTest(*cache, 1, Tier::DEVICE);
+    // Drop device data.
+    BlockTreeCacheTestPeer::dropBlocksForTest(*cache, 1, Tier::DEVICE);
     block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache);
 
     // Node should be deleted: group empty
@@ -3687,7 +3758,7 @@ TEST_F(BlockTreeCacheTest, ReorderedMembershipMapsBlocksByGroupId) {
                                                       block_transfer_engine_test::makeTestGroupBase(policy, {0}, 1)});
     auto device_pools = makeStructuralDevicePools(2, "reordered_membership");
     auto full         = std::make_shared<FullGroupSet>(device_pools, nullptr, nullptr);
-    full->initialize(0, topology, {"group1", "group0"});
+    full->initialize(0, topology, {"group1", "group0"}, {}, 0);
 
     std::vector<GroupSetPtr> group_sets = {full};
     auto                     cache      = makeBlockTreeCacheForTest(std::move(group_sets));
@@ -3741,7 +3812,7 @@ TEST_F(BlockTreeCacheTest, MatchRequiresSWAWindowAfterGap) {
     block_tree_cache_test::releaseRequestRefsForTest(*cache, restored.matched_device_resources);
 }
 
-TEST_F(BlockTreeCacheTest, ParentBecomesDeviceLeafAfterChildReclaim) {
+TEST_F(BlockTreeCacheTest, ParentBecomesDeviceLeafAfterChildDrop) {
     auto full = std::make_shared<FullGroupSet>(
         std::vector<DeviceBlockPoolPtr>{block_tree_cache_test::makeStructuralDevicePool(0)}, nullptr, nullptr);
     std::vector<GroupSetPtr> groups = {full};
@@ -3758,13 +3829,13 @@ TEST_F(BlockTreeCacheTest, ParentBecomesDeviceLeafAfterChildReclaim) {
     // Initially only C (leaf) is in heap
     EXPECT_EQ(cache->getStats().device_heap_total_size, 1u);
 
-    // Reclaim C -> B becomes DeviceLeaf -> enters heap.
-    BlockTreeCacheTestPeer::reclaimBlocksForTest(*cache, 1, Tier::DEVICE);
+    // Drop C -> B becomes DeviceLeaf -> enters heap.
+    BlockTreeCacheTestPeer::dropBlocksForTest(*cache, 1, Tier::DEVICE);
     block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache);
     EXPECT_EQ(cache->getStats().device_heap_total_size, 1u);
 
-    // Reclaim B -> A becomes DeviceLeaf -> enters heap.
-    BlockTreeCacheTestPeer::reclaimBlocksForTest(*cache, 1, Tier::DEVICE);
+    // Drop B -> A becomes DeviceLeaf -> enters heap.
+    BlockTreeCacheTestPeer::dropBlocksForTest(*cache, 1, Tier::DEVICE);
     block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache);
     EXPECT_EQ(cache->getStats().device_heap_total_size, 1u);
 }
@@ -3902,7 +3973,7 @@ TEST_F(BlockTreeCacheTest, LoadDetectsHostData) {
     resources[0][0].device_blocks = {42};
     cache->insert({100}, resources, Tier::DEVICE);
 
-    BlockTreeCacheTestPeer::reclaimBlocksForTest(*cache, 1, Tier::DEVICE);
+    BlockTreeCacheTestPeer::dropBlocksForTest(*cache, 1, Tier::DEVICE);
     block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache);
 
     std::vector<std::vector<GroupSetResource>> resources2(1, std::vector<GroupSetResource>(1));
@@ -4288,7 +4359,7 @@ TEST_F(BlockTreeCacheTest, LoadQueueRejectionRollsBackMixedDeviceAndHostDescript
     EXPECT_EQ(host_pool->treeRefCount(host_block), 2u);
 
     // Matching owns the DEVICE source until the request releases it, even if the load is rejected.
-    EXPECT_EQ(BlockTreeCacheTestPeer::reclaimBlocksForTest(*cache, 1, Tier::DEVICE), 0);
+    EXPECT_EQ(BlockTreeCacheTestPeer::dropBlocksForTest(*cache, 1, Tier::DEVICE), 0);
     BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache);
     EXPECT_TRUE(cache_device_pool->isAllocated(cache_block));
     EXPECT_EQ(cache_device_pool->refCount(cache_block), 2u);
@@ -4324,7 +4395,7 @@ TEST_F(BlockTreeCacheTest, LoadQueueRejectionRollsBackMixedDeviceAndHostDescript
     block_tree_cache_test::releaseRequestRefsForTest(*cache, result.matched_device_resources);
     result.matched_device_resources.clear();
     EXPECT_EQ(cache_device_pool->refCount(cache_block), 1u);
-    EXPECT_EQ(BlockTreeCacheTestPeer::reclaimBlocksForTest(*cache, 1, Tier::DEVICE), 1);
+    EXPECT_EQ(BlockTreeCacheTestPeer::dropBlocksForTest(*cache, 1, Tier::DEVICE), 1);
     EXPECT_FALSE(cache_device_pool->isAllocated(cache_block));
     EXPECT_EQ(host_pool->treeRefCount(host_block), 1u);
     target_device_pool->decRef(request_target);
@@ -4505,8 +4576,8 @@ TEST_F(BlockTreeCacheTest, ShutdownReleasesOnlyTreeHoldWhenExternalCoHolderSurvi
     EXPECT_EQ(device_pool->freeBlocksNum(), free_before);
 }
 
-// C006-T04: partial reclaim leaves only valid Host/Disk tree holds for shutdown to drain.
-TEST_F(BlockTreeCacheTest, ShutdownDrainsOnlyHoldsRemainingAfterPartialMixedTierReclaim) {
+// C006-T04: partial drop leaves only valid Host/Disk tree holds for shutdown to drain.
+TEST_F(BlockTreeCacheTest, ShutdownDrainsOnlyHoldsRemainingAfterPartialMixedTierDrop) {
     if (!cudaAvailable()) {
         GTEST_SKIP() << "CUDA not available";
     }
@@ -4554,7 +4625,7 @@ TEST_F(BlockTreeCacheTest, ShutdownDrainsOnlyHoldsRemainingAfterPartialMixedTier
     ASSERT_TRUE(insertGroupSetResources(*cache, {300}, disk_resources));
     releaseDeviceBlocks(*cache, device_pool, device_holder.front());
 
-    EXPECT_EQ(BlockTreeCacheTestPeer::reclaimBlocksForTest(*cache, 1, Tier::DEVICE), 1);
+    EXPECT_EQ(BlockTreeCacheTestPeer::dropBlocksForTest(*cache, 1, Tier::DEVICE), 1);
     block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache);
     EXPECT_EQ(per_rank_transfer_engine->submittedBatchCount(), 0u);
     EXPECT_EQ(device_pool->freeBlocksNum(), device_free_before);
@@ -4867,7 +4938,7 @@ TEST_F(BlockTreeCacheTest, EventPublicationTracksComponentsIndependently) {
     EXPECT_EQ(replayed, snapshot.block_groups);
 }
 
-TEST_F(BlockTreeCacheTest, OnDemandReclaimPreservesRequestHeldFullSibling) {
+TEST_F(BlockTreeCacheTest, OnDemandEvictPreservesRequestHeldFullSibling) {
     for (const size_t target_group : {1u, 2u}) {
         SCOPED_TRACE(target_group);
         const auto               pools = makeStructuralDevicePools(3, "on_demand_non_full");

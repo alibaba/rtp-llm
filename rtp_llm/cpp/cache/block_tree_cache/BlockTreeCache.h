@@ -11,6 +11,7 @@
 #include <vector>
 
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTree.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeCacheConfig.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/metrics/BlockTreeCacheMetricsReporter.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/evict/BlockTreeEvictor.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/group_set/GroupSet.h"
@@ -38,89 +39,12 @@ struct BlockTreeKeySnapshot {
     int64_t                   version{-1};
     std::vector<CacheKeyType> keys;
 };
-// Unified configuration for BlockTreeCache behavior and pool sizing.
-struct BlockTreeCacheConfig {
-    // ---- Tier enable flags ----
-    bool enable_device_cache{true};
-    bool enable_host_cache{false};
-    bool enable_disk_cache{false};
-    bool enable_remote_cache{false};
-
-    // ---- Per-tier watermark ----
-    using TierWatermark = rtp_llm::TierWatermark;
-    TierWatermark watermark_device;
-    TierWatermark watermark_host;
-    TierWatermark watermark_disk;
-
-    // ---- Per-tier eviction policy ----
-    EvictionPolicy device_eviction_policy{EvictionPolicy::LRU};
-    EvictionPolicy host_eviction_policy{EvictionPolicy::LRU};
-    EvictionPolicy disk_eviction_policy{EvictionPolicy::LRU};
-
-    // ---- Shared load/eviction task pool ----
-    int    task_pool_size{4};
-    size_t business_queue_max_size{10000};
-
-    // ---- Per-rank WorkLoop owners or legacy workers per direction ----
-    size_t transfer_worker_count{2};
-    size_t transfer_queue_max_size{10000};
-
-    // ---- Transfer deadlines, including queue wait and cross-rank work ----
-    int host_cache_sync_timeout_ms{10000};
-    // Preserve the existing name for disk loads.
-    int disk_cache_sync_timeout_ms{3000};
-    // Outbound disk transfers for eviction.
-    int disk_cache_evict_timeout_ms{3000};
-
-    // Async: blocks per load/evict pair, split by direction and shared by groups.
-    // Legacy: rank-wide byte budget measured in maximum-stride blocks.
-    size_t device_disk_staging_block_count{128};
-    // Shared descriptor batching limit for watermark planning and all transfer directions.
-    size_t max_descriptors_per_transfer_batch{32};
-    size_t disk_cache_evict_max_pending_bytes{0};
-
-    // ---- FULL prefix invariant scanner (diagnostic only) ----
-    // The factory zeroes this on ranks that do not own a mutable BlockTree.
-    int64_t full_prefix_scan_interval_ms{30000};  // 30 seconds; 0 = disabled, no thread
-
-    // ---- Query helpers ----
-    bool isTierEnabled(Tier tier) const {
-        switch (tier) {
-            case Tier::DEVICE:
-                return enable_device_cache;
-            case Tier::HOST:
-                return enable_host_cache;
-            case Tier::DISK:
-                return enable_disk_cache;
-            case Tier::REMOTE:
-                return enable_remote_cache;
-            default:
-                return false;
-        }
-    }
-
-    TierWatermark watermarkForTier(Tier tier) const {
-        switch (tier) {
-            case Tier::DEVICE:
-                return watermark_device;
-            case Tier::HOST:
-                return watermark_host;
-            case Tier::DISK:
-                return watermark_disk;
-            default:
-                return {};
-        }
-    }
-};
-
 // BlockTreeCache: eviction workflow coordinator.
 // Owns BlockTree, GroupSets, HostBlockPool (L2), DiskBlockPool (L3),
 // StorageBackend, and the cache workflow collaborators injected by the factory.
 // Local tiers require DISK -> HOST -> DEVICE; remote storage is independent.
 class BlockTreeCache {
 public:
-    using TierWatermark = BlockTreeCacheConfig::TierWatermark;
-
     BlockTreeCache(std::unique_ptr<BlockTree>                     tree,
                    BlockTreeCacheConfig                           config,
                    std::shared_ptr<StorageBackend>                storage_backend,
@@ -130,9 +54,7 @@ public:
                    std::shared_ptr<BlockTreeReclaimer>            reclaimer);
 
     ~BlockTreeCache();
-    bool init();
-    // Retry deferred watermarks after external pins release. Safe inside a pool callback.
-    void onCapacityChanged();
+    bool                  init();
     std::function<void()> capacityChangeCallback() const;
     BlockTreeReclaimer& reclaimer() const { return *reclaimer_; }
     void stopBackgroundTasks();
@@ -155,7 +77,7 @@ public:
                   std::optional<int64_t>                            request_id         = {},
                   size_t                                            remote_reuse_begin = 0,
                   size_t                                            remote_reuse_end   = 0);
-    // Directly reclaim up to num_blocks device blocks belonging to one group set
+    // Evict on demand to free num_blocks in the DEVICE pool for this group
     // (target_tier = NONE, content dropped). Returns the number actually freed.
     // Skips plans containing device blocks that would remain referenced after dropping.
     int evictForGroup(std::string_view group_tag, size_t num_blocks);
@@ -211,9 +133,7 @@ public:
 private:
     struct CapacityCallbackState;
 
-    void checkWatermark();
-    // Caller holds mutex_.
-    void onWorkflowSettledLocked(bool check_watermark);
+    void scheduleCapacityCheck();
 
     BlockTreeCacheConfig                           config_;
     std::unique_ptr<BlockTree>                     tree_;
@@ -225,12 +145,11 @@ private:
     BlockTreeEvictor                               evictor_;
     bool                                           initialized_{false};
     std::atomic<bool>                              stopping_{false};
-    std::atomic<bool>                              watermark_check_pending_{false};
     BlockTreeLoader                                loader_;
     BlockTreeStorer                                storer_;
     std::unique_ptr<FullPrefixInvariantScanner>    full_prefix_scanner_;
     std::shared_ptr<BlockTreeReclaimer> reclaimer_;
-    std::shared_ptr<CapacityCallbackState> capacity_callback_state_;
+    std::shared_ptr<CapacityCallbackState>         capacity_callback_state_;
 };
 
 using BlockTreeCachePtr = std::shared_ptr<BlockTreeCache>;

@@ -199,8 +199,8 @@ TEST(BlockTreeCacheAdapterTest, MaterializesReadyRefsOutsideMatchAndReleasesThem
     EXPECT_FALSE(last_pool->isAllocated(extra->front()));
     EXPECT_TRUE(subset_blocks.empty());
     EXPECT_TRUE(subset_tags.empty());
-    environment->reclaimAll();
-    environment->expectFullyReclaimed();
+    environment->dropAll();
+    environment->expectAllBlocksFree();
 }
 
 TEST(BlockTreeCacheAdapterTest, InvalidRequestIdentityDoesNotPartiallyReleaseLedger) {
@@ -260,8 +260,8 @@ TEST(BlockTreeCacheAdapterTest, InvalidRequestIdentityDoesNotPartiallyReleaseLed
     EXPECT_FALSE(first_pool->isAllocated(first->front()));
     EXPECT_FALSE(second_pool->isAllocated(second->front()));
     EXPECT_FALSE(first_pool->isAllocated(prepared_block->front()));
-    environment->reclaimAll();
-    environment->expectFullyReclaimed();
+    environment->dropAll();
+    environment->expectAllBlocksFree();
 }
 
 TEST(BenchmarkFixtureTest, SwaWindowUsesTokenGeometry) {

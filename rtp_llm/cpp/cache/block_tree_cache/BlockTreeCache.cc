@@ -39,35 +39,25 @@ BlockTreeCache::BlockTreeCache(std::unique_ptr<BlockTree>                     tr
     transfer_dispatcher_(std::move(transfer_dispatcher)),
     task_pool_(std::move(task_pool)),
     metrics_reporter_(std::move(metrics_reporter)),
-    evictor_(
-        tree_.get(),
-        config_.device_eviction_policy,
-        config_.host_eviction_policy,
-        config_.disk_eviction_policy,
-        transfer_dispatcher_.get(),
-        task_pool_.get(),
-        *metrics_reporter_,
-        mutex_,
-        config_.host_cache_sync_timeout_ms,
-        config_.disk_cache_evict_timeout_ms,
-        config_.max_descriptors_per_transfer_batch,
-        [this](Tier tier) { return config_.isTierEnabled(tier); },
-        [this](bool check_watermark) { onWorkflowSettledLocked(check_watermark); },
-        config_.disk_cache_evict_max_pending_bytes),
+    evictor_(tree_.get(),
+             config_,
+             transfer_dispatcher_.get(),
+             task_pool_.get(),
+             *metrics_reporter_,
+             mutex_,
+             [this] { scheduleCapacityCheck(); }),
     loader_(tree_.get(),
             evictor_,
             transfer_dispatcher_.get(),
             task_pool_.get(),
             *metrics_reporter_,
             mutex_,
-            config_.disk_cache_sync_timeout_ms,
-            config_.host_cache_sync_timeout_ms,
+            config_.disk_to_device_timeout_ms,
+            config_.device_host_timeout_ms,
             config_.enable_device_cache,
             storage_backend_,
-            [this](bool check_watermark) { onWorkflowSettledLocked(check_watermark); }),
-    storer_(tree_.get(), evictor_, *metrics_reporter_, storage_backend_, [this](bool check_watermark) {
-        onWorkflowSettledLocked(check_watermark);
-    }),
+            [this] { scheduleCapacityCheck(); }),
+    storer_(tree_.get(), evictor_, *metrics_reporter_, storage_backend_, [this] { scheduleCapacityCheck(); }),
     reclaimer_(std::move(reclaimer)),
     capacity_callback_state_(std::make_shared<CapacityCallbackState>(this)) {
     metrics_reporter_->initEvictionMetricGroupTypes(tree_->groupSets());
@@ -157,26 +147,20 @@ std::function<void()> BlockTreeCache::capacityChangeCallback() const {
     return [state = capacity_callback_state_] {
         std::lock_guard<std::mutex> lock(state->mutex);
         if (state->owner) {
-            state->owner->onCapacityChanged();
+            state->owner->scheduleCapacityCheck();
         }
     };
 }
 
-void BlockTreeCache::onCapacityChanged() {
-    if (stopping_.load() || watermark_check_pending_.exchange(true)) {
+void BlockTreeCache::scheduleCapacityCheck() {
+    if (stopping_.load() || !evictor_.capacityCheckEnabled()) {
         return;
     }
-    // Capacity callbacks can run under mutex_ while tree references are released.
-    // Queue the check and coalesce wakeups instead of reacquiring that mutex inline.
-    if (!task_pool_->submitCompletion([this] {
-            watermark_check_pending_.store(false);
-            std::lock_guard<std::mutex> lock(mutex_);
-            if (!stopping_.load()) {
-                checkWatermark();
-            }
-        })) {
-        watermark_check_pending_.store(false);
-    }
+    task_pool_->submit(BlockTreeTaskClass::CAPACITY_CHECK, [this] {
+        if (!stopping_.load()) {
+            evictor_.checkCapacity();
+        }
+    });
 }
 
 bool BlockTreeCache::executeFunction(BlockTreeCache*          cache,
@@ -309,15 +293,19 @@ int BlockTreeCache::evictForGroup(std::string_view group_tag, size_t num_blocks)
     if (location == nullptr) {
         return 0;
     }
-    const size_t reclaimed =
-        evictor_.reclaimDeviceBlocksLocked(location->group_set_id, location->member_group_id, num_blocks);
-    RTP_LLM_LOG_DEBUG("tag=%.*s group_set[%zu] reclaimed %zu/%zu device blocks",
+    const size_t initial_free =
+        tree_->groupSets()[location->group_set_id]->devicePools()[location->member_group_id]->freeBlocksNum();
+    const size_t freed =
+        evictor_
+            .batchDropLocked(location->group_set_id, Tier::DEVICE, num_blocks, initial_free, location->member_group_id)
+            .freed;
+    RTP_LLM_LOG_DEBUG("tag=%.*s group_set[%zu] freed %zu/%zu device blocks",
                       static_cast<int>(group_tag.size()),
                       group_tag.data(),
                       location->group_set_id,
-                      reclaimed,
+                      freed,
                       num_blocks);
-    return static_cast<int>(reclaimed);
+    return static_cast<int>(freed);
 }
 
 BlockIndicesType BlockTreeCache::matchedBlocksForGroup(std::string_view                      group_tag,
@@ -377,22 +365,6 @@ BlockTreeKeySnapshot BlockTreeCache::getKeySnapshot(int64_t latest_version) cons
 
 bool BlockTreeCache::abortPendingLoad(const std::shared_ptr<AsyncContext>& context) {
     return loader_.abortPendingLoad(context);
-}
-
-void BlockTreeCache::onWorkflowSettledLocked(bool check_watermark) {
-    if (check_watermark) {
-        checkWatermark();
-    }
-}
-
-void BlockTreeCache::checkWatermark() {
-    for (Tier tier : {Tier::DISK, Tier::HOST, Tier::DEVICE}) {
-        const auto watermark = config_.watermarkForTier(tier);
-        if (!config_.isTierEnabled(tier)) {
-            continue;
-        }
-        evictor_.scheduleWatermarkEvictionsLocked(tier, watermark);
-    }
 }
 
 }  // namespace rtp_llm

@@ -51,9 +51,6 @@ DiskBlockPool::normalizeConfig(const std::shared_ptr<const DiskBlockPoolConfig>&
 
     auto normalized                  = std::make_shared<DiskBlockPoolConfig>(*config);
     normalized->physical_block_count = computed_physical_block_count;
-    if (normalized->eviction_block_bytes == 0) {
-        normalized->eviction_block_bytes = normalized->stride_bytes;
-    }
     return normalized;
 }
 
@@ -263,10 +260,6 @@ size_t DiskBlockPool::payloadBytes() const {
 
 size_t DiskBlockPool::strideBytes() const {
     return config().stride_bytes;
-}
-
-size_t DiskBlockPool::evictionBlockBytes() const {
-    return config().eviction_block_bytes;
 }
 
 size_t DiskBlockPool::blockSizeBytes() const {

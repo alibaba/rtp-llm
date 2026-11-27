@@ -120,7 +120,7 @@ TEST(KVCMLocalTest, ManagerKeepsRemoteControlIndependentOfHbmPublicationSettings
         KVCacheManager manager(manager_config, false, nullptr, config, singleRankConfig(), runtime);
         auto           full =
             std::make_shared<FullGroupSet>(std::vector<DeviceBlockPoolPtr>{environment.device_pool}, nullptr, nullptr);
-        full->initialize(0, manager_config.topologyPtr(), {"default"});
+        full->initialize(0, manager_config.topologyPtr(), {"default"}, {}, 0);
         manager.block_tree_cache_                   = block_tree_cache_test::makeBlockTreeCacheForTest({full});
         manager.block_tree_cache_->storage_backend_ = backend;
         backend->setReclaimer(manager.block_tree_cache_->reclaimer_);
@@ -244,7 +244,7 @@ TEST(KVCMLocalTest, Dsv41PublisherUsesEffectiveBackendFullSpecMerge) {
                 pools.push_back(environment.pools_by_tag.at(tag));
             }
             auto full = std::make_shared<FullGroupSet>(std::move(pools), nullptr, nullptr);
-            full->initialize(0, environment.cache_config.topologyPtr(), tags);
+            full->initialize(0, environment.cache_config.topologyPtr(), tags, {}, 0);
             manager.block_tree_cache_                   = block_tree_cache_test::makeBlockTreeCacheForTest({full});
             manager.block_tree_cache_->storage_backend_ = backend;
             backend->setReclaimer(manager.block_tree_cache_->reclaimer_);

@@ -65,7 +65,7 @@ StoreEnvironment makeStoreEnvironment(const std::string&              name,
     config.enable_host_cache        = host_cache_on;
     config.enable_disk_cache        = disk_cache_on;
     config.enable_remote_cache      = storage_backend != nullptr;
-    config.watermark_device         = device_watermark;
+    config.device_watermark         = device_watermark;
     config.task_pool_size           = task_pool_size;
     std::vector<GroupSetPtr> groups = env.groups;
     env.cache = makeBlockTreeCacheForTest(std::move(groups), std::move(config), std::move(storage_backend));
@@ -626,7 +626,7 @@ TEST(BlockTreeStorerTest, UnsupportedInsertTargetsRejectWithoutPublishingOrPinni
     releaseDeviceBlocks(*env.cache, env.device_pools[0], holder[1]);
 }
 
-TEST(BlockTreeStorerTest, WatermarkPreservesPendingRemoteWriteUntilReferencesRelease) {
+TEST(BlockTreeStorerTest, DeviceEvictionWaitsForPendingRemoteWriteReferences) {
     if (!cudaAvailable()) {
         GTEST_SKIP() << "CUDA not available";
     }
@@ -671,7 +671,7 @@ TEST(BlockTreeStorerTest, WatermarkPreservesPendingRemoteWriteUntilReferencesRel
         EXPECT_TRUE(pool->isAllocated(holder[0]));
         EXPECT_EQ(pool->refCount(holder[0]), 2u);
     }
-    BlockTreeCacheTestPeer::runMaintenanceForTest(*env.cache);
+    EXPECT_EQ(env.cache->evictForGroup(env.groups[0]->groupTags().front(), 2), 0);
     EXPECT_EQ(env.cache->getStats().tree_node_count, 2u);
     backend->finishWrite();
     EXPECT_EQ(uploaded_bytes, (std::vector<int>{17, 18}));
@@ -682,6 +682,8 @@ TEST(BlockTreeStorerTest, WatermarkPreservesPendingRemoteWriteUntilReferencesRel
         EXPECT_EQ(pool->treeRefCount(holder[0]), 1u);
     }
     BlockTreeCacheTestPeer::runMaintenanceForTest(*env.cache);
+    EXPECT_EQ(env.cache->getStats().tree_node_count, 2u);
+    EXPECT_EQ(env.cache->evictForGroup(env.groups[0]->groupTags().front(), 2), 2);
     EXPECT_EQ(env.cache->getStats().tree_node_count, 0u);
     for (const auto& holder : holders) {
         EXPECT_FALSE(pool->isAllocated(holder[0]));
@@ -792,7 +794,7 @@ TEST(BlockTreeStorerTest, StorageHandlesUseTopologyGroupsAndResolveGpuBuffers) {
     auto pool_z    = makeDevicePool({{16, 0}}, kStoreDeviceBlocks, "storage_tag_z");
     auto pool_a    = makeDevicePool({{16, 0}}, kStoreDeviceBlocks, "storage_tag_a");
     auto group_set = std::make_shared<FullGroupSet>(std::vector<DeviceBlockPoolPtr>{pool_z, pool_a}, nullptr, nullptr);
-    group_set->initialize(0, topology, {"z_group", "a_group"});
+    group_set->initialize(0, topology, {"z_group", "a_group"}, {}, 0);
 
     auto                 backend = std::make_shared<PendingWriteBackend>();
     BlockTreeCacheConfig config;

@@ -43,7 +43,8 @@ public:
     void initialize(size_t                               group_set_id,
                     std::shared_ptr<const CacheTopology> topology,
                     std::vector<std::string>             group_tags,
-                    BackingLayout                        backing_layout = {});
+                    BackingLayout                        backing_layout,
+                    size_t                               eviction_block_bytes);
 
     size_t groupSetId() const {
         return group_set_id_;
@@ -59,6 +60,9 @@ public:
     }
     size_t payloadBytes() const {
         return payload_bytes_;
+    }
+    size_t evictionBlockBytes() const {
+        return eviction_block_bytes_;
     }
     bool usesPhysicalPayloadGeometry() const {
         return uses_physical_payload_geometry_;
@@ -87,6 +91,8 @@ public:
         return disk_pool_;
     }
 
+    IBlockPool* hostOrDiskPool(Tier tier) const;
+
     void referenceBlocks(const MultiNodeResource& resource) const;
     void unreferenceBlocks(const MultiNodeResource& resource) const;
     void referenceBlocks(const MultiNodeResource& resource, BlockTreeRefType ref_type) const;
@@ -97,16 +103,17 @@ public:
     void                       unreferenceBlocks(Tier tier, const BlockIdList& blocks, BlockTreeRefType ref_type) const;
 
 private:
-    std::vector<DeviceBlockPoolPtr>         device_pools_;
-    std::shared_ptr<HostBlockPool>          host_pool_;
-    std::shared_ptr<DiskBlockPool>          disk_pool_;
-    size_t                                  group_set_id_{0};
-    std::shared_ptr<const CacheTopology>    topology_;
-    std::vector<std::string>                group_tags_;
-    size_t                                  payload_bytes_{0};
-    size_t                                  storage_bytes_{0};
-    bool                                    enable_crc_{false};
-    bool                                    uses_physical_payload_geometry_{false};
+    std::vector<DeviceBlockPoolPtr>      device_pools_;
+    std::shared_ptr<HostBlockPool>       host_pool_;
+    std::shared_ptr<DiskBlockPool>       disk_pool_;
+    size_t                               group_set_id_{0};
+    std::shared_ptr<const CacheTopology> topology_;
+    std::vector<std::string>             group_tags_;
+    size_t                               payload_bytes_{0};
+    size_t                               eviction_block_bytes_{0};
+    size_t                               storage_bytes_{0};
+    bool                                 enable_crc_{false};
+    bool                                 uses_physical_payload_geometry_{false};
 };
 
 using GroupSetPtr = std::shared_ptr<GroupSet>;

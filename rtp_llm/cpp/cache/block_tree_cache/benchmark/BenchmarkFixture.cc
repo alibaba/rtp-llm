@@ -167,8 +167,11 @@ GroupSetPtr BenchmarkFixture::createFullGroupSet(std::vector<DeviceBlockPoolPtr>
     for (const auto& tag : group_tags)
         payload += topology->blockSizeBytesForGroup(tag);
     const auto storage = enable_crc ? CrcCopyWorkspace::encodedBytes(payload) : payload;
-    group_set->initialize(
-        group_set_id, std::move(topology), group_tags, {0, storage, alignUp(storage, kPoolAlignment), enable_crc});
+    group_set->initialize(group_set_id,
+                          std::move(topology),
+                          group_tags,
+                          {0, storage, alignUp(storage, kPoolAlignment), enable_crc},
+                          alignUp(storage, kPoolAlignment));
     return group_set;
 }
 
@@ -187,8 +190,11 @@ GroupSetPtr BenchmarkFixture::createSWAGroupSet(std::vector<DeviceBlockPoolPtr> 
     for (const auto& tag : group_tags)
         payload += topology->blockSizeBytesForGroup(tag);
     const auto storage = enable_crc ? CrcCopyWorkspace::encodedBytes(payload) : payload;
-    group_set->initialize(
-        group_set_id, std::move(topology), group_tags, {0, storage, alignUp(storage, kPoolAlignment), enable_crc});
+    group_set->initialize(group_set_id,
+                          std::move(topology),
+                          group_tags,
+                          {0, storage, alignUp(storage, kPoolAlignment), enable_crc},
+                          alignUp(storage, kPoolAlignment));
     return group_set;
 }
 
@@ -247,18 +253,15 @@ std::unique_ptr<BlockTreeCache> BenchmarkFixture::createCache(std::vector<GroupS
     config.enable_device_cache                = true;
     config.enable_host_cache                  = enable_host;
     config.enable_disk_cache                  = enable_disk;
-    config.disk_cache_evict_max_pending_bytes = KVCacheConfig{}.disk_cache_evict_max_pending_bytes;
     config.task_pool_size                     = static_cast<int>(task_pool_size);
-    config.watermark_device                   = {1.0, 1.0};
-    config.watermark_host                     = {1.0, 1.0};
-    config.watermark_disk                     = {1.0, 1.0};
-    // Event-driven eviction: insert commits trigger checkWatermark, which
-    // evicts overflow down to the per-tier ratio watermark (0.0 = disabled).
+    config.device_watermark                   = {1.0, 1.0};
+    config.host_watermark                     = {1.0, 1.0};
+    config.disk_watermark                     = {1.0, 1.0};
     if (device_watermark_ratio > 0.0) {
-        config.watermark_device = {device_watermark_ratio, std::nextafter(device_watermark_ratio, 1.0)};
+        config.device_watermark = {device_watermark_ratio, std::nextafter(device_watermark_ratio, 1.0)};
     }
     if (host_watermark_ratio > 0.0) {
-        config.watermark_host = {host_watermark_ratio, std::nextafter(host_watermark_ratio, 1.0)};
+        config.host_watermark = {host_watermark_ratio, std::nextafter(host_watermark_ratio, 1.0)};
     }
 
     auto cache_metrics_reporter = std::make_shared<BlockTreeCacheMetricsReporter>(nullptr);
