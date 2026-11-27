@@ -143,8 +143,21 @@ class _PaddedFFN:
 
 
 class _PaddedGateUp(_PaddedFFN, MergedColumnParallelLinear):
-    pass
+    def _checked_lora_factors(self, a, b, input_size, output_size):
+        # PEFT describes the checkpoint, not TP's padded parameter. A fused B
+        # contains [gate, up]; insert zeros after EACH projection before the
+        # normal merged-column sharder selects this rank's gate and up rows.
+        parts = output_size // self.padded_intermediate_size
+        width = self.checkpoint_intermediate_size
+        a, b = super()._checked_lora_factors(a, b, input_size, parts * width)
+        b = torch.nn.functional.pad(
+            b.reshape(parts, width, -1), (0, 0, 0, self.padded_intermediate_size - width)
+        )
+        return a, b.flatten(0, 1)
 
 
 class _PaddedDown(_PaddedFFN, RowParallelLinear):
-    pass
+    def _checked_lora_factors(self, a, b, input_size, output_size):
+        width = self.checkpoint_intermediate_size
+        a, b = super()._checked_lora_factors(a, b, width, output_size)
+        return torch.nn.functional.pad(a, (0, input_size - width)), b

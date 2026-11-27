@@ -3,6 +3,7 @@
 import json
 import tempfile
 import unittest
+from contextlib import nullcontext
 from dataclasses import replace
 from datetime import timedelta
 from pathlib import Path
@@ -185,6 +186,80 @@ def check_ffn_rank(rank, checkpoint_dir, config, backend):
 
 
 class GroupwiseOwnerTest(unittest.TestCase):
+    def test_padded_ffn_lora_exclusions_match_unsharded_checkpoint(self):
+        from rtp_llm.models_py.lora_checkpoint import (
+            RankLocalCheckpointAdapters,
+            prepare_startup_lora_merge,
+        )
+        from rtp_llm.models_py.new_models.qwen2.language import Qwen2MLP
+
+        hidden, width, padded, tp = 64, 56, 64, 4
+        for method in ("awq", "gptq"):
+            for names in (("gate_proj", "up_proj"), ("gate_up_proj",), ("down_proj",)):
+                down = names == ("down_proj",)
+                leaf = "down_proj" if down else "gate_up_proj"
+                config = QuantizationConfig(
+                    method, source_config(method, 4), ignored_layers=names
+                )
+                with self.subTest(method=method, names=names), tempfile.TemporaryDirectory() as path:
+                    tensors, deltas = {}, []
+                    for i, name in enumerate(names):
+                        k = width if down else hidden
+                        n = hidden if down else width * (2 if name == "gate_up_proj" else 1)
+                        a = (torch.arange(2 * k).reshape(2, k) % 13 + i).float()
+                        b = (torch.arange(n * 2).reshape(n, 2) % 11 - i).float()
+                        tensors[f"{name}.lora_A.weight"] = a
+                        tensors[f"{name}.lora_B.weight"] = b
+                        deltas.append(b @ a)
+                    (Path(path) / "adapter_config.json").write_text(
+                        json.dumps({"r": 2, "lora_alpha": 2})
+                    )
+                    save_file(tensors, str(Path(path) / "adapter_model.safetensors"))
+                    delta = torch.cat(deltas)
+                    base = torch.arange(delta.numel()).reshape_as(delta).float() % 7
+
+                    # Independent reference: merge in logical checkpoint geometry,
+                    # then pad each projection and take that rank's interval.
+                    def expected(weight, rank):
+                        if down:
+                            whole = torch.nn.functional.pad(weight, (0, padded - width))
+                            return whole.chunk(tp, 1)[rank]
+                        return torch.cat(
+                            [
+                                torch.nn.functional.pad(part, (0, 0, 0, padded - width))
+                                .chunk(tp)[rank]
+                                for part in weight.chunk(2)
+                            ]
+                        )
+
+                    for rank in range(tp):
+                        model = Qwen2MLP(hidden, width, tp, rank, config, torch.float32)
+                        layer = getattr(model, leaf)
+                        layer.load_weights({"weight": base})
+                        local_base, merged = expected(base, rank), expected(base + delta, rank)
+                        manager = RankLocalCheckpointAdapters(model, NewModelLoader)
+                        manager.load("adapter", path)
+                        torch.testing.assert_close(layer.weight, local_base, rtol=0, atol=0)
+                        manager.merge("adapter", pause_engine=nullcontext)
+                        torch.testing.assert_close(layer.weight, merged, rtol=0, atol=0)
+                        manager.unmerge(pause_engine=nullcontext)
+                        torch.testing.assert_close(layer.weight, local_base, rtol=0, atol=0)
+                        prepare_startup_lora_merge(model, NewModelLoader, "startup", path)()
+                        torch.testing.assert_close(layer.weight, merged, rtol=0, atol=0)
+
+                    # Checkpoint factors must use logical sizes even if the supplied
+                    # dimensions happen to match the padded runtime storage exactly.
+                    invalid_target = names[-1]
+                    factor_name = f"{invalid_target}.lora_{'A' if down else 'B'}.weight"
+                    extra = (padded - width) * (2 if invalid_target == "gate_up_proj" else 1)
+                    tensors[factor_name] = torch.nn.functional.pad(
+                        tensors[factor_name], (0, extra) if down else (0, 0, 0, extra)
+                    )
+                    save_file(tensors, str(Path(path) / "adapter_model.safetensors"))
+                    with self.assertRaises(ValueError):
+                        manager.load("invalid", path)
+                    torch.testing.assert_close(layer.weight, merged, rtol=0, atol=0)
+
     def test_group_odd_ffn_width_matches_global_qwen_checkpoint(self):
         # 3 groups of 16 split over TP2: rank 0 owns channels 0:32,
         # rank 1 owns 32:48 plus one neutral group. Both gate/up and down
