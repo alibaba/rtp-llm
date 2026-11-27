@@ -85,8 +85,8 @@ class FinetuneCheckpointOverlay:
         return BaseExpander()
 
     def weights(self, name_filter=None, read_spec_resolver=None, slice_expander=None):
-        # mmap keeps an expert overlay from eagerly copying all expert payloads
-        # into host memory. The same model-owned ReadSpecs select local pieces.
+        # When available, private mmap avoids eagerly copying all expert
+        # payloads. Legacy pre-ZIP archives still use weights-only eager load.
         payload = torch.load(
             self.path, map_location="cpu", weights_only=True, mmap=_can_map_cpu_archive(self.path)
         )

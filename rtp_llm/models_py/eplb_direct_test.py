@@ -632,6 +632,9 @@ class DistributedEplbReloadTest(unittest.TestCase):
                         for stage in range(stages)
                     },
                     os.path.join(overlay_path, "pytorch_model.bin"),
+                    # Both the historic eager format and mmap-capable overlay
+                    # must keep this replacement after expert redistribution.
+                    _use_new_zipfile_serialization=dtype == torch.bfloat16,
                 )
             mp.spawn(
                 _rank_worker,
