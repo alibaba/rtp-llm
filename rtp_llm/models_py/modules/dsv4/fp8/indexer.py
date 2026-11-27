@@ -375,8 +375,24 @@ def _build_score_chunks(
             continue
         ks_c = ks[rs:re]
         ke_c = ke[rs:re]
-        ks_rebased = ks_c if k_lo == 0 else (ks_c - k_lo).contiguous()
-        ke_rebased = ke_c if k_lo == 0 else (ke_c - k_lo).contiguous()
+        # Align k_lo down to 4 fp32 elements (16B) so k_scale_flat[k_lo:k_hi]
+        # stays 16-byte aligned without copying; clone unaligned rs slices of
+        # 4-byte ks/ke when k_lo == 0.
+        k_lo = (k_lo // 4) * 4
+        if k_lo == 0:
+            ks_rebased = (
+                ks_c.clone()
+                if (ks_c.numel() > 0 and (ks_c.data_ptr() % 16) != 0)
+                else ks_c
+            )
+            ke_rebased = (
+                ke_c.clone()
+                if (ke_c.numel() > 0 and (ke_c.data_ptr() % 16) != 0)
+                else ke_c
+            )
+        else:
+            ks_rebased = (ks_c - k_lo).contiguous()
+            ke_rebased = (ke_c - k_lo).contiguous()
         row_indices = None
         if (
             max_len > 2 * min_len

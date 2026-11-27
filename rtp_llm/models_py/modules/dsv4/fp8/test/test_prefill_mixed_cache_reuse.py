@@ -448,6 +448,189 @@ class IndexerMixedCacheReuseTest(unittest.TestCase):
                         f"row {row} topk={topk} score mismatch: vc={vc}",
                     )
 
+    def test_score_chunks_and_fp8_mqa_score_unaligned_slices(self) -> None:
+        if rtp_llm_ops is None or not has_fp8_mqa_logits():
+            self.skipTest("rtp_llm_ops and fp8_mqa_logits required")
+
+        torch.manual_seed(29)
+        ratio = 4
+        topk = 256
+        # Non-4-aligned Q rows (3, 7) and non-4-aligned K spans (5, 9 -> k_lo=5).
+        T_per_req = [5, 9]
+        cu_q_host = [0, 3, 10]
+        cu_k_host = [0, 5, 14]
+        M = cu_q_host[-1]
+        T_total = cu_k_host[-1]
+
+        ks = torch.tensor(
+            [0, 0, 0, 5, 5, 5, 5, 5, 5, 5], dtype=torch.int32, device=self.device
+        )
+        ke = torch.tensor(
+            [1, 3, 5, 6, 7, 8, 10, 11, 13, 14], dtype=torch.int32, device=self.device
+        )
+        with patch(
+            "rtp_llm.models_py.modules.dsv4.fp8.indexer._fp8_prefill_score_chunk_rows",
+            return_value=3,
+        ):
+            chunks = _build_score_chunks(
+                ks,
+                ke,
+                M=M,
+                T=T_total,
+                ratio=ratio,
+                topk=topk,
+                use_varlen=True,
+                sp_int=0,
+                cu_q_host=cu_q_host,
+                cu_k_host=cu_k_host,
+                T_per_req_host=T_per_req,
+            )
+        self.assertGreaterEqual(len(chunks), 2)
+
+        q_fp8 = torch.randn(
+            M, 64, INDEXER_HEAD_DIM, device=self.device, dtype=torch.bfloat16
+        ).to(torch.float8_e4m3fn)
+        w_fold = torch.randn(M, 64, device=self.device, dtype=torch.float32)
+        k_quant = torch.randn(
+            T_total, INDEXER_HEAD_DIM, device=self.device, dtype=torch.bfloat16
+        ).to(torch.float8_e4m3fn)
+        k_scale = torch.rand(T_total, dtype=torch.float32, device=self.device) + 0.25
+
+        for c in chunks:
+            self.assertEqual(c.k_lo % 4, 0)
+            k_scale_c = k_scale[c.k_lo : c.k_hi]
+            self.assertEqual(k_scale_c.data_ptr() % 16, 0)
+            self.assertEqual(c.ks_chunk.data_ptr() % 16, 0)
+            self.assertEqual(c.ke_chunk.data_ptr() % 16, 0)
+
+        # Also exercise rs % 4 != 0 when k_lo == 0 across split query chunks.
+        with patch(
+            "rtp_llm.models_py.modules.dsv4.fp8.indexer._fp8_prefill_score_chunk_rows",
+            return_value=3,
+        ):
+            split_chunks = _build_score_chunks(
+                torch.zeros(7, dtype=torch.int32, device=self.device),
+                torch.tensor([1, 2, 3, 4, 5, 6, 7], dtype=torch.int32, device=self.device),
+                M=7,
+                T=7,
+                ratio=ratio,
+                topk=topk,
+                use_varlen=False,
+                sp_int=0,
+                cu_q_host=None,
+                cu_k_host=None,
+                T_per_req_host=None,
+            )
+        self.assertEqual(len(split_chunks), 3)
+        for c in split_chunks:
+            self.assertEqual(c.k_lo, 0)
+            self.assertEqual(c.ks_chunk.data_ptr() % 16, 0)
+            self.assertEqual(c.ke_chunk.data_ptr() % 16, 0)
+
+        # Trigger high_padding_waste (merged > 4M and > 2*raw) without patches:
+        # req 0 has many rows (299) and tiny span T_0=5, req 1 has 7 rows and T_1=16384,
+        # so chunk 1 starts at rs=299 (3 mod 4) and k_lo_raw=5 -> aligned k_lo=4.
+        huge_T = [5, 16384]
+        q0_huge, q1_huge = 299, 7
+        M_huge = q0_huge + q1_huge
+        q_huge_fp8 = torch.randn(
+            M_huge, 64, INDEXER_HEAD_DIM, device=self.device, dtype=torch.bfloat16
+        ).to(torch.float8_e4m3fn)
+        w_huge_fold = torch.randn(M_huge, 64, device=self.device, dtype=torch.float32)
+        k_quant_big = torch.randn(
+            sum(huge_T), INDEXER_HEAD_DIM, device=self.device, dtype=torch.bfloat16
+        ).to(torch.float8_e4m3fn)
+        k_scale_big = torch.rand(sum(huge_T), dtype=torch.float32, device=self.device) + 0.25
+        ks_big = torch.cat(
+            [
+                torch.zeros(q0_huge, dtype=torch.int32, device=self.device),
+                torch.full((q1_huge,), 5, dtype=torch.int32, device=self.device),
+            ]
+        )
+        ke_big = torch.cat(
+            [
+                torch.full((q0_huge,), 5, dtype=torch.int32, device=self.device),
+                torch.tensor(
+                    [6, 100, 500, 1000, 4000, 8000, 16389],
+                    dtype=torch.int32,
+                    device=self.device,
+                ),
+            ]
+        )
+        big_chunks = _build_score_chunks(
+            ks_big,
+            ke_big,
+            M=M_huge,
+            T=sum(huge_T),
+            ratio=ratio,
+            topk=topk,
+            use_varlen=True,
+            sp_int=0,
+            cu_q_host=[0, q0_huge, M_huge],
+            cu_k_host=[0, 5, sum(huge_T)],
+            T_per_req_host=huge_T,
+        )
+        self.assertEqual(len(big_chunks), 2)
+        self.assertEqual(big_chunks[1].row_start, q0_huge)
+        self.assertEqual(big_chunks[1].k_lo, 4)
+        self.assertEqual(k_scale_big[big_chunks[1].k_lo : big_chunks[1].k_hi].data_ptr() % 16, 0)
+
+        stub = IndexerFP8.__new__(IndexerFP8)
+        stub.compress_ratio = ratio
+        stub.n_heads = 64
+        stub.head_dim = INDEXER_HEAD_DIM
+        stub.index_topk = topk
+        meta = _IndexerFP8PrefillMeta(
+            bsz=2,
+            seqlen=M_huge,
+            M=M_huge,
+            sp_int=0,
+            end_pos=0,
+            is_fresh_prefill=False,
+            T=sum(huge_T),
+            freqs_cis_slice=torch.empty(0),
+            positions_d=torch.empty(0),
+            ks=ks_big,
+            ke=ke_big,
+            block_table_i32=None,
+            cu_kv_seqlens=None,
+            cu_kv_per_token=None,
+            compressor_meta=None,
+            indexer_cp_plan=None,
+            indexer_cp_local_cu=None,
+            score_chunks=big_chunks,
+        )
+        out_chunked = stub._score_and_topk_prefill(
+            q_huge_fp8, w_huge_fold, k_quant_big, k_scale_big, meta, (M_huge, topk)
+        )
+        self.assertEqual(out_chunked.shape, (M_huge, topk))
+
+        # Direct fp8_mqa_indexer_score call with explicitly unaligned 1D slices (offset=1,3).
+        logits_unaligned = fp8_mqa_indexer_score(
+            q_fp8[1:6],
+            w_fold[1:6],
+            k_quant[1:12],
+            k_scale[1:12],
+            ks[3:8],
+            ke[3:8],
+            clean_logits=False,
+        )
+        logits_ref = fp8_mqa_indexer_score(
+            q_fp8[1:6].clone(),
+            w_fold[1:6].clone(),
+            k_quant[1:12].clone(),
+            k_scale[1:12].clone(),
+            ks[3:8].clone(),
+            ke[3:8].clone(),
+            clean_logits=False,
+        )
+        self.assertEqual(logits_unaligned.shape, logits_ref.shape)
+        for idx, (s, e) in enumerate(zip(ks[3:8].tolist(), ke[3:8].tolist())):
+            self.assertTrue(
+                torch.equal(logits_unaligned[idx, s:e], logits_ref[idx, s:e]),
+                f"row {idx} logits mismatch on unaligned direct call",
+            )
+
 
 class CompressorMixedCacheReuseTest(unittest.TestCase):
     """HCA may_use_cache=False + CSA/Idx mixed continuation+cold vs per-req refs."""

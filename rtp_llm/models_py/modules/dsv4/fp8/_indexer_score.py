@@ -203,6 +203,14 @@ def fp8_paged_indexer_score(
 # ---------------------------------------------------------------------------
 
 
+def _contiguous_16b_aligned(t: torch.Tensor) -> torch.Tensor:
+    """Return a contiguous copy if a 1D/sub-16B slice is not 16-byte aligned."""
+    t = t.contiguous()
+    if t.numel() > 0 and (t.data_ptr() % 16) != 0:
+        return t.clone()
+    return t
+
+
 def fp8_mqa_indexer_score(
     q_fp8: torch.Tensor,  # [M, H, D] float8_e4m3fn
     w_fold: torch.Tensor,  # [M, H]    fp32
@@ -252,11 +260,11 @@ def fp8_mqa_indexer_score(
         )
 
     return _deep_gemm.fp8_mqa_logits(
-        q_fp8.contiguous(),
-        (k_quant.contiguous(), k_scale.contiguous()),
-        w_fold.contiguous(),
-        cu_seqlen_ks.contiguous(),
-        cu_seqlen_ke.contiguous(),
+        _contiguous_16b_aligned(q_fp8),
+        (_contiguous_16b_aligned(k_quant), _contiguous_16b_aligned(k_scale)),
+        _contiguous_16b_aligned(w_fold),
+        _contiguous_16b_aligned(cu_seqlen_ks),
+        _contiguous_16b_aligned(cu_seqlen_ke),
         clean_logits,
         max_seqlen_k,
     )
