@@ -1,4 +1,15 @@
-"""Stage a shared FP8 PLE table from a Qwen4 MXFP4 checkpoint."""
+"""Stage one shared PLE table that every local rank of a Qwen4 model maps.
+
+The released n-gram memory is the bulk of a qwen4_exp checkpoint -- around a
+hundred gigabytes -- and it is frozen for the whole of an RL run. Staging it
+once into a memfd and letting every local rank map it read-only costs one copy
+of host memory instead of one per rank, which is what makes a DP topology
+loadable at all: the table is selected per TP rank, so at TP1 every rank would
+otherwise hold the whole thing.
+
+Both the MXFP4 checkpoint's FP8 table and the BF16 checkpoint's BF16 table are
+staged by the same byte-range copy; only the element size differs.
+"""
 
 import ctypes
 import hashlib
@@ -26,6 +37,10 @@ def _memfd(name: str):
         error = ctypes.get_errno()
         raise OSError(error, os.strerror(error))
     return fd
+
+
+# Checkpoint dtypes the table may use, and their element size in bytes.
+PLE_DTYPES = {"F8_E4M3": 1, "BF16": 2}
 
 
 def _ple_layout(checkpoint: Path):
@@ -57,13 +72,17 @@ def _ple_layout(checkpoint: Path):
             begin, end = tensor["data_offsets"]
             shape = tensor["shape"]
             length = end - begin
+            item_size = PLE_DTYPES.get(tensor["dtype"])
             if (
-                tensor["dtype"] != "F8_E4M3"
+                item_size is None
                 or begin < 0
                 or length <= 0
-                or length != math.prod(shape)
+                or length != math.prod(shape) * item_size
             ):
-                raise ValueError(f"Invalid FP8 PLE shard for {name}")
+                raise ValueError(
+                    f"Invalid PLE shard for {name}: dtype {tensor['dtype']}, "
+                    f"{length} bytes for shape {shape}"
+                )
             ranges.append((path, name, 8 + header_size + begin, length))
             entries[name] = (table_size, length, shape)
             table_size += length
@@ -136,18 +155,34 @@ def shared_ple(checkpoint: Path, *, shutdown_requested=None):
         yield table.fileno()
 
 
-@contextmanager
-def stage_qwen4_ple_for_server(model_args, *, shutdown_requested):
-    """Expose a single staged table to the backend launcher and its ranks."""
+def shares_ple_table(model_args, dp_size: int) -> bool:
+    """Decide whether this run should map one shared table instead of copies.
+
+    MXFP4 keeps its existing behaviour unconditionally. A BF16 checkpoint only
+    stages when DP would otherwise replicate the table, because at TP == world
+    size the per-rank shards already sum to one copy and staging would just move
+    that memory earlier.
+    """
     if model_args.model_type != "qwen4_exp":
+        return False
+    checkpoint = Path(model_args.ckpt_path)
+    try:
+        config = json.loads((checkpoint / "config.json").read_text())
+    except OSError:
+        return False
+    if (config.get("quantization_config") or {}).get("quant_method") == "mxfp4":
+        return True
+    return dp_size > 1
+
+
+@contextmanager
+def stage_qwen4_ple_for_server(model_args, *, dp_size=1, shutdown_requested):
+    """Expose a single staged table to the backend launcher and its ranks."""
+    if not shares_ple_table(model_args, dp_size):
         yield None
         return
 
     checkpoint = Path(model_args.ckpt_path)
-    config = json.loads((checkpoint / "config.json").read_text())
-    if (config.get("quantization_config") or {}).get("quant_method") != "mxfp4":
-        yield None
-        return
 
     with shared_ple(checkpoint, shutdown_requested=shutdown_requested) as fd:
         yield f"/proc/{os.getpid()}/fd/{fd}"

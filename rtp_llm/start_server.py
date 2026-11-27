@@ -721,6 +721,7 @@ def start_server(py_env_configs: PyEnvConfigs):
             py_env_configs.model_args._qwen4_ple_table_path = resources.enter_context(
                 stage_qwen4_ple_for_server(
                     py_env_configs.model_args,
+                    dp_size=int(py_env_configs.parallelism_config.dp_size),
                     shutdown_requested=lambda: process_manager.shutdown_requested,
                 )
             )

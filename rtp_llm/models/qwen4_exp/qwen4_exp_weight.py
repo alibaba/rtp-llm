@@ -460,9 +460,15 @@ class Qwen4ExpWeight(Qwen35MoeWeight):
                         else None
                     ),
                     preserve_fp8=preserve_fp8,
+                    # Map the staged table whenever startup produced one. It is
+                    # staged for the MXFP4 source and, now, for any qwen4_exp
+                    # checkpoint whose DP topology would otherwise replicate the
+                    # table once per rank; _qwen4_ple_table_path being set is
+                    # exactly that decision, already made and validated against
+                    # this checkpoint by resolve_shared_ple_table.
                     shared_ple_checkpoint=(
                         self.model_config.ckpt_path
-                        if getattr(self.model_config, "_qwen4_mxfp4_source", False)
+                        if getattr(self.model_config, "_qwen4_ple_table_path", None)
                         else None
                     ),
                     shared_ple_table_path=getattr(
