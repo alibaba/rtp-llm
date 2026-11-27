@@ -1558,7 +1558,6 @@ LocalRpcServer::CheckHealth(grpc::ServerContext* context, const EmptyPB* request
 grpc::Status LocalRpcServer::UpdateEplbConfig(grpc::ServerContext*             context,
                                               const UpdateEplbConfigRequestPB* request,
                                               EmptyPB*                         response) {
-    RTP_LLM_LOG_DEBUG("receive cacheStatus rpc request from client: %s", context->peer().c_str());
     const string mode_str = request->mode();
     EPLBConfig   config;
     if (mode_str == "EPLB" || mode_str == "eplb") {
@@ -1574,7 +1573,12 @@ grpc::Status LocalRpcServer::UpdateEplbConfig(grpc::ServerContext*             c
         return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "Invalid eplb mode");
     }
     config.eplb_update_time = request->update_time();
-    engine_->updateEplbConfig(config);
+    if (!engine_) {
+        return grpc::Status(grpc::StatusCode::UNAVAILABLE, "EPLB engine is not initialized");
+    }
+    if (!engine_->updateEplbConfig(config)) {
+        return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, "Engine rejected EPLB mode: " + mode_str);
+    }
     return grpc::Status::OK;
 }
 
