@@ -270,5 +270,164 @@ class BatchInvariantConfigTest(unittest.TestCase):
                         configure_batch_invariant_model(engine, model)
 
 
+def make_qwen38(layers=48):
+    """Qwen3.8-Flash-Next model config, geometry taken from the shipped checkpoint."""
+    model = ModelConfig()
+    model.model_type = "qwen4_exp"
+    model.task_type = TaskType.LANGUAGE_MODEL
+    model.data_type = "bf16"
+    model.num_layers = layers
+    model.hidden_size = 2560
+    model.expert_num = 512
+    model.moe_k = 10
+    model.moe_inter_size = 640
+    model.vit_separation = VitSeparation.VIT_SEPARATION_LOCAL
+    model.linear_attention_config.ssm_state_dtype = DataType.TYPE_FP32
+    attn = model.attn_config
+    attn.head_num, attn.kv_head_num, attn.size_per_head = 24, 2, 256
+    attn.tokens_per_block = attn.kernel_tokens_per_block = 128
+    attn.is_sparse = True
+    attn.use_sparse_gqa_fmha = True
+    return model
+
+
+def qwen38_checkpoint(layers=48):
+    period = ["linear_attention"] * 3 + ["full_attention"]
+    return {
+        "architectures": ["Qwen4ExpForConditionalGeneration"],
+        "text_config": {
+            "dtype": "bfloat16",
+            "model_type": "qwen4_exp_text",
+            "layer_types": period * (layers // 4),
+            "hc_count": 4,
+            "ple_layer_ids": [2],
+            "indexer_budget": 2048,
+            "indexer_compress_ratio": 4,
+        },
+    }
+
+
+def qwen38_engine(tp, dp, ep, *, cuda_graph=False, reuse_cache=False):
+    engine = make_engine()
+    parallel = engine.parallelism_config
+    parallel.world_size = parallel.local_world_size = max(tp * dp, ep)
+    parallel.tp_size = parallel.ffn_tp_size = tp
+    parallel.dp_size = dp
+    parallel.ep_size = ep
+    parallel.pp_size = 1
+    engine.moe_config.use_deepep_moe = False
+    engine.moe_config.use_all_gather = True
+    engine.moe_config.moe_strategy = "auto"
+    engine.hw_kernel_config.enable_cuda_graph = cuda_graph
+    engine.kv_cache_config.reuse_cache = reuse_cache
+    return engine
+
+
+class Qwen38FlashNextBatchInvariantTest(unittest.TestCase):
+    """The Qwen3.8-Flash-Next BF16 profile: topologies, SM100, graph, prefix reuse."""
+
+    def _patches(self, checkpoint, capability=(10, 3)):
+        return (
+            patch("rtp_llm.config.engine_config.is_cuda", return_value=True),
+            patch("torch.cuda.get_device_capability", return_value=capability),
+            patch(
+                "rtp_llm.config.engine_config.get_config_from_path",
+                return_value=checkpoint,
+            ),
+        )
+
+    def test_accepts_48l_and_8l_proxy_on_every_supported_topology(self):
+        for layers in (48, 8):
+            for tp, dp, ep in ((8, 1, 8), (4, 1, 4), (1, 8, 8)):
+                model = make_qwen38(layers)
+                engine = qwen38_engine(tp, dp, ep)
+                patches = self._patches(qwen38_checkpoint(layers))
+                with patches[0], patches[1], patches[2]:
+                    configure_batch_invariant_model(engine, model)
+                self.assertFalse(engine.hw_kernel_config.enable_cuda_graph)
+                # TP == EP takes the capturable PureTpRouter; DP/EP keeps pure-DP.
+                self.assertEqual(
+                    engine.moe_config.moe_strategy,
+                    "no_quant_pure_dp" if dp > 1 else "no_quant_cpp",
+                )
+
+    def test_accepts_sm100(self):
+        model = make_qwen38()
+        engine = qwen38_engine(8, 1, 8)
+        checkpoint = qwen38_checkpoint()
+        patches = self._patches(checkpoint, capability=(10, 0))
+        with patches[0], patches[1], patches[2]:
+            configure_batch_invariant_model(engine, model)
+
+    def test_rejects_unsupported_capability_and_topology(self):
+        checkpoint = qwen38_checkpoint()
+        patches = self._patches(checkpoint, capability=(9, 0))
+        with patches[0], patches[1], patches[2]:
+            with self.assertRaisesRegex(ValueError, "SM100 or SM103"):
+                configure_batch_invariant_model(qwen38_engine(8, 1, 8), make_qwen38())
+        patches = self._patches(checkpoint)
+        with patches[0], patches[1], patches[2]:
+            with self.assertRaisesRegex(ValueError, "Qwen3.8-Flash-Next 48L requires"):
+                configure_batch_invariant_model(qwen38_engine(2, 1, 2), make_qwen38())
+
+    def test_cuda_graph_allowed_when_tp_equals_ep_and_rejected_under_pure_dp(self):
+        checkpoint = qwen38_checkpoint()
+        patches = self._patches(checkpoint)
+        with patches[0], patches[1], patches[2]:
+            engine = qwen38_engine(8, 1, 8, cuda_graph=True)
+            configure_batch_invariant_model(engine, make_qwen38())
+            self.assertTrue(engine.hw_kernel_config.enable_cuda_graph)
+            self.assertEqual(engine.moe_config.moe_strategy, "no_quant_cpp")
+            with self.assertRaisesRegex(ValueError, "requires TP_SIZE=EP_SIZE"):
+                configure_batch_invariant_model(
+                    qwen38_engine(1, 8, 8, cuda_graph=True), make_qwen38()
+                )
+
+    def test_local_prefix_reuse_allowed_but_external_caches_are_not(self):
+        checkpoint = qwen38_checkpoint()
+        patches = self._patches(checkpoint)
+        with patches[0], patches[1], patches[2]:
+            engine = qwen38_engine(8, 1, 8, reuse_cache=True)
+            configure_batch_invariant_model(engine, make_qwen38())
+            self.assertTrue(engine.kv_cache_config.reuse_cache)
+            engine = qwen38_engine(8, 1, 8, reuse_cache=True)
+            engine.kv_cache_config.enable_disk_cache = True
+            with self.assertRaisesRegex(ValueError, "external KV caches"):
+                configure_batch_invariant_model(engine, make_qwen38())
+
+    def test_rejects_mxfp4_source_and_quantization(self):
+        checkpoint = qwen38_checkpoint()
+        patches = self._patches(checkpoint)
+        with patches[0], patches[1], patches[2]:
+            model = make_qwen38()
+            model._qwen4_mxfp4_source = True
+            with self.assertRaisesRegex(ValueError, "BF16 Qwen3.8-Flash-Next"):
+                configure_batch_invariant_model(qwen38_engine(8, 1, 8), model)
+
+    def test_accepts_either_vit_separation_but_not_a_vit_role(self):
+        checkpoint = qwen38_checkpoint()
+        patches = self._patches(checkpoint)
+        with patches[0], patches[1], patches[2]:
+            for separation in (
+                VitSeparation.VIT_SEPARATION_LOCAL,
+                VitSeparation.VIT_SEPARATION_REMOTE,
+            ):
+                model = make_qwen38()
+                model.vit_separation = separation
+                configure_batch_invariant_model(qwen38_engine(8, 1, 8), model)
+            model = make_qwen38()
+            model.vit_separation = VitSeparation.VIT_SEPARATION_ROLE
+            with self.assertRaisesRegex(ValueError, "no separate ViT"):
+                configure_batch_invariant_model(qwen38_engine(8, 1, 8), model)
+
+    def test_rejects_wrong_layer_schedule(self):
+        checkpoint = qwen38_checkpoint()
+        checkpoint["text_config"]["layer_types"] = ["full_attention"] * 48
+        patches = self._patches(checkpoint)
+        with patches[0], patches[1], patches[2]:
+            with self.assertRaisesRegex(ValueError, "BF16 Qwen3.8-Flash-Next"):
+                configure_batch_invariant_model(qwen38_engine(8, 1, 8), make_qwen38())
+
+
 if __name__ == "__main__":
     unittest.main()

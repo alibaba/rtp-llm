@@ -274,6 +274,19 @@ _BATCH_INVARIANT_QWEN_MODELS = {
     ("qwen4_exp", 60, 8192, 64, 4, 256, (768, 10, 2048)): ("Qwen4-Max M11", 1),
 }
 
+# Qwen3.8-Flash-Next shares M11's qwen4_exp decoder but ships BF16 weights, so it
+# takes the BF16 MoE path instead of M11's native FP8xFP4 MegaMoE. The 8-layer
+# true-PLE proxy is the daily regression target and has the same width, expert
+# count and PLE placement as the released 48-layer model.
+_BATCH_INVARIANT_QWEN38_LAYERS = (48, 8)
+_BATCH_INVARIANT_QWEN38_GEOMETRY = (2560, 24, 2, 256, (512, 10, 640))
+# (world_size, dp_size, ep_size, tp_size) accepted for Qwen3.8-Flash-Next.
+_BATCH_INVARIANT_QWEN38_TOPOLOGIES = (
+    (8, 1, 8, 8),
+    (4, 1, 4, 4),
+    (8, 8, 8, 1),
+)
+
 
 def configure_batch_invariant_model(
     engine_config: EngineConfig, model_config: "ModelConfig"
@@ -292,21 +305,41 @@ def configure_batch_invariant_model(
     hybrid = qwen4 or model_type == "qwen35_moe"
     uses_moe = hybrid or model_type == "qwen_3_moe"
     dp_ep = parallel.tp_size == 1 and parallel.dp_size == parallel.ep_size > 1
-    conflicts = []
-    if not is_cuda() or torch.cuda.get_device_capability() != (10, 3):
-        conflicts.append("requires an SM103 CUDA GPU")
-    vit_separation = (
-        VitSeparation.VIT_SEPARATION_REMOTE
-        if qwen4
-        else VitSeparation.VIT_SEPARATION_LOCAL
+    # Qwen3.8-Flash-Next: same decoder as M11, BF16 weights, its own topologies.
+    qwen38 = qwen4 and (
+        model_config.num_layers in _BATCH_INVARIANT_QWEN38_LAYERS
+        and (
+            model_config.hidden_size,
+            attn.head_num,
+            attn.kv_head_num,
+            attn.size_per_head,
+            (model_config.expert_num, model_config.moe_k, model_config.moe_inter_size),
+        )
+        == _BATCH_INVARIANT_QWEN38_GEOMETRY
     )
+    m11 = qwen4 and not qwen38
+    conflicts = []
+    if not is_cuda() or torch.cuda.get_device_capability() not in ((10, 0), (10, 3)):
+        conflicts.append("requires an SM100 or SM103 CUDA GPU")
+    if m11:
+        vit_separations = (VitSeparation.VIT_SEPARATION_REMOTE,)
+    elif qwen38:
+        # The RL rollout role starts this text-only checkpoint with
+        # vit_separation=2. Neither setting leaves multimodal preprocessing in
+        # the worker (is_multimodal is cleared below), so both are admitted.
+        vit_separations = (
+            VitSeparation.VIT_SEPARATION_LOCAL,
+            VitSeparation.VIT_SEPARATION_REMOTE,
+        )
+    else:
+        vit_separations = (VitSeparation.VIT_SEPARATION_LOCAL,)
     if (
         parallel.role_type != RoleType.PDFUSION
-        or model_config.vit_separation != vit_separation
+        or model_config.vit_separation not in vit_separations
     ):
         conflicts.append(
             "M11 requires a text PDFUSION worker with vit_separation=2"
-            if qwen4
+            if m11
             else "requires a colocated PDFUSION worker with no separate ViT"
         )
     ffn_shape = (
@@ -324,14 +357,38 @@ def configure_batch_invariant_model(
         ffn_shape,
     )
     model = _BATCH_INVARIANT_QWEN_MODELS.get(geometry)
-    if model is None:
+    if qwen38:
+        name = f"Qwen3.8-Flash-Next {model_config.num_layers}L"
+        topology = (
+            parallel.world_size,
+            parallel.dp_size,
+            parallel.ep_size,
+            parallel.tp_size,
+        )
+        if (
+            topology not in _BATCH_INVARIANT_QWEN38_TOPOLOGIES
+            or parallel.local_world_size != parallel.world_size
+            or parallel.ffn_tp_size != parallel.tp_size
+            or parallel.pp_size != 1
+            or parallel.prefill_cp_config.is_enabled()
+            or parallel.prefill_cp_config.is_prefill_enabled()
+        ):
+            supported = ", ".join(
+                f"TP{tp}/DP{dp}/EP{ep}"
+                for _, dp, ep, tp in _BATCH_INVARIANT_QWEN38_TOPOLOGIES
+            )
+            conflicts.append(
+                f"{name} requires one of {supported} on one node, "
+                "FFN_TP_SIZE=TP_SIZE, PP_SIZE=1 and CP disabled"
+            )
+    elif model is None:
         supported = ", ".join(name for name, _ in _BATCH_INVARIANT_QWEN_MODELS.values())
         conflicts.append(f"requires one of these architectures: {supported}")
     else:
         name, tp = model
         topology = (parallel.world_size, parallel.dp_size, parallel.ep_size)
-        supported_topologies = [(8, 8, 8)] if qwen4 else [(tp, 1, 1)]
-        if uses_moe and not qwen4:
+        supported_topologies = [(8, 8, 8)] if m11 else [(tp, 1, 1)]
+        if uses_moe and not m11:
             supported_topologies.append((4, 4 // tp, 4))
         if (
             topology not in supported_topologies
@@ -340,7 +397,7 @@ def configure_batch_invariant_model(
             or parallel.prefill_cp_config.is_enabled()
             or parallel.prefill_cp_config.is_prefill_enabled()
         ):
-            if qwen4:
+            if m11:
                 conflicts.append(
                     "M11 requires TP_SIZE=1, DP_SIZE=EP_SIZE=WORLD_SIZE=8 "
                     "on one node, PP_SIZE=1 and CP disabled"
@@ -360,16 +417,21 @@ def configure_batch_invariant_model(
     )
     if model_config.data_type != DataType.TYPE_BF16:
         conflicts.append("requires BF16 activations (ACT_TYPE=bf16)")
-    if qwen4 and (quant is not None or model_config.quantization):
+    if m11 and (quant is not None or model_config.quantization):
         conflicts.append(
             "M11 requires the native MXFP4 checkpoint with --quantization omitted"
+        )
+    elif qwen38 and (quant is not None or model_config.quantization):
+        conflicts.append(
+            "Qwen3.8-Flash-Next batch invariance uses the BF16 weights the RL "
+            "trainer synchronizes; omit --quantization"
         )
     elif quant is not None and (not fp8_block or not hybrid or model is None):
         conflicts.append(
             f"unsupported quantization {quant_method}: FP8_PER_BLOCK with 128x128 "
             "weight blocks requires Qwen3.6-35B-A3B TP1 or Qwen3.5-397B-A17B TP4"
         )
-    if model is not None:
+    if model is not None or qwen38:
         checkpoint_config = get_config_from_path(model_config.ckpt_path) or {}
         text_config = (
             (checkpoint_config.get("text_config") or {})
@@ -382,34 +444,63 @@ def configure_batch_invariant_model(
             conflicts.append(
                 f"requires a BF16 checkpoint ({config_name} has dtype {checkpoint_dtype!r})"
             )
-        if qwen4 and (
-            not getattr(model_config, "_qwen4_mxfp4_source", False)
-            or not attn.is_sparse
-            or not attn.use_sparse_gqa_fmha
-            or "Qwen4ExpForConditionalGeneration"
-            not in (checkpoint_config.get("architectures") or ())
-            or text_config.get("model_type") != "qwen4_exp_text"
-            or text_config.get("layer_types")
-            != (["linear_attention"] * 3 + ["full_attention"]) * 15
-            or text_config.get("hc_count") != 4
-            or text_config.get("ple_layer_ids") != [2]
-            or text_config.get("indexer_budget") != 2048
-            or text_config.get("indexer_compress_ratio") != 4
-        ):
-            conflicts.append("requires the native Qwen4-Max M11 GDN/QSA/PLE checkpoint")
+        if qwen4:
+            layer_types = text_config.get("layer_types")
+            # Both M11 and Qwen3.8 repeat (3 linear_attention + 1 full_attention);
+            # only the repeat count differs, so check the pattern rather than the
+            # expanded list. That is what admits the 8-layer proxy.
+            period = ["linear_attention"] * 3 + ["full_attention"]
+            schedule_ok = (
+                isinstance(layer_types, list)
+                and len(layer_types) == model_config.num_layers
+                and model_config.num_layers % len(period) == 0
+                and layer_types == period * (model_config.num_layers // len(period))
+            )
+            shared = (
+                not attn.is_sparse
+                or not attn.use_sparse_gqa_fmha
+                or "Qwen4ExpForConditionalGeneration"
+                not in (checkpoint_config.get("architectures") or ())
+                or text_config.get("model_type") != "qwen4_exp_text"
+                or not schedule_ok
+                or text_config.get("hc_count") != 4
+                or text_config.get("ple_layer_ids") != [2]
+                or text_config.get("indexer_budget") != 2048
+                or text_config.get("indexer_compress_ratio") != 4
+            )
+            if m11 and (
+                shared or not getattr(model_config, "_qwen4_mxfp4_source", False)
+            ):
+                conflicts.append(
+                    "requires the native Qwen4-Max M11 GDN/QSA/PLE checkpoint"
+                )
+            elif qwen38 and (shared or getattr(model_config, "_qwen4_mxfp4_source", False)):
+                conflicts.append(
+                    "requires a BF16 Qwen3.8-Flash-Next GDN/QSA/PLE checkpoint"
+                )
     if model_config.task_type != TaskType.LANGUAGE_MODEL:
         conflicts.append("requires a text generation task")
     if model_config.lora_infos:
         conflicts.append("LoRA adapters are unsupported")
-    if hw.enable_cuda_graph or hw.enable_decode_cascade_attention:
+    if hw.enable_decode_cascade_attention:
+        conflicts.append("ENABLE_DECODE_CASCADE_ATTENTION must be disabled")
+    if hw.enable_cuda_graph and dp_ep:
+        # PureDpRouter derives its pad width from a runtime all_gather plus
+        # .item(), which is a D2H sync mid-capture and a dynamic pad shape on
+        # replay, so it declines CUDA Graph (pure_dp_router.py:88) and the
+        # factory would fall back to DeepEP, whose router batch invariance
+        # rejects. TP==EP uses PureTpRouter, which has no such restriction.
         conflicts.append(
-            "ENABLE_CUDA_GRAPH and ENABLE_DECODE_CASCADE_ATTENTION must be disabled"
+            "ENABLE_CUDA_GRAPH with batch invariance requires TP_SIZE=EP_SIZE "
+            "(the pure-DP MoE router cannot be captured)"
         )
+    if hw.enable_cuda_graph and not uses_moe:
+        conflicts.append("ENABLE_CUDA_GRAPH is only validated for the MoE profiles")
     if engine_config.sp_config.type != SpeculativeType.NONE:
         conflicts.append("speculative decoding and MTP must be disabled")
     if engine_config.runtime_config.use_batch_decode_scheduler:
         conflicts.append("USE_BATCH_DECODE_SCHEDULER must be disabled")
-    if qwen4:
+    if m11:
         moe_strategies = ("mega_moe",)
     elif dp_ep:
         moe_strategies = (
@@ -424,7 +515,7 @@ def configure_batch_invariant_model(
     needs_all_gather = fp8_block or parallel.ep_size > 1
     uses_unstable_router = (
         moe.use_deepep_moe
-        if qwen4
+        if m11
         else not dp_ep
         and (moe.use_deepep_moe or (needs_all_gather and not moe.use_all_gather))
     )
@@ -436,7 +527,7 @@ def configure_batch_invariant_model(
         or model_config.eplb_config.phy_exp_num(model_config.expert_num)
         != model_config.expert_num
     ):
-        if qwen4:
+        if m11:
             conflicts.append("M11 requires native mega_moe without expert remapping")
         elif dp_ep:
             conflicts.append(
@@ -463,9 +554,12 @@ def configure_batch_invariant_model(
     if attn.tokens_per_block != page_size or attn.kernel_tokens_per_block != page_size:
         pages = "KV and SSM" if hybrid else "KV"
         conflicts.append(f"requires {page_size}-token {pages} pages")
+    # Local prefix reuse is a block-table question and is measured bit-exact for
+    # the GDN SSM state at page-aligned prefixes. Externally supplied blocks are
+    # a different claim: they may come from a build whose kernels round
+    # differently, and nothing in the engine verifies that, so they stay off.
     if (
-        cache.reuse_cache
-        or cache.enable_remote_cache
+        cache.enable_remote_cache
         or cache.enable_disk_cache
         or cache.enable_memory_cache
         or cache.multi_task_prompt
@@ -473,15 +567,29 @@ def configure_batch_invariant_model(
         or cache.multi_task_prompt_tokens
     ):
         conflicts.append(
-            "prefix reuse, task prompts and external KV caches must be disabled"
+            "task prompts and external KV caches must be disabled; their blocks "
+            "carry no proof that they were produced by a bit-identical build"
+        )
+    if cache.reuse_cache and not qwen4:
+        conflicts.append(
+            "local prefix reuse is only qualified for the qwen4_exp profiles"
         )
     if conflicts:
         raise ValueError("RTP_BATCH_INVARIANT=1:\n" + "\n".join(conflicts))
 
-    if dp_ep and not qwen4:
+    if dp_ep and not m11:
         # Ordinary DP/EP auto-selection uses DeepEP. Move the same shards over
         # the stage group in BI, where the combine order is fixed.
         moe.moe_strategy = "fp8_per_block_pure_dp" if fp8_block else "no_quant_pure_dp"
+        moe.use_all_gather = True
+        moe.use_deepep_moe = False
+        moe.use_deepep_low_latency = False
+        moe.use_deepep_internode = False
+    elif qwen38:
+        # TP == EP takes PureTpRouter, whose all-gather dispatch and fixed-order
+        # TP reduction are both capturable, which is what makes decode CUDA
+        # Graph reachable here but not under the pure-DP router.
+        moe.moe_strategy = "no_quant_cpp"
         moe.use_all_gather = True
         moe.use_deepep_moe = False
         moe.use_deepep_low_latency = False
@@ -491,11 +599,26 @@ def configure_batch_invariant_model(
         model_config.mm_model_config.is_multimodal = False
     # Keep the checkpoint's BF16 LM head and accumulate its products in FP32.
     model_config.enable_fp32_lm_head = False
-    if qwen4:
+    if m11:
         logging.info(
             "M11 batch invariant: 45 GDN / 15 sparse QSA layers, "
             "TP1/DP8/EP8, BF16 dense and KV, FP32 SSM and logits, "
             "128-token pages, FP8_FP4 MegaMoE, FP8 PLE"
+        )
+    elif qwen38:
+        logging.info(
+            "Qwen3.8-Flash-Next batch invariant: %d layers "
+            "(%d GDN / %d sparse QSA), TP%d/DP%d/EP%d, BF16 dense, KV and MoE, "
+            "FP32 SSM and logits, 128-token pages, BF16 PLE, "
+            "cuda_graph=%s, reuse_cache=%s",
+            model_config.num_layers,
+            model_config.num_layers * 3 // 4,
+            model_config.num_layers // 4,
+            parallel.tp_size,
+            parallel.dp_size,
+            parallel.ep_size,
+            hw.enable_cuda_graph,
+            cache.reuse_cache,
         )
 
 
