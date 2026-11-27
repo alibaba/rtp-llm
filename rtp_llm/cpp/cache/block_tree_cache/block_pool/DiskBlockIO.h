@@ -2,6 +2,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <filesystem>
 #include <string>
 #include <vector>
 
@@ -58,6 +59,7 @@ class BlockTreePosixDiskBlockIO: public DiskBlockIO {
 public:
     BlockTreePosixDiskBlockIO() = default;
     ~BlockTreePosixDiskBlockIO() override;
+    DiskBlockIOStatus openBufferedRead(const std::string& file_path, size_t bytes);
 
     DiskBlockIOStatus openAndPreallocate(const std::string& file_path, size_t bytes, bool buffered_io) override;
 
@@ -82,6 +84,20 @@ private:
     std::string       file_path_;
     size_t            bytes_{0};
     bool              buffered_io_{true};
+};
+
+// Owns a private scratch directory with one file per disk slot.
+class DiskFiles {
+public:
+    explicit DiskFiles(const std::filesystem::path& directory);
+    ~DiskFiles();
+    DiskFiles(const DiskFiles&) = delete;
+    DiskFiles& operator=(const DiskFiles&) = delete;
+
+    void copy(bool write, uint64_t slot, void* data, size_t bytes, uint64_t operation);
+
+private:
+    std::filesystem::path path_;
 };
 
 }  // namespace rtp_llm

@@ -16,23 +16,37 @@
 #include <utility>
 #include <vector>
 
-#include "rtp_llm/cpp/cache/block_tree_cache/block_pool/HostStagingBlockPool.h"
-#include "rtp_llm/cpp/cache/block_tree_cache/transfer/CrcCopyExecutor.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/group_set/GroupSet.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/transfer/HostStagingLease.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferBatchAsyncContext.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferStageTimer.h"
-#include "rtp_llm/cpp/utils/Logger.h"
 
 namespace rtp_llm {
 
+class BlockTreeCacheMetricsReporter;
+class CacheObserver;
+class CrcCopyExecutor;
+class HostStagingBlockPool;
+enum class BlockIOStatus;
+
 class DiskIOExecutor;
 
-// One operation owner. Disk workers fill their Entry's result and publish its
-// completion queue under mutex_; CRC stage callbacks run in this owner's stack.
+// One operation owner. External I/O callbacks fill their Entry's result and
+// publish to its completion queue under mutex_; CRC polls on the owner itself.
 // Business references stay upstream. The borrowed disk executor, when needed,
 // outlives this owner's shutdown/join; pass nullptr only for routes without Disk.
 class TransferWorkLoop {
 public:
     using BeforeCompleteCallback = std::function<void(const TransferResult&)>;
+    using SubmitBatch = std::function<void(const TransferTask&, TransferAsyncContext::DoneCallback)>;
+
+    TransferWorkLoop(TransferOperation operation,
+                     size_t batch_limit,
+                     size_t queue_capacity,
+                     std::shared_ptr<CacheObserver> observer,
+                     int64_t world_rank,
+                     size_t worker_index,
+                     SubmitBatch submit_batch);
 
     TransferWorkLoop(std::vector<GroupSetPtr>                       groups,
                      std::unique_ptr<CrcCopyExecutor>               crc,
@@ -77,7 +91,7 @@ private:
     struct Entry;
     using Entries       = std::list<std::unique_ptr<Entry>>;
     using WaitDeadlines = std::multimap<TransferTask::Clock::time_point, Entry*>;
-    // Intrusive, allocation-free indexes. The disk completion queue uses mutex_;
+    // Intrusive, allocation-free indexes. The I/O completion queue uses mutex_;
     // other queues belong to the owner. An Entry belongs to at most one queue.
     struct Queue {
         Entry* head{nullptr};
@@ -95,9 +109,10 @@ private:
         DISK_WRITE,
         CRC_LOAD,
         CRC_EVICT,
-        PLAIN_DEVICE_COPY
+        PLAIN_DEVICE_COPY,
+        DEVICE_COPY
     };
-    // Constructed by the submitter; otherwise owned by the WorkLoop. While a Disk
+    // Constructed by the submitter; otherwise owned by the WorkLoop. While an I/O
     // operation is pending, its callback exclusively writes result; the owner
     // consumes its mutex-published completion before accessing it. Each Entry is one batch.
     struct Entry {
@@ -109,7 +124,7 @@ private:
         BeforeCompleteCallback                      before_complete;
         Step                                        step{Step::DISK_READ};  // Set by the initial plan.
         std::vector<HostBufferView>                 hosts;
-        HostStagingBlockPool::HostStagingBlockBatch staging;
+        std::vector<HostStagingBlockLease>           staging;
         Entries::iterator                           position;
         Entry*                                      next{nullptr};
         Entry*                                      previous{nullptr};
@@ -119,12 +134,27 @@ private:
         // Queue observation ends at initial plan. Its storage is then reused
         // for the terminal CRC lifecycle, which ends after Entry destruction.
         TransferStageTimer      task_timer, queue_or_finalize_timer, batch_timer, staging_timer, step_timer;
-        CrcCopyExecutor::Timing crc_timing;
+        TransferCrcTiming       crc_timing;
     };
     struct StagingResource {
         std::array<std::shared_ptr<HostStagingBlockPool>, 2> pools;  // FULL/default, SWA.
         Queue                                                waiting;
     };
+
+    // RTP owns CUDA/CRC and Disk buffer resolution. Admission, resource waits,
+    // the step order and completion queues belong to this work loop.
+    struct RtpIo {
+        bool (TransferWorkLoop::*acquire_staging)(Entry&);
+        HostBufferView (*host_buffer)(const GroupSet&, BlockIdxType);
+        int (*device_index)(const GroupSet&);
+        bool (TransferWorkLoop::*submit_crc)(Entry&, TransferAsyncContext::DoneCallback, TransferCrcTiming*);
+        bool (TransferWorkLoop::*poll_crc)();
+        size_t (TransferWorkLoop::*free_crc_slots)(int) const;
+        void (TransferWorkLoop::*stop_crc)();
+        void (TransferWorkLoop::*plain_copy)(Entry&);
+        void (TransferWorkLoop::*disk_copy)(Entry&);
+    };
+
     void run();
     // false means the Entry is waiting for staging or has finished.
     bool               plan(Entry& entry);
@@ -136,6 +166,13 @@ private:
     void               submitCrc(Entry& entry);
     void               submitPlainDeviceCopy(Entry& entry);
     void               submitDisk(Entry& entry);
+    void               submitDeviceCopy(Entry& entry);
+    bool               acquireRtpStaging(Entry& entry);
+    bool               submitRtpCrc(Entry& entry, TransferAsyncContext::DoneCallback done, TransferCrcTiming* timing);
+    bool               pollRtpCrc();
+    size_t             freeRtpCrcSlots(int device) const;
+    void               stopRtpCrc();
+    void               publishCompletion(Entry& entry) noexcept;
     void               publishDisk(Entry& entry, BlockIOStatus status) noexcept;
     void               pollOnce();
     static void        recordDiskResult(Entry& entry, BlockIOStatus status) noexcept;
@@ -166,7 +203,6 @@ private:
         try {
             return std::forward<Action>(action)();
         } catch (const std::bad_alloc&) {
-            Logger::getEngineLogger().flush();
             std::abort();
         }
     }
@@ -186,11 +222,13 @@ private:
     // ==================== Fixed configuration/handles: no WorkLoop lock ====================
     // Initialized before start(); CRC is exclusive to this owner until join.
     std::vector<GroupSetPtr>                       groups_;
-    std::unique_ptr<CrcCopyExecutor>               crc_;
-    DiskIOExecutor* const                          disk_io_executor_;  // Owned by the engine through shutdown/join.
+    std::shared_ptr<CrcCopyExecutor>               crc_;
+    DiskIOExecutor*                               disk_io_executor_{nullptr};  // Owned through shutdown/join.
+    const RtpIo*                                  rtp_io_{nullptr};
+    SubmitBatch                                   submit_batch_;
     TransferOperation                              operation_;
     size_t                                         batch_limit_, capacity_;
-    std::shared_ptr<BlockTreeCacheMetricsReporter> metrics_reporter_;
+    std::shared_ptr<CacheObserver>                  metrics_reporter_;
     int64_t                                        world_rank_;
     std::string                                    thread_name_;
 
@@ -205,13 +243,13 @@ private:
     bool                 has_crc_pending_{false};
 
     // ==================== Shared state: protected by mutex_ ====================
-    // API callers, owner and Disk callbacks use this mutex; cv_ waits on it.
+    // API callers, owner and I/O callbacks use this mutex; cv_ waits on it.
     mutable std::mutex      mutex_;
     std::condition_variable cv_;
     bool                    accepting_{true}, cancel_staging_{false};
     size_t                  entry_count_{0};
     Entries                 incoming_;
-    Queue                   disk_completed_;
+    Queue                   io_completed_;
 
     // ==================== Lifecycle: caller-serialized ====================
     // start() runs once before external use; the lifecycle caller serializes shutdown/join.

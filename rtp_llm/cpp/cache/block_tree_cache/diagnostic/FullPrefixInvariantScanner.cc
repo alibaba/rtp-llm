@@ -1,3 +1,4 @@
+#include "rtp_llm/cpp/cache/block_tree_cache/diagnostic/CacheDiagnostics.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/metrics/CacheLockGuard.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/diagnostic/FullPrefixInvariantScanner.h"
 
@@ -10,8 +11,7 @@
 #include "rtp_llm/cpp/cache/CacheGroupType.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTree.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/TreeNode.h"
-#include "rtp_llm/cpp/cache/block_tree_cache/metrics/BlockTreeCacheMetricsReporter.h"
-#include "rtp_llm/cpp/utils/Logger.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/metrics/CacheObserver.h"
 
 namespace rtp_llm {
 namespace {
@@ -87,7 +87,9 @@ const char* invalidResourceReasonName(InvalidResourceReason reason) {
 }
 
 InvalidResourceReason invalidResourceReason(const GroupSetResource& resource) {
-    if (resource.servingTierCount() > 1) {
+    const size_t replicas = static_cast<size_t>(resource.retained_host_replica)
+                            + static_cast<size_t>(resource.retained_disk_replica);
+    if (resource.servingTierCount() > 1 + replicas) {
         return InvalidResourceReason::MULTI_TIER;
     }
     if (resource.hasTier(Tier::DEVICE) && !resource.hasCompleteDeviceValue()) {
@@ -138,7 +140,7 @@ void detectNodeViolations(const BlockTree& tree, const TreeNode& node, std::vect
             continue;
         }
         // The root is a sentinel: root(EMPTY) -> first data node is not a gap.
-        const TreeNode* parent = node.parent;
+        const TreeNode* parent = tree.previousGroupPage(&node, group_set_id);
         if (parent == nullptr || parent == tree.root() || group_set_id >= parent->group_set_resources.size()) {
             continue;
         }
@@ -189,7 +191,7 @@ std::string formatViolationDetail(const FullViolationDetail& detail) {
 FullPrefixInvariantScanner::FullPrefixInvariantScanner(const BlockTree&                     tree,
                                                        std::mutex&                          cache_mutex,
                                                        int64_t                              interval_ms,
-                                                       const BlockTreeCacheMetricsReporter* metrics_reporter):
+                                                       const CacheObserver* metrics_reporter):
     metrics_reporter_(metrics_reporter), tree_(tree), cache_mutex_(cache_mutex), interval_ms_(interval_ms) {}
 
 FullPrefixInvariantScanner::~FullPrefixInvariantScanner() {
@@ -201,14 +203,30 @@ bool FullPrefixInvariantScanner::start() {
         return false;
     }
     if (interval_ms_ > kMaxIntervalMs) {
-        RTP_LLM_LOG_ERROR("FULL prefix invariant scan interval_ms=%ld overflows the loop period", interval_ms_);
+        BTC_LOG_ERROR("FULL prefix invariant scan interval_ms=%ld overflows the loop period", interval_ms_);
         return false;
     }
-    // runScan() already spaces its batches; measure the window from callback start.
-    loop_thread_ = autil::LoopThread::createLoopThread(
-        [this] { runScanGuarded(); }, interval_ms_ * 1000, "BlockTreeScan", /*strictMode=*/false);
-    if (!loop_thread_) {
-        RTP_LLM_LOG_ERROR("failed to create FULL prefix invariant scanner loop thread");
+    if (loop_thread_.joinable() || stopping_.load(std::memory_order_acquire)) {
+        return false;
+    }
+    try {
+        loop_thread_ = std::thread([this] {
+            while (!stopping_.load(std::memory_order_acquire)) {
+                const auto window_begin = std::chrono::steady_clock::now();
+                runScanGuarded();
+                const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+                    std::chrono::steady_clock::now() - window_begin);
+                const auto remaining = std::chrono::milliseconds(interval_ms_) - elapsed;
+                if (remaining.count() > 0) {
+                    std::unique_lock<std::mutex> lock(wait_mutex_);
+                    stop_condition_.wait_for(lock, remaining, [this] {
+                        return stopping_.load(std::memory_order_acquire);
+                    });
+                }
+            }
+        });
+    } catch (const std::exception& e) {
+        BTC_LOG_ERROR("failed to start FULL prefix invariant scanner: %s", e.what());
         return false;
     }
     return true;
@@ -220,9 +238,8 @@ void FullPrefixInvariantScanner::stop() {
         stopping_.store(true, std::memory_order_release);
     }
     stop_condition_.notify_all();
-    if (loop_thread_) {
-        loop_thread_->stop();
-        loop_thread_.reset();
+    if (loop_thread_.joinable()) {
+        loop_thread_.join();
     }
 }
 
@@ -230,7 +247,7 @@ void FullPrefixInvariantScanner::runScanGuarded() {
     try {
         runScan();
     } catch (const std::exception& e) {
-        RTP_LLM_LOG_WARNING("FULL prefix invariant scan round failed, dropping details: %s", e.what());
+        BTC_LOG_WARNING("FULL prefix invariant scan round failed, dropping details: %s", e.what());
     }
 }
 
@@ -340,9 +357,9 @@ void FullPrefixInvariantScanner::publishBatch(const std::vector<FullViolationDet
         ++cycle_details_logged_;
         const std::string line = formatViolationDetail(detail);
         if (detail.stable) {
-            RTP_LLM_LOG_WARNING("%s", line.c_str());
+            BTC_LOG_WARNING("%s", line.c_str());
         } else {
-            RTP_LLM_LOG_INFO("%s", line.c_str());
+            BTC_LOG_INFO("%s", line.c_str());
         }
     }
 
@@ -360,9 +377,9 @@ void FullPrefixInvariantScanner::publishBatch(const std::vector<FullViolationDet
                                     + " details_logged=" + std::to_string(cycle_details_logged_)
                                     + " details_suppressed=" + std::to_string(cycle_details_suppressed_);
         if (cycle_stable_ > 0) {
-            RTP_LLM_LOG_WARNING("%s", summary.c_str());
+            BTC_LOG_WARNING("%s", summary.c_str());
         } else {
-            RTP_LLM_LOG_INFO("%s", summary.c_str());
+            BTC_LOG_INFO("%s", summary.c_str());
         }
     }
 

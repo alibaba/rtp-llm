@@ -1,8 +1,8 @@
+#include "rtp_llm/cpp/cache/block_tree_cache/diagnostic/CacheDiagnostics.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/load/LoadJoinRegistry.h"
 
 #include <utility>
 
-#include "rtp_llm/cpp/utils/Logger.h"
 
 namespace rtp_llm {
 
@@ -31,7 +31,7 @@ bool LoadJoinRegistry::join(const std::shared_ptr<LoadAsyncContext>& context) {
         const TransferDescriptor& desc      = load_descs[desc_index];
         const auto                record_it = records_.find(Key{desc.node, desc.group_set_id, desc.generation});
         if (record_it == records_.end()) {
-            RTP_LLM_LOG_ERROR("failed to attach joined load context, group_set_id=%zu", desc.group_set_id);
+            BTC_LOG_ERROR("failed to attach joined load context, group_set_id=%zu", desc.group_set_id);
             return false;
         }
         if (record_it->second.joined_contexts.find(context_id) == record_it->second.joined_contexts.end()) {
@@ -43,6 +43,11 @@ bool LoadJoinRegistry::join(const std::shared_ptr<LoadAsyncContext>& context) {
             MultiNodeResource{desc.group_set_id, Tier::DEVICE, {{desc.node, desc.target_blocks}}});
     }
     return true;
+}
+
+const BlockIdList* LoadJoinRegistry::targetBlocks(TreeNode* node, size_t group, uint64_t generation) const {
+    const auto it = records_.find(Key{node, group, generation});
+    return it == records_.end() ? nullptr : &it->second.target_blocks;
 }
 
 bool LoadJoinRegistry::finish(TreeNode*                                       node,

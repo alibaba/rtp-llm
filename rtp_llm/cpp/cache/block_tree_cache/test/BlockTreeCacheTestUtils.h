@@ -10,6 +10,7 @@
 #include <memory>
 #include <mutex>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeTaskPool.h"
@@ -26,6 +27,14 @@ class BroadcastManager;
 }
 
 namespace rtp_llm::block_tree_cache_test {
+
+inline TransferResult terminalCopyResultForTest(ErrorInfo status = ErrorInfo::OkStatus()) {
+    TransferResult result(std::move(status));
+    result.buffer_safe = true;
+    return result;
+}
+
+TreeNode* pendingNodeForTest(const BlockTree& tree, CacheKeyType key);
 
 // Match the serving lifecycle used by production metric reporters.
 class ScopedServingMetrics {

@@ -1,3 +1,4 @@
+#include "rtp_llm/cpp/cache/block_tree_cache/diagnostic/CacheDiagnostics.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferCompletionCleanup.h"
 
 #include <algorithm>
@@ -6,7 +7,6 @@
 #include <stdexcept>
 #include <utility>
 
-#include "rtp_llm/cpp/utils/Logger.h"
 
 namespace rtp_llm {
 namespace {
@@ -72,7 +72,7 @@ void TransferCompletionCleanup::submit(std::list<Entry>& node) noexcept {
     }
     if (threshold != 0) {
         try {
-            RTP_LLM_LOG_WARNING(
+            BTC_LOG_WARNING(
                 "completion cleanup retains %zu entries (warning threshold=%zu); admission remains open",
                 count,
                 threshold);
@@ -119,7 +119,7 @@ void TransferCompletionCleanup::logFailure(const char*                          
                 break;  // One representative failed rank keeps the diagnostic bounded.
             }
         }
-        RTP_LLM_LOG_WARNING(
+        BTC_LOG_WARNING(
             "completion cleanup failed: reason=%s pending=%zu%s", reason, pending, context.str().c_str());
     } catch (...) {
         // Diagnostics must never prevent retry or change cleanup ownership.

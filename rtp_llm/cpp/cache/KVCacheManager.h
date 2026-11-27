@@ -206,6 +206,7 @@ public:
     BlockTreeCachePtr blockTreeCache() const {
         return block_tree_cache_;
     }
+    void deferLoadResourceRelease(LoadAsyncContext& context, BatchKVCacheResourcePtr resource) const;
 
     // Increment KV cache reference count for PD separation (connector refcount)
     std::shared_ptr<KVCacheResource>

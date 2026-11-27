@@ -5,6 +5,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <initializer_list>
 #include <memory>
 #include <map>
 #include <mutex>
@@ -19,20 +20,17 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/metrics/EvictionMetrics.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/group_set/GroupSet.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/evict/EvictionHeap.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/evict/TierWatermark.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferTypes.h"
 #include "rtp_llm/cpp/utils/ErrorCode.h"
 
 namespace rtp_llm {
 
 class BlockTransferDispatcher;
-class BlockTreeCacheMetricsReporter;
+class CacheObserver;
 class BlockTreeTaskPool;
 class EvictionTaskRunner;
-
-struct TierWatermark {
-    double low_ratio{0.0};
-    double high_ratio{0.0};
-};
+class StorageBackend;
 
 // Aggregated candidate counts across all group sets, one number per tier.
 struct CandidateStats {
@@ -55,14 +53,15 @@ public:
                      EvictionPolicy                 disk_policy,
                      const BlockTransferDispatcher* transfer_dispatcher,
                      BlockTreeTaskPool*             task_pool,
-                     BlockTreeCacheMetricsReporter& metrics_reporter,
+                     CacheObserver& metrics_reporter,
                      std::mutex&                    mutex,
                      int                            host_timeout_ms,
                      int                            disk_timeout_ms,
                      size_t                         max_descriptors_per_batch,
                      IsTierEnabledFn                is_tier_enabled,
                      SettledFn                      settled,
-                     size_t                         disk_cache_evict_max_pending_bytes);
+                     size_t                         disk_cache_evict_max_pending_bytes,
+                     std::shared_ptr<StorageBackend> host_writeback_backend = nullptr);
     ~BlockTreeEvictor();
 
     // ---- Semantic events (must be called while holding BlockTreeCache mutex) ----
@@ -84,6 +83,27 @@ public:
     // Force-drop a batch until this member pool reaches the requested free-block delta
     // or no candidate remains. Return the actual number of physically reclaimed blocks.
     size_t reclaimDeviceBlocksLocked(size_t group_set_id, size_t member_group_id, size_t num_blocks);
+    size_t releaseDevicePagesLocked(const IBlockPool& pool, const std::vector<BlockIdList>& slots,
+                                    size_t requested_slots, const BlockIdList& eligible, size_t pressure,
+                                    bool copy_only, bool demote_to_host, bool cascade);
+    bool invalidateDevicePagesLocked(const IBlockPool& pool, const BlockIdList& blocks);
+    size_t reclaimLocalPagesLocked(Tier tier, size_t group_id, size_t pressure);
+    void balanceDevicePagesLocked(const IBlockPool& pool, const std::vector<BlockIdList>& slots,
+                                  size_t eligible_count, size_t capacity, size_t free_slots, size_t returning,
+                                  TierWatermark watermark, bool& triggered);
+    void balanceHostPoolsLocked(TierWatermark watermark);
+    using HostVictimPredicate = std::function<bool(size_t, TreeNode*)>;
+    std::optional<std::pair<size_t, EvictionEntry>>
+    bestHostVictimLocked(const HostBlockPool& pool, const HostVictimPredicate& eligible = {}) const;
+    size_t pendingHostReleases(const HostBlockPool& pool) const;
+    // The deficit already excludes free slots. Return existing and newly
+    // scheduled releases from this physical pool, without allocating slots.
+    size_t scheduleHostReleaseLocked(const HostBlockPool& pool, size_t deficit,
+                                     const HostVictimPredicate& eligible = {});
+    void setHostReleaseFailureCallback(std::function<void(const HostBlockPool&)> callback) {
+        host_release_failed_ = std::move(callback);
+    }
+    void setLocalEvictionPolicyLocked(Tier tier, EvictionPolicy policy);
     void   scheduleWatermarkEvictionsLocked(Tier tier, std::optional<TierWatermark> watermark = std::nullopt);
     size_t computeWatermarkEvictCount(const GroupSet& group_set, Tier tier, const TierWatermark& watermark);
     // Release a detached operation's source CACHE reference after it settles, without publishing its target.
@@ -91,7 +111,16 @@ public:
 
     // Snapshot before settlement can delete nodes; paths remain valid across cascading drops.
     struct InvalidationSource {
-        CacheKeysType cache_keys;
+        InvalidationSource(BlockTreeKeys keys, size_t group, Tier tier):
+            cache_keys(std::move(keys)), group_set_id(group), source_tier(tier) {}
+        InvalidationSource(std::initializer_list<CacheKeyType> keys, size_t group, Tier tier):
+            group_set_id(group), source_tier(tier) {
+            cache_keys.reserve(keys.size());
+            for (auto key : keys) {
+                cache_keys.emplace_back(key);
+            }
+        }
+        BlockTreeKeys cache_keys;
         size_t        group_set_id;
         Tier          source_tier;
     };
@@ -100,6 +129,7 @@ public:
     // Exact candidate updates for callers that already know the affected tier.
     void suspendCandidate(TreeNode* node, size_t group_set_id, Tier source_tier);
     void admitCandidate(TreeNode* node, size_t group_set_id, Tier target_tier);
+    bool dropColdHostPageLocked(size_t group_set_id, const char* trigger);
     // Refresh candidate metadata and topology after a successful load.
     void onLoaded(TreeNode* node, size_t group_set_id);
 
@@ -108,6 +138,7 @@ private:
         CASCADE,
         PRIMARY_ONLY
     };
+    void invalidateSource(TreeNode* node, size_t group_id, Tier source_tier, DropScope scope);
 
     // Reuse only within one eviction pass for the same group, tier and mode,
     // while holding the cache mutex, with only synchronous drops mutating the tree.
@@ -140,7 +171,13 @@ private:
         std::unique_ptr<EvictionHeap>                         disk;
         std::array<bool, 3>                                   watermark_triggered{};
         std::array<WatermarkEvictionRound, 3>                 watermark_rounds{};
-        std::map<std::pair<TreeNode*, uint64_t>, EvictionTimingMetrics> pending_timings;
+        struct PendingEviction {
+            EvictionTimingMetrics timing;
+            bool retain_source;
+            Tier source_tier;
+        };
+        std::map<std::pair<TreeNode*, uint64_t>, PendingEviction> pending_timings;
+        // The tree owns each node until this copy starts or its reservation is retired.
         std::vector<std::chrono::steady_clock::time_point>    next_device_reclaim_log;
     };
 
@@ -178,11 +215,16 @@ private:
                                     EvictionBatchContext* eviction_batch_context = nullptr,
                                     DropScope             scope                  = DropScope::CASCADE);
     bool   batchDropLocked(size_t group_set_id, Tier source_tier, size_t max_victim_count, size_t& scheduled_count);
-    bool   submitEvictionTask(std::vector<TransferDescriptor> descriptors, std::vector<EvictionTimingMetrics> timings);
+    size_t submitHostCopiesLocked(size_t group_set_id, const std::vector<TreeNode*>& nodes, bool retain_source);
+    void relieveHostPressureLocked(size_t group_set_id, size_t needed);
+    EvictionTimingMetrics prepareEvictionSource(const TransferDescriptor& desc);
+    bool   submitEvictionTask(std::vector<TransferDescriptor> descriptors, std::vector<EvictionTimingMetrics> timings,
+                              bool retain_source = false);
     void   finishWatermarkRoundLocked(size_t group_set_id, Tier source_tier);
     Tier   watermarkTargetTier(Tier source_tier) const;
     size_t watermarkLogicalBatchLimit(const GroupSet& group_set, Tier source_tier, Tier target_tier) const;
     void   runEvictionTask(std::shared_ptr<const EvictionTransferTask> task) noexcept;
+    void   runHostWriteback(const std::shared_ptr<const EvictionTransferTask>& task);
     void   completeEvictionTask(std::shared_ptr<const EvictionTransferTask> task, ErrorInfo error) noexcept;
     BatchEvictResult batchEvictLocked(size_t group_set_id, Tier source_tier, size_t max_victim_count);
     void scheduleEvictionSettlement(std::shared_ptr<const EvictionTransferTask> task, bool success) noexcept;
@@ -202,7 +244,7 @@ private:
     void restoreSource(DescriptorView eviction_descs);
     void releaseTargetBlocks(DescriptorView descs);
     void                            completeDrop(const TransferDescriptor& desc);
-    void                            completeEvict(DescriptorView descs);
+    void                            completeEvict(DescriptorView descs, bool retain_source = false);
     void                            settleEviction(DescriptorView descs);
     void                            settleSingleEviction(TreeNode* node);
     void                            eraseNodeFromAllHeaps(TreeNode* node);
@@ -210,11 +252,13 @@ private:
     void                            updatePendingReleaseBlocks(DescriptorView descs, bool reserve, bool revoked);
 
     BlockTree*                          tree_;
+    std::shared_ptr<StorageBackend>     host_writeback_backend_;
     BlockTreeTaskPool*                  task_pool_{nullptr};
-    BlockTreeCacheMetricsReporter*      metrics_reporter_{nullptr};
+    CacheObserver*      metrics_reporter_{nullptr};
     std::mutex*                         mutex_{nullptr};
     IsTierEnabledFn                     is_tier_enabled_;
     SettledFn                           settled_;
+    std::function<void(const HostBlockPool&)> host_release_failed_;
     std::unique_ptr<EvictionTaskRunner> task_runner_;
     int                                 host_timeout_ms_{0};
     int                                 disk_timeout_ms_{0};
@@ -226,7 +270,7 @@ private:
     std::vector<GroupSetTierHeaps>          heaps_;
     mutable EvictionVictimMetrics           eviction_victim_metrics_;
     mutable std::mutex                      pending_release_mutex_;
-    std::unordered_map<IBlockPool*, size_t> pending_release_counts_;
+    std::unordered_map<const IBlockPool*, size_t> pending_release_counts_;
     // Process-local logical clocks (read/written only under the cache mutex).
     uint64_t access_seq_{0};
     uint64_t admission_seq_{0};

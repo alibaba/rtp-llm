@@ -1,4 +1,6 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/CrcDumpWriter.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/block_pool/DiskBlockPool.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/block_pool/HostBlockPool.h"
 
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/DeviceHostCopyGeometry.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferTypes.h"

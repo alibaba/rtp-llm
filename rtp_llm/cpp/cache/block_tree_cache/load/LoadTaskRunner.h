@@ -16,7 +16,7 @@
 
 namespace rtp_llm {
 
-class BlockTreeCacheMetricsReporter;
+class CacheObserver;
 class BlockTransferDispatcher;
 
 class LoadTaskRunner {
@@ -70,13 +70,13 @@ public:
     TaskPtr createTask(const std::shared_ptr<LoadAsyncContext>& context);
     void    runTransfer(TaskPtr                        task,
                         const BlockTransferDispatcher& transfer_dispatcher,
-                        BlockTreeCacheMetricsReporter& metrics_reporter,
+                        CacheObserver& metrics_reporter,
                         TransferDoneCallback           callback);
     void    releaseTaskResources(const Task& task);
 
 private:
     void reportStageFinished(const Task&                    task,
-                             BlockTreeCacheMetricsReporter& metrics_reporter,
+                             CacheObserver& metrics_reporter,
                              Tier                           source_tier,
                              DescriptorView                 descriptors,
                              int64_t                        begin_time_us,

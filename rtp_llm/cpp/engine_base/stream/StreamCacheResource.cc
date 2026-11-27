@@ -689,7 +689,7 @@ bool StreamCacheResource::deferAllocatorLoadRelease() {
     auto replacement = std::make_shared<BatchKVCacheResource>();
     replacement->resetBatchSize(batch_kv_cache_resource_->batchSize());
     replacement->initGroups(resource_context_.cache_manager->cacheConfig().topologyPtr());
-    context->deferRelease(batch_kv_cache_resource_);
+    resource_context_.cache_manager->deferLoadResourceRelease(*context, batch_kv_cache_resource_);
     batch_kv_cache_resource_ = std::move(replacement);
     allocator_load_context_.reset();
     return true;

@@ -29,6 +29,10 @@ struct EvictionEntry {
 // count. upsert/erase/contains are all O(log N) with no stale entries.
 class EvictionHeap {
 public:
+    struct EntryLess {
+        bool operator()(const EvictionEntry& a, const EvictionEntry& b) const;
+    };
+
     explicit EvictionHeap(EvictionPolicy policy);
 
     // Insert or replace a node's ordered entry from its candidate meta.
@@ -39,6 +43,7 @@ public:
     void erase(TreeNode* node);
     // Read the best matching victim without changing heap membership.
     std::optional<EvictionEntry> best(const std::function<bool(TreeNode*)>& can_evict) const;
+    const EvictionEntry& entry(TreeNode* node) const { return *index_.at(node); }
 
     // Collect all current nodes. Used for read-only capacity queries.
     std::vector<TreeNode*> nodes() const {
@@ -50,17 +55,10 @@ public:
         return out;
     }
 
-    std::vector<EvictionEntry> orderedEntries() const {
-        return {ordered_.begin(), ordered_.end()};
-    }
-
     bool   contains(TreeNode* node) const;
     size_t size() const;
 
 private:
-    struct EntryLess {
-        bool operator()(const EvictionEntry& a, const EvictionEntry& b) const;
-    };
     using OrderedSet = std::set<EvictionEntry, EntryLess>;
 
     // Build the ordered entry (primary/secondary keys) from meta per policy.

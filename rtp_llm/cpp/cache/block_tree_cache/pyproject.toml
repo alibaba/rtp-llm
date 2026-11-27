@@ -1,0 +1,14 @@
+[build-system]
+requires = ["setuptools>=61", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "block-tree-cache"
+version = "2.1.0"
+description = "Engine-independent prefix cache and its native Python binding"
+readme = "README.md"
+requires-python = ">=3.10"
+
+[tool.setuptools.packages.find]
+where = ["bindings/python"]
+include = ["block_tree_cache", "block_tree_cache.*"]

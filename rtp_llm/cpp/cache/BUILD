@@ -16,6 +16,18 @@ cc_library(
     ],
 )
 
+# Data contracts used without an engine, device runtime or metrics client.
+cc_library(
+    name = "native_cache_interfaces",
+    hdrs = [
+        "AsyncContext.h",
+        "CacheTier.h",
+        "metrics/CachePoolMetrics.h",
+    ],
+    visibility = ["//visibility:public"],
+    deps = ["//rtp_llm/cpp/utils:error_code"],
+)
+
 cc_library(
     name = "cp_slot_mapper",
     srcs = ["CPSlotMapper.cc"],
@@ -107,6 +119,7 @@ cc_library(
     copts = copts(),
     visibility = ["//visibility:public"],
     deps = [
+        "//rtp_llm/cpp/cache/block_tree_cache:prefix_coverage",
         ":cache_group_type",
         ":kv_cache_specs",
         "//rtp_llm/cpp/config:config_modules",
@@ -174,6 +187,7 @@ cc_library(
         ":cache_group_type",
         ":cache_layout",
         ":kv_cache_specs",
+        "//rtp_llm/cpp/cache/block_tree_cache:malloc_status",
         "//rtp_llm/cpp/config:config_modules",
         "//rtp_llm/cpp/engine_base/stream:complete_token_ids",
         "//rtp_llm/cpp/model_utils:model_utils",

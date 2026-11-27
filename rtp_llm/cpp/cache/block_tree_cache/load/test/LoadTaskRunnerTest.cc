@@ -574,18 +574,21 @@ TEST(LoadTaskRunnerTest, ConcurrentFailuresPreserveUnknownCompletionAndCorruptio
     for (bool host_unknown : {false, true}) {
         for (bool host_first : {false, true}) {
             const std::vector<GroupSetPtr> group_sets{makeTaskRunnerTestGroupSet(0, false, 2)};
-            // Unknown completion now retains physical targets in the coordinator.
             auto       device_pool = group_sets.front()->devicePools().front();
             const auto host_target = block_transfer_engine_test::poolMalloc(*device_pool);
             const auto disk_target = block_transfer_engine_test::poolMalloc(*device_pool);
+            const auto host_source = group_sets.front()->allocateSingleBlock(Tier::HOST, BlockTreeRefType::LOAD);
+            const auto disk_source = group_sets.front()->allocateSingleBlock(Tier::DISK, BlockTreeRefType::LOAD);
             ASSERT_NE(host_target, NULL_BLOCK_IDX);
             ASSERT_NE(disk_target, NULL_BLOCK_IDX);
+            ASSERT_NE(host_source, NULL_BLOCK_IDX);
+            ASSERT_NE(disk_source, NULL_BLOCK_IDX);
             LoadTaskRunner                runner(group_sets, 30'000, 30'000);
             auto                          engine = std::make_shared<PendingPerRankEngine>(group_sets);
             BlockTransferDispatcher       dispatcher(engine);
             BlockTreeCacheMetricsReporter metrics_reporter{nullptr};
-            auto                          task = makeLoadTask({TransferDescriptor::hostToDevice(0, 1, {host_target}),
-                                                               TransferDescriptor::diskToDevice(0, 2, {disk_target})});
+            auto task = makeLoadTask({TransferDescriptor::hostToDevice(0, host_source, {host_target}),
+                                      TransferDescriptor::diskToDevice(0, disk_source, {disk_target})});
             std::optional<ErrorInfo>      result;
             block_tree_cache_detail::ScopeRollback drain([&] { engine->completeAll(); });
             runner.runTransfer(task, dispatcher, metrics_reporter, [&](ErrorInfo error) { result = std::move(error); });
@@ -608,6 +611,8 @@ TEST(LoadTaskRunnerTest, ConcurrentFailuresPreserveUnknownCompletionAndCorruptio
                       CacheCopyError::CRC_MISMATCH);
             EXPECT_TRUE(device_pool->isFrozen(host_unknown ? host_target : disk_target));
             EXPECT_FALSE(device_pool->isFrozen(host_unknown ? disk_target : host_target));
+            EXPECT_EQ(group_sets.front()->hostPool()->isFrozen(host_source), host_unknown);
+            EXPECT_EQ(group_sets.front()->diskPool()->isFrozen(disk_source), !host_unknown);
         }
     }
 }

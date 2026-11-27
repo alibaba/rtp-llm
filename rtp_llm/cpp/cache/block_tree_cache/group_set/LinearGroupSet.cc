@@ -1,4 +1,5 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/group_set/LinearGroupSet.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/group_set/PrefixCoverage.h"
 
 namespace rtp_llm {
 
@@ -7,7 +8,7 @@ std::unique_ptr<MatchValidator> LinearGroupSet::createMatchValidator() {
 }
 
 size_t LinearGroupSet::computeReuseBlockCount(size_t matched_block_count) const {
-    return group(groupTags().front()).reuseBlockCount(matched_block_count);
+    return reusableBlockCount(groupType(), pageTokens(), windowTokens(), matched_block_count);
 }
 
 bool LinearMatchValidator::validate(const GroupSetResource& resource) {

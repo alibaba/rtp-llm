@@ -358,13 +358,19 @@ TEST_F(FrozenExecutionTest, EvictUnknownFreezesHostAndDiskTargets) {
         SCOPED_TRACE(tierName(tier));
         const auto target = groups_[0]->allocateSingleBlock(tier, BlockTreeRefType::EVICT);
         ASSERT_NE(target, NULL_BLOCK_IDX);
+        const auto host_source = tier == Tier::DISK ?
+                                     groups_[0]->allocateSingleBlock(Tier::HOST, BlockTreeRefType::EVICT) :
+                                     NULL_BLOCK_IDX;
+        if (tier == Tier::DISK) {
+            ASSERT_NE(host_source, NULL_BLOCK_IDX);
+        }
         std::shared_ptr<IBlockPool> pool     = tier == Tier::HOST ? std::static_pointer_cast<IBlockPool>(host_) :
                                                                     std::static_pointer_cast<IBlockPool>(disk);
         auto                        context  = std::make_shared<ObservableContext>();
         auto                        executor = engine({context});
         BlockTransferDispatcher     dispatcher(executor);
-        auto                        descriptor = tier == Tier::HOST ? TransferDescriptor::deviceToHost(0, {1}, target) :
-                                                                      TransferDescriptor::hostToDisk(0, 1, target);
+        auto descriptor = tier == Tier::HOST ? TransferDescriptor::deviceToHost(0, {1}, target) :
+                                              TransferDescriptor::hostToDisk(0, host_source, target);
         size_t                      completions = 0;
         dispatcher.runTransfer(
             makeTransferTask({descriptor}),
@@ -373,6 +379,10 @@ TEST_F(FrozenExecutionTest, EvictUnknownFreezesHostAndDiskTargets) {
                 EXPECT_EQ(result.status.code(), ErrorCode::TRANSFER_COMPLETION_UNKNOWN);
                 EXPECT_TRUE(pool->isFrozen(target));
                 pool->decTreeRef(target, BlockTreeRefType::EVICT);
+                if (tier == Tier::DISK) {
+                    EXPECT_TRUE(host_->isFrozen(host_source));
+                    host_->decTreeRef(host_source, BlockTreeRefType::EVICT);
+                }
             },
             "evict");
         context->deliver(unknownExecution());
@@ -383,6 +393,9 @@ TEST_F(FrozenExecutionTest, EvictUnknownFreezesHostAndDiskTargets) {
         ASSERT_EQ(frozen.size(), 1u);
         frozen[0]->unfreeze();
         EXPECT_FALSE(pool->isAllocated(target));
+        if (tier == Tier::DISK) {
+            EXPECT_FALSE(host_->isAllocated(host_source));
+        }
         dispatcher.waitForTransfers();
     }
 }

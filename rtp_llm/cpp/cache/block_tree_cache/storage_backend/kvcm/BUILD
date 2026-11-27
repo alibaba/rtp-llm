@@ -17,8 +17,36 @@ cc_library(
 )
 
 cc_library(
+    name = "sdk_client",
+    srcs = ["SdkClient.cc"],
+    hdrs = ["SdkClient.h"],
+    copts = copts(),
+    deps = [
+        "//3rdparty/remote_kv_cache_manager:remote_kv_cache_manager_client",
+        "//3rdparty/remote_kv_cache_manager:remote_kv_cache_manager_client_headers",
+    ],
+)
+
+cc_library(
+    name = "sdk_write_session",
+    hdrs = ["SdkWriteSession.h"],
+    visibility = ["//rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm:__subpackages__"],
+    deps = [
+        ":replica_proof",
+        "//3rdparty/remote_kv_cache_manager:remote_kv_cache_manager_client_headers",
+    ],
+)
+
+cc_library(
     name = "worker_payload_proof",
     hdrs = ["WorkerPayloadProof.h"],
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
+    name = "replica_proof",
+    hdrs = ["ReplicaProof.h"],
+    deps = [":worker_payload_proof"],
     visibility = ["//visibility:public"],
 )
 
@@ -31,9 +59,11 @@ cc_library(
     deps = [
         ":client",
         ":group_policy",
-        ":worker_payload_proof",
+        ":replica_proof",
+        ":sdk_write_session",
         "//rtp_llm/cpp/cache/block_tree_cache",
         "//rtp_llm/cpp/cache/block_tree_cache:block_tree_task_pool",
+        "//rtp_llm/cpp/cache/block_tree_cache/integration/rtp_llm:rtp_storage_backend",
         "//rtp_llm/cpp/cache/block_tree_cache:transfer_common",
         "//rtp_llm/cpp/cache/block_tree_cache:transfer_buffer_safety",
         "//rtp_llm/cpp/cache/block_tree_cache:transfer_task_registry",
@@ -58,7 +88,7 @@ cc_library(
     visibility = ["//visibility:public"],
     deps = [
         "//3rdparty/remote_kv_cache_manager:remote_kv_cache_manager_client_headers",
-        "//rtp_llm/cpp/cache/block_tree_cache",
+        "//rtp_llm/cpp/cache/block_tree_cache/integration/rtp_llm:rtp_storage_backend",
         "//rtp_llm/cpp/utils:core_utils",
     ],
 )
@@ -89,6 +119,7 @@ cc_library(
         ":config",
         ":subscriber",
         ":sdk_buffer_safety",
+        ":sdk_client",
         "//rtp_llm/cpp/cache/events:kvcm_discovery_proto",
         "//3rdparty/remote_kv_cache_manager:remote_kv_cache_manager_client",
         "//3rdparty/remote_kv_cache_manager:remote_kv_cache_manager_client_headers",

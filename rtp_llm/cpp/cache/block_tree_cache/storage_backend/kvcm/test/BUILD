@@ -1,6 +1,19 @@
 load("//:def.bzl", "cc_test_wrapper", "copts")
 
 cc_test_wrapper(
+    name = "sdk_write_session_contract",
+    srcs = ["SdkWriteSessionContract.cc"],
+    copts = copts() + ["-UNDEBUG"],
+    target_compatible_with = select({
+        "//:using_remote_kv_cache": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    }),
+    deps = [
+        "//rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm:sdk_write_session",
+    ],
+)
+
+cc_test_wrapper(
     name = "client_wrapper_test",
     testonly = True,
     exec_properties = {"gpu": "L20_CU13"},

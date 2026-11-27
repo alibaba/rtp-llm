@@ -2,6 +2,7 @@
 
 #include <atomic>
 #include <cstdint>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -10,8 +11,7 @@
 #include <vector>
 
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTree.h"
-#include "rtp_llm/cpp/cache/block_tree_cache/ExternalBlockTreeMatch.h"
-#include "rtp_llm/cpp/cache/block_tree_cache/metrics/BlockTreeCacheMetricsReporter.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/metrics/CacheObserver.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/evict/BlockTreeEvictor.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/group_set/GroupSet.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/load/BlockTreeLoader.h"
@@ -44,6 +44,9 @@ struct BlockTreeCacheConfig {
     bool enable_host_cache{false};
     bool enable_disk_cache{false};
     bool enable_remote_cache{false};
+    bool write_remote_on_host_pressure{false};
+    // An imported device pool obtains pressure and reclaimable slots from its allocator.
+    bool external_device_capacity{false};
 
     // ---- Per-tier watermark ----
     using TierWatermark = rtp_llm::TierWatermark;
@@ -125,7 +128,7 @@ public:
                    std::shared_ptr<StorageBackend>                storage_backend,
                    std::unique_ptr<BlockTransferDispatcher>       transfer_dispatcher,
                    std::unique_ptr<BlockTreeTaskPool>             task_pool,
-                   std::shared_ptr<BlockTreeCacheMetricsReporter> metrics_reporter);
+                   std::shared_ptr<CacheObserver> metrics_reporter);
 
     ~BlockTreeCache();
     bool init();
@@ -139,17 +142,35 @@ public:
                                bool                               enable_storage_backend = true,
                                std::optional<int64_t>             request_id             = {},
                                bool                               skip_linear            = false);
-    // Uses one native tree walk with explicit per-endpoint coverage from the external
-    // scheduler. The caller retains selected slots before changing external allocations.
-    ExternalBlockTreeMatchResult match(const CacheKeysType&                       cache_keys,
-                                       const std::vector<ExternalMatchEndpoint>& endpoints,
-                                       ExternalMatchMode                         mode,
-                                       const ExternalJoinLookup&                 lookup_join = {});
-    ExternalBlockTreeMatchResult matchWholePages(const CacheKeysType&                 cache_keys,
-                                                 size_t                               maximum_tokens,
-                                                 size_t                               hash_step,
-                                                 const std::vector<ExternalPageGroup>& groups,
-                                                 const ExternalJoinLookup&            lookup_join);
+    BlockTreeMatchResult match(const BlockTreeKeys& cache_keys,
+                               const std::function<bool(size_t)>& valid_prefix,
+                               bool enable_storage_backend,
+                               std::optional<int64_t> request_id,
+                               bool skip_linear,
+                               const std::vector<bool>& selected_groups,
+                               size_t max_load_pages = std::numeric_limits<size_t>::max(),
+                               bool stage_disk_through_host = false);
+    std::shared_ptr<LocalMatchAdmission> prepareHostAdmission(
+        const BlockTreeKeys& keys, const std::function<bool(size_t)>& valid_prefix,
+        std::optional<int64_t> request_id, const std::vector<bool>& selected_groups,
+        size_t max_load_pages, bool stage_disk_through_host = false,
+        size_t max_load_rows = std::numeric_limits<size_t>::max());
+    std::optional<BlockTreeMatchResult> completeHostAdmission(
+        const std::shared_ptr<LocalMatchAdmission>& admission, const std::shared_ptr<HostPrefetchMatch>& warmed = {});
+    bool prefetchRemote(const BlockTreeKeys& cache_keys,
+                        size_t locally_matched_rows,
+                        const std::function<bool(size_t)>& valid_prefix,
+                        const std::vector<bool>& selected_groups,
+                        size_t max_load_pages,
+                        std::optional<int64_t> request_id,
+                        std::function<bool()> still_needed,
+                        std::function<void(bool)> notice,
+                        BlockTreeLoader::RemotePrefetchDone on_ready);
+    void advanceRemotePrefetch();
+    void expireRemotePrefetches();
+    void notifyRemoteHostPressureFailure(const HostBlockPool& pool);
+    DiskStage prefetchDisk(const BlockTreeKeys& keys, const std::vector<std::pair<size_t, size_t>>& positions,
+                           std::optional<int64_t> request, std::function<void(bool)> done);
     void                 insert(const CacheKeysType&                              cache_keys,
                                 const std::vector<std::vector<GroupSetResource>>& resources,
                                 Tier                                              target_tier);
@@ -161,10 +182,25 @@ public:
                   std::optional<int64_t>                            request_id         = {},
                   size_t                                            remote_reuse_begin = 0,
                   size_t                                            remote_reuse_end   = 0);
+    size_t insert(const BlockTreeKeys& cache_keys,
+                  const std::vector<std::vector<GroupSetResource>>& resources,
+                  Tier target_tier,
+                  bool is_resident,
+                  std::optional<int64_t> request_id = {},
+                  size_t remote_reuse_begin = 0,
+                  size_t remote_reuse_end = 0);
     // Directly reclaim up to num_blocks device blocks belonging to one group set
     // (target_tier = NONE, content dropped). Returns the number actually freed.
     // Skips plans containing device blocks that would remain referenced after dropping.
     int evictForGroup(std::string_view group_tag, size_t num_blocks);
+    size_t releaseDevicePages(const IBlockPool& pool, const std::vector<BlockIdList>& slots,
+                              size_t requested_slots, const BlockIdList& eligible, size_t pressure,
+                              bool copy_only, bool demote_to_host, bool cascade);
+    bool invalidateDevicePages(const IBlockPool& pool, const BlockIdList& blocks);
+    size_t reclaimLocalPages(Tier tier, size_t group_id, size_t pressure);
+    void balanceDevicePages(const IBlockPool& pool, const std::vector<BlockIdList>& slots, size_t eligible_count,
+                            size_t capacity, size_t free_slots, size_t returning, bool& triggered);
+    void setLocalEvictionPolicy(Tier tier, EvictionPolicy policy);
 
     CacheStats                    getStats() const;
     std::vector<CachePoolMetrics> poolMetrics() const;
@@ -174,9 +210,10 @@ public:
     BlockTreeKeySnapshot          getKeySnapshot(int64_t latest_version = -1) const;
     void setEventPublisher(KVCacheEventPublisherPtr publisher, const std::vector<std::string>& required_group_tags);
     KVCacheSnapshot logicalCacheSnapshot() const;
+    void visitTreeLocked(const std::function<void(const BlockTree&)>& visit) const;
     bool            abortPendingLoad(const std::shared_ptr<AsyncContext>& context);
 
-    BlockIndicesType matchedBlocksForGroup(std::string_view                      group_tag,
+    BlockIdList matchedBlocksForGroup(std::string_view                      group_tag,
                                            const std::vector<MultiNodeResource>& matched_resources) const;
 
     TransferResult                     executeTransfer(TransferTask task);
@@ -220,6 +257,14 @@ public:
     }
 
 private:
+    template<class Keys>
+    size_t insertImpl(const Keys& cache_keys,
+                      const std::vector<std::vector<GroupSetResource>>& resources,
+                      Tier target_tier,
+                      bool is_resident,
+                      std::optional<int64_t> request_id,
+                      size_t remote_reuse_begin,
+                      size_t remote_reuse_end);
     void checkWatermark();
     // Caller holds mutex_.
     void onWorkflowSettledLocked(bool check_watermark);
@@ -229,7 +274,7 @@ private:
     std::shared_ptr<StorageBackend>                storage_backend_;
     std::unique_ptr<BlockTransferDispatcher>       transfer_dispatcher_;
     std::unique_ptr<BlockTreeTaskPool>             task_pool_;
-    std::shared_ptr<BlockTreeCacheMetricsReporter> metrics_reporter_;
+    std::shared_ptr<CacheObserver> metrics_reporter_;
     mutable std::mutex                             mutex_;
     BlockTreeEvictor                               evictor_;
     bool                                           initialized_{false};

@@ -10,7 +10,7 @@
 namespace rtp_llm {
 namespace {
 
-TransferDescriptor removedDiskToHost(size_t group, BlockIdxType disk, BlockIdxType host) {
+TransferDescriptor diskToHost(size_t group, BlockIdxType disk, BlockIdxType host) {
     auto desc = TransferDescriptor::hostToDisk(group, host, disk);
     std::swap(desc.source_tier, desc.target_tier);
     std::swap(desc.source_blocks, desc.target_blocks);
@@ -210,6 +210,20 @@ TEST(TransferResultTest, BusinessStatusAndBlockDiagnosticsNeverImplyBufferSafety
     EXPECT_EQ(aggregate.block_errors, std::vector<CacheCopyError>(3, CacheCopyError::NOT_EXECUTED));
 }
 
+TEST(TransferResultTest, ConfirmedCopyRequiresEverySafeSuccessfulBlock) {
+    TransferResult result;
+    result.expandBlockErrors(2);
+    EXPECT_FALSE(result.confirmedCopy(2));
+
+    result.buffer_safe = true;
+    EXPECT_TRUE(result.confirmedCopy(2));
+    EXPECT_FALSE(result.confirmedCopy(3));
+
+    result.block_errors[1] = CacheCopyError::NOT_EXECUTED;
+    EXPECT_TRUE(result.ok());
+    EXPECT_FALSE(result.confirmedCopy(2));
+}
+
 TEST(TransferResultTest, EveryContributorMustProveSafetyRegardlessOfBusinessOutcome) {
     for (const bool first_safe : {false, true}) {
         for (const bool second_safe : {false, true}) {
@@ -269,7 +283,8 @@ TEST(TransferDescriptorTest, FactoriesBuildExecutableDescriptors) {
     EXPECT_TRUE(TransferDescriptor::deviceToHost(0, {1, 2}, 3).isExecutable());
     EXPECT_TRUE(TransferDescriptor::hostToDevice(0, 3, {1, 2}).isExecutable());
     EXPECT_TRUE(TransferDescriptor::hostToDisk(0, 1, 2).isExecutable());
-    EXPECT_FALSE(removedDiskToHost(0, 1, 2).isExecutable());
+    EXPECT_TRUE(diskToHost(0, 1, 2).isExecutable());
+    EXPECT_FALSE(diskToHost(0, 1, NULL_BLOCK_IDX).isExecutable());
     EXPECT_FALSE(removedDeviceToDisk(0, {1, 2}, 3).isExecutable());
     EXPECT_TRUE(TransferDescriptor::diskToDevice(0, 3, {1, 2}).isExecutable());
 }

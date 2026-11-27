@@ -9,6 +9,7 @@
 #include "rtp_llm/cpp/config/MMTransportMode.h"
 #include "rtp_llm/cpp/config/RoleTypes.h"
 #include "rtp_llm/cpp/config/RdmaConfig.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/evict/TierWatermark.h"
 #include "rtp_llm/models_py/bindings/core/Types.h"
 
 namespace rtp_llm {
@@ -151,13 +152,6 @@ struct FMHAConfig {
     int64_t     absorb_opt_len = 1024;
     std::string to_string() const;
 };
-
-constexpr double kDefaultDeviceLowWatermarkRatio        = 0.82;
-constexpr double kDefaultDeviceHighWatermarkRatio       = 0.90;
-constexpr double kDefaultMemoryLowWatermarkRatio        = 0.90;
-constexpr double kDefaultMemoryHighWatermarkRatio       = 0.94;
-constexpr double kDefaultDiskLowWatermarkRatio          = 0.92;
-constexpr double kDefaultDiskHighWatermarkRatio         = 0.97;
 
 struct KVCacheConfig {
     bool                                    reuse_cache           = false;

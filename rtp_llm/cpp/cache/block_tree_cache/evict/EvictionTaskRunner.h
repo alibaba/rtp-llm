@@ -11,7 +11,7 @@
 namespace rtp_llm {
 
 class BlockTransferDispatcher;
-class BlockTreeCacheMetricsReporter;
+class CacheObserver;
 class EvictionTaskRunner {
 public:
     using EvictionDoneCallback = std::function<void(ErrorInfo)>;
@@ -19,7 +19,7 @@ public:
     EvictionTaskRunner(const std::vector<GroupSetPtr>& group_sets, const BlockTransferDispatcher* transfer_dispatcher);
 
     void runTransfer(std::shared_ptr<const EvictionTransferTask> task,
-                     BlockTreeCacheMetricsReporter&              metrics_reporter,
+                     CacheObserver&              metrics_reporter,
                      EvictionDoneCallback                        on_done) const;
 
 private:

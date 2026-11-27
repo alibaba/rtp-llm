@@ -7,7 +7,10 @@
 #include <list>
 #include <memory>
 #include <mutex>
+#include <string>
+#include <vector>
 
+#include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeTaskPool.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferAsyncContext.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferTypes.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/FrozenTask.h"
@@ -18,12 +21,25 @@ namespace rtp_llm {
 class MultiRankBlockTransferEngine;
 class PerRankBlockTransferEngine;
 class TransferCompletionCleanup;
-struct BlockTreeQueueSizes;
+class GroupSet;
+
+// The host owns physical execution. It returns a logical result and reports
+// buffer safety through the proof carried by each accepted local task.
+struct TransferTransport {
+    using Context = std::shared_ptr<TransferAsyncContext>;
+    std::function<Context(TransferTask)> execute_local;
+    std::function<Context(TransferTask, const char*)> execute_parallel;
+    std::vector<std::string> participant_addresses;
+    std::function<void()> cancel_pending;
+    std::function<void()> shutdown;
+    std::function<BlockTreeQueueSizes()> queue_sizes;
+};
 
 class BlockTransferDispatcher {
 public:
     using TransferDoneCallback = std::function<void(TransferResult)>;
 
+    BlockTransferDispatcher(std::vector<std::shared_ptr<GroupSet>> groups, TransferTransport transport);
     BlockTransferDispatcher(std::shared_ptr<PerRankBlockTransferEngine>   per_rank_engine,
                             std::shared_ptr<MultiRankBlockTransferEngine> multi_rank_engine = nullptr);
     ~BlockTransferDispatcher();
@@ -36,7 +52,6 @@ public:
     // observations only. Existing physical transfer stage identities are unchanged.
     void
     runTransfer(TransferTask task, TransferDoneCallback callback, const char* completion_operation = nullptr) const;
-
     void                cancelPendingStagingTransfers() const;
     BlockTreeQueueSizes queueSizes() const;
 
@@ -90,6 +105,8 @@ private:
     FrozenTask::ExecutionInfo buildExecutionInfo(const TransferTask& task, const char* completion_operation) const;
     void                      retainFrozenTask(std::list<std::shared_ptr<FrozenTask>>& prepared_slot) const noexcept;
 
+    const std::vector<std::shared_ptr<GroupSet>>    groups_;
+    const TransferTransport                       transport_;
     std::shared_ptr<PerRankBlockTransferEngine>    per_rank_engine_;
     std::shared_ptr<MultiRankBlockTransferEngine>  multi_rank_engine_;
     mutable std::mutex                             inflight_mutex_;

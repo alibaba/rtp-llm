@@ -14,8 +14,7 @@ struct HasExplicitBufferSafeCodes<
     std::true_type {};
 }  // namespace detail
 
-// Older/generic SDK headers have no explicit failed-but-buffer-safe contract.
-// Do not interpret unnamed numeric codes 119/120 as that proof in an old ABI.
+// Older SDK headers have no explicit failed-but-buffer-safe contract.
 template<typename Code>
 bool sdkCodeProvesBufferSafety(Code code) {
     if (code == Code::ER_OK)

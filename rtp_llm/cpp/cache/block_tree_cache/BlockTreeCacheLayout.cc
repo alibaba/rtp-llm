@@ -1,4 +1,5 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeCacheLayout.h"
+#include "rtp_llm/cpp/cache/CacheConfig.h"
 
 #include <algorithm>
 #include <limits>

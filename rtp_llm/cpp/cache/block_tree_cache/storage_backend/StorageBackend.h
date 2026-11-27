@@ -7,27 +7,26 @@
 #include <chrono>
 #include <cstdint>
 #include <functional>
-#include <map>
 #include <memory>
 #include <mutex>
 #include <optional>
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
-#include "rtp_llm/cpp/cache/BlockInfo.h"
-#include "rtp_llm/cpp/cache/CacheTopology.h"
-#include "rtp_llm/cpp/cache/KVCacheResource.h"
-#include "rtp_llm/cpp/cache/block_tree_cache/block_pool/DeviceBlockPool.h"
+#include "rtp_llm/cpp/cache/BlockIndex.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeKey.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/StorageBackendExecutor.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferTypes.h"
 #include "rtp_llm/cpp/utils/ErrorCode.h"
 
 namespace rtp_llm {
 
-class BatchKVCacheResource;
-class BlockTreeCacheMetricsReporter;
+class CacheObserver;
+class FrozenTask;
+class IBlockPool;
 enum class AsyncProfileKind;
 class TransferStageTimer;
 class SharedTransferStageTimer;
@@ -35,10 +34,13 @@ class SharedTransferStageTimer;
 struct StorageBlockHandle {
     std::string  tag;
     BlockIdxType block{NULL_BLOCK_IDX};
+    Tier         tier{Tier::DEVICE};
+    uint64_t     end_token{0};
 };
 
 struct StorageBackendMatchMeta {
     virtual ~StorageBackendMatchMeta() = default;
+    virtual std::string replicaDescriptor(size_t, const std::vector<std::string>&) const { return {}; }
 };
 
 enum class StorageQuarantineReason {
@@ -64,8 +66,10 @@ public:
     StorageOperationCompletionUnknown(
         const std::string&           message,
         StorageQuarantineReason      reason,
-        StorageLocalTargetProtection local_target_protection = StorageLocalTargetProtection::LEGACY):
-        std::runtime_error(message), reason_(reason), local_target_protection_(local_target_protection) {}
+        StorageLocalTargetProtection local_target_protection = StorageLocalTargetProtection::LEGACY,
+        std::shared_ptr<const FrozenTask> recovery = {}):
+        std::runtime_error(message), reason_(reason), local_target_protection_(local_target_protection),
+        recovery_(std::move(recovery)) {}
 
     StorageQuarantineReason reason() const noexcept {
         return reason_;
@@ -74,10 +78,12 @@ public:
     StorageLocalTargetProtection localTargetProtection() const noexcept {
         return local_target_protection_;
     }
+    const std::shared_ptr<const FrozenTask>& recovery() const noexcept { return recovery_; }
 
 private:
     StorageQuarantineReason      reason_;
     StorageLocalTargetProtection local_target_protection_;
+    std::shared_ptr<const FrozenTask> recovery_;
 };
 
 // An explicit timeout with unknown buffer safety preserves the timeout error code.
@@ -104,6 +110,12 @@ struct StorageMatchResult {
     std::shared_ptr<StorageBackendMatchMeta> match_meta;
 };
 
+struct StorageTransferOutcome {
+    ErrorInfo error;
+    bool safe;
+    std::shared_ptr<const FrozenTask> recovery;
+};
+
 struct StorageRequest {
     std::shared_ptr<const CacheKeysType> keys;
     // handles[i] contains every group block associated with (*keys)[i].
@@ -113,6 +125,34 @@ struct StorageRequest {
     size_t                      local_matched_blocks_num{0};
     std::optional<int64_t>      request_id;
     std::optional<TransferTask> transfer_task;
+    // Shared-tree queries return exact replica descriptors, and writes check
+    // those same descriptors for visibility after handoff to the backend.
+    bool positional_replicas{false};
+    // A planned read selects exact group replicas per keys row.
+    std::vector<std::vector<std::string>> replica_descriptors;
+    // Shared-tree transfer identity spans the coordinator and all ranks.
+    std::string payload_trace_id;
+    // Keep the native integer fast path and support complete opaque keys.
+    // Exactly one sequence supplies the positions in handles.
+    std::shared_ptr<const BlockTreeKeys> opaque_keys;
+    // Optional early progress for the exact cold prefetch that owns this I/O.
+    // True terminates the scheduler wait while physical ownership remains held.
+    std::function<void(bool)> prefetch_notice{};
+
+    size_t cacheKeyCount() const noexcept {
+        return keys ? keys->size() : opaque_keys ? opaque_keys->size() : 0;
+    }
+
+    void sliceKeys(size_t first, size_t last) {
+        if ((!keys && !opaque_keys) || first > last || last > cacheKeyCount()) {
+            throw std::out_of_range("invalid storage request key slice");
+        }
+        if (keys) {
+            keys = std::make_shared<CacheKeysType>(keys->begin() + first, keys->begin() + last);
+        } else {
+            opaque_keys = std::make_shared<BlockTreeKeys>(opaque_keys->begin() + first, opaque_keys->begin() + last);
+        }
+    }
 
     bool empty() const {
         for (const auto& key_handles : handles) {
@@ -151,57 +191,38 @@ private:
 // before derived backend state starts destruction.
 class StorageBackend {
 public:
-    // A scheduler-owned transport consumes these Host writes in batches. Each
-    // entry holds an ordinary StorageWriteTask until the transport reports
-    // durable publication or a buffer-safe failure. Calls are serialized by
-    // the tree's lock with its Host catalog updates.
-    class HostWrites {
-    public:
-        struct Source {
-            uint64_t     ticket;
-            size_t       group;
-            std::string  hash;
-            BlockIdxType slot;  // External Host row; native pool IDs start at one.
-        };
-        explicit HostWrites(IBlockPool& pool): pool_(pool) {}
-        uint64_t write(size_t group, std::string hash, BlockIdxType slot);
-        void dispatch(const std::function<void(const std::vector<const Source*>&)>& submit);
-        bool settle(uint64_t ticket, bool committed, const std::function<void(const Source&, bool)>& done);
-        bool busy() const { return !pending_.empty(); }
-        size_t countIf(const std::function<bool(BlockIdxType)>& include) const;
-    private:
-        struct Entry {
-            Source           source;
-            StorageWriteTask task;
-            bool             sent{false};
-        };
-        IBlockPool&               pool_;
-        uint64_t                  last_ticket_{0};
-        std::map<uint64_t, Entry> pending_;
-    };
-
     using MatchDone      = std::function<void(
         size_t matched_blocks_num, std::shared_ptr<StorageBackendMatchMeta> match_meta, bool success)>;
     using Done           = std::function<void(ErrorInfo error)>;
-    using PoolsByTag     = std::unordered_map<std::string, DeviceBlockPoolPtr>;
-    using BufferResolver = std::function<std::vector<BlockInfo>(int layer_id, const std::string& tag, int block_id)>;
+    using TransferDone   = std::function<void(StorageTransferOutcome)>;
+    struct PageAccess {
+        std::shared_ptr<IBlockPool> pool;
+        std::function<std::function<void()>(BlockIdxType)> pin;
+    };
+    struct GroupAccess {
+        PageAccess device, host;
+        std::function<bool(size_t key_index, size_t matched_keys)> required;
+
+        const PageAccess& forTier(Tier tier) const;
+    };
+    using Groups = std::unordered_map<std::string, GroupAccess>;
 
     // An injected executor may be observed by its owner but belongs to only
     // one backend; init rejects binding the same instance a second time.
     explicit StorageBackend(std::shared_ptr<StorageBackendExecutor>        executor         = nullptr,
-                            std::shared_ptr<BlockTreeCacheMetricsReporter> metrics_reporter = nullptr,
+                            std::shared_ptr<CacheObserver>                  metrics_reporter = nullptr,
                             int64_t                                        world_rank       = -1,
-                            std::chrono::milliseconds                      timeout          = std::chrono::seconds(10));
+                            std::optional<std::chrono::milliseconds>       timeout          = std::chrono::seconds(10));
     virtual ~StorageBackend();
     // Atomic replacement allows attaching the cache reporter before or after init.
-    void                        setStageMetricsReporter(std::shared_ptr<BlockTreeCacheMetricsReporter> reporter);
+    void                        setStageMetricsReporter(std::shared_ptr<CacheObserver> reporter);
     virtual BlockTreeQueueSizes queueSizes() const {
         return executor_ ? executor_->queueSizes() : BlockTreeQueueSizes{};
     }
 
     // Initialization is single-attempt. A failed start may permanently stop
     // an injected executor; create a fresh backend/executor to retry.
-    bool init(std::shared_ptr<const CacheTopology> topology, PoolsByTag pools_by_tag, BufferResolver buffer_resolver);
+    bool init(Groups groups);
     // Runtime admission only. Disabling must not tear down clients or interrupt
     // a payload batch that rank 0 has already admitted.
     void setRemoteCacheEnabled(bool enabled) noexcept {
@@ -212,15 +233,21 @@ public:
     }
     void             match(StorageRequest request, MatchDone done);
     void             read(StorageRequest request, std::shared_ptr<StorageBackendMatchMeta> match_meta, Done done);
+    void             readOwned(StorageRequest request, std::shared_ptr<StorageBackendMatchMeta> match_meta,
+                               TransferDone done);
+    virtual bool supportsPositionalReplicas() const noexcept { return false; }
+    virtual bool supportsWriteTier(Tier tier) const noexcept { return tier == Tier::DEVICE; }
     StorageWriteTask prepareWrite(StorageRequest request);
     // Returns admission only, not the I/O result; never waits for completion.
     // Source pins live through payload completion and publication.
-    bool write(StorageWriteTask task);
+    bool write(StorageWriteTask task, TransferDone done = {});
     // Must not be called from backend I/O or completion callbacks.
     void shutdown();
 
 protected:
     using Task = StorageBackendExecutor::Task;
+    using MatchResult     = std::function<StorageMatchResult()>;
+    using MatchCompletion = std::function<void(MatchResult)>;
     // The completion callable only checks results and updates local state; it
     // must not start blocking I/O on the RPC completion/settlement thread.
     using ReadCompletion = std::function<void(Task)>;
@@ -229,16 +256,18 @@ protected:
     using WriteResult     = std::function<void(bool on_worker)>;
     using WriteCompletion = std::function<void(WriteResult)>;
     using WritePinFilter  = std::function<void(const std::vector<size_t>&)>;
-    const CacheTopology&      topology() const;
-    const DeviceBlockPoolPtr& devicePool(const std::string& tag) const;
-    std::vector<BlockInfo>    convertIndexToBuffer(int layer_id, const std::string& tag, int block_id) const;
+    bool initializationAttempted() const noexcept { return init_attempted_; }
     // Match queries contain every possible group handle. Derived matchers use
     // this predicate for each candidate prefix; the core applies the same rule
     // before allocating read targets.
-    bool isHandleRequired(size_t key_index, size_t matched_key_count, std::string_view tag) const;
+    bool isHandleRequired(size_t key_index, size_t matched_key_count, const std::string& tag) const;
+    size_t coveredPrefix(const StorageRequest& request,
+                         const std::function<bool(size_t row, const StorageBlockHandle&)>& available) const;
 
     virtual bool               initImpl()                                                           = 0;
     virtual StorageMatchResult matchImpl(const StorageRequest& request)                             = 0;
+    virtual bool usesAsyncMatch(const StorageRequest&) const noexcept { return false; }
+    virtual bool matchAsyncImpl(const StorageRequest&, MatchCompletion) { return false; }
     virtual void               readImpl(const StorageRequest&                           request,
                                         const std::shared_ptr<StorageBackendMatchMeta>& match_meta) = 0;
     // Synchronous payloads run on one worker. A deferred payload spans dispatch through completion.
@@ -261,7 +290,6 @@ protected:
     virtual void onRemoteCacheSkipped(const char*) noexcept {}
 
 private:
-    static StorageWriteTask prepareWrite(IBlockPool& host_pool, BlockIdxType source);
     enum class Lifecycle {
         CREATED,
         ACCEPTING,
@@ -283,20 +311,21 @@ private:
                                         const char*           operation,
                                         uint64_t              trace_id) const noexcept;
     void                     validateRequest(const StorageRequest& request, bool allow_null_blocks) const;
+    void                     applyDeadline(StorageRequest& request) const;
+    std::optional<StorageBackendExecutor::Clock::time_point> deadline(const StorageRequest& request) const;
+    bool                     expired(const StorageRequest& request) const;
     bool                     dispatch(Operation                                                operation,
                                       BlockTreeTaskClass                                       task_class,
                                       bool                                                     run_inline = false,
                                       std::optional<StorageBackendExecutor::Clock::time_point> io_deadline = std::nullopt);
     void                     taskFinished();
-    std::shared_ptr<const CacheTopology>           topology_;
     std::atomic<bool>                              remote_cache_enabled_{true};
-    PoolsByTag                                     pools_by_tag_;
-    BufferResolver                                 buffer_resolver_;
+    Groups                                         groups_;
     std::shared_ptr<StorageBackendExecutor>        executor_;
-    std::shared_ptr<BlockTreeCacheMetricsReporter> stage_metrics_reporter_;
+    std::shared_ptr<CacheObserver>                  stage_metrics_reporter_;
     std::atomic<bool>                              stage_metrics_enabled_{false};
     const int64_t                                  world_rank_;
-    const std::chrono::milliseconds                timeout_;
+    const std::optional<std::chrono::milliseconds> timeout_;
     bool                                           init_attempted_{false};
     bool                                           initialized_{false};
 

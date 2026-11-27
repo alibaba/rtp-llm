@@ -1,82 +1,26 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/block_pool/HostBlockPool.h"
 
-#include <cerrno>
-#include <cstdint>
-#include <cstring>
 #include <limits>
 #include <sstream>
-
-#include <sys/mman.h>
-#include <unistd.h>
-
-#include "rtp_llm/cpp/utils/AssertUtils.h"
-#include "rtp_llm/cpp/utils/Logger.h"
+#include <stdexcept>
+#include <utility>
 
 namespace rtp_llm {
-
 namespace {
 
 std::shared_ptr<const HostBlockPoolConfig>
-validateHostBlockPoolConfig(const std::shared_ptr<const HostBlockPoolConfig>& config) {
-    RTP_LLM_CHECK(config != nullptr);
-    RTP_LLM_CHECK_WITH_INFO(config->physical_block_count > 1,
-                            "host block pool [%s] physical_block_count must be > 1",
-                            config->pool_name.c_str());
+validateHostBlockPoolConfig(std::shared_ptr<const HostBlockPoolConfig> config) {
+    if (!config || config->pool_type != BlockPoolType::HOST || config->physical_block_count <= 1
+        || config->growable) {
+        throw std::invalid_argument("Host block pool requires a fixed positive capacity");
+    }
     return config;
-}
-
-// Exclude the host block pool backing from core dumps (mirrors the removed legacy pool
-// behavior). Best-effort: failures and the absence of MADV_DONTDUMP only warn and never
-// fail initialization.
-void markHostBlockPoolDontDump(const char* pool_name, void* ptr, size_t size) {
-#ifdef MADV_DONTDUMP
-    if (ptr == nullptr || size == 0) {
-        return;
-    }
-
-    long page_size = sysconf(_SC_PAGESIZE);
-    if (page_size <= 0) {
-        page_size = 4096;
-    }
-
-    const auto begin         = reinterpret_cast<uintptr_t>(ptr);
-    const auto page_mask     = static_cast<uintptr_t>(page_size - 1);
-    const auto aligned_begin = begin & ~page_mask;
-    const auto aligned_end   = (begin + size + page_mask) & ~page_mask;
-    const auto aligned_size  = static_cast<size_t>(aligned_end - aligned_begin);
-
-    if (madvise(reinterpret_cast<void*>(aligned_begin), aligned_size, MADV_DONTDUMP) != 0) {
-        RTP_LLM_LOG_WARNING("madvise MADV_DONTDUMP failed for host block pool, pool_name=%s ptr=%p, size=%zu, "
-                            "error=%s",
-                            pool_name,
-                            ptr,
-                            size,
-                            std::strerror(errno));
-    } else {
-        RTP_LLM_LOG_INFO("madvise MADV_DONTDUMP success for host block pool, pool_name=%s ptr=%p, size=%zu, "
-                         "aligned_ptr=%p, aligned_size=%zu",
-                         pool_name,
-                         ptr,
-                         size,
-                         reinterpret_cast<void*>(aligned_begin),
-                         aligned_size);
-    }
-#else
-    RTP_LLM_LOG_WARNING(
-        "MADV_DONTDUMP is not defined, host block pool may be included in coredump, pool_name=%s ptr=%p, size=%zu",
-        pool_name,
-        ptr,
-        size);
-#endif
 }
 
 }  // namespace
 
 HostBlockPool::HostBlockPool(std::shared_ptr<const HostBlockPoolConfig> config):
-    IBlockPool(validateHostBlockPoolConfig(config)) {
-    RTP_LLM_CHECK(config != nullptr);
-    RTP_LLM_CHECK(config->pool_type == BlockPoolType::HOST);
-}
+    IBlockPool(validateHostBlockPoolConfig(std::move(config))) {}
 
 HostBlockPool::~HostBlockPool() = default;
 
@@ -84,50 +28,52 @@ const HostBlockPoolConfig& HostBlockPool::config() const {
     return configAs<HostBlockPoolConfig>(BlockPoolType::HOST);
 }
 
-bool HostBlockPool::init() {
+size_t HostBlockPool::backingBytes(size_t first_usable_offset) const {
     const auto& cfg = config();
-    RTP_LLM_CHECK_WITH_INFO(
-        cfg.payload_bytes > 0, "host block pool [%s] payload_bytes must be > 0", cfg.pool_name.c_str());
-    RTP_LLM_CHECK_WITH_INFO(cfg.stride_bytes >= cfg.payload_bytes,
-                            "host block pool [%s] stride_bytes [%zu] must be >= payload_bytes [%zu]",
-                            cfg.pool_name.c_str(),
-                            cfg.stride_bytes,
-                            cfg.payload_bytes);
-    RTP_LLM_CHECK_WITH_INFO(cfg.alignment > 0, "host block pool [%s] alignment must be > 0", cfg.pool_name.c_str());
-    RTP_LLM_CHECK_WITH_INFO(cfg.stride_bytes % cfg.alignment == 0,
-                            "host block pool [%s] stride_bytes [%zu] must be a multiple of alignment [%zu]",
-                            cfg.pool_name.c_str(),
-                            cfg.stride_bytes,
-                            cfg.alignment);
+    if (!cfg.payload_bytes || cfg.stride_bytes < cfg.payload_bytes || !cfg.alignment
+        || cfg.stride_bytes % cfg.alignment || first_usable_offset % cfg.alignment) {
+        throw std::invalid_argument("Invalid Host block layout for pool " + poolName());
+    }
+    const size_t usable = cfg.physical_block_count - 1;
+    if (usable > (std::numeric_limits<size_t>::max() - first_usable_offset) / cfg.stride_bytes) {
+        throw std::invalid_argument("Host block backing size overflow for pool " + poolName());
+    }
+    return first_usable_offset + usable * cfg.stride_bytes;
+}
 
-    // block 0's slot is allocated as backing but is never handed out by malloc().
-    RTP_LLM_CHECK_WITH_INFO(cfg.physical_block_count <= std::numeric_limits<size_t>::max() / cfg.stride_bytes,
-                            "host block pool [%s] backing size overflow",
-                            cfg.pool_name.c_str());
-    const size_t total_bytes = cfg.physical_block_count * cfg.stride_bytes;
-    backing_.emplace(total_bytes, cfg.alignment, cfg.pool_name);
-    markHostBlockPoolDontDump(cfg.pool_name.c_str(), backing_->data(), total_bytes);
-    static constexpr double kBytesPerMB = 1024.0 * 1024.0;
-    RTP_LLM_LOG_INFO("backing selected: pool_name=%s payload_bytes=%zu stride_bytes=%zu "
-                     "physical_block_count=%zu total_size=%zu bytes total_size_mb=%.2f ptr=%p",
-                     cfg.pool_name.c_str(),
-                     cfg.payload_bytes,
-                     cfg.stride_bytes,
-                     cfg.physical_block_count,
-                     total_bytes,
-                     static_cast<double>(total_bytes) / kBytesPerMB,
-                     backing_->data());
-
+bool HostBlockPool::initBacking(void* base,
+                                size_t mapped_bytes,
+                                size_t first_usable_offset,
+                                std::shared_ptr<void> owner) {
+    if (initialized()) {
+        throw std::logic_error("Host block pool is already initialized: " + poolName());
+    }
+    const size_t needed = backingBytes(first_usable_offset);
+    const auto address = reinterpret_cast<uintptr_t>(base);
+    if (!base || needed > mapped_bytes || address % config().alignment
+        || mapped_bytes > std::numeric_limits<uintptr_t>::max() - address) {
+        throw std::invalid_argument("Invalid Host backing for pool " + poolName());
+    }
+    backing_owner_ = std::move(owner);
+    first_usable_row_ = static_cast<uint8_t*>(base) + first_usable_offset;
     markInitialized();
     return true;
 }
 
+void HostBlockPool::initDelegated() {
+    if (initialized()) {
+        throw std::logic_error("Host block pool is already initialized: " + poolName());
+    }
+    markInitialized();
+}
+
 HostBlockBuffer HostBlockPool::blockBuffer(BlockIdxType block) const {
-    RTP_LLM_CHECK(initialized());
-    RTP_LLM_CHECK(validBlock(block));
-    const auto& cfg  = config();
-    void*       addr = backing_->data() + static_cast<size_t>(block) * cfg.stride_bytes;
-    return HostBlockBuffer{block, addr, cfg.payload_bytes, cfg.stride_bytes};
+    if (!first_usable_row_ || !validBlock(block)) {
+        throw std::invalid_argument("Host backing or block is unavailable in pool " + poolName());
+    }
+    const auto& cfg = config();
+    auto* row = first_usable_row_ + static_cast<size_t>(block - 1) * cfg.stride_bytes;
+    return {block, row, cfg.payload_bytes, cfg.stride_bytes};
 }
 
 size_t HostBlockPool::payloadBytes() const {

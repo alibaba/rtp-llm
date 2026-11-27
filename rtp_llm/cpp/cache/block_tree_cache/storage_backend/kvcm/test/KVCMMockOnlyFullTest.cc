@@ -5,6 +5,8 @@
 #include <thread>
 
 #include "kvcm_client/HostCacheStateCompat.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/group_set/FullGroupSet.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/test/BlockTreeCacheTestUtils.h"
 
 namespace rtp_llm {
 namespace {
@@ -734,14 +736,22 @@ TEST(KVCMMockOnlyFullTest, RemoteTransfersOmitRtpSdkTrace) {
     EXPECT_TRUE(backend->execute(write_request, write_response));
 }
 
-TEST(KVCMMockOnlyFullTest, WritePublishesActualUri) {
+TEST(KVCMMockOnlyFullTest, DeviceInsertWritesThroughKvcmAndPublishesActualUri) {
     auto environment    = makeBackendEnvironment("kvcm_storage_backend_write");
     auto client_wrapper = std::make_shared<MockClientWrapper>();
 
     EXPECT_CALL(*client_wrapper, initForPools(_, _, _, _)).WillOnce(Return(true));
     EXPECT_CALL(*client_wrapper, shutdown()).Times(1);
-    auto backend = makeBackend(environment, singleRankConfig(), client_wrapper);
-    ASSERT_TRUE(initSingleRank(*backend.backend, environment));
+    auto handle = makeBackend(environment, singleRankConfig(), client_wrapper);
+    auto backend = std::shared_ptr<KVCMStorageBackend>(std::move(handle.backend));
+    auto group = std::make_shared<FullGroupSet>(std::vector<DeviceBlockPoolPtr>{environment.device_pool}, nullptr, nullptr);
+    group->initialize(0, environment.cache_config.topologyPtr(), {"default"});
+    BlockTreeCacheConfig config;
+    config.enable_remote_cache = true;
+    config.watermark_device    = {1.0, 1.0};
+    auto cache = block_tree_cache_test::makeBlockTreeCacheForTest({group}, std::move(config), backend);
+    ASSERT_NE(cache, nullptr);
+    const auto expected_buffers = environment.device_pool->convertIndexToBuffer(0, environment.block_id);
 
     kv_cache_manager::WriteLocation write_location;
     write_location.write_session_id = "write_session";
@@ -751,7 +761,17 @@ TEST(KVCMMockOnlyFullTest, WritePublishesActualUri) {
     EXPECT_CALL(*client_wrapper, getWriteLocation(_, _, std::vector<int64_t>{101}, std::vector<int64_t>{}, _, 40, 0))
         .WillOnce(Return(std::make_pair(true, write_location)));
     EXPECT_CALL(*client_wrapper, saveKvCachesForTag("default", kv_cache_manager::UriStrVec{"write_uri"}, _, _))
-        .WillOnce(Return(std::make_pair(true, kv_cache_manager::UriStrVec{"actual_uri"})));
+        .WillOnce(Invoke([expected_buffers](const auto&, const auto&, const kv_cache_manager::BlockBuffers& buffers, const auto&) {
+            if (buffers.size() != 1 || buffers.front().iovs.size() != expected_buffers.size()) {
+                ADD_FAILURE() << "the published Device block did not reach KVCM with the correct layout";
+                return std::make_pair(false, kv_cache_manager::UriStrVec{});
+            }
+            for (size_t i = 0; i < expected_buffers.size(); ++i) {
+                EXPECT_EQ(buffers.front().iovs[i].base, expected_buffers[i].addr);
+                EXPECT_EQ(buffers.front().iovs[i].size, expected_buffers[i].size_bytes);
+            }
+            return std::make_pair(true, kv_cache_manager::UriStrVec{"actual_uri"});
+        }));
     EXPECT_CALL(*client_wrapper, finishWrite(_, _, "write_session", _, _))
         .WillOnce(Invoke([](const std::string&,
                             const std::string&,
@@ -766,8 +786,13 @@ TEST(KVCMMockOnlyFullTest, WritePublishesActualUri) {
             return true;
         }));
 
-    backend->write(backend->prepareWrite(makeStorageRequest(environment)));
-    ASSERT_TRUE(waitForBackendOperationsForTest(*backend.backend));
+    GroupSetResource resource;
+    resource.device_blocks = {environment.block_id};
+    cache->insert({101}, {{resource}}, Tier::DEVICE);
+    ASSERT_TRUE(waitForBackendOperationsForTest(*backend));
+    const auto path = cache->tree()->findNode({101});
+    ASSERT_EQ(path.size(), 1u);
+    EXPECT_EQ(path.front()->group_set_resources[0].getTopTier(), Tier::DEVICE);
 }
 
 TEST(KVCMMockOnlyFullTest, WriteHonorsOffsetBlockMask) {

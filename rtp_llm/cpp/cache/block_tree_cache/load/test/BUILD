@@ -34,7 +34,10 @@ cc_test(
         "L20_CU13",
         "exclusive-if-local",
     ],
-    deps = test_deps + ["//rtp_llm/cpp/cache/block_tree_cache/test:block_tree_cache_test_utils"],
+    deps = test_deps + [
+        "//rtp_llm/cpp/cache/block_tree_cache/integration/rtp_llm:rtp_storage_backend",
+        "//rtp_llm/cpp/cache/block_tree_cache/test:block_tree_cache_test_utils",
+    ],
     env = {},
 )
 
@@ -44,7 +47,10 @@ cc_test(
     exec_properties = {"gpu": "L20_CU13"},
     srcs = ["LoadAsyncContextTest.cc"],
     copts = test_copts,
-    deps = test_deps + ["//rtp_llm/cpp/cache/block_tree_cache/test:bounded_thread_test_utils"],
+    deps = test_deps + [
+        "//rtp_llm/cpp/cache/block_tree_cache/integration/rtp_llm:rtp_storage_backend",
+        "//rtp_llm/cpp/cache/block_tree_cache/test:bounded_thread_test_utils",
+    ],
     tags = ["L20_CU13"],
 )
 

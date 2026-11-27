@@ -11,8 +11,8 @@ namespace rtp_llm {
 
 struct EvictionTransferTask {
     explicit EvictionTransferTask(TransferTask task): transfer_task(std::move(task)) {}
-    EvictionTransferTask(TransferTask task, std::vector<EvictionTimingMetrics> timings):
-        transfer_task(std::move(task)), timings(std::move(timings)) {}
+    EvictionTransferTask(TransferTask task, std::vector<EvictionTimingMetrics> timings, bool retain_source = false):
+        transfer_task(std::move(task)), timings(std::move(timings)), retain_source(retain_source) {}
 
     DescriptorView descriptors() const {
         return transfer_task.descriptors();
@@ -20,6 +20,7 @@ struct EvictionTransferTask {
 
     TransferTask                        transfer_task;
     std::vector<EvictionTimingMetrics>  timings;
+    bool                               retain_source{false};
 };
 
 struct EvictionDropTask {

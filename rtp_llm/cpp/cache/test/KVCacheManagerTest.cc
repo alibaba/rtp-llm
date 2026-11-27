@@ -40,6 +40,7 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/FrozenTaskRecovery.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/MultiRankBlockTransferEngine.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/PerRankBlockTransferEngine.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/transfer/test/PerRankBlockTransferEngineTestUtils.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/test/BlockTreeCacheTestUtils.h"
 #include "rtp_llm/cpp/testing/KVCacheTestUtils.h"
 #include "rtp_llm/cpp/cache/DeviceBlockPoolConfigHelper.h"
@@ -2062,6 +2063,7 @@ private:
 
 class KVCachePayloadTest: public KVCacheManagerTest {
 protected:
+    void standaloneRoundTrip(const KVCacheConfig& options);
     struct Request {
         BatchKVCacheResourcePtr resource;
         CompleteTokenIdsPtr     tokens;
@@ -2186,6 +2188,7 @@ protected:
         options.memory_cache_size_mb         = 4;
         options.memory_cache_sync_timeout_ms = 30000;
         manager_                             = std::make_shared<KVCacheManager>(config, false, nullptr, options);
+        // This round-trip inspects and gates legacy TreeNode transitions.
         ASSERT_TRUE(manager_->init());
         for (bool scale : {false, true}) {
             // Regression for the old 8-bit additive pattern's exact collision.
@@ -2333,6 +2336,96 @@ protected:
 
     std::shared_ptr<KVCacheManager> manager_;
 };
+
+void KVCachePayloadTest::standaloneRoundTrip(const KVCacheConfig& options) {
+    auto config = makeSimpleMhaCacheConfig(3, 17, 8, DataType::TYPE_INT8, 2, 64);
+    manager_ = std::make_shared<KVCacheManager>(config, false, nullptr, options);
+    ASSERT_TRUE(manager_->init());
+    auto cache = manager_->blockTreeCache();
+
+    BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache, Tier::DEVICE, 0.0);
+
+    auto original = request(1);
+    ASSERT_NO_FATAL_FAILURE(seed(original));
+    evict();
+    BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache);
+    BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache, Tier::DEVICE, 0.0);
+    ASSERT_EQ(manager_->freeBlocksNum(), 16u);
+    ASSERT_EQ(cache->groupSets()[0]->hostPool()->usedBlocksNum(), 2u);
+    if (options.enable_disk_cache) {
+        BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache, Tier::HOST, 0.000001);
+        BlockTreeCacheTestPeer::runMaintenanceForTest(*cache);
+        BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache);
+        BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache, Tier::HOST, 0.0);
+        ASSERT_EQ(cache->groupSets()[0]->hostPool()->usedBlocksNum(), 0u);
+        ASSERT_EQ(cache->groupSets()[0]->diskPool()->usedBlocksNum(), 2u);
+    }
+
+    const auto lower_tier = options.enable_disk_cache ? Tier::DISK : Tier::HOST;
+    for (const bool first : {true, false}) {
+        auto hit = cache->match(original.keys);
+        ASSERT_EQ(hit.matched_device_blocks, 0u);
+        ASSERT_EQ(hit.reuse_time_metrics.size(), 2u);
+        for (const auto& metric : hit.reuse_time_metrics) {
+            EXPECT_EQ(metric.tier, lower_tier);
+            EXPECT_EQ(metric.group_type, CacheGroupType::FULL);
+            EXPECT_EQ(metric.reuse_block_first_hit_idletime_ms.has_value(), first);
+            EXPECT_GE(metric.reuse_block_hit_idletime_ms, 0);
+            if (first) {
+                EXPECT_EQ(metric.reuse_block_first_hit_idletime_ms, metric.reuse_block_hit_idletime_ms);
+            }
+        }
+        ASSERT_TRUE(cache->abortPendingLoad(hit.async_context));
+    }
+
+    auto poison = request(9, 16);
+    MallocInfo poison_info{poison.resource, poison.tokens};
+    poison_info.enable_cache_lookup = false;
+    ASSERT_TRUE(manager_->malloc(poison_info).success);
+    ASSERT_NO_FATAL_FAILURE(devicePayload(poison, true, 16));
+    manager_->free({poison.resource, poison.tokens});
+
+    auto restored = request(1);
+    const auto load = manager_->malloc(MallocInfo{restored.resource, restored.tokens});
+    ASSERT_TRUE(load.success);
+    ASSERT_NE(load.async_context, nullptr);
+    load.async_context->waitDone();
+    ASSERT_TRUE(load.async_context->success()) << load.async_context->errorInfo().ToString();
+    ASSERT_NO_FATAL_FAILURE(devicePayload(restored, false, 2));
+    auto device_hit = cache->match(original.keys);
+    ASSERT_EQ(device_hit.matched_device_blocks, 2u);
+    ASSERT_EQ(device_hit.reuse_time_metrics.size(), 2u);
+    for (const auto& metric : device_hit.reuse_time_metrics) {
+        EXPECT_EQ(metric.tier, Tier::DEVICE);
+        EXPECT_TRUE(metric.reuse_block_first_hit_idletime_ms.has_value());
+    }
+    for (const auto& resource : device_hit.matched_device_resources) {
+        cache->groupSets()[resource.group_set_id]->unreferenceBlocks(resource);
+    }
+    manager_->free({restored.resource, restored.tokens});
+}
+
+TEST_F(KVCachePayloadTest, StandaloneHostRoundTripRestoresOverwrittenDevicePages) {
+    KVCacheConfig options;
+    options.enable_memory_cache = true;
+    options.reuse_cache = true;
+    options.memory_cache_size_mb = 4;
+    standaloneRoundTrip(options);
+}
+
+TEST_F(KVCachePayloadTest, StandaloneDiskRoundTripRestoresOverwrittenDevicePages) {
+    block_transfer_engine_test::TempDirGuard disk("standalone_disk_round_trip");
+    KVCacheConfig options;
+    options.enable_memory_cache = true;
+    options.reuse_cache = true;
+    options.memory_cache_size_mb = 4;
+    options.enable_disk_cache = true;
+    options.disk_cache_buffered_io = true;
+    options.disk_cache_size_mb = 4;
+    options.disk_cache_paths = disk.path;
+    standaloneRoundTrip(options);
+    manager_.reset();
+}
 
 TEST_F(KVCachePayloadTest, WriteEvictLoadBackPreservesEveryKVAndScaleByte) {
     roundTrip(/*concurrent=*/false);
@@ -2564,14 +2657,20 @@ TEST_F(KVCacheManagerTest, FrozenTransferRecoveryObservesLateProofWithoutRepeati
     const auto block = pool->malloc();
     ASSERT_TRUE(block.has_value());
     pool->incTreeRef(*block, BlockTreeRefType::EVICT);
+    const auto& source_pool = groups.front()->devicePools().front();
+    const auto source = source_pool->malloc();
+    ASSERT_TRUE(source.has_value());
+    source_pool->incTreeRef(*source, BlockTreeRefType::EVICT);
     size_t settlements = 0;
     manager->block_tree_cache_->transfer_dispatcher_->runTransfer(
-        TransferTask({TransferDescriptor::deviceToHost(0, {1}, *block)}, std::chrono::seconds(30)),
+        TransferTask({TransferDescriptor::deviceToHost(0, {*source}, *block)}, std::chrono::seconds(30)),
         [&](TransferResult result) {
             ++settlements;
             EXPECT_EQ(result.status.code(), ErrorCode::TRANSFER_COMPLETION_UNKNOWN);
             EXPECT_TRUE(pool->isFrozen(*block));
+            EXPECT_TRUE(source_pool->isFrozen(*source));
             pool->decTreeRef(*block, BlockTreeRefType::EVICT);
+            source_pool->decTreeRef(*source, BlockTreeRefType::EVICT);
         },
         "evict");
     ASSERT_EQ(settlements, 1u);
@@ -2588,10 +2687,12 @@ TEST_F(KVCacheManagerTest, FrozenTransferRecoveryObservesLateProofWithoutRepeati
         [&](const auto& execution, int timeout_ms) { return manager->queryTransferCompletion(execution, timeout_ms); });
     EXPECT_EQ(recovery.runOnce(1000).released, 0u);
     EXPECT_TRUE(pool->isFrozen(*block));
+    EXPECT_TRUE(source_pool->isFrozen(*source));
     // The physical producer supplies proof independently of its failed business result.
     engine->last_proof->report(true);
     EXPECT_EQ(recovery.runOnce(1000).released, 1u);
     EXPECT_FALSE(pool->isAllocated(*block));
+    EXPECT_FALSE(source_pool->isAllocated(*source));
     EXPECT_EQ(pool->referencedBlocksNum(BlockTreeRefType::FROZEN), 0u);
     EXPECT_EQ(record->snapshot().state, FrozenTask::State::RELEASED);
     EXPECT_EQ(record->failure().status.ToString(), failure);
@@ -2638,17 +2739,22 @@ TEST_F(KVCacheManagerTest, BackgroundRecoveryReclaimsLocalTargetsAndPublishesCap
     const auto block = pool->malloc();
     ASSERT_TRUE(block.has_value());
     pool->incTreeRef(*block, BlockTreeRefType::EVICT);
+    const auto& source_pool = groups.front()->devicePools().front();
+    const auto source = source_pool->malloc();
+    ASSERT_TRUE(source.has_value());
+    source_pool->incTreeRef(*source, BlockTreeRefType::EVICT);
     auto released = std::make_shared<std::promise<void>>();
     auto ready    = released->get_future();
     // FrozenTask prepares its release callback before acquiring the hold.
     pool->setCapacityChangeCallback([released] { released->set_value(); });
     size_t settlements = 0;
     manager->block_tree_cache_->transfer_dispatcher_->runTransfer(
-        TransferTask({TransferDescriptor::deviceToHost(0, {1}, *block)}, std::chrono::seconds(30)),
+        TransferTask({TransferDescriptor::deviceToHost(0, {*source}, *block)}, std::chrono::seconds(30)),
         [&](TransferResult result) {
             ++settlements;
             EXPECT_EQ(result.status.code(), ErrorCode::TRANSFER_COMPLETION_UNKNOWN);
             pool->decTreeRef(*block, BlockTreeRefType::EVICT);
+            source_pool->decTreeRef(*source, BlockTreeRefType::EVICT);
         },
         "evict");
     auto records = manager->frozenTasks();
@@ -2664,6 +2770,7 @@ TEST_F(KVCacheManagerTest, BackgroundRecoveryReclaimsLocalTargetsAndPublishesCap
     }
     ASSERT_EQ(records.front()->snapshot().state, FrozenTask::State::RELEASED);
     EXPECT_FALSE(pool->isAllocated(*block));
+    EXPECT_FALSE(source_pool->isAllocated(*source));
     EXPECT_EQ(pool->referencedBlocksNum(BlockTreeRefType::FROZEN), 0u);
     EXPECT_EQ(settlements, 1u);
     EXPECT_EQ(engine->submitted_batch_count, 1u);
@@ -2704,7 +2811,7 @@ TEST_F(KVCacheManagerTest, FrozenRecoveryStartsOnlyForAllocatorOwner) {
     }
 }
 
-TEST_F(KVCacheManagerTest, FrozenForceReleaseTimeoutReachesRecoveryWorker) {
+TEST_F(KVCacheManagerTest, FrozenForceReleaseTimeoutStillRequiresBufferSafetyProof) {
     const auto cache_config = makeSimpleMhaCacheConfig(1, 4, 2, rtp_llm::DataType::TYPE_INT8);
     for (const int timeout_ms : {0, 1000, 1200000}) {
         SCOPED_TRACE(timeout_ms);
@@ -2726,23 +2833,30 @@ TEST_F(KVCacheManagerTest, FrozenForceReleaseTimeoutReachesRecoveryWorker) {
         const auto block = pool->malloc();
         ASSERT_TRUE(block.has_value());
         pool->incTreeRef(*block, BlockTreeRefType::EVICT);
+        const auto& source_pool = groups.front()->devicePools().front();
+        const auto source = source_pool->malloc();
+        ASSERT_TRUE(source.has_value());
+        source_pool->incTreeRef(*source, BlockTreeRefType::EVICT);
         manager->block_tree_cache_->transfer_dispatcher_->runTransfer(
-            TransferTask({TransferDescriptor::deviceToHost(0, {1}, *block)}, std::chrono::seconds(30)),
+            TransferTask({TransferDescriptor::deviceToHost(0, {*source}, *block)}, std::chrono::seconds(30)),
             [&](TransferResult result) {
                 EXPECT_EQ(result.status.code(), ErrorCode::TRANSFER_COMPLETION_UNKNOWN);
                 pool->decTreeRef(*block, BlockTreeRefType::EVICT);
+                source_pool->decTreeRef(*source, BlockTreeRefType::EVICT);
             },
             "evict");
         const auto records = manager->frozenTasks();
         ASSERT_EQ(records.size(), 1u);
         records.front()->frozen_at_us_ -=
             std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::minutes(10)).count();
-        EXPECT_EQ(manager->frozen_task_recovery_->runOnce(1000).released, timeout_ms == 1000 ? 1u : 0u);
-        EXPECT_EQ(pool->isAllocated(*block), timeout_ms != 1000);
+        EXPECT_EQ(manager->frozen_task_recovery_->runOnce(1000).released, 0u);
+        EXPECT_TRUE(pool->isAllocated(*block));
+        EXPECT_TRUE(source_pool->isAllocated(*source));
         ASSERT_NE(engine->last_proof, nullptr);
         engine->last_proof->report(true);
-        EXPECT_EQ(manager->frozen_task_recovery_->runOnce(1000).released, timeout_ms == 1000 ? 0u : 1u);
+        EXPECT_EQ(manager->frozen_task_recovery_->runOnce(1000).released, 1u);
         EXPECT_FALSE(pool->isAllocated(*block));
+        EXPECT_FALSE(source_pool->isAllocated(*source));
     }
 }
 
@@ -3310,12 +3424,11 @@ TEST_F(KVCacheManagerTest, FirstStageRootBroadcastsAcrossAllPPAndTPWorkers) {
             cache_config, /*warmup=*/true, nullptr, kv_cache_config, parallelism_config, runtime_config);
         ASSERT_TRUE(manager->init());
         ASSERT_NE(manager->blockTreeCache(), nullptr);
-        ASSERT_NE(manager->blockTreeCache()->transfer_dispatcher_->multi_rank_engine_->broadcast_manager_, nullptr);
-        EXPECT_EQ(manager->blockTreeCache()->transfer_dispatcher_->multi_rank_engine_->broadcast_manager_->workerNum(),
-                  worker_count);
-
-        const auto& broadcast = manager->blockTreeCache()->transfer_dispatcher_->multi_rank_engine_->broadcast_manager_;
-        EXPECT_EQ(broadcast->worker_addrs_, runtime_config.worker_grpc_addrs);
+        const auto& engine = manager->blockTreeCache()->transfer_dispatcher_->multi_rank_engine_;
+        ASSERT_NE(engine, nullptr);
+        const auto& participants = engine->participantAddresses();
+        EXPECT_EQ(participants.size(), worker_count);
+        EXPECT_EQ(participants, runtime_config.worker_grpc_addrs);
     }
 }
 

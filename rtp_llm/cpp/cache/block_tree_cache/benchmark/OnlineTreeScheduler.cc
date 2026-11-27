@@ -141,7 +141,7 @@ OnlineTreeScheduler::AdmitResult OnlineTreeScheduler::admit(OnlineRequestContext
         // Allocation hit a temporarily exhausted pool: roll back the partial
         // allocations and wait for the cache's event-driven watermark
         // eviction to free capacity. The scheduler never evicts directly.
-        std::vector<BlockIndicesType> no_request_blocks;
+        std::vector<BlockIdList> no_request_blocks;
         std::vector<std::string>      no_request_group_tags;
         cache_.rollback(ctx.prepared, no_request_blocks, no_request_group_tags);
     }

@@ -53,12 +53,12 @@ public:
     void publishInsert(const PathKeys&,
                        size_t,
                        PreparedRequestResources&,
-                       std::vector<BlockIndicesType>& blocks,
+                       std::vector<BlockIdList>& blocks,
                        std::vector<std::string>&      tags) override {
         releaseRequestBlocks(blocks, tags);
     }
 
-    void releaseRequestBlocks(std::vector<BlockIndicesType>& blocks, std::vector<std::string>& tags) override {
+    void releaseRequestBlocks(std::vector<BlockIdList>& blocks, std::vector<std::string>& tags) override {
         released_request_blocks = blocks;
         released_request_group_tags = tags;
         blocks.clear();
@@ -66,7 +66,7 @@ public:
     }
 
     void rollback(PreparedRequestResources&      prepared,
-                  std::vector<BlockIndicesType>& blocks,
+                  std::vector<BlockIdList>& blocks,
                   std::vector<std::string>&      tags) override {
         ++rollback_calls;
         prepared = PreparedRequestResources{};
@@ -77,7 +77,7 @@ public:
     bool                          hold_prepared_on_failure{false};
     size_t                        rollback_calls{0};
     size_t                        materialize_calls{0};
-    std::vector<BlockIndicesType> released_request_blocks;
+    std::vector<BlockIdList> released_request_blocks;
     std::vector<std::string>      released_request_group_tags;
 };
 
@@ -97,7 +97,7 @@ TEST(OnlineTreeSchedulerTest, AdmissionFailureReleasesTransferredRequestBlocks) 
     EXPECT_TRUE(context.request_group_tags.empty());
     EXPECT_EQ(cache.materialize_calls, 1u);
     EXPECT_EQ(cache.released_request_group_tags, (std::vector<std::string>{"swa", "empty", "full"}));
-    EXPECT_EQ(cache.released_request_blocks, (std::vector<BlockIndicesType>{{11, 12}, {}, {13}}));
+    EXPECT_EQ(cache.released_request_blocks, (std::vector<BlockIdList>{{11, 12}, {}, {13}}));
 }
 
 TEST(OnlineTreeSchedulerTest, AdmissionRollbackKeepsRequestTagsPairedWithEmptyRows) {
@@ -113,7 +113,7 @@ TEST(OnlineTreeSchedulerTest, AdmissionRollbackKeepsRequestTagsPairedWithEmptyRo
     EXPECT_EQ(scheduler.admit(context), OnlineTreeScheduler::AdmitResult::OK);
     EXPECT_EQ(cache.rollback_calls, 1u);
     EXPECT_EQ(cache.released_request_group_tags, (std::vector<std::string>{"swa", "empty", "full"}));
-    EXPECT_EQ(cache.released_request_blocks, (std::vector<BlockIndicesType>{{11, 12}, {}, {13}}));
+    EXPECT_EQ(cache.released_request_blocks, (std::vector<BlockIdList>{{11, 12}, {}, {13}}));
     EXPECT_TRUE(context.request_blocks.empty());
     EXPECT_TRUE(context.request_group_tags.empty());
     EXPECT_FALSE(context.prepared.holdsBlocks());
@@ -141,7 +141,7 @@ TEST(OnlineTreeSchedulerTest, HeldRequestBlockPeakIncludesDeviceSources) {
     EXPECT_EQ(scheduler.metrics().held_request_blocks_peak, 3u);
     EXPECT_EQ(cache.materialize_calls, 1u);
     EXPECT_EQ(cache.released_request_group_tags, (std::vector<std::string>{"swa", "empty", "full"}));
-    EXPECT_EQ(cache.released_request_blocks, (std::vector<BlockIndicesType>{{11, 12}, {}, {13}}));
+    EXPECT_EQ(cache.released_request_blocks, (std::vector<BlockIdList>{{11, 12}, {}, {13}}));
 }
 
 TEST(BlockTreeCacheAdapterTest, MaterializesReadyRefsOutsideMatchAndReleasesThem) {
@@ -192,7 +192,7 @@ TEST(BlockTreeCacheAdapterTest, MaterializesReadyRefsOutsideMatchAndReleasesThem
     auto        extra      = last_pool->malloc(1);
     ASSERT_TRUE(extra.has_value());
     last_pool->incRef(*extra);
-    std::vector<BlockIndicesType> subset_blocks = {{extra->front()}};
+    std::vector<BlockIdList> subset_blocks = {{extra->front()}};
     std::vector<std::string>      subset_tags   = {last_group->groupTags().back()};
     EXPECT_EQ(last_pool->refCount(extra->front()), 1u);
     adapter->releaseRequestBlocks(subset_blocks, subset_tags);
@@ -222,7 +222,7 @@ TEST(BlockTreeCacheAdapterTest, InvalidRequestIdentityDoesNotPartiallyReleaseLed
     first_pool->incRef(*first);
     second_pool->incRef(*second);
 
-    std::vector<BlockIndicesType> request_blocks  = {{first->front()}, {second->front()}};
+    std::vector<BlockIdList> request_blocks  = {{first->front()}, {second->front()}};
     const auto                    original_blocks = request_blocks;
     std::vector<std::string>      request_tags    = {"group0", "unknown"};
     const auto                    unknown_tags    = request_tags;

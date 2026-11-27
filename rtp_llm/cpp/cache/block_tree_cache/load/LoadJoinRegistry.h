@@ -20,6 +20,7 @@ public:
                const std::vector<BlockIdxType>&         target_blocks,
                const std::shared_ptr<LoadAsyncContext>& context);
     bool join(const std::shared_ptr<LoadAsyncContext>& context);
+    const BlockIdList* targetBlocks(TreeNode* node, size_t group, uint64_t generation) const;
     bool finish(TreeNode*                                       node,
                 size_t                                          group_set_id,
                 uint64_t                                        generation,

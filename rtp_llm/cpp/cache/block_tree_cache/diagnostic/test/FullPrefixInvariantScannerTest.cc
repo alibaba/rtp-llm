@@ -17,6 +17,7 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/group_set/FullGroupSet.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/group_set/LinearGroupSet.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/group_set/SWAGroupSet.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/integration/rtp_llm/RtpCacheDiagnostics.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/metrics/BlockTreeCacheMetricsReporter.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/test/BlockTreeCacheTestUtils.h"
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
@@ -27,6 +28,11 @@ namespace rtp_llm {
 
 class FullPrefixScannerTest: public ::testing::Test {
 protected:
+    static void SetUpTestSuite() {
+        // This fixture constructs the scanner directly, bypassing the RTP cache factory.
+        installRtpCacheDiagnostics();
+    }
+
     static void runScan(FullPrefixInvariantScanner& scanner) {
         scanner.runScan();
     }

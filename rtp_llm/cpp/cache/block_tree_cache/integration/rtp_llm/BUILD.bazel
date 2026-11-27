@@ -1,0 +1,52 @@
+filegroup(
+    name = "engine_sources",
+    srcs = ["BlockTreeCacheFactory.cc", "RtpBlockTransferTransport.cc", "RtpRankBroadcast.cc"],
+    visibility = ["//rtp_llm/cpp/cache/block_tree_cache:__pkg__"],
+)
+
+cc_library(
+    name = "rtp_cache_diagnostics",
+    srcs = ["RtpCacheDiagnostics.cc"],
+    hdrs = ["RtpCacheDiagnostics.h"],
+    visibility = ["//rtp_llm/cpp/cache/block_tree_cache:__subpackages__"],
+    deps = [
+        "//rtp_llm/cpp/cache/block_tree_cache:cache_diagnostics",
+        "//rtp_llm/cpp/utils:core_utils",
+    ],
+)
+
+filegroup(
+    name = "per_rank_worker_sources",
+    srcs = ["RtpPerRankBlockTransferEngine.cc"],
+    visibility = ["//rtp_llm/cpp/cache/block_tree_cache:__pkg__"],
+)
+
+filegroup(
+    name = "transfer_work_loop_sources",
+    srcs = ["RtpTransferWorkLoop.cc"],
+    visibility = ["//rtp_llm/cpp/cache/block_tree_cache:__pkg__"],
+)
+
+filegroup(
+    name = "group_set_sources",
+    srcs = ["GroupSetRtp.cc"],
+    visibility = ["//rtp_llm/cpp/cache/block_tree_cache:__pkg__"],
+)
+
+filegroup(
+    name = "host_block_pool_sources",
+    srcs = ["RtpHostBlockPool.cc"],
+    visibility = ["//rtp_llm/cpp/cache/block_tree_cache:__pkg__"],
+)
+
+cc_library(
+    name = "rtp_storage_backend",
+    hdrs = ["RtpStorageBackend.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//rtp_llm/cpp/cache:block_info",
+        "//rtp_llm/cpp/cache:cache_config",
+        "//rtp_llm/cpp/cache/block_tree_cache:btc_core",
+        "//rtp_llm/cpp/cache/block_tree_cache:device_block_pool",
+    ],
+)

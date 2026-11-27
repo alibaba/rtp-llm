@@ -3,6 +3,7 @@
 
 import json
 import os
+from pathlib import Path
 import subprocess
 import sys
 import tempfile
@@ -34,6 +35,21 @@ def _libpython_dir():
 def _load_json(path):
     with open(path) as source:
         return json.load(source)
+
+
+def _failed_repetitions(output_dir):
+    details = []
+    root = Path(output_dir)
+    # The driver writes a repetition manifest when the native benchmark fails.
+    for manifest in sorted(root.glob("smoke/*/rep_*/manifest.json")):
+        for name in ("manifest.json", "stdout.txt", "stderr.txt"):
+            path = manifest.parent / name
+            if path.is_file():
+                with path.open("rb") as stream:
+                    stream.seek(max(0, path.stat().st_size - 8192))
+                    tail = stream.read().decode(errors="replace")
+                details.append(f"{path.relative_to(root)}\n{tail}")
+    return "\n".join(details)
 
 
 class BenchmarkSmokeTest(unittest.TestCase):
@@ -111,12 +127,11 @@ class BenchmarkSmokeTest(unittest.TestCase):
                 timeout=600,
                 env=env,
             )
-            self.assertEqual(
-                proc.returncode,
-                0,
-                f"benchmark smoke suite failed rc={proc.returncode}\n"
-                f"--- stdout ---\n{proc.stdout}\n--- stderr ---\n{proc.stderr}",
-            )
+            if proc.returncode:
+                self.fail(
+                    f"benchmark smoke suite failed rc={proc.returncode}\n"
+                    f"{proc.stdout}\n{proc.stderr}\n{_failed_repetitions(output_dir)}"
+                )
 
             results = {}
             for case, expected_owners in (

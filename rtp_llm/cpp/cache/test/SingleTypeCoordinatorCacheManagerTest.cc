@@ -44,7 +44,9 @@ public:
 
     std::shared_ptr<TransferAsyncContext> executeBatch(TransferTask) override {
         ++submit_count_;
-        return std::make_shared<CompletedTransferAsyncContext>(ErrorInfo::OkStatus());
+        TransferResult result;
+        result.buffer_safe = true;
+        return std::make_shared<CompletedTransferAsyncContext>(std::move(result));
     }
 
     size_t submitCount() const {

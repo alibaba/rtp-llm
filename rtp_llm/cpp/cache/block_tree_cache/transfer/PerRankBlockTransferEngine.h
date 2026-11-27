@@ -2,13 +2,13 @@
 
 #include <atomic>
 #include <cstddef>
+#include <functional>
 #include <memory>
 #include <vector>
 
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeCacheLayout.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/block_pool/DiskIOExecutor.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferAsyncContext.h"
-#include "rtp_llm/cpp/cache/block_tree_cache/transfer/CrcCopyExecutor.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferWorkLoop.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeTaskPool.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/group_set/GroupSet.h"
@@ -16,8 +16,23 @@
 
 namespace rtp_llm {
 
+struct PerRankWorkerOptions {
+    size_t max_descriptors_per_batch{32};
+    size_t transfer_worker_count{2};
+    size_t transfer_queue_max_size{10000};
+    int64_t world_rank{0};
+};
+
+struct PerRankWorkerIO {
+    std::function<bool(const TransferTask&)> validate;
+    // Runs on the existing owner. Call completion once, inline or later.
+    // A submission may throw before physical acceptance or after a confirmed drain.
+    TransferWorkLoop::SubmitBatch submit;
+};
+
 class PerRankBlockTransferEngine {
 public:
+    PerRankBlockTransferEngine(std::vector<GroupSetPtr> group_sets, PerRankWorkerOptions options, PerRankWorkerIO io);
     // Disk queue sizes are derived from Q and the configured batch limit;
     // disk_io_config supplies the shared read/write thread counts.
     explicit PerRankBlockTransferEngine(std::vector<GroupSetPtr> group_sets,
@@ -68,17 +83,23 @@ public:
 
 private:
     virtual std::shared_ptr<TransferAsyncContext> executeBatch(TransferTask task);
+    using MakeWorkLoop = std::function<std::unique_ptr<TransferWorkLoop>(TransferOperation, size_t, size_t)>;
+    void validateLimits(size_t queue_capacity) const;
+    void initializeLoops(size_t queue_capacity, const MakeWorkLoop& make_loop);
+    void startLoops();
 
     std::vector<GroupSetPtr> group_sets_;
     size_t                   max_descriptors_per_batch_;
 
-    std::unique_ptr<DiskIOExecutor> disk_io_executor_;
+    std::shared_ptr<DiskIOExecutor> disk_io_executor_;
+    std::function<bool(const TransferTask&)> validate_batch_;
+    std::function<void()>                   stop_io_;
 
     std::vector<std::unique_ptr<TransferWorkLoop>> load_loops_, evict_loops_;
     std::atomic<size_t>                            next_load_{0}, next_evict_{0};
     bool                                           enable_disk_cache_{false};
     size_t                                         transfer_worker_count_{2};
-    size_t                                         crc_slot_count_;
+    size_t                                         crc_slot_count_{0};
 };
 
 using PerRankBlockTransferEnginePtr = std::shared_ptr<PerRankBlockTransferEngine>;

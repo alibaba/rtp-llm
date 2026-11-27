@@ -1054,6 +1054,8 @@ enum RemoteOpType {
     REMOTE_OPERATION_REMOVE_CACHE = 3;
     REMOTE_OPERATION_GET_LOCATIONS_BY_BACKEND = 4;
     REMOTE_OPERATION_GET_HOST_CACHE_STATE = 5;
+    // A shared-tree write records rank-local buffer completion.
+    REMOTE_OPERATION_TRACKED_WRITE = 6;
 }
 
 message RemoteBoolMasksTypePB { repeated bool values = 1; }
@@ -1065,7 +1067,7 @@ message RemoteBlockMaskPB {
 }
 
 // Query existing worker evidence without admitting, cancelling or replaying I/O.
-// Numeric transfer traces and KVCM READ string traces are separate namespaces.
+// Numeric transfer traces and KVCM payload string traces are separate namespaces.
 message TransferCompletionKeyPB {
     oneof trace {
         uint64 transfer_trace_id = 1;

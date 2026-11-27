@@ -8,7 +8,7 @@
 #include <utility>
 #include <vector>
 
-#include "rtp_llm/cpp/cache/block_tree_cache/metrics/BlockTreeCacheMetricsReporter.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/metrics/CacheObserver.h"
 #include "rtp_llm/cpp/utils/AsyncProfilingScope.h"
 
 namespace rtp_llm {
@@ -18,7 +18,7 @@ struct CacheStageContext {
     const char* source{"DISK"};
     const char* target{"DEVICE"};
     const char* path{"disk_to_device"};
-    const BlockTreeCacheMetricsReporter* reporter{nullptr};
+    const CacheObserver* reporter{nullptr};
     int64_t                              request_id{-1};
     uint64_t                             transfer_id{0};
     size_t                               block_count{0};
@@ -62,7 +62,7 @@ struct CacheStageContext {
 
     // Freeze eligibility before observation-only work. Later profiling sessions
     // must not turn a disabled workflow into a partially observed one.
-    static CacheStageContext forWorkflow(const BlockTreeCacheMetricsReporter& reporter,
+    static CacheStageContext forWorkflow(const CacheObserver& reporter,
                                          DescriptorView                       descriptors,
                                          const char*                          operation,
                                          int64_t                              request_id,
@@ -78,11 +78,11 @@ struct CacheStageContext {
         return context;
     }
     static CacheStageContext
-    forTask(const BlockTreeCacheMetricsReporter& reporter, const TransferTask& task, const char* operation) noexcept {
+    forTask(const CacheObserver& reporter, const TransferTask& task, const char* operation) noexcept {
         return forWorkflow(reporter, task.descriptors(), operation, task.requestId().value_or(-1), task.traceId());
     }
     // Physical transfers have already been partitioned by direction.
-    static CacheStageContext forTransfer(const BlockTreeCacheMetricsReporter& reporter,
+    static CacheStageContext forTransfer(const CacheObserver& reporter,
                                          const TransferTask&                  task,
                                          const char*                          operation) noexcept {
         const bool enabled = reporter.stageMetricsEnabled() || AsyncProfileSession::enabled();
@@ -100,7 +100,7 @@ struct CacheStageContext {
         return context;
     }
     static CacheStageContext
-    forLock(const BlockTreeCacheMetricsReporter* reporter, const char* operation, Tier source, Tier target) noexcept {
+    forLock(const CacheObserver* reporter, const char* operation, Tier source, Tier target) noexcept {
         auto context     = CacheStageContext{operation, tierName(source), tierName(target), "cache_lock"};
         context.reporter = reporter;
         context.enabled  = (reporter && reporter->stageMetricsEnabled()) || AsyncProfileSession::enabled();
@@ -130,7 +130,7 @@ private:
 // Queue/resource waits explicitly select Wait at their observation sites.
 class TransferStageTimer {
     struct ReporterRef {
-        const BlockTreeCacheMetricsReporter* reporter;
+        const CacheObserver* reporter;
     };
 
 public:
@@ -194,7 +194,7 @@ public:
         return timer;
     }
 
-    TransferStageTimer(std::shared_ptr<BlockTreeCacheMetricsReporter> reporter,
+    TransferStageTimer(std::shared_ptr<CacheObserver> reporter,
                        const char*                                    stage,
                        int64_t                                        request_id,
                        size_t                                         begin,
@@ -210,7 +210,7 @@ public:
     }
     // Borrowed observers are used only by workflows whose owner drains all
     // callbacks before destroying the reporter (BlockTreeCache destruction).
-    TransferStageTimer(const BlockTreeCacheMetricsReporter& reporter,
+    TransferStageTimer(const CacheObserver& reporter,
                        const char*                          stage,
                        int64_t                              request_id,
                        size_t                               begin,
@@ -225,7 +225,7 @@ public:
 
     // A WorkLoop keeps its reporter alive until every Entry and callback drains.
     // A nullable borrowed observer also supports profiling without a reporter.
-    TransferStageTimer(const BlockTreeCacheMetricsReporter* reporter,
+    TransferStageTimer(const CacheObserver* reporter,
                        const char*                          stage,
                        int64_t                              request_id,
                        size_t                               begin,
@@ -348,7 +348,7 @@ public:
                           context.transfer_id,
                           context,
                           kind);
-        return create(std::shared_ptr<BlockTreeCacheMetricsReporter>{},
+        return create(std::shared_ptr<CacheObserver>{},
                       stage,
                       context.request_id,
                       0,
@@ -359,7 +359,7 @@ public:
                       context,
                       kind);
     }
-    static SharedTransferStageTimer create(std::shared_ptr<BlockTreeCacheMetricsReporter> reporter,
+    static SharedTransferStageTimer create(std::shared_ptr<CacheObserver> reporter,
                                            const char*                                    stage,
                                            int64_t                                        request_id,
                                            size_t                                         begin,
@@ -380,7 +380,7 @@ public:
             return {};
         }
     }
-    static SharedTransferStageTimer create(const BlockTreeCacheMetricsReporter& reporter,
+    static SharedTransferStageTimer create(const CacheObserver& reporter,
                                            const char*                          stage,
                                            int64_t                              request_id,
                                            size_t                               begin,
@@ -432,8 +432,8 @@ private:
     // unrelated business allocations or other requests.
     inline static thread_local void (*allocation_probe_)(const char*) = nullptr;
     friend class TransferStageTimerTestPeer;
-    std::shared_ptr<BlockTreeCacheMetricsReporter> reporter_owner_;
-    const BlockTreeCacheMetricsReporter*           reporter_{nullptr};
+    std::shared_ptr<CacheObserver> reporter_owner_;
+    const CacheObserver*           reporter_{nullptr};
     const char*                                    stage_{nullptr};
     int64_t                                        rank_{-1};
     const char*                                    scope_{"worker_batch"};

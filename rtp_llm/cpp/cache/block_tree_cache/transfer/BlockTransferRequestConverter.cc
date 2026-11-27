@@ -90,7 +90,7 @@ bool BlockTransferRequestConverter::directionFor(const TransferDescriptor&      
 bool BlockTransferRequestConverter::decodeDeviceBlocks(const CopyItem&            item,
                                                        const GroupSet&            group_set,
                                                        std::vector<BlockIdxType>& blocks) {
-    const auto&                                   device_pools = group_set.devicePools();
+    const auto&                                   device_pools = group_set.pools().device;
     const auto&                                   group_tags   = group_set.groupTags();
     std::unordered_map<std::string, BlockIdxType> blocks_by_tag;
     for (const auto& group_block : item.group_blocks()) {
@@ -230,7 +230,7 @@ bool BlockTransferRequestConverter::decodeTransfer(const MemoryOperationRequestP
         switch (request.copy_direction()) {
             case MemoryOperationRequestPB::D2H: {
                 std::vector<BlockIdxType> device_blocks;
-                if (!group_set.hostPool() || !group_set.hostPool()->validBlock(item.mem_block())
+                if (!group_set.pools().host || !group_set.pools().host->validBlock(item.mem_block())
                     || !decodeDeviceBlocks(item, group_set, device_blocks)) {
                     return false;
                 }
@@ -240,7 +240,7 @@ bool BlockTransferRequestConverter::decodeTransfer(const MemoryOperationRequestP
             }
             case MemoryOperationRequestPB::H2D: {
                 std::vector<BlockIdxType> device_blocks;
-                if (!group_set.hostPool() || !group_set.hostPool()->validBlock(item.mem_block())
+                if (!group_set.pools().host || !group_set.pools().host->validBlock(item.mem_block())
                     || !decodeDeviceBlocks(item, group_set, device_blocks)) {
                     return false;
                 }
@@ -249,8 +249,8 @@ bool BlockTransferRequestConverter::decodeTransfer(const MemoryOperationRequestP
                 break;
             }
             case MemoryOperationRequestPB::H2DISK:
-                if (!group_set.hostPool() || !group_set.hostPool()->validBlock(item.mem_block())
-                    || !group_set.diskPool() || !group_set.diskPool()->validBlock(item.disk_block())) {
+                if (!group_set.pools().host || !group_set.pools().host->validBlock(item.mem_block())
+                    || !group_set.pools().disk || !group_set.pools().disk->validBlock(item.disk_block())) {
                     return false;
                 }
                 descriptor =
@@ -258,7 +258,7 @@ bool BlockTransferRequestConverter::decodeTransfer(const MemoryOperationRequestP
                 break;
             case MemoryOperationRequestPB::DISK2D: {
                 std::vector<BlockIdxType> device_blocks;
-                if (!group_set.diskPool() || !group_set.diskPool()->validBlock(item.disk_block())
+                if (!group_set.pools().disk || !group_set.pools().disk->validBlock(item.disk_block())
                     || !decodeDeviceBlocks(item, group_set, device_blocks)) {
                     return false;
                 }

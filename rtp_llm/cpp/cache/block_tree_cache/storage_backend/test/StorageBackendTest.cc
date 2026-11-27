@@ -1,4 +1,4 @@
-#include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/StorageBackend.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/integration/rtp_llm/RtpStorageBackend.h"
 
 #include <atomic>
 #include <chrono>
@@ -306,10 +306,10 @@ private:
     bool                    throw_on_submit_{false};
 };
 
-class TestBackend: public StorageBackend {
+class TestBackend: public RtpStorageBackend {
 public:
     explicit TestBackend(bool init_result = true, std::shared_ptr<StorageBackendExecutor> executor = nullptr):
-        StorageBackend(std::move(executor)), init_result_(init_result) {}
+        RtpStorageBackend(std::move(executor)), init_result_(init_result) {}
 
     ~TestBackend() override {
         shutdown();

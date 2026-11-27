@@ -10,7 +10,7 @@
 #include <vector>
 
 #include "rtp_llm/cpp/cache/block_tree_cache/block_pool/AlignedHostMemory.h"
-#include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferTypes.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/transfer/HostStagingLease.h"
 
 namespace rtp_llm {
 
@@ -20,44 +20,7 @@ public:
 
     static constexpr size_t kAlignment = 4096;
 
-    class HostStagingBlockLease {
-    public:
-        HostStagingBlockLease(HostStagingBlockPool* pool, size_t block_id): pool_(pool), block_id_(block_id) {}
-        HostStagingBlockLease(const HostStagingBlockLease&)            = delete;
-        HostStagingBlockLease& operator=(const HostStagingBlockLease&) = delete;
-        HostStagingBlockLease(HostStagingBlockLease&& other) noexcept: pool_(other.pool_), block_id_(other.block_id_) {
-            other.pool_ = nullptr;
-        }
-        HostStagingBlockLease& operator=(HostStagingBlockLease&& other) noexcept {
-            if (this != &other) {
-                if (pool_ != nullptr) {
-                    pool_->free(block_id_);
-                }
-                pool_       = other.pool_;
-                block_id_   = other.block_id_;
-                other.pool_ = nullptr;
-            }
-            return *this;
-        }
-        ~HostStagingBlockLease() {
-            if (pool_ != nullptr) {
-                pool_->free(block_id_);
-            }
-        }
-
-        HostBufferView blockBuffer(size_t payload_bytes) const {
-            return pool_->blockBuffer(block_id_, payload_bytes);
-        }
-
-        bool belongsTo(const HostStagingBlockPool* pool) const {
-            return pool_ == pool;
-        }
-
-    private:
-        HostStagingBlockPool* pool_{nullptr};
-        size_t                block_id_{0};
-    };
-
+    using HostStagingBlockLease = rtp_llm::HostStagingBlockLease;
     using HostStagingBlockBatch = std::vector<HostStagingBlockLease>;
     using BatchReadyCallback    = std::function<void(std::optional<HostStagingBlockBatch>)>;
 
@@ -88,7 +51,7 @@ public:
     void cancelAllBatchWaiters() noexcept;
 
 private:
-    friend class HostStagingBlockLease;
+    friend class rtp_llm::HostStagingBlockLease;
 
     struct BatchWaiter {
         size_t             id;

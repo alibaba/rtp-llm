@@ -1,11 +1,10 @@
 #pragma once
 
 #include <cstddef>
+#include <cstdint>
 #include <memory>
-#include <optional>
 #include <string>
 
-#include "rtp_llm/cpp/cache/block_tree_cache/block_pool/AlignedHostMemory.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/block_pool/IBlockPool.h"
 
 namespace rtp_llm {
@@ -23,21 +22,21 @@ struct HostBlockBuffer {
     size_t       stride_bytes;
 };
 
-// HostBlockPool backs every block with a fixed-stride slice of a single contiguous
-// pinned CPU memory tensor. All lifecycle behavior (malloc/free/incRef/decRef/metrics) is inherited unchanged from
-// IBlockPool; this class only owns the host backing tensor and exposes blockBuffer()
-// to map a valid physical block index to its backing address.
+// Native Host allocations use IBlockPool's slot and reference lifetime. A
+// local backing maps the usable slots to fixed-stride rows. A delegated pool
+// tracks the same slots while an executor in another process owns their bytes.
 class HostBlockPool: public IBlockPool {
 public:
     explicit HostBlockPool(std::shared_ptr<const HostBlockPoolConfig> config);
     ~HostBlockPool() override;
 
-    // Validates payload/stride/alignment, allocates pinned CPU memory, and marks the
-    // pool initialized. Allocation failures and invariant violations raise errors.
+    // RTP supplies the pinned backing through its native memory provider.
     bool init();
+    bool initBacking(void* base, size_t mapped_bytes, size_t first_usable_offset, std::shared_ptr<void> owner = {});
+    void initDelegated();
 
-    // Returns the backing buffer for a valid physical block. RTP_LLM_CHECK-fails if
-    // the pool is not initialized or the block index is out of range.
+    // Address lookup does not acquire a reference. The caller holds a lease
+    // while accessing the bytes and keeps borrowed backing alive until close.
     HostBlockBuffer blockBuffer(BlockIdxType block) const;
 
     size_t payloadBytes() const;
@@ -48,9 +47,10 @@ public:
 
 private:
     const HostBlockPoolConfig& config() const;
+    size_t backingBytes(size_t first_usable_offset) const;
 
-private:
-    std::optional<AlignedHostMemory> backing_;
+    std::shared_ptr<void> backing_owner_;
+    uint8_t* first_usable_row_{nullptr};
 };
 
 }  // namespace rtp_llm

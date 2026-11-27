@@ -12,6 +12,7 @@
 #include <unordered_map>
 #include <vector>
 
+#include "rtp_llm/cpp/cache/block_tree_cache/metrics/CacheObserver.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/evict/EvictionTask.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/metrics/EvictionMetrics.h"
 #include "rtp_llm/cpp/cache/metrics/CachePoolMetrics.h"
@@ -31,21 +32,21 @@ struct BlockTreeQueueSizes;
 class CacheStageMetrics;
 class RtpLLMCacheEvictionMetricsCollector;
 
-class BlockTreeCacheMetricsReporter final {
+class BlockTreeCacheMetricsReporter final: public CacheObserver {
 public:
     explicit BlockTreeCacheMetricsReporter(std::shared_ptr<kmonitor::MetricsReporter> metrics_reporter,
                                            bool                                       enable_stage_metrics = true,
                                            std::chrono::milliseconds stage_interval = std::chrono::seconds(1));
-    ~BlockTreeCacheMetricsReporter();
-    bool enabled() const noexcept {
+    ~BlockTreeCacheMetricsReporter() override;
+    bool enabled() const noexcept override {
         return metrics_reporter_ != nullptr;
     }
-    bool stageMetricsEnabled() const noexcept {
+    bool stageMetricsEnabled() const noexcept override {
         return stage_metrics_ != nullptr;
     }
-    void flushStageMetrics() const;
-    void reportUnfreezeMetrics(const FrozenTask::ExecutionInfo& execution, bool forced) const;
-    void reportUnfreezeZeroMetrics(const std::vector<CachePoolMetrics>& pools) const;
+    void flushStageMetrics() const override;
+    void reportUnfreezeMetrics(const FrozenTask::ExecutionInfo& execution, bool forced) const override;
+    void reportUnfreezeZeroMetrics(const std::vector<CachePoolMetrics>& pools) const override;
 
     // Durations are per worker batch, except coordinator multi-rank stages.
     // Request/transfer IDs belong in the timeline, never in metric tags.
@@ -53,7 +54,7 @@ public:
                              int64_t     latency_us,
                              bool        success,
                              int64_t     rank  = -1,
-                             const char* scope = "worker_batch") const noexcept;
+                             const char* scope = "worker_batch") const noexcept override;
     void reportTransferStage(const char* stage,
                              int64_t     latency_us,
                              bool        success,
@@ -61,43 +62,43 @@ public:
                              const char* scope,
                              const char* operation,
                              const char* source_tier,
-                             const char* target_tier) const noexcept;
+                             const char* target_tier) const noexcept override;
 
     std::vector<CachePoolMetrics>
          collectPoolMetrics(const std::vector<GroupSetPtr>&       group_sets,
-                            std::chrono::steady_clock::time_point now = std::chrono::steady_clock::now());
-    void initEvictionMetricGroupTypes(const std::vector<GroupSetPtr>& group_sets);
-    void reportEvictionMetrics(const EvictionVictimMetrics& metrics_data) const;
-    void reportCacheReuseTimeMetrics(const std::vector<BlockTreeCacheReuseTimeMetrics>& metrics_list) const;
+                            std::chrono::steady_clock::time_point now = std::chrono::steady_clock::now()) override;
+    void initEvictionMetricGroupTypes(const std::vector<GroupSetPtr>& group_sets) override;
+    void reportEvictionMetrics(const EvictionVictimMetrics& metrics_data) const override;
+    void reportCacheReuseTimeMetrics(const std::vector<BlockTreeCacheReuseTimeMetrics>& metrics_list) const override;
     void reportEvictionFinished(const EvictionTransferTask&     task,
                                 const std::vector<GroupSetPtr>& group_sets,
                                 bool                            success,
                                 const std::vector<bool>&        skip_eviction_metrics,
-                                size_t                          cancelled_blocks) const;
+                                size_t                          cancelled_blocks) const override;
     void reportEvictionFinished(const EvictionDropTask&         task,
                                 const std::vector<GroupSetPtr>& group_sets,
-                                const char*                     trigger_type) const;
+                                const char*                     trigger_type) const override;
     void reportEvictionDescriptor(const TransferDescriptor&       desc,
                                   const EvictionTimingMetrics&    timing,
                                   const std::vector<GroupSetPtr>& group_sets,
                                   const char*                     trigger_type,
-                                  bool                            success) const;
-    void reportEvictionTriggered(Tier source_tier, CacheGroupType group_type, bool force_drop) const;
+                                  bool                            success) const override;
+    void reportEvictionTriggered(Tier source_tier, CacheGroupType group_type, bool force_drop) const override;
     void reportEvictionBlocks(Tier           source_tier,
                               CacheGroupType group_type,
                               bool           force_drop,
                               size_t         required_blocks,
-                              size_t         scheduled_blocks) const;
+                              size_t         scheduled_blocks) const override;
 
-    void reportLoadJoin(size_t dependency_count) const;
-    void reportLoadJoinWait(int64_t join_wait_latency_us) const;
-    void reportInsertHardStop() const;
+    void reportLoadJoin(size_t dependency_count) const override;
+    void reportLoadJoinWait(int64_t join_wait_latency_us) const override;
+    void reportInsertHardStop() const override;
     void
-    reportInvariantViolation(size_t group_set_id, const char* type, const char* reason, bool stable) const noexcept;
+    reportInvariantViolation(size_t group_set_id, const char* type, const char* reason, bool stable) const noexcept override;
 
-    int64_t reportTransferStarted(TransferOperation operation, Tier source_tier, Tier target_tier);
+    int64_t reportTransferStarted(TransferOperation operation, Tier source_tier, Tier target_tier) override;
     // Report once after all batches/ranks of a logical copy have completed.
-    void maybeReportCopyError(Tier source_tier, Tier target_tier, const TransferResult& result) const;
+    void maybeReportCopyError(Tier source_tier, Tier target_tier, const TransferResult& result) const override;
     void reportTransferFinished(TransferOperation               operation,
                                 Tier                            source_tier,
                                 Tier                            target_tier,
@@ -105,8 +106,8 @@ public:
                                 int64_t                         begin_time_us,
                                 bool                            success,
                                 DescriptorView                  successful_descriptors,
-                                const std::vector<GroupSetPtr>& group_sets);
-    void reportQueueBacklog(const BlockTreeQueueSizes& queue_sizes, const char* pool_type) const;
+                                const std::vector<GroupSetPtr>& group_sets) override;
+    void reportQueueBacklog(const BlockTreeQueueSizes& queue_sizes, const char* pool_type) const override;
 
 private:
     std::vector<CacheGroupType> eviction_metric_group_types_;

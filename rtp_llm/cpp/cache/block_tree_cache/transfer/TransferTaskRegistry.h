@@ -1,5 +1,6 @@
 #pragma once
 
+#include "rtp_llm/cpp/cache/block_tree_cache/diagnostic/CacheDiagnostics.h"
 #include <algorithm>
 #include <chrono>
 #include <functional>
@@ -15,7 +16,6 @@
 #include <utility>
 #include <vector>
 
-#include "rtp_llm/cpp/utils/Logger.h"
 
 namespace rtp_llm {
 
@@ -281,7 +281,7 @@ private:
             record.warned            = true;
             record.last_warning_time = now;
             try {
-                RTP_LLM_LOG_WARNING(
+                BTC_LOG_WARNING(
                     "transfer missing repeatedly accessed trace=%s registry=%s source=%s count=%lu remaining_seconds=%ld",
                     trace_id.c_str(),
                     epoch_.c_str(),
@@ -303,7 +303,7 @@ private:
                                      state == State::RUNNING     ? "RUNNING" :
                                      state == State::REJECTED    ? "REJECTED" :
                                                                    "UNKNOWN";
-            RTP_LLM_LOG_INFO("transfer_lifecycle event=registry_%s trace=%s registry=%s state=%s result=%s",
+            BTC_LOG_INFO("transfer_lifecycle event=registry_%s trace=%s registry=%s state=%s result=%s",
                              event,
                              trace_id.c_str(),
                              epoch_.c_str(),
@@ -316,7 +316,7 @@ private:
 
     void logQuery(const std::string& trace_id, State state) const noexcept {
         try {
-            if (!Logger::getEngineLogger().isLevelEnabled(alog::LOG_LEVEL_INFO)) {
+            if (!cacheLogEnabled(CacheLogLevel::Info)) {
                 return;
             }
             const auto previous = logged_query_states_.find(trace_id);

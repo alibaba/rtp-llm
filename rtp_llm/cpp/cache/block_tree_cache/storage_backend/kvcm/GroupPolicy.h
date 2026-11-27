@@ -9,7 +9,7 @@
 #include <utility>
 #include <vector>
 #include "kvcm_client/common.h"
-#include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/StorageBackend.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/integration/rtp_llm/RtpStorageBackend.h"
 
 namespace rtp_llm {
 
@@ -62,7 +62,7 @@ public:
     using LocationSpecGroups = std::map<std::string, std::vector<std::string>>;
 
     GroupPolicy(const CacheTopology&                    topology,
-                StorageBackend::BufferResolver          buffer_resolver,
+                RtpStorageBackend::BufferResolver          buffer_resolver,
                 const std::vector<std::string>&         full_group_tags,
                 const std::vector<std::string>&         other_group_tags,
                 std::unordered_map<std::string, size_t> group_block_size_bytes = {}):
@@ -122,7 +122,7 @@ protected:
                                  LocationView&                     location_view) const;
 
     const CacheTopology&                    topology_;
-    StorageBackend::BufferResolver          buffer_resolver_;
+    RtpStorageBackend::BufferResolver          buffer_resolver_;
     std::set<std::string>                   full_group_tags_;
     std::set<std::string>                   other_group_tags_;
     std::unordered_map<std::string, size_t> group_block_size_bytes_;
@@ -142,7 +142,7 @@ protected:
 class DefaultLayerGroupPolicy: public GroupPolicy {
 public:
     DefaultLayerGroupPolicy(const CacheTopology&                    topology,
-                            StorageBackend::BufferResolver          buffer_resolver,
+                            RtpStorageBackend::BufferResolver          buffer_resolver,
                             const std::vector<std::string>&         full_group_tags,
                             const std::vector<std::string>&         other_group_tags,
                             std::unordered_map<std::string, size_t> group_block_size_bytes = {}):
@@ -180,7 +180,7 @@ protected:
 class FullLayerGroupPolicy: public DefaultLayerGroupPolicy {
 public:
     FullLayerGroupPolicy(const CacheTopology&                    topology,
-                         StorageBackend::BufferResolver          buffer_resolver,
+                         RtpStorageBackend::BufferResolver          buffer_resolver,
                          const std::vector<std::string>&         full_group_tags,
                          const std::vector<std::string>&         other_group_tags,
                          std::unordered_map<std::string, size_t> group_block_size_bytes = {}):
@@ -214,7 +214,7 @@ protected:
     void rebuildDerivedSpecInfo() override;
 
     FullOtherGroupPolicy(const CacheTopology&                    topology,
-                         StorageBackend::BufferResolver          buffer_resolver,
+                         RtpStorageBackend::BufferResolver          buffer_resolver,
                          const std::vector<std::string>&         full_group_tags,
                          const std::vector<std::string>&         other_group_tags,
                          std::unordered_map<std::string, size_t> group_block_size_bytes = {}):
@@ -232,7 +232,7 @@ protected:
 class FullLinearLayerGroupPolicy: public FullOtherGroupPolicy {
 public:
     FullLinearLayerGroupPolicy(const CacheTopology&                    topology,
-                               StorageBackend::BufferResolver          buffer_resolver,
+                               RtpStorageBackend::BufferResolver          buffer_resolver,
                                const std::vector<std::string>&         full_group_tags,
                                const std::vector<std::string>&         other_group_tags,
                                std::unordered_map<std::string, size_t> group_block_size_bytes = {}):

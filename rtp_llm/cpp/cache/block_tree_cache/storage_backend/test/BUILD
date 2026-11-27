@@ -9,6 +9,7 @@ cc_test_wrapper(
     copts = copts(),
     deps = [
         "//rtp_llm/cpp/cache/block_tree_cache",
+        "//rtp_llm/cpp/cache/block_tree_cache/integration/rtp_llm:rtp_storage_backend",
         "//rtp_llm/cpp/cache/block_tree_cache/test:bounded_thread_test_utils",
         "@com_google_googletest//:gtest",
         "@com_google_googletest//:gtest_main",

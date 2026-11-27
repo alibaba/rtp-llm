@@ -39,7 +39,7 @@ GroupBase makeGroup(std::string tag, int layer_id, CacheGroupType type, size_t k
     return group;
 }
 
-StorageBackend::BufferResolver unusedResolver() {
+RtpStorageBackend::BufferResolver unusedResolver() {
     return [](int, const std::string&, int) { return std::vector<BlockInfo>{}; };
 }
 
@@ -677,7 +677,7 @@ TEST(KVCMInternalTest, UsesExactMtpPhysicalSizeForRemoteBufferValidation) {
                                           {{0, {"default"}}, {1, {"default"}}, {2, {"default"}}});
     const std::array<size_t, 3>    layer_bytes{32, 64, 64};
     std::array<uint8_t, 3>         storage{};
-    StorageBackend::BufferResolver resolver = [&layer_bytes,
+    RtpStorageBackend::BufferResolver resolver = [&layer_bytes,
                                                &storage](int layer_id, const std::string& tag, int block_id) {
         EXPECT_EQ(tag, "default");
         EXPECT_EQ(block_id, 7);

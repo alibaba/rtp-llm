@@ -1,6 +1,7 @@
 #pragma once
 
 #include <array>
+#include <cassert>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
@@ -10,12 +11,18 @@
 #include <string>
 #include <vector>
 
-#include "rtp_llm/cpp/cache/Types.h"
-#include "rtp_llm/cpp/utils/AssertUtils.h"
+#include "rtp_llm/cpp/cache/BlockIndex.h"
 
 namespace rtp_llm {
 
 using BlockIdList = std::vector<BlockIdxType>;
+class IBlockPool;
+
+struct BlockPoolPage {
+    const IBlockPool* pool;
+    BlockIdxType slot;
+    uint64_t generation;
+};
 
 enum class BlockPoolType {
     DEVICE,
@@ -39,6 +46,7 @@ struct BlockPoolConfigBase {
     BlockPoolType pool_type{BlockPoolType::DEVICE};
     std::string   pool_name;
     size_t        physical_block_count{0};
+    bool          growable{false};
 };
 
 // IBlockPool owns allocation and Tree-internal lifetime shared by Device, Host, and Disk.
@@ -56,10 +64,21 @@ public:
             return ref_blocks[static_cast<size_t>(type)];
         }
     };
+    struct ReferenceStats {
+        TreeReferenceStats tree;
+        size_t request_ref_blocks{0};
+        size_t remote_connector_ref_blocks{0};
+        size_t pd_connector_ref_blocks{0};
+    };
 
     virtual ~IBlockPool() = default;
 
     void setCapacityChangeCallback(std::function<void()> callback);
+    // Register once on a fixed Host or Disk pool before allocating blocks.
+    // Called under the pool lock. The callback must not throw or call the pool.
+    void setBlockRetirementCallback(std::function<void(BlockPoolPage)> callback);
+    // Return the exact retired generation after the owner proves it is safe.
+    void releaseRetiredBlock(BlockPoolPage page);
 
     const std::string&  poolName() const;
     virtual std::string debugString() const;
@@ -67,16 +86,32 @@ public:
 
     std::optional<BlockIdxType> malloc();
     std::optional<BlockIdList>  malloc(size_t n);
+    void appendCapacity(size_t additional);
 
     void     incTreeRef(BlockIdxType block, BlockTreeRefType ref_type);
     void     incTreeRef(const BlockIdList& blocks, BlockTreeRefType ref_type);
-    void     decTreeRef(BlockIdxType block, BlockTreeRefType ref_type);
-    void     decTreeRef(const BlockIdList& blocks, BlockTreeRefType ref_type);
+    // Return how many physical blocks became free in this operation.
+    size_t   decTreeRef(BlockIdxType block, BlockTreeRefType ref_type);
+    size_t   decTreeRef(const BlockIdList& blocks, BlockTreeRefType ref_type);
     uint32_t treeRefCount(BlockIdxType block) const;
 
-    // True when releasing one CACHE reference would immediately free the block.
+    std::optional<BlockPoolPage> pageIdentity(BlockIdxType block) const;
+    bool isCurrentPage(BlockPoolPage page) const;
+
+    // The scheduler may own request refs outside the cache pool. RTP's
+    // allocator implements these operations on its native request counts.
+    virtual void referenceRequestBlocks(const BlockIdList&) {}
+    virtual void unreferenceRequestBlocks(const BlockIdList&) {}
+    virtual bool hasRequestRef(BlockIdxType) const { return false; }
+    // An externally revoked allocation remains pinned until its copy settles.
+    virtual bool canPublish(BlockIdxType) const { return true; }
+    virtual ReferenceStats referenceStats() const;
+
+    // True when releasing one CACHE reference would retire the block. A pool
+    // with a retirement callback may defer reuse until acknowledgment.
     // Checks tree and external ownership together under the pool mutex.
     bool canReclaimCacheBlock(BlockIdxType block) const;
+    size_t unpinnedCacheReferences(BlockIdxType block) const;
 
     // Add one FROZEN reference; the caller decides when to release its hold.
     void freezeBlock(BlockIdxType block) noexcept;
@@ -98,6 +133,8 @@ public:
 
     size_t totalBlocksNum() const;
     size_t freeBlocksNum() const;
+    // Slots awaiting safe acknowledgment cannot be allocated yet.
+    size_t retiredBlocksNum() const;
     // Blocks that can be reclaimed for a new request: physical free blocks plus
     // blocks held exclusively by BlockTreeRefType::CACHE.
     size_t availableBlocksNum() const;
@@ -111,9 +148,7 @@ protected:
     bool initialized() const;
 
     virtual void onFirstTreeRefNoLock(BlockIdxType) {}
-    virtual bool onLastTreeRefNoLock(BlockIdxType) {
-        return true;
-    }
+    virtual bool onLastTreeRefNoLock(BlockIdxType block);
     virtual bool hasExternalRefNoLock(BlockIdxType) const {
         return false;
     }
@@ -161,7 +196,8 @@ protected:
     }
 
     void     checkInitializedNoLock() const;
-    void     checkAllocatedNoLock(BlockIdxType block) const;
+    void     checkAllocatedNoLock(BlockIdxType block, bool allow_retired = false) const;
+    void     incTreeRefLocked(BlockIdxType block, BlockTreeRefType type);
     uint32_t treeRefCountNoLock(BlockIdxType block) const;
     uint32_t treeRefCountNoLock(BlockIdxType block, BlockTreeRefType ref_type) const;
     bool     isActiveNoLock(BlockIdxType block) const;
@@ -174,12 +210,16 @@ protected:
 
     template<typename ConfigT>
     const ConfigT& configAs(BlockPoolType expected_type) const {
-        RTP_LLM_CHECK(config_->pool_type == expected_type);
+        assert(config_->pool_type == expected_type && "Block pool config type does not match pool");
+        (void)expected_type;
         return static_cast<const ConfigT&>(*config_);
     }
 
 private:
+    enum class SlotState : uint8_t { FREE, ALLOCATED, RETIRED };
+
     bool          validBlockNoLock(BlockIdxType block) const;
+    std::optional<BlockPoolPage> pageIdentityNoLock(BlockIdxType block) const;
     void          checkUniqueBlocksNoLock(const BlockIdList& blocks) const;
     static size_t treeRefTypeIndex(BlockTreeRefType ref_type);
     void          incTreeRefNoLock(BlockIdxType block, size_t ref_type_index);
@@ -194,7 +234,9 @@ private:
     std::shared_ptr<const BlockPoolConfigBase>                config_;
     bool                                                      initialized_{false};
     std::function<void()>                                     capacity_change_callback_;
-    std::vector<uint8_t>                                      allocated_;
+    std::function<void(BlockPoolPage)>                        retirement_callback_;
+    std::vector<SlotState>                                    slots_;
+    std::vector<uint64_t>                                     generations_;
     std::vector<uint32_t>                                     tree_refcounts_;
     std::array<std::vector<uint32_t>, kBlockTreeRefTypeCount> tree_refcounts_by_type_;
     std::array<size_t, kBlockTreeRefTypeCount>                tree_referenced_block_counts_{};
@@ -203,6 +245,7 @@ private:
     size_t                                                    free_head_{0};
     size_t                                                    active_blocks_num_{0};
     size_t                                                    available_blocks_num_{0};
+    size_t                                                    retired_blocks_num_{0};
 };
 
 }  // namespace rtp_llm

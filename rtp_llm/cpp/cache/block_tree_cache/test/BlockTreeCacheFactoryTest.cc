@@ -1,4 +1,5 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeCacheFactory.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/integration/rtp_llm/RtpStorageBackend.h"
 
 #include <algorithm>
 #include <array>
@@ -23,9 +24,11 @@
 #include "rtp_llm/cpp/cache/FullCacheManager.h"
 #include "rtp_llm/cpp/cache/CoordinatorCacheManager.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/block_pool/AlignedHostMemory.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/block_pool/HostStagingBlockPool.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/group_set/SWAGroupSet.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/test/BlockTreeCacheTestUtils.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/BlockTransferDispatcher.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/transfer/CrcCopyExecutor.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/PerRankBlockTransferEngine.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/test/PerRankBlockTransferEngineTestUtils.h"
 #include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
@@ -566,10 +569,10 @@ public:
     void shutdown() noexcept override {}
 };
 
-class ShutdownCountingStorageBackend: public StorageBackend {
+class ShutdownCountingStorageBackend: public RtpStorageBackend {
 public:
     ShutdownCountingStorageBackend(std::shared_ptr<size_t> shutdown_count, std::shared_ptr<size_t> resolved_count):
-        StorageBackend(std::make_shared<InlineFactoryExecutor>()),
+        RtpStorageBackend(std::make_shared<InlineFactoryExecutor>()),
         shutdown_count_(std::move(shutdown_count)),
         resolved_count_(std::move(resolved_count)) {}
 
@@ -597,9 +600,9 @@ private:
     std::shared_ptr<size_t> resolved_count_;
 };
 
-class CountingStorageBackend: public StorageBackend {
+class CountingStorageBackend: public RtpStorageBackend {
 public:
-    CountingStorageBackend(): StorageBackend(std::make_shared<InlineFactoryExecutor>()) {}
+    CountingStorageBackend(): RtpStorageBackend(std::make_shared<InlineFactoryExecutor>()) {}
     ~CountingStorageBackend() override {
         shutdown();
     }

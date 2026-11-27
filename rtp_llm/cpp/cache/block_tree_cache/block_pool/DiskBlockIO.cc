@@ -1,12 +1,15 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/block_pool/DiskBlockIO.h"
 
 #include <cerrno>
+#include <cstdlib>
 #include <cstring>
 #include <fcntl.h>
 #include <sstream>
+#include <stdexcept>
+#include <sys/stat.h>
 #include <unistd.h>
 
-#include "rtp_llm/cpp/utils/Logger.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/diagnostic/CacheDiagnostics.h"
 
 namespace rtp_llm {
 namespace {
@@ -28,7 +31,7 @@ BlockTreePosixDiskBlockIO::openAndPreallocate(const std::string& file_path, size
     close();
 
     if (bytes == 0) {
-        RTP_LLM_LOG_ERROR("openAndPreallocate rejected zero-byte file, file=%s", file_path.c_str());
+        BTC_LOG_ERROR("openAndPreallocate rejected zero-byte file, file=%s", file_path.c_str());
         return DiskBlockIOStatus::INVALID_SIZE;
     }
 
@@ -41,25 +44,29 @@ BlockTreePosixDiskBlockIO::openAndPreallocate(const std::string& file_path, size
 #ifdef O_DIRECT
         flags |= O_DIRECT;
 #else
-        RTP_LLM_LOG_ERROR("O_DIRECT is not supported on this platform, file=%s", file_path.c_str());
+        BTC_LOG_ERROR("O_DIRECT is not supported on this platform, file=%s", file_path.c_str());
         return DiskBlockIOStatus::IO_ERROR;
 #endif
     }
 
     fd_ = ::open(file_path.c_str(), flags, 0600);
     if (fd_ < 0) {
-        RTP_LLM_LOG_ERROR("open disk block file failed, file=%s, error=%s", file_path.c_str(), std::strerror(errno));
+        BTC_LOG_ERROR("open disk block file failed, file=%s, error=%s", file_path.c_str(), std::strerror(errno));
         return DiskBlockIOStatus::IO_ERROR;
     }
 
-    int rc = ::posix_fallocate(fd_, 0, static_cast<off_t>(bytes));
+#if defined(__APPLE__)
+    const int rc = EOPNOTSUPP;
+#else
+    const int rc = ::posix_fallocate(fd_, 0, static_cast<off_t>(bytes));
+#endif
     if (rc == EOPNOTSUPP || rc == ENOSYS) {
-        RTP_LLM_LOG_WARNING("posix_fallocate unsupported, falling back to ftruncate, file=%s, bytes=%zu, error=%s",
+        BTC_LOG_WARNING("posix_fallocate unsupported, falling back to ftruncate, file=%s, bytes=%zu, error=%s",
                             file_path.c_str(),
                             bytes,
                             std::strerror(rc));
         if (::ftruncate(fd_, static_cast<off_t>(bytes)) != 0) {
-            RTP_LLM_LOG_ERROR("ftruncate disk block file failed, file=%s, bytes=%zu, error=%s",
+            BTC_LOG_ERROR("ftruncate disk block file failed, file=%s, bytes=%zu, error=%s",
                               file_path.c_str(),
                               bytes,
                               std::strerror(errno));
@@ -69,7 +76,7 @@ BlockTreePosixDiskBlockIO::openAndPreallocate(const std::string& file_path, size
         return DiskBlockIOStatus::OK;
     }
     if (rc != 0) {
-        RTP_LLM_LOG_ERROR("posix_fallocate disk block file failed, file=%s, bytes=%zu, error=%s",
+        BTC_LOG_ERROR("posix_fallocate disk block file failed, file=%s, bytes=%zu, error=%s",
                           file_path.c_str(),
                           bytes,
                           std::strerror(rc));
@@ -79,9 +86,25 @@ BlockTreePosixDiskBlockIO::openAndPreallocate(const std::string& file_path, size
     return DiskBlockIOStatus::OK;
 }
 
+DiskBlockIOStatus BlockTreePosixDiskBlockIO::openBufferedRead(const std::string& file_path, size_t bytes) {
+    close();
+    const int fd = ::open(file_path.c_str(), O_RDONLY | O_CLOEXEC);
+    if (fd < 0) return DiskBlockIOStatus::IO_ERROR;
+    struct stat info {};
+    if (::fstat(fd, &info) || info.st_size < 0 || static_cast<uint64_t>(info.st_size) != bytes) {
+        ::close(fd);
+        return DiskBlockIOStatus::INVALID_SIZE;
+    }
+    fd_ = fd;
+    file_path_ = file_path;
+    buffered_io_ = true;
+    bytes_ = bytes;
+    return DiskBlockIOStatus::OK;
+}
+
 DiskBlockIOStatus BlockTreePosixDiskBlockIO::validate(uint64_t offset, const void* buffer, size_t bytes) const {
     if (buffer == nullptr || bytes == 0) {
-        RTP_LLM_LOG_ERROR("disk block io rejected invalid size/buffer, file=%s, offset=%lu, bytes=%zu",
+        BTC_LOG_ERROR("disk block io rejected invalid size/buffer, file=%s, offset=%lu, bytes=%zu",
                           file_path_.c_str(),
                           offset,
                           bytes);
@@ -96,7 +119,7 @@ DiskBlockIOStatus BlockTreePosixDiskBlockIO::validate(uint64_t offset, const voi
         const auto addr = reinterpret_cast<uintptr_t>(buffer);
         if (!isAligned(offset, kDirectIOAlignment) || !isAligned(addr, kDirectIOAlignment)
             || !isAligned(bytes, kDirectIOAlignment)) {
-            RTP_LLM_LOG_ERROR("direct disk io alignment failed, file=%s, offset=%lu, addr=%p, bytes=%zu",
+            BTC_LOG_ERROR("direct disk io alignment failed, file=%s, offset=%lu, addr=%p, bytes=%zu",
                               file_path_.c_str(),
                               offset,
                               buffer,
@@ -106,7 +129,7 @@ DiskBlockIOStatus BlockTreePosixDiskBlockIO::validate(uint64_t offset, const voi
     }
 
     if (offset > bytes_ || bytes > bytes_ - offset) {
-        RTP_LLM_LOG_ERROR("disk block io out of preallocated range, file=%s, offset=%lu, bytes=%zu, capacity=%zu",
+        BTC_LOG_ERROR("disk block io out of preallocated range, file=%s, offset=%lu, bytes=%zu, capacity=%zu",
                           file_path_.c_str(),
                           offset,
                           bytes,
@@ -123,7 +146,7 @@ DiskBlockIOStatus BlockTreePosixDiskBlockIO::read(uint64_t offset, void* dst, si
         return validation;
     }
     if (fd_ < 0) {
-        RTP_LLM_LOG_ERROR("disk block io read on closed file, file=%s", file_path_.c_str());
+        BTC_LOG_ERROR("disk block io read on closed file, file=%s", file_path_.c_str());
         return DiskBlockIOStatus::IO_ERROR;
     }
 
@@ -134,7 +157,7 @@ DiskBlockIOStatus BlockTreePosixDiskBlockIO::read(uint64_t offset, void* dst, si
             if (errno == EINTR) {
                 continue;
             }
-            RTP_LLM_LOG_ERROR("pread disk block file failed, file=%s, offset=%lu, bytes=%zu, done=%zu, error=%s",
+            BTC_LOG_ERROR("pread disk block file failed, file=%s, offset=%lu, bytes=%zu, done=%zu, error=%s",
                               file_path_.c_str(),
                               offset,
                               bytes,
@@ -144,7 +167,7 @@ DiskBlockIOStatus BlockTreePosixDiskBlockIO::read(uint64_t offset, void* dst, si
         }
         if (rc == 0) {
             // EOF before satisfying the full request.
-            RTP_LLM_LOG_ERROR("pread disk block file got EOF, file=%s, offset=%lu, bytes=%zu, done=%zu",
+            BTC_LOG_ERROR("pread disk block file got EOF, file=%s, offset=%lu, bytes=%zu, done=%zu",
                               file_path_.c_str(),
                               offset,
                               bytes,
@@ -162,7 +185,7 @@ DiskBlockIOStatus BlockTreePosixDiskBlockIO::write(uint64_t offset, const void* 
         return validation;
     }
     if (fd_ < 0) {
-        RTP_LLM_LOG_ERROR("disk block io write on closed file, file=%s", file_path_.c_str());
+        BTC_LOG_ERROR("disk block io write on closed file, file=%s", file_path_.c_str());
         return DiskBlockIOStatus::IO_ERROR;
     }
 
@@ -174,7 +197,7 @@ DiskBlockIOStatus BlockTreePosixDiskBlockIO::write(uint64_t offset, const void* 
             if (errno == EINTR) {
                 continue;
             }
-            RTP_LLM_LOG_ERROR("pwrite disk block file failed, file=%s, offset=%lu, bytes=%zu, done=%zu, error=%s",
+            BTC_LOG_ERROR("pwrite disk block file failed, file=%s, offset=%lu, bytes=%zu, done=%zu, error=%s",
                               file_path_.c_str(),
                               offset,
                               bytes,
@@ -183,7 +206,7 @@ DiskBlockIOStatus BlockTreePosixDiskBlockIO::write(uint64_t offset, const void* 
             return DiskBlockIOStatus::IO_ERROR;
         }
         if (rc == 0) {
-            RTP_LLM_LOG_ERROR("pwrite disk block file made no progress, file=%s, offset=%lu, bytes=%zu, done=%zu",
+            BTC_LOG_ERROR("pwrite disk block file made no progress, file=%s, offset=%lu, bytes=%zu, done=%zu",
                               file_path_.c_str(),
                               offset,
                               bytes,
@@ -227,6 +250,48 @@ std::string BlockTreePosixDiskBlockIO::debugString() const {
     oss << "BlockTreePosixDiskBlockIO{file=" << file_path_ << ", bytes=" << bytes_
         << ", io=" << (buffered_io_ ? "buffered" : "direct") << ", open=" << (fd_ >= 0) << "}";
     return oss.str();
+}
+
+DiskFiles::DiskFiles(const std::filesystem::path& directory) {
+    std::filesystem::create_directories(directory);
+    std::string scratch = (directory / "btc-XXXXXX").string();
+    if (!::mkdtemp(scratch.data())) {
+        throw std::filesystem::filesystem_error(
+            "Create private BTC disk directory", directory, std::error_code(errno, std::generic_category()));
+    }
+    path_ = scratch;
+}
+
+DiskFiles::~DiskFiles() {
+    std::error_code ignored;
+    std::filesystem::remove_all(path_, ignored);
+}
+
+void DiskFiles::copy(bool write, uint64_t slot, void* data, size_t bytes, uint64_t operation) {
+    if (!data || !bytes) {
+        throw std::invalid_argument("Invalid BTC disk buffer");
+    }
+    const auto name = std::to_string(slot);
+    const auto file = path_ / name;
+    BlockTreePosixDiskBlockIO io;
+    if (write) {
+        const auto temp = path_ / (name + "." + std::to_string(operation) + ".tmp");
+        try {
+            if (io.openAndPreallocate(temp.string(), bytes, true) != DiskBlockIOStatus::OK
+                || io.write(0, data, bytes) != DiskBlockIOStatus::OK) {
+                throw std::ios_base::failure("BTC disk write failed");
+            }
+            io.close();
+            std::filesystem::rename(temp, file);
+        } catch (...) {
+            std::error_code ignored;
+            std::filesystem::remove(temp, ignored);
+            throw;
+        }
+    } else if (io.openBufferedRead(file.string(), bytes) != DiskBlockIOStatus::OK
+               || io.read(0, data, bytes) != DiskBlockIOStatus::OK) {
+        throw std::ios_base::failure("BTC disk read failed");
+    }
 }
 
 }  // namespace rtp_llm

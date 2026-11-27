@@ -1,3 +1,4 @@
+#include "rtp_llm/cpp/cache/block_tree_cache/block_pool/HostStagingBlockPool.h"
 #include "rtp_llm/cpp/cache/test/KVCacheManagerWithTierCacheTestBase.h"
 #include "rtp_llm/cpp/engine_base/schedulers/FIFOScheduler.h"
 #include "rtp_llm/cpp/normal_engine/NormalGenerateStream.h"

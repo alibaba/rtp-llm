@@ -1,6 +1,7 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferWorkLoop.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cassert>
 #include <chrono>
 #include <cstdlib>
@@ -11,16 +12,8 @@
 #include <stdexcept>
 #include <utility>
 
-#include <c10/core/DeviceGuard.h>
-#if defined(USING_ROCM) && USING_ROCM
-#include <c10/core/impl/VirtualGuardImpl.h>
-#endif
-
 #include "rtp_llm/cpp/cache/block_tree_cache/ScopeRollback.h"
-#include "rtp_llm/cpp/cache/block_tree_cache/transfer/DeviceHostCopyGeometry.h"
-#include "rtp_llm/cpp/cache/block_tree_cache/transfer/DiskTransferUtils.h"
-#include "rtp_llm/cpp/utils/Logger.h"
-#include "rtp_llm/models_py/bindings/NoBlockCopy.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/diagnostic/CacheDiagnostics.h"
 
 namespace rtp_llm {
 
@@ -82,43 +75,28 @@ TransferWorkLoop::Entry::Entry(TransferTask task, BeforeCompleteCallback before_
     before_complete(std::move(before_complete)) {}
 
 bool TransferWorkLoop::isDeviceCopy(Step step) {
-    return step == Step::CRC_LOAD || step == Step::CRC_EVICT || step == Step::PLAIN_DEVICE_COPY;
+    return step == Step::CRC_LOAD || step == Step::CRC_EVICT || step == Step::PLAIN_DEVICE_COPY
+           || step == Step::DEVICE_COPY;
 }
 
-TransferWorkLoop::TransferWorkLoop(std::vector<GroupSetPtr>                       groups,
-                                   std::unique_ptr<CrcCopyExecutor>               crc,
-                                   DiskIOExecutor*                                disk_io_executor,
-                                   TransferOperation                              operation,
-                                   size_t                                         batch_limit,
-                                   size_t                                         queue_capacity,
-                                   std::shared_ptr<HostStagingBlockPool>          staging,
-                                   std::shared_ptr<BlockTreeCacheMetricsReporter> metrics_reporter,
-                                   int64_t                                        world_rank,
-                                   size_t                                         worker_index,
-                                   std::shared_ptr<HostStagingBlockPool>          swa_staging):
-    groups_(std::move(groups)),
-    crc_(std::move(crc)),
-    disk_io_executor_(disk_io_executor),
+TransferWorkLoop::TransferWorkLoop(TransferOperation operation,
+                                   size_t batch_limit,
+                                   size_t queue_capacity,
+                                   std::shared_ptr<CacheObserver> observer,
+                                   int64_t world_rank,
+                                   size_t worker_index,
+                                   SubmitBatch submit_batch):
+    submit_batch_(std::move(submit_batch)),
     operation_(operation),
     batch_limit_(batch_limit),
     capacity_(queue_capacity),
-    metrics_reporter_(std::move(metrics_reporter)),
+    metrics_reporter_(std::move(observer)),
     world_rank_(world_rank),
     thread_name_((operation == TransferOperation::LOAD ? "btc_load_" : "btc_evict_") + std::to_string(worker_index)) {
-    abortOnOom([&] {
-        if (!batch_limit_ || !capacity_)
-            throw std::invalid_argument("async transfer requires positive M/Q");
-        if (capacity_ > std::numeric_limits<size_t>::max() / batch_limit_)
-            throw std::overflow_error("async transfer descriptor capacity overflow");
-        if (operation_ == TransferOperation::EVICT && (staging || swa_staging))
-            throw std::invalid_argument("evict WorkLoop must not own staging pools");
-        // A single supplied pool remains useful for standalone load owners.
-        staging_.pools = {staging, swa_staging ? std::move(swa_staging) : std::move(staging)};
-        for (const auto& group : groups_) {
-            if (!group->devicePools().empty())
-                crc_waiting_.try_emplace(group->devicePools().front()->deviceIndex());
-        }
-    });
+    if (!batch_limit_ || !capacity_)
+        throw std::invalid_argument("async transfer requires positive M/Q");
+    if (capacity_ > std::numeric_limits<size_t>::max() / batch_limit_)
+        throw std::overflow_error("async transfer descriptor capacity overflow");
 }
 
 TransferWorkLoop::~TransferWorkLoop() {
@@ -134,10 +112,14 @@ void TransferWorkLoop::waitForIdle() {
 void TransferWorkLoop::start() {
     abortOnOom([&] {
         thread_ = std::thread([this] {
+#if defined(__APPLE__)
+            const auto error = pthread_setname_np(thread_name_.c_str());
+#else
             const auto error = pthread_setname_np(pthread_self(), thread_name_.c_str());
+#endif
             if (error)
-                RTP_LLM_LOG_WARNING("cannot name transfer owner %s: %s", thread_name_.c_str(), std::strerror(error));
-            RTP_LLM_LOG_INFO("BlockTree transfer owner: name=%s rank=%ld", thread_name_.c_str(), world_rank_);
+                BTC_LOG_WARNING("cannot name transfer owner %s: %s", thread_name_.c_str(), std::strerror(error));
+            BTC_LOG_INFO("BlockTree transfer owner: name=%s rank=%ld", thread_name_.c_str(), world_rank_);
             run();
         });
     });
@@ -229,7 +211,7 @@ void TransferWorkLoop::shutdown() {
     if (thread_.joinable())
         thread_.join();
     if (crc_)
-        crc_->stopAndWaitForIo();
+        (this->*rtp_io_->stop_crc)();
 }
 
 size_t TransferWorkLoop::outstandingBatches() const {
@@ -293,6 +275,10 @@ bool TransferWorkLoop::plan(Entry& entry) {
             return false;
         }
     }
+    if (submit_batch_) {
+        entry.step = Step::DEVICE_COPY;
+        return true;
+    }
     const auto& descriptors = entry.task.descriptors();
     const auto& first       = descriptors.front();
     const bool  combined    = first.source_tier == Tier::DISK && first.target_tier == Tier::DEVICE;
@@ -327,8 +313,7 @@ bool TransferWorkLoop::plan(Entry& entry) {
             return false;
     } else {
         for (const auto& descriptor : descriptors) {
-            const auto buffer = group(entry)->hostPool()->blockBuffer(descriptor.singleBlockAt(Tier::HOST));
-            entry.hosts.push_back({buffer.addr, buffer.payload_bytes, buffer.stride_bytes});
+            entry.hosts.push_back(rtp_io_->host_buffer(*group(entry), descriptor.singleBlockAt(Tier::HOST)));
         }
     }
     return true;
@@ -350,16 +335,11 @@ bool TransferWorkLoop::acquireStaging(Entry& entry, bool waiting) {
         retryStaging();
         return false;
     }
-    auto leases = staging_.pools[stagingIndex(entry)]->tryMallocBatch(entry.task.descriptors().size());
-    if (!leases) {
+    if (!(this->*rtp_io_->acquire_staging)(entry)) {
         if (!waiting)
             waitForResource(entry, staging_.waiting);
         return false;
     }
-    entry.staging = std::move(*leases);
-    entry.staging_timer.finish(true);
-    for (const auto& lease : entry.staging)
-        entry.hosts.push_back(lease.blockBuffer(group(entry)->payloadBytes()));
     return true;
 }
 
@@ -412,22 +392,23 @@ void TransferWorkLoop::tryStep(Entry& entry) {
                                     CacheCopyError::NOT_EXECUTED)));
             return;
         }
-        if (entry.step == Step::PLAIN_DEVICE_COPY)
-            submitPlainDeviceCopy(entry);
+        if (entry.step == Step::DEVICE_COPY)
+            submitDeviceCopy(entry);
+        else if (entry.step == Step::PLAIN_DEVICE_COPY)
+            (this->*rtp_io_->plain_copy)(entry);
         else if (isDeviceCopy(entry.step))
             submitCrc(entry);
         else
-            submitDisk(entry);
+            (this->*rtp_io_->disk_copy)(entry);
     });
 }
 
 void TransferWorkLoop::submitCrc(Entry& entry) {
     startStepTimer(entry, entry.step == Step::CRC_LOAD ? "h2d" : "d2h");
-    const auto& owner   = group(entry);
-    auto&       waiting = crc_waiting_.at(owner->devicePools().front()->deviceIndex());
+    auto& waiting = crc_waiting_.at(rtp_io_->device_index(*group(entry)));
     // Settle the stable Entry and intrusive indexes. Optional observations use
     // the existing task span and preallocated profiling buffer.
-    CrcCopyExecutor::DoneCallback done = [this, &entry](TransferResult result) noexcept {
+    TransferAsyncContext::DoneCallback done = [this, &entry](TransferResult result) noexcept {
         assert(entry.step == Step::CRC_LOAD || entry.step == Step::CRC_EVICT);
         const auto& timing = entry.crc_timing;
         if (timing.completed_us && result.ok()) {
@@ -463,7 +444,7 @@ void TransferWorkLoop::submitCrc(Entry& entry) {
         completed_.push(entry);
     };
     auto*      timing  = entry.task_timer ? &entry.crc_timing : nullptr;
-    const bool handled = crc_->trySubmit(entry.hosts, entry.task.descriptors(), owner, std::move(done), timing);
+    const bool handled = (this->*rtp_io_->submit_crc)(entry, std::move(done), timing);
     if (timing && timing->submit_return_us) {
         auto submit = timer(entry.task,
                             "crc_submit_cpu",
@@ -484,146 +465,46 @@ void TransferWorkLoop::submitCrc(Entry& entry) {
     }
 }
 
-void TransferWorkLoop::submitPlainDeviceCopy(Entry& entry) {
-    const auto& descriptors = entry.task.descriptors();
-    const Tier  source      = descriptors.front().source_tier;
-    const Tier  target      = descriptors.front().target_tier;
-    const bool  to_device   = target == Tier::DEVICE;
-    const bool  valid_route =
-        to_device ? (source == Tier::HOST || source == Tier::DISK) : (source == Tier::DEVICE && target == Tier::HOST);
-    const auto& owner       = *group(entry);
-    const auto  reject      = [&] { fail(entry, unsubmittedResult(TransferStatus::INVALID_ARGS)); };
-    if (!valid_route || !isPlainDeviceTransferGroup(owner) || entry.hosts.size() != descriptors.size()) {
-        reject();
-        return;
-    }
-
-    const auto             device_index = owner.devicePools().front()->deviceIndex();
-    const auto             device       = torch::Device(torch::kCUDA, static_cast<c10::DeviceIndex>(device_index));
-    const c10::DeviceGuard device_guard(device);
-    const auto             bytes_on_host   = torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCPU);
-    const auto             bytes_on_device = torch::TensorOptions().dtype(torch::kUInt8).device(device);
-    MultiCopyParams copy;
-    startStepTimer(entry, to_device ? "h2d" : "d2h");
-    // Build and validate every view before enqueuing any device access.
-    for (size_t i = 0; i < descriptors.size(); ++i) {
-        const auto& descriptor = descriptors[i];
-        const auto& host       = entry.hosts[i];
-        if (descriptor.source_tier != source || descriptor.target_tier != target
-            || !isValidHostBufferView(host, owner.payloadBytes(), owner.payloadBytes())) {
-            reject();
-            return;
-        }
-        for (const auto& tile : getDeviceHostCopyTiles(owner, descriptor.blocksAt(Tier::DEVICE))) {
-            const auto& pool    = *owner.devicePools()[tile.member_group_id];
-            const auto  base    = reinterpret_cast<uintptr_t>(pool.getBaseAddress());
-            const auto  address = reinterpret_cast<uintptr_t>(tile.buffer.addr);
-            const auto  size    = pool.getTotalSizeBytes();
-            if (!tile.buffer.is_cuda || tile.buffer.device_index != device_index
-                || tile.buffer.size_bytes > static_cast<size_t>(std::numeric_limits<int64_t>::max())
-                || address < base || address - base > size || tile.buffer.size_bytes > size - (address - base)) {
-                reject();
-                return;
-            }
-            const auto shape       = static_cast<int64_t>(tile.buffer.size_bytes);
-            auto       host_view   = torch::from_blob(
-                static_cast<uint8_t*>(host.base) + tile.host_offset, {shape}, bytes_on_host);
-            auto       device_view = torch::from_blob(tile.buffer.addr, {shape}, bytes_on_device);
-            copy.multi_src.push_back(to_device ? std::move(host_view) : std::move(device_view));
-            copy.multi_dst.push_back(to_device ? std::move(device_view) : std::move(host_view));
-        }
-    }
-    if (entry.task.expired()) {
-        fail(entry,
-             unsubmittedResult(
-                 TransferResult(ErrorInfo(ErrorCode::DEADLINE_EXCEEDED, "transfer expired before stage submission"),
-                                CacheCopyError::NOT_EXECUTED)));
-        return;
-    }
-
-    // CUDA and PPU drain their copy streams on failure. The ROCm implementation
-    // uses blocking tensor copies on the current stream. If a copy throws,
-    // require a confirmed drain before withEntry can release the backing.
-#if defined(USING_ROCM) && USING_ROCM
-    const auto stream = c10::impl::VirtualGuardImpl(device.type()).getStream(device);
+void TransferWorkLoop::submitDeviceCopy(Entry& entry) {
+    const auto& desc = entry.task.descriptors().front();
+    startStepTimer(entry, desc.target_tier == Tier::DEVICE ? "h2d" :
+                          desc.source_tier == Tier::DEVICE ? "d2h" :
+                          desc.source_tier == Tier::DISK ? "disk_read" : "disk_write");
+    auto claimed = std::make_shared<std::atomic<bool>>(false);
     try {
-        execNoBlockCopy(copy);
+        submit_batch_(entry.task, [this, &entry, claimed](TransferResult result) {
+            if (claimed->exchange(true, std::memory_order_acq_rel))
+                return;
+            if (!result.block_errors.empty() && result.block_errors.size() != entry.task.descriptors().size())
+                result = TransferResult::executionException(result.buffer_safe, "invalid worker receipt size");
+            if (!result.buffer_safe)
+                result.status.setErrorCode(ErrorCode::TRANSFER_COMPLETION_UNKNOWN);
+            recordResult(entry, std::move(result));
+            publishCompletion(entry);
+        });
     } catch (...) {
-        try {
-            stream.synchronize();
-        } catch (...) {
-            RTP_LLM_LOG_ERROR("could not drain failed plain device copy on device %d", device_index);
-            Logger::getEngineLogger().flush();
-            std::abort();
-        }
-        throw;
-    }
-#else
-    execNoBlockCopy(copy);
-#endif
-    TransferResult result(TransferStatus::OK);
-    result.buffer_safe = true;
-    recordResult(entry, std::move(result));
-    completed_.push(entry);
-}
-
-void TransferWorkLoop::submitDisk(Entry& entry) {
-    startStepTimer(entry, entry.step == Step::DISK_READ ? "disk_read" : "disk_write");
-    auto*                    pool   = group(entry)->diskPool().get();
-    const bool               write  = entry.step == Step::DISK_WRITE;
-    const auto               stride = pool->strideBytes();
-    BlockIdList              blocks;
-    std::vector<void*>       buffers;
-    std::vector<const void*> write_buffers;
-    const auto&              descriptors = entry.task.descriptors();
-    blocks.reserve(descriptors.size());
-    buffers.reserve(descriptors.size());
-    write_buffers.reserve(descriptors.size());
-    for (size_t i = 0; i < descriptors.size(); ++i) {
-        const auto& host  = entry.hosts[i];
-        const auto& owner = *group(entry);
-        if (owner.storageBytes() > stride || !isValidHostBufferView(host, owner.payloadBytes(), stride)) {
-            fail(entry, unsubmittedResult(TransferStatus::DISK_IO_ERROR));
-            return;
-        }
-        blocks.push_back(descriptors[i].singleBlockAt(Tier::DISK));
-        if (write)
-            write_buffers.push_back(host.base);
-        else
-            buffers.push_back(host.base);
-    }
-    DiskBlockPool::Callback done = [this, &entry](BlockIOStatus status) { publishDisk(entry, status); };
-    // Ordinary rejection has no I/O/callback. Accepted workers own completion.
-    // Submission exceptions propagate to withEntry; it handles OOM locally.
-    assert(disk_io_executor_ != nullptr);
-    const auto status = write ? pool->asyncWrite(*disk_io_executor_, blocks, write_buffers, stride, std::move(done)) :
-                                pool->asyncRead(*disk_io_executor_, blocks, buffers, stride, std::move(done));
-    if (status != BlockIOStatus::OK) {
-        recordDiskResult(entry, status);
-        completed_.push(entry);
+        if (!claimed->exchange(true, std::memory_order_acq_rel))
+            throw;
     }
 }
 
-void TransferWorkLoop::publishDisk(Entry& entry, BlockIOStatus status) noexcept {
-    recordDiskResult(entry, status);
-    // Hold the lock from publication through the final notification so the owner
-    // cannot release admission or exit before this callback finishes accessing the WorkLoop.
+void TransferWorkLoop::publishCompletion(Entry& entry) noexcept {
+    // The producer does not access the entry after publishing it to the owner.
     std::lock_guard<std::mutex> lock(mutex_);
-    disk_completed_.push(entry);
-    // Do not touch entry after publication: the owner may already consume it.
+    io_completed_.push(entry);
     cv_.notify_all();
 }
 
 void TransferWorkLoop::pollOnce() {
     expireResourceWaiters();
-    Queue disk_completed;
+    Queue io_completed;
     {
         std::lock_guard<std::mutex> lock(mutex_);
-        disk_completed = disk_completed_.take();
+        io_completed = io_completed_.take();
     }
-    while (auto* entry = disk_completed.pop())
+    while (auto* entry = io_completed.pop())
         completed_.push(*entry);
-    has_crc_pending_ = crc_ && crc_->poll();
+    has_crc_pending_ = crc_ && (this->*rtp_io_->poll_crc)();
     auto completed   = completed_.take();
     while (auto* entry = completed.pop())
         consumeStage(*entry);
@@ -633,7 +514,7 @@ void TransferWorkLoop::pollOnce() {
         for (auto& [device, waiting] : crc_waiting_) {
             if (waiting.empty())
                 continue;
-            auto free_slots = crc_->availableSlots(device);
+            auto free_slots = (this->*rtp_io_->free_crc_slots)(device);
             while (free_slots > 0 && waiting.head) {
                 auto& entry = *waiting.head;
                 removeWaiter(entry);
@@ -642,25 +523,6 @@ void TransferWorkLoop::pollOnce() {
             }
         }
     }
-}
-
-void TransferWorkLoop::recordDiskResult(Entry& entry, BlockIOStatus status) noexcept {
-    assert(entry.result.ok());
-    // Only called after a zero-I/O rejection or the final DiskIOExecutor callback,
-    // which joins every accepted worker even on partial failure or exception.
-    // This stage contributes true to the AND; preserve the earlier stages' proof.
-    const auto transfer_status = blockIOStatusToTransferStatus(status);
-    const auto copy_error      = cacheCopyErrorFor(transfer_status);
-    const bool intermediate    = transfer_status == TransferStatus::OK && entry.step == Step::DISK_READ
-                              && entry.task.descriptors().front().target_tier == Tier::DEVICE;
-    if (!intermediate)
-        std::fill(entry.result.block_errors.begin(), entry.result.block_errors.end(), copy_error);
-    // Write only existing storage. Error strings are constructed by the owner
-    // after taking the completion queue. OOM there exits the process without retry.
-    entry.result.copy_error = copy_error;
-    entry.result.status.setErrorCode(transfer_status == TransferStatus::OK           ? ErrorCode::NONE_ERROR :
-                                     transfer_status == TransferStatus::INVALID_ARGS ? ErrorCode::INVALID_PARAMS :
-                                                                                       ErrorCode::EXECUTION_EXCEPTION);
 }
 
 void TransferWorkLoop::recordResult(Entry& entry, TransferResult result) noexcept {
@@ -738,9 +600,9 @@ void TransferWorkLoop::finish(Entry& entry) {
                 entry.before_complete(entry.result);
         });
     } catch (const std::exception& error) {
-        RTP_LLM_LOG_WARNING("async transfer before_complete callback failed: %s", error.what());
+        BTC_LOG_WARNING("async transfer before_complete callback failed: %s", error.what());
     } catch (...) {
-        RTP_LLM_LOG_WARNING("async transfer before_complete callback failed");
+        BTC_LOG_WARNING("async transfer before_complete callback failed");
     }
     entry.context->complete(std::move(entry.result));
     // Context ready precedes callback return. Neither permits early reuse of
@@ -818,12 +680,12 @@ void TransferWorkLoop::run() {
         }
         if (cancel)
             cancelStaging();
-        Queue cuda_work, disk_work;
+        Queue device_work, disk_work;
         auto  ready = ready_.take();
         while (auto* entry = ready.pop()) {
             withEntry(*entry, [&] {
                 if (plan(*entry))
-                    (isDeviceCopy(entry->step) ? cuda_work : disk_work).push(*entry);
+                    (isDeviceCopy(entry->step) ? device_work : disk_work).push(*entry);
             });
         }
         auto submit = [&](Queue& work) {
@@ -832,18 +694,18 @@ void TransferWorkLoop::run() {
         };
         if (operation_ == TransferOperation::LOAD) {
             submit(disk_work);
-            submit(cuda_work);
+            submit(device_work);
         } else {
-            submit(cuda_work);
+            submit(device_work);
             submit(disk_work);
         }
         pollOnce();
         std::unique_lock<std::mutex> lock(mutex_);
-        if (!accepting_ && entry_count_ == 0 && incoming_.empty() && disk_completed_.empty())
+        if (!accepting_ && entry_count_ == 0 && incoming_.empty() && io_completed_.empty())
             return;
         if (ready_.empty() && completed_.empty() && !has_crc_pending_) {
             const auto wake_up = [this] {
-                return !incoming_.empty() || !disk_completed_.empty() || cancel_staging_
+                return !incoming_.empty() || !io_completed_.empty() || cancel_staging_
                        || (!accepting_ && entry_count_ == 0);
             };
             if (wait_deadlines_.empty()) {

@@ -26,6 +26,7 @@
 #include "rtp_llm/cpp/cache/CPSlotMapper.h"
 #include "rtp_llm/cpp/cache/SingleTypeCacheManager.h"
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/block_pool/AlignedHostMemory.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/BlockTransferDispatcher.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/test/BlockTreeCacheTestUtils.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferBatchAsyncContext.h"
@@ -1400,6 +1401,7 @@ protected:
                                                     /*warmup=*/false,
                                                     nullptr,
                                                     makeTierConfig(GetParam(), disk_dir_.path(), lower_cache_size_mb));
+        // This fixture injects legacy TreeNodes and inspects transfer states directly.
         ASSERT_TRUE(manager_->init());
         ASSERT_NE(manager_->blockTreeCache(), nullptr);
         auto cache = manager_->blockTreeCache();

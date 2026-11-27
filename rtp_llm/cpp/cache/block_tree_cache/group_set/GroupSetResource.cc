@@ -1,6 +1,7 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/group_set/GroupSetResource.h"
 
 #include <algorithm>
+#include <cassert>
 
 namespace rtp_llm {
 
@@ -8,15 +9,21 @@ void GroupSetResource::evictFromTier(Tier tier) {
     switch (tier) {
         case Tier::DEVICE:
             std::fill(device_blocks.begin(), device_blocks.end(), NULL_BLOCK_IDX);
+            retained_host_replica = false;
             break;
         case Tier::HOST:
             host_block = NULL_BLOCK_IDX;
+            retained_host_replica = false;
             break;
         case Tier::DISK:
             disk_block = NULL_BLOCK_IDX;
+            retained_disk_replica = false;
             break;
         default:
             break;
+    }
+    if (!hasTier(Tier::DEVICE) && !hasTier(Tier::HOST)) {
+        retained_disk_replica = false;
     }
 }
 
@@ -50,6 +57,13 @@ void GroupSetResource::setBlocks(Tier tier, const std::vector<BlockIdxType>& blo
         default:
             break;
     }
+}
+
+void GroupSetResource::setHostReplica(BlockIdxType block) {
+    assert(hasCompleteDeviceValue() && !hasTier(Tier::HOST) && !hasTier(Tier::DISK) && !isNullBlockIdx(block)
+           && "A retained Host copy must accompany complete Device data");
+    host_block = block;
+    retained_host_replica = true;
 }
 
 }  // namespace rtp_llm

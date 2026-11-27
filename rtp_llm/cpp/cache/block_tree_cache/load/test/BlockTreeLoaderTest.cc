@@ -1,4 +1,5 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/load/BlockTreeLoader.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/integration/rtp_llm/RtpStorageBackend.h"
 
 #include <atomic>
 #include <chrono>
@@ -33,6 +34,7 @@ using block_tree_cache_test::makeHostPool;
 using block_tree_cache_test::makeStructuralDevicePool;
 using block_tree_cache_test::releaseDeviceBlocks;
 using block_tree_cache_test::reserveEvictionSourceForTest;
+using block_tree_cache_test::terminalCopyResultForTest;
 
 class ReadFailureBackend final: public StorageBackend {
 public:
@@ -83,14 +85,14 @@ TEST(BlockTreeLoaderTest, LocalHostLoadSettlesDespiteBackendFailure) {
     environment->groups[0]->enable_crc_ = true;
 
     auto                       backend = std::make_shared<ReadFailureBackend>();
-    StorageBackend::PoolsByTag pools;
+    RtpStorageBackend::PoolsByTag pools;
     for (const auto& group : environment->groups) {
         for (size_t member = 0; member < group->groupTags().size(); ++member) {
             pools.emplace(group->groupTags()[member], group->devicePools()[member]);
         }
     }
-    ASSERT_TRUE(backend->init(
-        environment->topology, pools, [](int, const std::string&, int) { return std::vector<BlockInfo>{}; }));
+    ASSERT_TRUE(RtpStorageBackend::initEngine(
+        *backend, environment->topology, pools, [](int, const std::string&, int) { return std::vector<BlockInfo>{}; }));
     environment->cache->loader_.storage_backend_ = backend;
     CacheKeysType keys                           = environment->keys;
     keys.push_back(keys.back() + 1);
@@ -936,7 +938,7 @@ public:
             released = released_;
         }
         if (released) {
-            context->complete(ErrorInfo::OkStatus());
+            context->complete(terminalCopyResultForTest());
         }
         cv_.notify_all();
         return context;
@@ -961,6 +963,14 @@ public:
         context->complete(std::move(result));
     }
 
+    void completeResult(size_t index, ErrorInfo status) {
+        auto result = TransferResult(std::move(status));
+        if (result.status.code() != ErrorCode::TRANSFER_COMPLETION_UNKNOWN) {
+            result.buffer_safe = true;
+        }
+        completeResult(index, std::move(result));
+    }
+
     void releaseAll() {
         std::vector<std::shared_ptr<TransferBatchAsyncContext>> contexts;
         {
@@ -969,7 +979,7 @@ public:
             contexts  = contexts_;
         }
         for (const auto& context : contexts) {
-            context->complete(ErrorInfo::OkStatus());
+            context->complete(terminalCopyResultForTest());
         }
     }
 
@@ -993,7 +1003,7 @@ public:
             }
         }
         for (const auto& [task, context] : batches) {
-            TransferResult result;
+            auto result = terminalCopyResultForTest();
             result.expandBlockErrors(task.descriptors().size());
             for (size_t index = 0; index < task.descriptors().size(); ++index) {
                 if (std::find(corrupt_groups.begin(), corrupt_groups.end(), task.descriptors()[index].group_set_id)
@@ -1004,8 +1014,10 @@ public:
                         std::fill(result.block_errors.begin(), result.block_errors.end(), CacheCopyError::NOT_EXECUTED);
                     }
                     result.block_errors[index] = CacheCopyError::CRC_MISMATCH;
-                    result.merge({ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "injected corrupt record"),
-                                  CacheCopyError::CRC_MISMATCH});
+                    auto corrupt = terminalCopyResultForTest(ErrorInfo(ErrorCode::EXECUTION_EXCEPTION,
+                                                                       "injected corrupt record"));
+                    corrupt.copy_error = CacheCopyError::CRC_MISMATCH;
+                    result.merge(std::move(corrupt));
                     if (!whole_batch) {
                         break;
                     }
@@ -1323,7 +1335,7 @@ TEST(BlockTreeLoaderTest, HostSuccessUsesResidentSwaFallbackWithoutLoadingAnExtr
     }
 }
 
-TEST(BlockTreeLoaderTest, UnknownDiskCompletionFreezesOnlyItsTargetBeforeHostCompletion) {
+TEST(BlockTreeLoaderTest, UnknownDiskCompletionFreezesItsSourceAndTargetBeforeHostCompletion) {
     if (!cudaAvailable()) {
         GTEST_SKIP() << "CUDA not available";
     }
@@ -1355,7 +1367,7 @@ TEST(BlockTreeLoaderTest, UnknownDiskCompletionFreezesOnlyItsTargetBeforeHostCom
     EXPECT_EQ(frozen_tasks.front()->execution().descriptors.front().source_tier, Tier::DISK);
     for (size_t group = 0; group < env->groups.size(); ++group) {
         EXPECT_EQ(env->groups[group]->hostPool()->referencedBlocksNum(BlockTreeRefType::FROZEN), 0u);
-        EXPECT_EQ(env->groups[group]->diskPool()->referencedBlocksNum(BlockTreeRefType::FROZEN), 0u);
+        EXPECT_EQ(env->groups[group]->diskPool()->referencedBlocksNum(BlockTreeRefType::FROZEN), group);
         for (const auto& pool : env->groups[group]->devicePools()) {
             EXPECT_EQ(pool->referencedBlocksNum(BlockTreeRefType::FROZEN), group);
         }
@@ -1368,7 +1380,7 @@ TEST(BlockTreeLoaderTest, UnknownDiskCompletionFreezesOnlyItsTargetBeforeHostCom
     EXPECT_TRUE(env->resourcesForPathNode(0)[1].hasTier(Tier::DISK));
     for (size_t group = 0; group < env->groups.size(); ++group) {
         EXPECT_EQ(env->groups[group]->hostPool()->referencedBlocksNum(BlockTreeRefType::FROZEN), 0u);
-        EXPECT_EQ(env->groups[group]->diskPool()->referencedBlocksNum(BlockTreeRefType::FROZEN), 0u);
+        EXPECT_EQ(env->groups[group]->diskPool()->referencedBlocksNum(BlockTreeRefType::FROZEN), group);
         for (const auto& pool : env->groups[group]->devicePools()) {
             EXPECT_EQ(pool->referencedBlocksNum(BlockTreeRefType::FROZEN), group);
         }
@@ -1526,7 +1538,7 @@ TEST_P(BlockTreeLoaderCorruptionTest, FullCorruptionBlocksPendingKeyUntilDescend
     EXPECT_EQ(env->cache->tree_->size(), 0u);
     EXPECT_TRUE(env->cache->tree_->findNode(env->keys).empty());
     ASSERT_EQ(env->cache->tree_->pending_node_pool_.size(), 1u);
-    EXPECT_EQ(env->cache->tree_->pending_node_pool_.at(env->keys.back()).get(), old_leaf);
+    EXPECT_EQ(block_tree_cache_test::pendingNodeForTest(*env->cache->tree_, env->keys.back()), old_leaf);
     EXPECT_EQ(old_leaf->parent, nullptr);
     const auto after_drop = env->cache->getKeySnapshot();
     EXPECT_TRUE(after_drop.keys.empty());
@@ -1552,7 +1564,7 @@ TEST_P(BlockTreeLoaderCorruptionTest, FullCorruptionBlocksPendingKeyUntilDescend
     // Reinsert the prefix, but stop before the key still owned by the pending leaf.
     const auto replacement_prefix = env->cache->tree_->findNode(env->keys);
     ASSERT_EQ(replacement_prefix.size(), env->keys.size() - 1);
-    EXPECT_EQ(env->cache->tree_->pending_node_pool_.at(env->keys.back()).get(), old_leaf);
+    EXPECT_EQ(block_tree_cache_test::pendingNodeForTest(*env->cache->tree_, env->keys.back()), old_leaf);
     const auto replacement_snapshot = env->cache->getKeySnapshot();
     EXPECT_EQ(replacement_snapshot.keys, (CacheKeysType{env->keys[0], env->keys[1]}));
     for (const auto& resource : old_leaf->group_set_resources) {
@@ -1727,7 +1739,7 @@ TEST(BlockTreeLoaderTest, FullPendingCommitRejectsCorruptSubtreeAndReclaimsItsNo
     ASSERT_EQ(env->cache->tree_->pending_node_pool_.size(), 1u);
     const auto after_drop = env->cache->getKeySnapshot();
     EXPECT_TRUE(after_drop.keys.empty());
-    for (const auto& resource : env->cache->tree_->pending_node_pool_.at(env->keys.back())->group_set_resources) {
+    for (const auto& resource : block_tree_cache_test::pendingNodeForTest(*env->cache->tree_, env->keys.back())->group_set_resources) {
         EXPECT_TRUE(resource.transfer_detached);
         EXPECT_EQ(resource.transfer_state, GroupSetTransferState::LOAD_PENDING);
     }
@@ -1844,7 +1856,7 @@ TEST(BlockTreeLoaderTest, ConcurrentFullAndSwaCorruptionPreservesSwaPathAndRecla
     ASSERT_EQ(env->cache->tree_->pending_node_pool_.size(), 1u);
     const auto after_drop = env->cache->getKeySnapshot();
     EXPECT_EQ(after_drop.keys.size(), other_keys.size());
-    for (const auto& resource : env->cache->tree_->pending_node_pool_.at(env->keys.back())->group_set_resources) {
+    for (const auto& resource : block_tree_cache_test::pendingNodeForTest(*env->cache->tree_, env->keys.back())->group_set_resources) {
         EXPECT_TRUE(resource.transfer_detached);
         EXPECT_EQ(resource.transfer_state, GroupSetTransferState::LOAD_PENDING);
     }
@@ -2349,7 +2361,7 @@ TEST(BlockTreeLoaderTest, NonOwnerLoadKeepsRemovedNodesPendingUntilLastUserFinis
                 EXPECT_FALSE(desc.initial_owner);
                 EXPECT_EQ(desc.node->parent, nullptr);
                 EXPECT_GE(desc.node->non_owner_transfer_ref_count, 2u);
-                EXPECT_EQ(env->cache->tree_->pending_node_pool_.at(desc.node->cache_key).get(), desc.node);
+                EXPECT_EQ(block_tree_cache_test::pendingNodeForTest(*env->cache->tree_, desc.node->cache_key), desc.node);
                 const auto& group = env->groups[desc.group_set_id];
                 IBlockPool* pool  = source == Tier::HOST ? static_cast<IBlockPool*>(group->hostPool().get()) :
                                                            static_cast<IBlockPool*>(group->diskPool().get());
@@ -2540,7 +2552,7 @@ TEST(BlockTreeLoaderTest, NonOwnerFullCrcPrunesBusySubtreeAndRestoresParentCandi
                 EXPECT_TRUE(path.front()->children.empty());
                 ASSERT_EQ(env->cache->tree_->pending_node_pool_.size(), path_length - 1);
                 for (size_t index = 1; index < path_length; ++index) {
-                    const auto* node = env->cache->tree_->pending_node_pool_.at(env->keys[index]).get();
+                    const auto* node = block_tree_cache_test::pendingNodeForTest(*env->cache->tree_, env->keys[index]);
                     EXPECT_EQ(node->parent, nullptr);
                     for (const auto& resource : node->group_set_resources) {
                         EXPECT_TRUE(resource.transfer_detached);

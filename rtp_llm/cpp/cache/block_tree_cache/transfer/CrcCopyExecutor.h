@@ -22,9 +22,7 @@ public:
 
     // Optional borrowed output: one zero-initialized record per batch, valid
     // through done. Only raw steady-clock boundaries; profiling stays upstream.
-    struct Timing {
-        int64_t slot_acquired_us{0}, submit_return_us{0}, completed_us{0};
-    };
+    using Timing = TransferCrcTiming;
 
     // Groups have validated physical copy geometry. Slot count is per device.
     CrcCopyExecutor(const std::vector<GroupSetPtr>& groups,

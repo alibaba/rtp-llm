@@ -107,8 +107,8 @@ public:
     }
 
     void complete(size_t index, bool success) {
-        contexts_.at(index)->complete(success ? ErrorInfo::OkStatus() :
-                                                ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "injected failure"));
+        contexts_.at(index)->complete(block_tree_cache_test::terminalCopyResultForTest(
+            success ? ErrorInfo::OkStatus() : ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "injected failure")));
     }
 
 private:

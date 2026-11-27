@@ -4,9 +4,10 @@
 #include <string>
 #include <vector>
 
-#include "rtp_llm/cpp/cache/CacheConfig.h"
-
 namespace rtp_llm {
+
+struct CacheConfig;
+struct KVCacheConfig;
 
 // Layout of one packed HOST/DISK record for one GroupSet block on this rank.
 // The payload combines one block from each member pool, including all of that

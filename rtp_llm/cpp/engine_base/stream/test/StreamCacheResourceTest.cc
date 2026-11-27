@@ -1048,34 +1048,33 @@ TEST_F(StreamCacheResourceTest, PrefillIncrementAfterHostLoadPreservesLinearReus
         resource.resource_context_.enable_memory_cache         = true;
         stream_->generate_input_->generate_config->reuse_cache = true;
         initCacheKeys(resource.batch_kv_cache_resource_, stream_->completeTokenIdsPtr(), 2);
-        const auto&                                cache = cache_manager_->block_tree_cache_;
+        const auto& cache = cache_manager_->block_tree_cache_;
+
+        using block_tree_cache_test::BlockTreeCacheTestPeer;
+        BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache, Tier::DEVICE, 0.0);
         std::vector<std::vector<GroupSetResource>> slots(1, std::vector<GroupSetResource>(cache->groupSets().size()));
         for (const auto& group : cache->groupSets()) {
-            const auto host_block = group->allocateSingleBlock(Tier::HOST, BlockTreeRefType::CACHE);
-            ASSERT_FALSE(isNullBlockIdx(host_block));
-            BlockIndicesType device_blocks;
+            auto& device_blocks = slots[0][group->groupSetId()].device_blocks;
             for (const auto& pool : group->devicePools()) {
                 const auto allocated = pool->malloc(1);
                 ASSERT_TRUE(allocated.has_value());
                 pool->incRef(*allocated);
                 device_blocks.push_back(allocated->front());
             }
-            ASSERT_TRUE(cache
-                            ->executeTransfer(TransferTask(
-                                {TransferDescriptor::deviceToHost(group->groupSetId(), device_blocks, host_block)},
-                                std::chrono::seconds(30)))
-                            .ok());
-            for (size_t member = 0; member < device_blocks.size(); ++member) {
-                group->devicePools()[member]->decRef(device_blocks[member]);
-            }
-            slots[0][group->groupSetId()].host_block = host_block;
         }
-        ASSERT_EQ(cache->tree()
-                      ->insertNode({resource.batch_kv_cache_resource_->cacheKeys(0).front()}, slots, false, false)
-                      .accepted_resource_count,
-                  cache->groupSets().size());
+        cache->insert({resource.batch_kv_cache_resource_->cacheKeys(0).front()}, slots, Tier::DEVICE);
         for (const auto& group : cache->groupSets()) {
-            group->releaseSingleBlock(Tier::HOST, slots[0][group->groupSetId()].host_block, BlockTreeRefType::CACHE);
+            const auto& blocks = slots[0][group->groupSetId()].device_blocks;
+            for (size_t member = 0; member < blocks.size(); ++member) {
+                group->devicePools()[member]->decRef(blocks[member]);
+            }
+        }
+        BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache, Tier::DEVICE, 0.000001);
+        BlockTreeCacheTestPeer::runMaintenanceForTest(*cache);
+        BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache);
+        BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache, Tier::DEVICE, 0.0);
+        for (const auto& group : cache->groupSets()) {
+            ASSERT_EQ(group->hostPool()->usedBlocksNum(), 1u);
         }
 
         ASSERT_TRUE(resource.initKVBlock().ok());

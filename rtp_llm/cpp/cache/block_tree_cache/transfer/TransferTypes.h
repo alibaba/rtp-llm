@@ -22,6 +22,10 @@
 
 namespace rtp_llm {
 
+struct TransferCrcTiming {
+    int64_t slot_acquired_us{0}, submit_return_us{0}, completed_us{0};
+};
+
 enum class TransferOperation : uint8_t {
     LOAD,
     EVICT,
@@ -195,6 +199,13 @@ struct TransferResult {
         return status.ok();
     }
 
+    bool confirmedCopy(size_t expected_blocks) const {
+        return ok() && buffer_safe && block_errors.size() == expected_blocks
+               && std::all_of(block_errors.begin(), block_errors.end(), [](auto error) {
+                      return error == CacheCopyError::NONE;
+                  });
+    }
+
     // Completion evidence must survive failure to allocate the diagnostic itself.
     static TransferResult executionException(bool safe, const char* message = nullptr) noexcept {
         TransferResult result;
@@ -299,7 +310,12 @@ struct TransferDescriptor {
         target_tier(target_tier),
         source_blocks(std::move(source_blocks)),
         initial_owner(initial_owner),
-        generation(node ? node->group_set_resources.at(group_set_id).generation : 0) {}
+        generation(node ? node->group_set_resources.at(group_set_id).generation : 0) {
+        if (node && node->key().isOpaque()) {
+            this->path_index = node->depth - 1;
+            logical_key = node->key().bytes();
+        }
+    }
 
     static TransferDescriptor
     deviceToHost(size_t group_set_id, std::vector<BlockIdxType> device_blocks, BlockIdxType host_block) {
@@ -360,7 +376,7 @@ struct TransferDescriptor {
         const bool supported_direction =
             (source_tier == Tier::DEVICE && target_tier == Tier::HOST)
             || (source_tier == Tier::HOST && (target_tier == Tier::DEVICE || target_tier == Tier::DISK))
-            || (source_tier == Tier::DISK && target_tier == Tier::DEVICE);
+            || (source_tier == Tier::DISK && (target_tier == Tier::DEVICE || target_tier == Tier::HOST));
         return supported_direction && endpointResolved(source_tier, source_blocks)
                && endpointResolved(target_tier, target_blocks);
     }
@@ -380,6 +396,8 @@ struct TransferDescriptor {
     std::vector<BlockIdxType> target_blocks;
     bool                      initial_owner{true};
     uint64_t                  generation{0};
+    // Deep-copied under the tree lock for work leaving the coordinator.
+    std::string                logical_key;
 
     bool isCurrentOwner() const {
         return node && initial_owner && generation == node->group_set_resources[group_set_id].generation;
@@ -453,11 +471,11 @@ public:
     using Clock = std::chrono::steady_clock;
 
     TransferTask(std::vector<TransferDescriptor> descriptors,
-                 std::chrono::milliseconds       timeout,
+                 std::optional<std::chrono::milliseconds> timeout,
                  std::optional<int64_t>          request_id = {}):
         descriptors_(makeDescriptors(std::move(descriptors))),
         end_(descriptors_ ? descriptors_->size() : 0),
-        deadline_(Clock::now() + timeout),
+        deadline_(timeout ? Clock::now() + *timeout : Clock::time_point::max()),
         request_id_(request_id) {}
 
     TransferTask(const TransferTask&)                = default;

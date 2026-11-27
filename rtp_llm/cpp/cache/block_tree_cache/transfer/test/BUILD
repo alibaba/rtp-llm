@@ -29,7 +29,7 @@ cc_library(
     name = "block_transfer_engine_test_utils",
     srcs = ["PerRankBlockTransferEngineTestUtils.cc"],
     hdrs = ["PerRankBlockTransferEngineTestUtils.h"],
-    visibility = ["//rtp_llm/cpp/cache/block_tree_cache:__subpackages__"],
+    visibility = ["//rtp_llm/cpp/cache/block_tree_cache:__subpackages__", "//rtp_llm/cpp/cache/test:__pkg__"],
     deps = [
         "//rtp_llm/cpp/cache/block_tree_cache",
         "//rtp_llm/cpp/cache/test:cache_config_test_utils",

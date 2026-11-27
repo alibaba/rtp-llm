@@ -3,7 +3,7 @@
 #include <algorithm>
 #include <utility>
 
-#include "rtp_llm/cpp/cache/block_tree_cache/metrics/BlockTreeCacheMetricsReporter.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/metrics/CacheObserver.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/BlockTransferDispatcher.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/CompletionStage.h"
 
@@ -14,7 +14,7 @@ EvictionTaskRunner::EvictionTaskRunner(const std::vector<GroupSetPtr>& group_set
     group_sets_(group_sets), transfer_dispatcher_(transfer_dispatcher) {}
 
 void EvictionTaskRunner::runTransfer(std::shared_ptr<const EvictionTransferTask> task,
-                                     BlockTreeCacheMetricsReporter&              metrics_reporter,
+                                     CacheObserver&              metrics_reporter,
                                      EvictionDoneCallback                        on_done) const {
     const auto&               descriptors = task->descriptors();
     const TransferDescriptor& first       = descriptors.front();
@@ -44,7 +44,13 @@ void EvictionTaskRunner::runTransfer(std::shared_ptr<const EvictionTransferTask>
     transfer_dispatcher_->runTransfer(
         task->transfer_task,
         [this, task, &metrics_reporter, transfer_begin, on_done = std::move(on_done)](TransferResult result) mutable {
-            const bool success = result.ok();
+            const bool success = result.confirmedCopy(task->descriptors().size());
+            if (!success && result.ok()) {
+                result.status = ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "unconfirmed eviction copy");
+                if (result.copy_error == CacheCopyError::NONE) {
+                    result.copy_error = CacheCopyError::COPY_FAILED;
+                }
+            }
             auto       stage_context = CacheStageContext::forTransfer(metrics_reporter, task->transfer_task, "evict");
             auto       total = TransferStageTimer::scope(stage_context, "callback_total", "workflow_callback", success);
             {

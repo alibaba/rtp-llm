@@ -3,14 +3,15 @@
 #include <algorithm>
 #include <mutex>
 #include <exception>
-#include <limits>
 #include <optional>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
 
-#include "rtp_llm/cpp/utils/AssertUtils.h"
-#include "rtp_llm/cpp/utils/Logger.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/block_pool/IBlockPool.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/diagnostic/CacheDiagnostics.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/metrics/CacheObserver.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/StoragePrefixCoverage.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferStageTimer.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/ScopeRollback.h"
 
@@ -36,16 +37,16 @@ bool invokeCallback(const StorageBackend* backend, Callback&& callback) noexcept
         callback();
         return true;
     } catch (const std::exception& error) {
-        RTP_LLM_LOG_ERROR("StorageBackend completion failed: %s", error.what());
+        BTC_LOG_ERROR("StorageBackend completion failed: %s", error.what());
     } catch (...) {
-        RTP_LLM_LOG_ERROR("StorageBackend completion failed with an unknown exception");
+        BTC_LOG_ERROR("StorageBackend completion failed with an unknown exception");
     }
     return false;
 }
 
 struct StorageTaskState {
     struct Pin {
-        DeviceBlockPoolPtr    pool;
+        std::shared_ptr<IBlockPool> pool;
         BlockIdxType          block;
         std::function<void()> release;
     };
@@ -53,7 +54,6 @@ struct StorageTaskState {
     StorageRequest    request;
     uint64_t          trace_id{0};
     std::vector<Pin>  pins;
-    std::function<void()> release_host_source;
     std::once_flag    finish_once;
     std::atomic<bool> completion_started{false};
     void              finish(bool freeze_pins = false) {
@@ -67,7 +67,6 @@ struct StorageTaskState {
                     pin.release();
             }
             pins.clear();
-            if (release_host_source) release_host_source();
         });
     }
 
@@ -102,7 +101,7 @@ namespace rtp_llm {
 namespace {
 
 struct BlockKey {
-    DeviceBlockPool* pool;
+    const IBlockPool* pool;
     BlockIdxType     block;
     bool             operator==(const BlockKey& other) const {
         return pool == other.pool && block == other.block;
@@ -111,7 +110,7 @@ struct BlockKey {
 
 struct BlockKeyHash {
     size_t operator()(const BlockKey& key) const {
-        return std::hash<DeviceBlockPool*>{}(key.pool) ^ (std::hash<BlockIdxType>{}(key.block) << 1U);
+        return std::hash<const IBlockPool*>{}(key.pool) ^ (std::hash<BlockIdxType>{}(key.block) << 1U);
     }
 };
 
@@ -120,77 +119,34 @@ struct BlockKeyHash {
 StorageWriteTask::StorageWriteTask(std::shared_ptr<storage_backend_detail::StorageTaskState> state):
     state_(std::move(state)) {}
 
-StorageWriteTask StorageBackend::prepareWrite(IBlockPool& host_pool, BlockIdxType source) {
-    // Use main's task-owned release callback for this Host source. Prepare
-    // its ownership record before acquiring the EVICT pin; a failed native
-    // retain must never run a release for an unacquired reference.
-    auto state = std::make_shared<storage_backend_detail::StorageTaskState>();
-    std::function<void()> release = [&host_pool, source] {
-        host_pool.decTreeRef(source, BlockTreeRefType::EVICT);
-    };
-    host_pool.incTreeRef(source, BlockTreeRefType::EVICT);
-    state->release_host_source = std::move(release);
-    return StorageWriteTask(std::move(state));
-}
-
-uint64_t StorageBackend::HostWrites::write(size_t group, std::string hash, BlockIdxType slot) {
-    if (slot < 0 || static_cast<size_t>(slot) >= pool_.totalBlocksNum())
-        throw std::out_of_range("Host storage source outside registered pool");
-    if (last_ticket_ == std::numeric_limits<uint64_t>::max())
-        throw std::overflow_error("Host storage write ticket space exhausted");
-    const uint64_t ticket = ++last_ticket_;
-    auto task = StorageBackend::prepareWrite(pool_, slot + 1);
-    pending_.emplace(ticket, Entry{{ticket, group, std::move(hash), slot}, std::move(task)});
-    return ticket;
-}
-
-void StorageBackend::HostWrites::dispatch(const std::function<void(const std::vector<const Source*>&)>& submit) {
-    std::vector<const Source*> batch;
-    for (const auto& [ticket, entry] : pending_) {
-        if (!entry.sent) {
-            batch.push_back(&entry.source);
-            if (batch.size() == 256)
-                break;
-        }
-    }
-    // Construct the entire outbound batch before consuming any admissions.
-    submit(batch);
-    for (const auto* source : batch)
-        pending_.at(source->ticket).sent = true;
-}
-
-bool StorageBackend::HostWrites::settle(
-    uint64_t ticket, bool committed, const std::function<void(const Source&, bool)>& done) {
-    auto it = pending_.find(ticket);
-    if (it == pending_.end() || !it->second.sent)
-        return false;
-    // Commit metadata while the write still owns its immutable source. A
-    // failed backend write never grants permission to evict that source.
-    done(it->second.source, committed);
-    pending_.erase(it);
-    return true;
-}
-
-size_t StorageBackend::HostWrites::countIf(const std::function<bool(BlockIdxType)>& include) const {
-    return std::count_if(pending_.begin(), pending_.end(), [&](const auto& item) {
-        return include(item.second.source.slot);
-    });
-}
-
 StorageBackend::StorageBackend(std::shared_ptr<StorageBackendExecutor>        executor,
-                               std::shared_ptr<BlockTreeCacheMetricsReporter> reporter,
+                               std::shared_ptr<CacheObserver>                  reporter,
                                int64_t                                        world_rank,
-                               std::chrono::milliseconds                      timeout):
+                               std::optional<std::chrono::milliseconds>       timeout):
     executor_(std::move(executor)),
     stage_metrics_reporter_(std::move(reporter)),
     stage_metrics_enabled_(stage_metrics_reporter_ && stage_metrics_reporter_->stageMetricsEnabled()),
     world_rank_(world_rank),
     timeout_(timeout) {}
 
-void StorageBackend::setStageMetricsReporter(std::shared_ptr<BlockTreeCacheMetricsReporter> reporter) {
+void StorageBackend::setStageMetricsReporter(std::shared_ptr<CacheObserver> reporter) {
     const bool enabled = reporter && reporter->stageMetricsEnabled();
     std::atomic_store(&stage_metrics_reporter_, std::move(reporter));
     stage_metrics_enabled_.store(enabled, std::memory_order_release);
+}
+
+void StorageBackend::applyDeadline(StorageRequest& request) const {
+    if (timeout_ && !request.transfer_task) {
+        request.transfer_task.emplace(std::vector<TransferDescriptor>{}, *timeout_, request.request_id);
+    }
+}
+
+std::optional<StorageBackendExecutor::Clock::time_point> StorageBackend::deadline(const StorageRequest& request) const {
+    return timeout_ ? std::optional{request.transfer_task->deadline()} : std::nullopt;
+}
+
+bool StorageBackend::expired(const StorageRequest& request) const {
+    return timeout_.has_value() && request.transfer_task->expired();
 }
 
 SharedTransferStageTimer StorageBackend::stageTimer(const char*           stage,
@@ -229,42 +185,43 @@ TransferStageTimer StorageBackend::stageValue(const char*           stage,
 
 StorageBackend::~StorageBackend() {
     std::lock_guard<std::mutex> lock(lifecycle_mutex_);
-    RTP_LLM_CHECK_WITH_INFO(lifecycle_ == Lifecycle::CREATED || lifecycle_ == Lifecycle::STOPPED,
+    BTC_CHECK_WITH_INFO(lifecycle_ == Lifecycle::CREATED || lifecycle_ == Lifecycle::STOPPED,
                             "StorageBackend must be shutdown before derived destruction");
 }
 
-bool StorageBackend::init(std::shared_ptr<const CacheTopology> topology,
-                          PoolsByTag                           pools_by_tag,
-                          BufferResolver                       buffer_resolver) {
+const StorageBackend::PageAccess& StorageBackend::GroupAccess::forTier(Tier tier) const {
+    if (tier == Tier::DEVICE) {
+        return device;
+    }
+    if (tier == Tier::HOST && host.pool) {
+        return host;
+    }
+    throw std::invalid_argument("storage operation has no pool for its tier");
+}
+
+bool StorageBackend::init(Groups groups) {
     if (init_attempted_) {
-        RTP_LLM_LOG_ERROR("StorageBackend initialization has already been attempted");
+        BTC_LOG_ERROR("StorageBackend initialization has already been attempted");
         return false;
     }
-    RTP_LLM_CHECK(topology && buffer_resolver);
-    RTP_LLM_CHECK(pools_by_tag.size() == topology->groups().size());
-    std::unordered_set<const DeviceBlockPool*> seen_pools;
-    for (const auto& [tag, pool] : pools_by_tag) {
-        (void)topology->group(tag);
-        RTP_LLM_CHECK_WITH_INFO(pool != nullptr, "null storage pool for tag=%s", tag.c_str());
-        RTP_LLM_CHECK_WITH_INFO(
-            seen_pools.emplace(pool.get()).second, "storage tags must own distinct pools: tag=%s", tag.c_str());
+    for (const auto& [tag, group] : groups) {
+        if (tag.empty() || !group.device.pool || !group.device.pin || !group.required
+            || bool(group.host.pool) != bool(group.host.pin)) {
+            throw std::invalid_argument("incomplete storage group binding for tag=" + tag);
+        }
     }
     init_attempted_ = true;
     if (executor_ == nullptr) {
         executor_ = makeDefaultStorageBackendExecutor();
     }
     if (executor_->bound_to_backend_.exchange(true)) {
-        RTP_LLM_LOG_ERROR("StorageBackend executor cannot be shared between backends");
+        BTC_LOG_ERROR("StorageBackend executor cannot be shared between backends");
         return false;
     }
-    topology_            = std::move(topology);
-    pools_by_tag_        = std::move(pools_by_tag);
-    buffer_resolver_     = std::move(buffer_resolver);
+    groups_ = std::move(groups);
     const auto fail_init = [this] {
         shutdownImpl();
-        buffer_resolver_ = {};
-        pools_by_tag_.clear();
-        topology_.reset();
+        groups_.clear();
         return false;
     };
     bool impl_initialized = false;
@@ -306,7 +263,7 @@ bool StorageBackend::dispatch(Operation                                         
         if (outcome == Lifecycle::FINALIZING) {
             outcome = Lifecycle::STOPPED;
         } else if (outcome != Lifecycle::STOPPED) {
-            RTP_LLM_CHECK(outcome != Lifecycle::CREATED);
+            BTC_CHECK(outcome != Lifecycle::CREATED);
             ++in_flight_;
         }
     }
@@ -349,14 +306,14 @@ bool StorageBackend::dispatch(Operation                                         
 
 void StorageBackend::taskFinished() {
     std::lock_guard<std::mutex> lock(lifecycle_mutex_);
-    RTP_LLM_CHECK(in_flight_ > 0);
+    BTC_CHECK(in_flight_ > 0);
     if (--in_flight_ == 0) {
         lifecycle_cv_.notify_all();
     }
 }
 
 void StorageBackend::shutdown() {
-    RTP_LLM_CHECK_WITH_INFO(storage_backend_detail::completing_backend != this,
+    BTC_CHECK_WITH_INFO(storage_backend_detail::completing_backend != this,
                             "StorageBackend shutdown cannot run from its callback");
     std::shared_ptr<StorageBackendExecutor> executor;
     {
@@ -397,42 +354,46 @@ StorageBackend::prepare(StorageRequest request, bool for_write, uint64_t trace_i
     auto state      = std::make_shared<storage_backend_detail::StorageTaskState>();
     state->request  = std::move(request);
     state->trace_id = trace_id;
-    RTP_LLM_CHECK(initialized_);
+    BTC_CHECK(initialized_);
 
     std::unordered_set<BlockKey, BlockKeyHash> pinned;
+    std::vector<std::pair<const PageAccess*, BlockIdxType>> targets;
     for (const auto& key_handles : state->request.handles) {
         for (const StorageBlockHandle& handle : key_handles) {
-            const auto&    pool = devicePool(handle.tag);
-            const BlockKey key{pool.get(), handle.block};
+            const auto& group = groups_.at(handle.tag).forTier(handle.tier);
+            const BlockKey key{group.pool.get(), handle.block};
             if (pinned.insert(key).second) {
-                state->pins.push_back({pool, handle.block, {}});
+                targets.emplace_back(&group, handle.block);
             }
         }
     }
     // Finish all metadata allocation before acquiring any pin. A partial pin
     // acquisition then releases only the closures that were successfully prepared.
-    for (auto& pin : state->pins)
-        pin.release = pin.pool->pinForStorageIo(pin.block);
+    state->pins.reserve(targets.size());
+    for (const auto& [group, block] : targets) {
+        state->pins.push_back({group->pool, block, group->pin(block)});
+    }
     timer.finish(true);
     return state;
 }
 
 void StorageBackend::validateRequest(const StorageRequest& request, bool allow_null_blocks) const {
-    RTP_LLM_CHECK_WITH_INFO(request.keys != nullptr, "storage request requires cache keys");
-    RTP_LLM_CHECK_WITH_INFO(request.handles.size() == request.keys->size(),
+    BTC_CHECK_WITH_INFO(static_cast<bool>(request.keys) != static_cast<bool>(request.opaque_keys),
+                            "storage request requires one cache key sequence");
+    BTC_CHECK_WITH_INFO(request.handles.size() == request.cacheKeyCount(),
                             "storage request key/handle count mismatch: keys=%zu handles=%zu",
-                            request.keys->size(),
+                            request.cacheKeyCount(),
                             request.handles.size());
     for (size_t key_index = 0; key_index < request.handles.size(); ++key_index) {
         std::unordered_set<std::string> seen_tags;
         for (const auto& handle : request.handles[key_index]) {
-            RTP_LLM_CHECK_WITH_INFO(!handle.tag.empty(), "storage handle has empty tag at key=%zu", key_index);
-            (void)topology().group(handle.tag);
-            RTP_LLM_CHECK_WITH_INFO(seen_tags.emplace(handle.tag).second,
+            BTC_CHECK_WITH_INFO(!handle.tag.empty(), "storage handle has empty tag at key=%zu", key_index);
+            (void)groups_.at(handle.tag);
+            BTC_CHECK_WITH_INFO(seen_tags.emplace(handle.tag).second,
                                     "storage request has duplicate tag=%s at key=%zu",
                                     handle.tag.c_str(),
                                     key_index);
-            RTP_LLM_CHECK_WITH_INFO(allow_null_blocks || !isNullBlockIdx(handle.block),
+            BTC_CHECK_WITH_INFO(allow_null_blocks || !isNullBlockIdx(handle.block),
                                     "storage request has null block for tag=%s at key=%zu",
                                     handle.tag.c_str(),
                                     key_index);
@@ -440,84 +401,118 @@ void StorageBackend::validateRequest(const StorageRequest& request, bool allow_n
     }
 }
 
-const CacheTopology& StorageBackend::topology() const {
-    RTP_LLM_CHECK(topology_ != nullptr);
-    return *topology_;
+bool StorageBackend::isHandleRequired(size_t key_index, size_t matched_key_count, const std::string& tag) const {
+    BTC_CHECK(key_index < matched_key_count);
+    return groups_.at(tag).required(key_index, matched_key_count);
 }
 
-const DeviceBlockPoolPtr& StorageBackend::devicePool(const std::string& tag) const {
-    return pools_by_tag_.at(tag);
-}
-
-std::vector<BlockInfo> StorageBackend::convertIndexToBuffer(int layer_id, const std::string& tag, int block_id) const {
-    RTP_LLM_CHECK(static_cast<bool>(buffer_resolver_));
-    (void)topology().group(tag);
-    return buffer_resolver_(layer_id, tag, block_id);
-}
-
-bool StorageBackend::isHandleRequired(size_t key_index, size_t matched_key_count, std::string_view tag) const {
-    RTP_LLM_CHECK(key_index < matched_key_count);
-    const size_t reuse_count = topology().group(tag).reuseBlockCount(matched_key_count);
-    return matched_key_count - key_index <= reuse_count;
+size_t StorageBackend::coveredPrefix(
+    const StorageRequest& request,
+    const std::function<bool(size_t, const StorageBlockHandle&)>& available) const {
+    StoragePrefixCoverage coverage;
+    auto matched = request.local_matched_blocks_num;
+    for (size_t row = matched; row < request.handles.size(); ++row) {
+        for (const auto& handle : request.handles[row]) {
+            coverage.observe(row, handle.tag, available(row, handle));
+        }
+        if (coverage.covers(row + 1, [&](size_t index, size_t end, const std::string& tag) {
+                return isHandleRequired(index, end, tag);
+            })) {
+            matched = row + 1;
+        }
+    }
+    return matched;
 }
 
 void StorageBackend::match(StorageRequest request, MatchDone done) {
-    RTP_LLM_CHECK(initialized_);
+    BTC_CHECK(initialized_);
     validateRequest(request, /*allow_null_blocks=*/true);
-    if (!request.transfer_task) {
-        request.transfer_task.emplace(std::vector<TransferDescriptor>{}, timeout_, request.request_id);
-    }
+    applyDeadline(request);
     const auto trace_id    = storage_backend_detail::nextTraceId();
     auto       total       = stageTimer("match_total", request, "match", trace_id, AsyncProfileKind::Lifecycle);
     auto       queue       = stageTimer("match_queue_wait", request, "match", trace_id, AsyncProfileKind::Wait);
     const bool skip_remote = !remoteCacheEnabled();
+    auto       state       = std::make_shared<storage_backend_detail::StorageTaskState>();
+    state->request        = std::move(request);
+    state->trace_id       = trace_id;
     dispatch(
-        [this, skip_remote, request = std::move(request), done = std::move(done), trace_id, total, queue](
+        [this, skip_remote, state = std::move(state), done = std::move(done), total, queue](
             Lifecycle outcome, Task finished) mutable {
-            block_tree_cache_detail::ScopeRollback retire(std::move(finished));
             queue.finish(outcome == Lifecycle::ACCEPTING);
-            StorageMatchResult result;
-            bool               success = outcome == Lifecycle::ACCEPTING && !request.transfer_task->expired();
-            if (success) {
-                auto io = stageValue("match_io", request, "match", trace_id);
-                try {
-                    const bool admitted = !skip_remote && remoteCacheEnabled();
-                    if (admitted) {
-                        result = matchImpl(request);
+            const auto& request = state->request;
+            const bool can_run = outcome == Lifecycle::ACCEPTING && !expired(request);
+            const bool admitted = can_run && !skip_remote && remoteCacheEnabled();
+            const auto io_kind = usesAsyncMatch(request) ? AsyncProfileKind::Lifecycle : AsyncProfileKind::Execution;
+            auto io = can_run ? stageTimer("match_io", request, "match", state->trace_id, io_kind) :
+                                SharedTransferStageTimer{};
+            auto settle = [this, state, can_run, admitted, done = std::move(done), io, total,
+                           finished = std::move(finished)](MatchResult result, bool) mutable {
+                block_tree_cache_detail::ScopeRollback retire(std::move(finished));
+                storage_backend_detail::invokeCallback(this, [&] {
+                    const auto& request = state->request;
+                    StorageMatchResult match;
+                    bool success = can_run;
+                    if (success) {
+                        try {
+                            if (admitted) {
+                                match = result();
+                            }
+                            // An in-flight query cannot install remote data after admission closes.
+                            if (!admitted || !remoteCacheEnabled()) {
+                                onRemoteCacheSkipped("match");
+                                match = {request.local_matched_blocks_num, nullptr};
+                            }
+                            success = !expired(request);
+                        } catch (...) {
+                            success = false;
+                        }
+                        io.finish(success);
                     }
-                    // A query may have been in flight when the control changed.
-                    // Return a successful local-only match, never unfilled remote hits.
-                    if (!admitted || !remoteCacheEnabled()) {
-                        onRemoteCacheSkipped("match");
-                        result = {request.local_matched_blocks_num, nullptr};
+                    if (done) {
+                        auto callback = stageValue("match_callback", request, "match", state->trace_id);
+                        done(success ? match.matched_blocks_num : 0, success ? std::move(match.match_meta) : nullptr, success);
+                        callback.finish(true);
                     }
-                    success = !request.transfer_task->expired();
-                } catch (...) {
-                    success = false;
+                    total.finish(success);
+                });
+            };
+            auto complete = storage_backend_detail::makeIoCompletion<MatchResult>(executor_, state, std::move(settle));
+            if (!admitted) {
+                complete({}, false);
+                return;
+            }
+            try {
+                if (matchAsyncImpl(request, [complete](MatchResult result) { complete(std::move(result), true); })) {
+                    return;
                 }
-                io.finish(success);
+                complete([this, state] { return matchImpl(state->request); }, false);
+            } catch (...) {
+                complete([error = std::current_exception()]() -> StorageMatchResult { std::rethrow_exception(error); },
+                         false);
             }
-            if (done) {
-                auto callback = stageValue("match_callback", request, "match", trace_id);
-                done(
-                    success ? result.matched_blocks_num : 0, success ? std::move(result.match_meta) : nullptr, success);
-                callback.finish(true);
-            }
-            total.finish(success);
         },
         BlockTreeTaskClass::LOAD,
         skip_remote);
 }
 
 void StorageBackend::read(StorageRequest request, std::shared_ptr<StorageBackendMatchMeta> match_meta, Done done) {
-    if (!request.transfer_task) {
-        request.transfer_task.emplace(std::vector<TransferDescriptor>{}, timeout_, request.request_id);
+    TransferDone report;
+    if (done) {
+        report = [done = std::move(done)](StorageTransferOutcome outcome) {
+            done(std::move(outcome.error));
+        };
     }
+    readOwned(std::move(request), std::move(match_meta), std::move(report));
+}
+
+void StorageBackend::readOwned(StorageRequest request, std::shared_ptr<StorageBackendMatchMeta> match_meta,
+                               TransferDone done) {
+    applyDeadline(request);
     const auto trace_id    = storage_backend_detail::nextTraceId();
     auto       total       = stageTimer("read_total", request, "read", trace_id, AsyncProfileKind::Lifecycle);
     auto       state       = prepare(std::move(request), false, trace_id);
     auto       queue       = stageTimer("read_queue_wait", state->request, "read", trace_id, AsyncProfileKind::Wait);
-    const auto deadline    = state->request.transfer_task->deadline();
+    const auto io_deadline = deadline(state->request);
     const bool skip_remote = !remoteCacheEnabled();
     dispatch(
         [this,
@@ -527,12 +522,12 @@ void StorageBackend::read(StorageRequest request, std::shared_ptr<StorageBackend
          done       = std::move(done),
          total,
          queue](Lifecycle outcome, Task finished) mutable {
-            queue.finish(outcome == Lifecycle::ACCEPTING && !state->request.transfer_task->expired());
+            queue.finish(outcome == Lifecycle::ACCEPTING && !expired(state->request));
             ErrorInfo error = outcome == Lifecycle::ACCEPTING ?
                                   ErrorInfo::OkStatus() :
                                   ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "storage backend is not accepting reads");
-            if (error.ok() && state->request.transfer_task->expired()) {
-                RTP_LLM_LOG_WARNING("storage read deadline exceeded before I/O: trace=%llu target_key_count=%zu",
+            if (error.ok() && expired(state->request)) {
+                BTC_LOG_WARNING("storage read deadline exceeded before I/O: trace=%llu target_key_count=%zu",
                                     static_cast<unsigned long long>(state->trace_id), state->request.handles.size());
                 error = ErrorInfo(ErrorCode::DEADLINE_EXCEEDED, "storage read deadline exceeded before I/O");
             }
@@ -551,6 +546,8 @@ void StorageBackend::read(StorageRequest request, std::shared_ptr<StorageBackend
                     block_tree_cache_detail::ScopeRollback retire(std::move(finished));
                     storage_backend_detail::invokeCallback(this, [&] {
                         bool freeze_pins = false;
+                        bool safe = true;
+                        std::shared_ptr<const FrozenTask> recovery;
                         if (error.ok()) {
                             try {
                                 std::optional<TransferStageTimer> complete;
@@ -565,20 +562,24 @@ void StorageBackend::read(StorageRequest request, std::shared_ptr<StorageBackend
                                                      state->trace_id,
                                                      CacheStageContext::storage("read"));
                                 result();
-                                if (state->request.transfer_task->expired()) {
+                                if (expired(state->request)) {
                                     error = ErrorInfo(ErrorCode::DEADLINE_EXCEEDED, "storage read deadline exceeded");
                                 }
                             } catch (const StorageDeadlineExceeded& exception) {
                                 error = ErrorInfo(ErrorCode::DEADLINE_EXCEEDED, exception.what());
                             } catch (const StorageOperationTimeout& exception) {
                                 freeze_pins = exception.localTargetProtection() == StorageLocalTargetProtection::LEGACY;
+                                safe = false;
+                                recovery = exception.recovery();
                                 error       = ErrorInfo(ErrorCode::DEADLINE_EXCEEDED, exception.what());
                             } catch (const StorageOperationCompletionUnknown& exception) {
                                 freeze_pins = exception.localTargetProtection() == StorageLocalTargetProtection::LEGACY;
+                                safe = false;
+                                recovery = exception.recovery();
                                 error       = ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, exception.what());
                             } catch (const StorageOperationBufferSafeFailure& exception) {
                                 error =
-                                    ErrorInfo(state->request.transfer_task->expired() ? ErrorCode::DEADLINE_EXCEEDED :
+                                    ErrorInfo(expired(state->request) ? ErrorCode::DEADLINE_EXCEEDED :
                                                                                         ErrorCode::EXECUTION_EXCEPTION,
                                               exception.what());
                             } catch (const std::exception& exception) {
@@ -594,7 +595,7 @@ void StorageBackend::read(StorageRequest request, std::shared_ptr<StorageBackend
                         const bool success = error.ok();
                         if (done) {
                             auto callback = stageValue("read_callback", state->request, "read", state->trace_id);
-                            done(std::move(error));
+                            done({std::move(error), safe, std::move(recovery)});
                             callback.finish(true);
                         }
                         total.finish(success);
@@ -630,11 +631,11 @@ void StorageBackend::read(StorageRequest request, std::shared_ptr<StorageBackend
         },
         BlockTreeTaskClass::LOAD,
         skip_remote,
-        deadline);
+        io_deadline);
 }
 
 StorageWriteTask StorageBackend::prepareWrite(StorageRequest request) {
-    RTP_LLM_CHECK(initialized_);
+    BTC_CHECK(initialized_);
     if (!remoteCacheEnabled()) {
         onRemoteCacheSkipped("write");
         return {};
@@ -642,37 +643,39 @@ StorageWriteTask StorageBackend::prepareWrite(StorageRequest request) {
     if (request.empty()) {
         return {};
     }
-    if (!request.transfer_task) {
-        request.transfer_task.emplace(std::vector<TransferDescriptor>{}, timeout_, request.request_id);
-    }
+    applyDeadline(request);
     return StorageWriteTask(prepare(std::move(request), true));
 }
 
-bool StorageBackend::write(StorageWriteTask task) {
-    RTP_LLM_CHECK(initialized_);
-    RTP_LLM_CHECK(task.state_ != nullptr);
+bool StorageBackend::write(StorageWriteTask task, TransferDone done) {
+    BTC_CHECK(initialized_);
+    BTC_CHECK(task.state_ != nullptr);
     auto       state = std::move(task.state_);
     auto       total = stageTimer("write_total", state->request, "write", state->trace_id, AsyncProfileKind::Lifecycle);
     auto       queue = stageTimer("write_queue_wait", state->request, "write", state->trace_id, AsyncProfileKind::Wait);
     const bool skip_remote = !remoteCacheEnabled();
     const bool admitted    = dispatch(
-        [this, skip_remote, state, total, queue](Lifecycle outcome, Task finished) {
+        [this, skip_remote, state, done = std::move(done), total, queue](Lifecycle outcome, Task finished) mutable {
             const bool accepting = outcome == Lifecycle::ACCEPTING;
-            queue.finish(accepting && !state->request.transfer_task->expired());
+            queue.finish(accepting && !expired(state->request));
             const bool disabled = accepting && (skip_remote || !remoteCacheEnabled());
             if (disabled)
                 onRemoteCacheSkipped("write");
-            const bool run     = accepting && !disabled && !state->request.transfer_task->expired();
+            const bool run     = accepting && !disabled && !expired(state->request);
             const auto io_kind = usesAsyncPayload(state->request, /*is_write=*/true) ? AsyncProfileKind::Lifecycle :
                                                                                           AsyncProfileKind::Execution;
             auto       io      = run ? stageTimer("write_io", state->request, "write", state->trace_id, io_kind) :
                                           SharedTransferStageTimer{};
-            auto       settle_write = [this, state, total, io, io_kind, run, finished = std::move(finished)](
+            auto       settle_write = [this, state, done = std::move(done), total, io, io_kind, run,
+                                       finished = std::move(finished)](
                                     WriteResult result, bool on_worker) mutable {
                 block_tree_cache_detail::ScopeRollback retire(std::move(finished));
                 storage_backend_detail::invokeCallback(this, [&] {
                     bool success     = false;
                     bool freeze_pins = false;
+                    bool safe        = true;
+                    bool timeout     = false;
+                    std::shared_ptr<const FrozenTask> recovery;
                     if (run) {
                         try {
                             std::optional<TransferStageTimer> complete;
@@ -688,25 +691,37 @@ bool StorageBackend::write(StorageWriteTask task) {
                                                  CacheStageContext::storage("write"));
                             if (result)
                                 result(on_worker);
-                            success = !state->request.transfer_task->expired();
+                            success = !expired(state->request);
                         } catch (const StorageOperationTimeout& error) {
                             freeze_pins = error.localTargetProtection() == StorageLocalTargetProtection::LEGACY;
-                            RTP_LLM_LOG_WARNING("StorageBackend write timed out: %s", error.what());
+                            safe = false;
+                            timeout = true;
+                            recovery = error.recovery();
+                            BTC_LOG_WARNING("StorageBackend write timed out: %s", error.what());
                         } catch (const StorageOperationCompletionUnknown& error) {
                             freeze_pins = error.localTargetProtection() == StorageLocalTargetProtection::LEGACY;
-                            RTP_LLM_LOG_WARNING("StorageBackend write completion is unknown: %s", error.what());
+                            safe = false;
+                            recovery = error.recovery();
+                            BTC_LOG_WARNING("StorageBackend write completion is unknown: %s", error.what());
                         } catch (const StorageOperationBufferSafeFailure& error) {
-                            RTP_LLM_LOG_WARNING("StorageBackend payload-safe write failure: %s", error.what());
+                            BTC_LOG_WARNING("StorageBackend payload-safe write failure: %s", error.what());
                         } catch (const std::exception& error) {
-                            RTP_LLM_LOG_ERROR("StorageBackend write failed: %s", error.what());
+                            BTC_LOG_ERROR("StorageBackend write failed: %s", error.what());
                         } catch (...) {
-                            RTP_LLM_LOG_ERROR("StorageBackend write failed with an unknown exception");
+                            BTC_LOG_ERROR("StorageBackend write failed with an unknown exception");
                         }
                         io.finish(success);
                     }
                     auto settle = stageValue("write_settle", state->request, "write", state->trace_id);
                     state->finish(freeze_pins);
                     settle.finish(true);
+                    if (done) {
+                        auto failure = timeout || expired(state->request)
+                            ? ErrorCode::DEADLINE_EXCEEDED : ErrorCode::EXECUTION_EXCEPTION;
+                        auto report = success && remoteCacheEnabled()
+                            ? ErrorInfo::OkStatus() : ErrorInfo(failure, "storage write failed");
+                        done({std::move(report), safe, std::move(recovery)});
+                    }
                     total.finish(success);
                 });
             };
@@ -734,8 +749,8 @@ bool StorageBackend::write(StorageWriteTask task) {
                     std::unordered_set<BlockKey, BlockKeyHash> required;
                     for (const auto key_index : key_indices) {
                         for (const auto& handle : state->request.handles.at(key_index)) {
-                            const auto& pool = devicePool(handle.tag);
-                            required.insert({pool.get(), handle.block});
+                            const auto& group = groups_.at(handle.tag).forTier(handle.tier);
+                            required.insert({group.pool.get(), handle.block});
                         }
                     }
                     auto& pins = state->pins;
@@ -762,7 +777,7 @@ bool StorageBackend::write(StorageWriteTask task) {
         },
         BlockTreeTaskClass::BACKGROUND,
         skip_remote,
-        state->request.transfer_task->deadline());
+        deadline(state->request));
     return admitted && !skip_remote;
 }
 

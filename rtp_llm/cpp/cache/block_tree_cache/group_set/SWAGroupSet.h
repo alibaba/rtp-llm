@@ -8,6 +8,7 @@ namespace rtp_llm {
 // Uses Any-node heaps: any node with data can be evicted.
 class SWAGroupSet: public GroupSet {
 public:
+    explicit SWAGroupSet(GroupSetPools pools): GroupSet(std::move(pools)) {}
     SWAGroupSet(size_t                          sliding_window_size,
                 size_t                          seq_size_per_block,
                 std::vector<DeviceBlockPoolPtr> device_pools,
@@ -20,15 +21,15 @@ public:
     size_t computeReuseBlockCount(size_t matched_block_count) const override;
 
     size_t slidingWindowSize() const {
-        return sliding_window_size_;
+        return seq_size_per_block_ ? sliding_window_size_ : windowTokens();
     }
     size_t seqSizePerBlock() const {
-        return seq_size_per_block_;
+        return seq_size_per_block_ ? seq_size_per_block_ : pageTokens();
     }
 
 private:
-    size_t sliding_window_size_;
-    size_t seq_size_per_block_;
+    size_t sliding_window_size_{0};
+    size_t seq_size_per_block_{0};
 };
 
 // SWA window match validator.

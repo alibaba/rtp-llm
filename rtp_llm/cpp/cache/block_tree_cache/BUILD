@@ -1,6 +1,98 @@
 load("//:def.bzl", "copts")
+load(":native_sources.bzl", "BTC_NATIVE_SOURCES", "BTC_NATIVE_HEADERS")
 load("//bazel:arch_select.bzl", "no_block_copy_link_deps", "torch_deps")
-load(":external/tree_cpu_link.bzl", "cpu_tree_link")
+
+cc_library(
+    name = "tier_watermark",
+    hdrs = ["evict/TierWatermark.h"],
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
+    name = "malloc_status",
+    hdrs = ["block_pool/MallocStatus.h"],
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
+    name = "block_tree_key",
+    hdrs = ["BlockTreeKey.h"],
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
+    name = "prefix_coverage",
+    hdrs = ["group_set/PrefixCoverage.h"],
+    visibility = ["//visibility:public"],
+    deps = ["//rtp_llm/cpp/cache:cache_group_type"],
+)
+
+# The standalone shared library and the engine use one implementation of
+# BlockTreeCache. Reuse the existing small native targets where they already
+# own a translation unit, so a worker linking those targets gets one definition.
+cc_library(
+    name = "btc_core",
+    srcs = [src for src in BTC_NATIVE_SOURCES if src not in [
+        "BlockTreeTaskPool.cc",
+        "block_pool/DiskBlockIO.cc",
+        "block_pool/IBlockPool.cc",
+        "diagnostic/CacheDiagnostics.cc",
+    ]],
+    hdrs = BTC_NATIVE_HEADERS,
+    includes = ["include"],
+    linkopts = ["-pthread"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":block_tree_task_pool",
+        ":cache_diagnostics",
+        ":disk_block_io",
+        ":native_block_pool",
+        ":transfer_task_registry",
+        "//rtp_llm/cpp/cache:block_index",
+        "//rtp_llm/cpp/cache:cache_group_type",
+        ":malloc_status",
+        "//rtp_llm/cpp/cache:native_cache_interfaces",
+        "//rtp_llm/cpp/cache/events:kv_cache_event",
+        "//rtp_llm/cpp/utils:async_profiling_scope",
+        "//rtp_llm/cpp/utils:error_code",
+    ],
+)
+
+cc_test(
+    name = "rank_worker_abi",
+    srcs = ["tests/contract/RankWorkerContract.cc"],
+    deps = [":btc_core"],
+)
+
+cc_test(
+    name = "multi_rank_contract",
+    srcs = ["tests/contract/MultiRankContract.cc"],
+    deps = [":btc_core"],
+)
+
+cc_test(
+    name = "native_tree_contract",
+    srcs = ["tests/contract/NativeTreeContract.cc"],
+    deps = [":btc_core"],
+)
+
+cc_test(
+    name = "native_worker_contract",
+    srcs = ["tests/contract/NativeWorkerContract.cc"],
+    deps = [":btc_core"],
+)
+
+cc_test(
+    name = "remote_prefetch_pressure_contract",
+    srcs = ["tests/contract/RemotePrefetchPressureContract.cc"],
+    deps = [":btc_core"],
+)
+
+cc_test(
+    name = "block_tree_cache_contract",
+    srcs = ["tests/contract/Contract.cc"],
+    deps = [":btc_core"],
+)
 
 cc_library(
     name = "block_tree_cache_layout",
@@ -27,9 +119,8 @@ cc_library(
     hdrs = [
         "transfer/TransferTaskRegistry.h",
     ],
-    copts = copts(),
     visibility = ["//visibility:public"],
-    deps = ["//rtp_llm/cpp/utils:core_utils"],
+    deps = [":cache_diagnostics"],
 )
 
 cc_library(
@@ -43,18 +134,25 @@ cc_library(
 # IBlockPool lifecycle. Keeping this target below allocator/group targets avoids
 # a cycle with the full block_tree_cache library.
 cc_library(
+    name = "native_block_pool",
+    srcs = ["block_pool/IBlockPool.cc"],
+    hdrs = ["block_pool/IBlockPool.h"],
+    visibility = ["//visibility:public"],
+    deps = ["//rtp_llm/cpp/cache:block_index"],
+)
+
+cc_library(
     name = "device_block_pool",
     srcs = [
         "block_pool/DeviceBlockPool.cc",
-        "block_pool/IBlockPool.cc",
     ],
     hdrs = [
         "block_pool/DeviceBlockPool.h",
-        "block_pool/IBlockPool.h",
     ],
     copts = copts(),
     visibility = ["//visibility:public"],
     deps = [
+        ":native_block_pool",
         "//rtp_llm/cpp/cache:block_info",
         "//rtp_llm/cpp/cache:block_index",
         "//rtp_llm/cpp/cache:cache_types",
@@ -72,26 +170,26 @@ cc_library(
 )
 
 cc_library(
+    name = "cache_diagnostics",
+    srcs = ["diagnostic/CacheDiagnostics.cc"],
+    hdrs = ["diagnostic/CacheDiagnostics.h"],
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
     name = "block_tree_task_pool",
     srcs = ["BlockTreeTaskPool.cc"],
     hdrs = ["BlockTreeTaskPool.h"],
-    copts = copts(),
+    linkopts = ["-pthread"],
     visibility = ["//visibility:public"],
-    deps = [
-        "@havenask//aios/autil:lock_free",
-        "@havenask//aios/autil:thread",
-    ],
 )
 
 cc_library(
     name = "disk_block_io",
     srcs = ["block_pool/DiskBlockIO.cc"],
     hdrs = ["block_pool/DiskBlockIO.h"],
-    copts = copts(),
     visibility = ["//visibility:public"],
-    deps = [
-        "//rtp_llm/cpp/utils:core_utils",
-    ],
+    deps = [":cache_diagnostics"],
 )
 
 cc_library(
@@ -124,21 +222,13 @@ cc_library(
     srcs = [
         "metrics/BlockTreeCacheMetricsReporter.cc",
         "metrics/CacheStageMetrics.cc",
-        "metrics/EvictionMetrics.cc",
-        "group_set/GroupSetResource.cc",
-        "group_set/GroupSet.cc",
-        "group_set/FullGroupSet.cc",
-        "group_set/LinearGroupSet.cc",
-        "group_set/SWAGroupSet.cc",
-        "transfer/TransferBatchAsyncContext.cc",
+        "//rtp_llm/cpp/cache/block_tree_cache/integration/rtp_llm:group_set_sources",
         "transfer/CrcCopyExecutor.cc",
-        "transfer/FrozenTask.cc",
-        "transfer/TransferCompletionCleanup.cc",
         "transfer/CrcDumpWriterMetadata.cc",
         "block_pool/DiskBlockPool.cc",
         "block_pool/DiskMountGuard.cc",
         "block_pool/AlignedHostMemory.cc",
-        "block_pool/HostBlockPool.cc",
+        "//rtp_llm/cpp/cache/block_tree_cache/integration/rtp_llm:host_block_pool_sources",
         "block_pool/HostStagingBlockPool.cc",
     ] + select({
         "@//:using_cuda": ["block_pool/CudaHostMemoryRegistration.cc"],
@@ -147,6 +237,7 @@ cc_library(
     hdrs = [
         "BlockTree.h",
         "metrics/BlockTreeCacheMetricsReporter.h",
+        "metrics/CacheObserver.h",
         "metrics/CacheLockGuard.h",
         "metrics/CacheStageMetrics.h",
         "group_set/GroupSetResource.h",
@@ -176,7 +267,6 @@ cc_library(
         "block_pool/DiskBlockPool.h",
         "block_pool/DiskMountGuard.h",
         "block_pool/AlignedHostMemory.h",
-        "block_pool/HostBlockPool.h",
         "block_pool/HostStagingBlockPool.h",
         "block_pool/HostMemoryRegistration.h",
         "transfer/DiskTransferUtils.h",
@@ -184,7 +274,11 @@ cc_library(
     copts = copts(),
     visibility = ["//visibility:public"],
     deps = [
+        ":btc_core",
         "//rtp_llm/cpp/cache:pool_metrics",
+        ":cache_diagnostics",
+        ":block_tree_key",
+        ":prefix_coverage",
         ":transfer_buffer_safety",
         ":transfer_task_registry",
         ":block_tree_cache_layout",
@@ -223,7 +317,7 @@ cc_library(
 
 cc_library(
     name = "transfer_work_loop",
-    srcs = ["transfer/TransferWorkLoop.cc"],
+    srcs = ["//rtp_llm/cpp/cache/block_tree_cache/integration/rtp_llm:transfer_work_loop_sources"],
     hdrs = ["transfer/TransferWorkLoop.h"],
     copts = copts(),
     visibility = ["//visibility:public"],
@@ -236,31 +330,15 @@ cc_library(
 cc_library(
     name = "block_tree_cache",
     srcs = [
-        "BlockTree.cc",
-        "BlockTreeCache.cc",
-        "diagnostic/FullPrefixInvariantScanner.cc",
-        "storage_backend/StorageBackend.cc",
-        "storage_backend/StorageBackendExecutor.cc",
-        "BlockTreeCacheFactory.cc",
-        "evict/BlockTreeEvictor.cc",
-        "evict/EvictionTaskRunner.cc",
-        "load/BlockTreeLoader.cc",
-        "load/LoadJoinRegistry.cc",
+        "//rtp_llm/cpp/cache/block_tree_cache/integration/rtp_llm:engine_sources",
         "transfer/BlockTransferRequestConverter.cc",
-        "evict/EvictionHeap.cc",
-        "load/LoadAsyncContext.cc",
-        "load/LoadTaskRunner.cc",
-        "store/BlockTreeStorer.cc",
-        "transfer/BlockTransferDispatcher.cc",
         "transfer/TransferCompletionQuery.cc",
         "transfer/TransferCompletionForget.cc",
         "transfer/FrozenTaskRecovery.cc",
-        "transfer/MultiRankBlockTransferEngine.cc",
-        "transfer/PerRankBlockTransferEngine.cc",
+        "//rtp_llm/cpp/cache/block_tree_cache/integration/rtp_llm:per_rank_worker_sources",
     ],
     hdrs = [
         "BlockTreeCache.h",
-        "ExternalBlockTreeMatch.h",
         "diagnostic/FullPrefixInvariantScanner.h",
         "BlockTreeCacheFactory.h",
         "evict/EvictionTaskRunner.h",
@@ -282,6 +360,11 @@ cc_library(
     copts = copts(),
     visibility = ["//visibility:public"],
     deps = [
+        ":btc_core",
+        "//rtp_llm/cpp/cache/block_tree_cache/integration/rtp_llm:rtp_cache_diagnostics",
+        "//rtp_llm/cpp/cache/block_tree_cache/integration/rtp_llm:rtp_storage_backend",
+        ":cache_diagnostics",
+        ":malloc_status",
         ":transfer_task_registry",
         ":block_tree_cache_layout",
         ":transfer_common",
@@ -316,48 +399,5 @@ cc_library(
             "@local_config_cuda//cuda:cudart",
         ],
         "//conditions:default": [],
-    }),
-)
-
-_TREE_DEPS = [
-    ":block_tree_cache",
-    ":block_tree_task_pool",
-    ":device_block_pool",
-    ":transfer_common",
-]
-
-cpu_tree_link(
-    name = "cpu_tree_link_inputs",
-    deps = _TREE_DEPS,
-)
-
-cc_binary(
-    name = "libbtc_tree.so",
-    srcs = [
-        "external/ExternalBlockTreeDriver.cc",
-        "external/ExternalDiskBindings.inc",
-        "external/ExternalDiskProtocol.h",
-        "external/ExternalDiskTransactions.inc",
-        "external/ExternalHostOps.inc",
-        "external/ExternalHostTypes.inc",
-        "storage_backend/HostStorageWriteback.h",
-    ],
-    copts = copts(),
-    additional_linker_inputs = select({
-        "@//:using_cpu": ["external/btc_tree.exports"],
-        "//conditions:default": [],
-    }),
-    linkopts = select({
-        "@//:using_cpu": [
-            "-Wl,--version-script,$(location :external/btc_tree.exports)",
-            "-Wl,--gc-sections,--as-needed,--no-undefined",
-        ],
-        "//conditions:default": [],
-    }),
-    linkshared = True,
-    visibility = ["//visibility:public"],
-    deps = select({
-        "@//:using_cpu": [":cpu_tree_link_inputs"],
-        "//conditions:default": _TREE_DEPS,
     }),
 )

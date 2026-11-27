@@ -1,5 +1,7 @@
 #include "rtp_llm/cpp/cache/CacheTopology.h"
 
+#include "rtp_llm/cpp/cache/block_tree_cache/group_set/PrefixCoverage.h"
+
 #include <algorithm>
 #include <limits>
 #include <unordered_set>
@@ -45,20 +47,9 @@ size_t GroupBase::cacheKeyTokenStride() const {
 }
 
 size_t GroupBase::reuseBlockCount(size_t matched_block_count) const {
-    switch (policy.group_type) {
-        case CacheGroupType::FULL:
-            return matched_block_count;
-        case CacheGroupType::LINEAR:
-            return matched_block_count == 0 ? 0 : 1;
-        case CacheGroupType::SWA:
-            if (policy.sliding_window_size == 0) {
-                return matched_block_count;
-            }
-            const size_t window = static_cast<size_t>(policy.sliding_window_size);
-            return std::min(matched_block_count,
-                            window / cacheKeyTokenStride() + (window % cacheKeyTokenStride() != 0));
-    }
-    return 0;
+    const auto window = static_cast<size_t>(policy.sliding_window_size);
+    const size_t page_tokens = policy.group_type == CacheGroupType::SWA && window > 0 ? cacheKeyTokenStride() : 1;
+    return reusableBlockCount(policy.group_type, page_tokens, window, matched_block_count);
 }
 
 uint32_t GroupBase::localKvHeadNum() const {

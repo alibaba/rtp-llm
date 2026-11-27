@@ -1,11 +1,12 @@
-#include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeTaskPool.h"
+#include "BlockTreeTaskPool.h"
 
 #include <cassert>
 #include <algorithm>
+#include <system_error>
 #include <utility>
-
-#include "autil/LambdaWorkItem.h"
-#include "autil/LockFreeThreadPool.h"
+#if defined(__linux__) || defined(__APPLE__)
+#include <pthread.h>
+#endif
 
 namespace rtp_llm {
 
@@ -22,26 +23,22 @@ bool BlockTreeTaskPool::start() {
         return false;
     }
 
-    auto thread_pool =
-        std::make_shared<autil::LockFreeThreadPool>(thread_count_, thread_count_, nullptr, thread_name_.c_str());
-    if (!thread_pool->start()) {
+    workers_.reserve(thread_count_);
+    try {
+        for (size_t index = 0; index < thread_count_; ++index) {
+            workers_.emplace_back(&BlockTreeTaskPool::workerLoop, this);
+        }
+    } catch (const std::system_error&) {
+        shutdown_ = true;
+        queue_cv_.notify_all();
+        auto workers = std::move(workers_);
+        lock.unlock();
+        for (auto& worker : workers) {
+            worker.join();
+        }
         return false;
     }
-    thread_pool_ = thread_pool;
-    started_     = true;
-    for (size_t index = 0; index < thread_count_; ++index) {
-        auto*                               work_item = new autil::LambdaWorkItem([this] { workerLoop(); });
-        const autil::ThreadPool::ERROR_TYPE error     = thread_pool->pushWorkItem(work_item, false);
-        if (error != autil::ThreadPool::ERROR_NONE) {
-            work_item->destroy();
-            shutdown_ = true;
-            queue_cv_.notify_all();
-            lock.unlock();
-            thread_pool->stop(autil::ThreadPool::STOP_AFTER_QUEUE_EMPTY);
-            thread_pool->join();
-            return false;
-        }
-    }
+    started_ = true;
     return true;
 }
 
@@ -129,6 +126,13 @@ BlockTreeTaskPool::QueuedTask BlockTreeTaskPool::popNextNormalTaskLocked() {
 }
 
 void BlockTreeTaskPool::workerLoop() {
+#if defined(__linux__)
+    char name[16]{};
+    thread_name_.copy(name, sizeof(name) - 1);
+    pthread_setname_np(pthread_self(), name);
+#elif defined(__APPLE__)
+    pthread_setname_np(thread_name_.c_str());
+#endif
     while (true) {
         std::function<void()> task;
         QueuedTask queued_task;
@@ -183,11 +187,10 @@ void BlockTreeTaskPool::waitForIdle() {
 }
 
 void BlockTreeTaskPool::shutdown() {
-    std::shared_ptr<autil::LockFreeThreadPool> thread_pool;
+    std::vector<std::thread>                  workers;
     std::deque<QueuedTask>                    dropped_load;
     std::deque<QueuedTask>                    dropped_background;
     std::deque<std::function<void()>>         dropped_completions;
-    bool                                       was_started   = false;
     size_t                                     dropped_tasks = 0;
     {
         std::lock_guard<std::mutex> lock(lifecycle_mutex_);
@@ -200,8 +203,7 @@ void BlockTreeTaskPool::shutdown() {
         dropped_load.swap(load_queue_);
         dropped_background.swap(background_queue_);
         dropped_completions.swap(completion_queue_);
-        thread_pool = thread_pool_;
-        was_started = started_;
+        workers.swap(workers_);
         queue_cv_.notify_all();
     }
 
@@ -219,9 +221,8 @@ void BlockTreeTaskPool::shutdown() {
         }
     }
 
-    if (thread_pool != nullptr && was_started) {
-        thread_pool->stop(autil::ThreadPool::STOP_AFTER_QUEUE_EMPTY);
-        thread_pool->join();
+    for (auto& worker : workers) {
+        worker.join();
     }
 }
 

@@ -1,22 +1,16 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/group_set/SWAGroupSet.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/group_set/PrefixCoverage.h"
+
+#include <limits>
 
 namespace rtp_llm {
 
-SWAGroupSet::SWAGroupSet(size_t                          sliding_window_size,
-                         size_t                          seq_size_per_block,
-                         std::vector<DeviceBlockPoolPtr> device_pools,
-                         std::shared_ptr<HostBlockPool>  host_pool,
-                         DiskBlockPoolPtr                disk_pool):
-    GroupSet(std::move(device_pools), std::move(host_pool), std::move(disk_pool)),
-    sliding_window_size_(sliding_window_size),
-    seq_size_per_block_(seq_size_per_block) {}
-
 std::unique_ptr<MatchValidator> SWAGroupSet::createMatchValidator() {
-    return std::make_unique<SWAMatchValidator>(sliding_window_size_, seq_size_per_block_);
+    return std::make_unique<SWAMatchValidator>(slidingWindowSize(), seqSizePerBlock());
 }
 
 size_t SWAGroupSet::computeReuseBlockCount(size_t matched_block_count) const {
-    return group(groupTags().front()).reuseBlockCount(matched_block_count);
+    return reusableBlockCount(groupType(), pageTokens(), windowTokens(), matched_block_count);
 }
 
 // SWAMatchValidator
@@ -30,7 +24,7 @@ bool SWAMatchValidator::validate(const GroupSetResource& resource) {
         return false;
     }
 
-    accumulated_length_ += seq_size_per_block_;
+    accumulated_length_ += std::min(seq_size_per_block_, std::numeric_limits<size_t>::max() - accumulated_length_);
     return connected_to_root_ || (sliding_window_size_ > 0 && accumulated_length_ >= sliding_window_size_);
 }
 

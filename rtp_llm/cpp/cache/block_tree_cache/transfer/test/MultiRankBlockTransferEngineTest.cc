@@ -51,7 +51,7 @@ struct MultiRankBlockTransferRpcConfig {
     ErrorInfo                                       error_info{};
     std::shared_ptr<BlockTransferDispatcher>        local_dispatcher{};
     std::vector<GroupSetPtr>                        groups{};
-    std::optional<bool>                             buffer_safe{};
+    std::optional<bool>                             buffer_safe{true};
 };
 
 class MultiRankBlockTransferRpcService final: public RpcService::Service {
@@ -233,7 +233,9 @@ public:
                 result.merge(TransferStatus::DISK_IO_ERROR);
             }
         }
-        return std::make_shared<CompletedTransferAsyncContext>(std::move(result));
+        result.buffer_safe = true;
+        return std::make_shared<CompletedTransferAsyncContext>(
+            std::move(result), descriptors.size(), task.completionProof());
     }
 
     std::vector<std::vector<TransferDescriptor>> batches;
@@ -701,10 +703,8 @@ TEST_F(MultiRankBlockTransferEngineTest, DispatcherUsesDistinctExecutionIdentity
     const auto second_result = second_done.get();
     EXPECT_TRUE(first_result.ok());
     EXPECT_TRUE(second_result.ok());
-    // These mocks omit the optional safety proof, as older workers do.
-    // Even successful RPCs from every rank must not grant it implicitly.
-    EXPECT_FALSE(first_result.buffer_safe);
-    EXPECT_FALSE(second_result.buffer_safe);
+    EXPECT_TRUE(first_result.buffer_safe);
+    EXPECT_TRUE(second_result.buffer_safe);
     dispatcher.waitForTransfers();
     std::lock_guard<std::mutex> lock(state->mutex);
     ASSERT_EQ(state->requests.size(), 4u);
@@ -990,9 +990,7 @@ TEST_F(MultiRankBlockTransferEngineTest, BroadcastManagerStoredCorrectly) {
 
     auto cache = makeBlockTreeCacheForTest(std::move(groups), std::move(cfg), nullptr, broadcast_mgr);
 
-    // Verify BroadcastManager is stored (access via internal member)
-    EXPECT_EQ(cache->transfer_dispatcher_->multi_rank_engine_->broadcast_manager_, broadcast_mgr);
-    EXPECT_EQ(cache->transfer_dispatcher_->multi_rank_engine_->broadcast_manager_->workerNum(), 2u);
+    EXPECT_EQ(cache->transfer_dispatcher_->multi_rank_engine_->participantAddresses(), worker_addrs);
 }
 
 bool executeAndWait(MultiRankBlockTransferEngine&          engine,
@@ -1038,7 +1036,7 @@ TEST_F(MultiRankBlockTransferEngineTest, BufferSafetyRequiresEveryWorkerProofReg
                 context->onDone([completion](TransferResult result) { completion->set_value(std::move(result)); });
                 ASSERT_EQ(finished.wait_for(std::chrono::seconds(5)), std::future_status::ready);
                 const auto result = finished.get();
-                EXPECT_EQ(result.ok(), second_code == MemoryOperationResponsePB::OK);
+                EXPECT_EQ(result.ok(), second_code == MemoryOperationResponsePB::OK && first_safe && second_safe);
                 EXPECT_EQ(result.buffer_safe, first_safe && second_safe);
                 context->waitDone();
                 EXPECT_EQ(context->result().buffer_safe, result.buffer_safe);
@@ -1052,7 +1050,7 @@ TEST_F(MultiRankBlockTransferEngineTest, MissingWorkerSafetyProofRemainsUnsafeWi
         SCOPED_TRACE(::testing::Message() << "legacy_rank=" << legacy_rank);
         std::vector<MultiRankBlockTransferRpcConfig> configs{{true, MemoryOperationResponsePB::OK, grpc::Status::OK},
                                                              {true, MemoryOperationResponsePB::OK, grpc::Status::OK}};
-        configs[1 - legacy_rank].buffer_safe = true;
+        configs[legacy_rank].buffer_safe.reset();
         std::vector<std::unique_ptr<MultiRankBlockTransferRpcServer>> servers;
         auto                                                          manager = makeBroadcastManager(configs, servers);
         ASSERT_NE(manager, nullptr);
@@ -1060,7 +1058,8 @@ TEST_F(MultiRankBlockTransferEngineTest, MissingWorkerSafetyProofRemainsUnsafeWi
         auto context = cache->transfer_dispatcher_->multi_rank_engine_->execute(
             TransferTask(makeBroadcastDescriptors(), std::chrono::seconds(5)));
         context->waitDone();
-        EXPECT_TRUE(context->success());
+        EXPECT_FALSE(context->success());
+        EXPECT_EQ(context->errorInfo().code(), ErrorCode::TRANSFER_COMPLETION_UNKNOWN);
         EXPECT_FALSE(context->result().buffer_safe);
     }
 }
@@ -1503,7 +1502,7 @@ TEST_F(MultiRankBlockTransferEngineTest, BroadcastHostLoadFailureKeepsSourceReso
     group->devicePools().front()->decRef(device_block);
 }
 
-TEST_F(MultiRankBlockTransferEngineTest, HostLoadRpcFailureFreezesOnlyTargetBeforeNotification) {
+TEST_F(MultiRankBlockTransferEngineTest, HostLoadRpcFailureFreezesSourceAndTargetBeforeNotification) {
     if (!cudaAvailable()) {
         GTEST_SKIP() << "CUDA not available";
     }
@@ -1533,7 +1532,7 @@ TEST_F(MultiRankBlockTransferEngineTest, HostLoadRpcFailureFreezesOnlyTargetBefo
     context->setTargetBlocks(0, {target});
     context->onDone([&](ErrorInfo error) {
         EXPECT_FALSE(error.ok());
-        EXPECT_FALSE(host_pool->isFrozen(source));
+        EXPECT_TRUE(host_pool->isFrozen(source));
         EXPECT_TRUE(device_pool->isFrozen(target));
     });
     ASSERT_TRUE(context->commit());
@@ -1547,13 +1546,13 @@ TEST_F(MultiRankBlockTransferEngineTest, HostLoadRpcFailureFreezesOnlyTargetBefo
     device_pool->decRef(target);
     EXPECT_EQ(device_pool->refCount(target), 1u);
     EXPECT_EQ(device_pool->referencedBlocksNum(BlockTreeRefType::FROZEN), 1u);
-    EXPECT_EQ(host_pool->referencedBlocksNum(BlockTreeRefType::FROZEN), 0u);
+    EXPECT_EQ(host_pool->referencedBlocksNum(BlockTreeRefType::FROZEN), 1u);
     EXPECT_EQ(device_pool->referencedBlocksNum(BlockTreeRefType::LOAD), 0u);
     EXPECT_EQ(host_pool->referencedBlocksNum(BlockTreeRefType::LOAD), 0u);
     EXPECT_EQ(device_pool->referencedBlocksNum(BlockTreeRefType::LOAD), 0u);
 }
 
-TEST_F(MultiRankBlockTransferEngineTest, EvictionRpcFailureFreezesOnlyTargetAndRetainsSourceCache) {
+TEST_F(MultiRankBlockTransferEngineTest, EvictionRpcFailureFreezesSourceAndTargetAndPreventsRetry) {
     if (!cudaAvailable()) {
         GTEST_SKIP() << "CUDA not available";
     }
@@ -1591,21 +1590,22 @@ TEST_F(MultiRankBlockTransferEngineTest, EvictionRpcFailureFreezesOnlyTargetAndR
     ASSERT_FALSE(nodes.empty());
     EXPECT_EQ(nodes.back()->group_set_resources[0].transfer_state, GroupSetTransferState::IDLE);
     EXPECT_FALSE(nodes.back()->group_set_resources[0].hasTier(Tier::DISK));
-    EXPECT_FALSE(device_pool->isFrozen(source));
-    EXPECT_EQ(device_pool->referencedBlocksNum(BlockTreeRefType::FROZEN), 0u);
+    EXPECT_TRUE(device_pool->isFrozen(source));
+    EXPECT_EQ(device_pool->referencedBlocksNum(BlockTreeRefType::FROZEN), 1u);
+    EXPECT_EQ(device_pool->referencedBlocksNum(BlockTreeRefType::CACHE), 1u);
     EXPECT_EQ(host_pool->referencedBlocksNum(BlockTreeRefType::FROZEN), 1u);
     EXPECT_EQ(host_pool->freeBlocksNum(), 7u);
     EXPECT_EQ(device_pool->referencedBlocksNum(BlockTreeRefType::EVICT), 0u);
     EXPECT_EQ(host_pool->referencedBlocksNum(BlockTreeRefType::EVICT), 0u);
-    // The retained source may be retried, but the unknown target must not be reused.
+    // Neither endpoint can participate in another eviction before every rank is safe.
     BlockTreeCacheTestPeer::runMaintenanceForTest(*cache);
     BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache);
     ASSERT_TRUE(waitForEvictionSettlement(*cache));
-    EXPECT_FALSE(device_pool->isFrozen(source));
-    EXPECT_EQ(host_pool->referencedBlocksNum(BlockTreeRefType::FROZEN), 2u);
-    EXPECT_EQ(host_pool->freeBlocksNum(), 6u);
+    EXPECT_TRUE(device_pool->isFrozen(source));
+    EXPECT_EQ(host_pool->referencedBlocksNum(BlockTreeRefType::FROZEN), 1u);
+    EXPECT_EQ(host_pool->freeBlocksNum(), 7u);
     std::lock_guard<std::mutex> lock(state->mutex);
-    EXPECT_EQ(state->requests.size(), 4u);
+    EXPECT_EQ(state->requests.size(), 2u);
     for (const auto& request : state->requests) {
         ASSERT_EQ(request.copy_items_size(), 1);
         EXPECT_TRUE(host_pool->isFrozen(request.copy_items(0).mem_block()));

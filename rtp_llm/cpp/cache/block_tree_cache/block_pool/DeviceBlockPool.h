@@ -13,6 +13,7 @@
 #include "rtp_llm/cpp/cache/BlockInfo.h"
 #include "rtp_llm/cpp/cache/MemoryLayoutConfig.h"
 #include "rtp_llm/cpp/cache/MemoryLayoutStrategy.h"
+#include "rtp_llm/cpp/cache/Types.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/block_pool/IBlockPool.h"
 
 namespace rtp_llm {
@@ -76,20 +77,16 @@ public:
                                      BlockIndicesType&                          replacements,
                                      int&                                       required_free_blocks);
     bool isExclusiveRequestBlock(BlockIdxType block) const;
-    bool hasRequestRef(BlockIdxType block) const;
+    void referenceRequestBlocks(const BlockIdList& blocks) override { incRef(blocks); }
+    void unreferenceRequestBlocks(const BlockIdList& blocks) override { decRef(blocks); }
+    bool hasRequestRef(BlockIdxType block) const override;
 
     uint32_t refCount(BlockIdxType block) const;
     using IBlockPool::referencedBlocksNum;
     size_t referencedBlocksNum(DeviceBlockRefType ref_type = DeviceBlockRefType::REQUEST) const;
 
-    struct ReferenceStats {
-        TreeReferenceStats tree;
-        size_t             request_ref_blocks;
-        size_t             remote_connector_ref_blocks;
-        size_t             pd_connector_ref_blocks;
-    };
     // Snapshot existing per-pool counters together under the pool mutex.
-    ReferenceStats referenceStats() const;
+    ReferenceStats referenceStats() const override;
 
     // Stable CUDA device index of the backing buffer. Returns -1 for non-CUDA builds.
     int deviceIndex() const;

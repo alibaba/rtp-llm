@@ -6,14 +6,11 @@
 #include <cstddef>
 #include <deque>
 #include <functional>
-#include <memory>
 #include <mutex>
 #include <optional>
 #include <string>
-
-namespace autil {
-class LockFreeThreadPool;
-}
+#include <thread>
+#include <vector>
 
 namespace rtp_llm {
 
@@ -80,7 +77,7 @@ private:
     const size_t      queue_size_;
     const std::string thread_name_;
 
-    std::shared_ptr<autil::LockFreeThreadPool> thread_pool_;
+    std::vector<std::thread> workers_;
     mutable std::mutex                         lifecycle_mutex_;
     std::condition_variable                    queue_cv_;
     std::deque<QueuedTask>                     load_queue_;

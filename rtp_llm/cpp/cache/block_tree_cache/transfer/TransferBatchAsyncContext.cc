@@ -1,3 +1,4 @@
+#include "rtp_llm/cpp/cache/block_tree_cache/diagnostic/CacheDiagnostics.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferBatchAsyncContext.h"
 
 #include <utility>
@@ -5,7 +6,6 @@
 #include <cstdlib>
 #include <new>
 
-#include "rtp_llm/cpp/utils/Logger.h"
 
 namespace rtp_llm {
 namespace {
@@ -37,7 +37,7 @@ void invokeCompletion(TransferAsyncContext::DoneCallback& callback, TransferResu
             throw;
         }
         try {
-            RTP_LLM_LOG_WARNING("transfer completion callback failed");
+            BTC_LOG_WARNING("transfer completion callback failed");
         } catch (...) {}
     }
 }

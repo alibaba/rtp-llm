@@ -29,7 +29,9 @@
 #include "kmonitor/client/core/MetricsData.h"
 
 #include "rtp_llm/cpp/cache/block_tree_cache/ScopeRollback.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/block_pool/HostStagingBlockPool.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/BlockTransferDispatcher.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/transfer/CrcCopyExecutor.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferWorkLoop.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/test/BlockTreeCacheTestUtils.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/test/PerRankBlockTransferEngineTestUtils.h"
@@ -921,17 +923,17 @@ TEST_F(TransferWorkLoopTest, DiskResultPublicationWaitsForNotificationMutex) {
         });
         ASSERT_EQ(started_future.wait_for(5s), std::future_status::ready);
         EXPECT_EQ(callback.wait_for(20ms), std::future_status::timeout);
-        EXPECT_TRUE(owner.disk_completed_.empty());
+        EXPECT_TRUE(owner.io_completed_.empty());
     }
     ASSERT_EQ(callback.wait_for(5s), std::future_status::ready);
     callback.get();
-    EXPECT_EQ(owner.disk_completed_.head, &entry);
+    EXPECT_EQ(owner.io_completed_.head, &entry);
     EXPECT_EQ(entry.result.status.code(), ErrorCode::EXECUTION_EXCEPTION);
     EXPECT_TRUE(entry.result.status.ToString().empty());  // The owner adds the error text.
     EXPECT_EQ(entry.result.copy_error, CacheCopyError::IO_FAILED);
     EXPECT_EQ(entry.result.block_errors, std::vector<CacheCopyError>(2, CacheCopyError::IO_FAILED));
-    EXPECT_FALSE(owner.disk_completed_.empty());
-    EXPECT_EQ(owner.disk_completed_.pop(), &entry);
+    EXPECT_FALSE(owner.io_completed_.empty());
+    EXPECT_EQ(owner.io_completed_.pop(), &entry);
 }
 
 TEST_F(TransferWorkLoopTest, HostToDiskEvictionRunsOnEvictOwner) {
@@ -979,7 +981,7 @@ TEST_F(TransferWorkLoopTest, DiskQueuePreservesCompletionsPublishedDuringConsump
     EXPECT_FALSE(second->done());
     EXPECT_EQ(callbacks, 1u);
     EXPECT_EQ(owner.outstandingBatches(), 1u);
-    EXPECT_FALSE(owner.disk_completed_.empty());
+    EXPECT_FALSE(owner.io_completed_.empty());
     // The notification published during completion must survive into the next
     // turn, including when admission closes and the owner drains.
     owner.start();
@@ -989,7 +991,7 @@ TEST_F(TransferWorkLoopTest, DiskQueuePreservesCompletionsPublishedDuringConsump
     EXPECT_EQ(second->result().copy_error, CacheCopyError::IO_FAILED);
     EXPECT_EQ(second->result().status.ToString(), "disk block transfer failed");
     EXPECT_EQ(owner.outstandingBatches(), 0u);
-    EXPECT_TRUE(owner.disk_completed_.empty());
+    EXPECT_TRUE(owner.io_completed_.empty());
     EXPECT_EQ(callbacks, 2u);
 }
 
@@ -1800,8 +1802,8 @@ TEST_F(TransferWorkLoopCrcTest, DeadlineSkipsUnsubmittedCrcAndReleasesResources)
             if (from_disk) {
                 ASSERT_TRUE(io->waitReads(reads + 1));
                 std::unique_lock<std::mutex> lock(owner.mutex_);
-                ASSERT_TRUE(owner.cv_.wait_for(lock, 5s, [&] { return !owner.disk_completed_.empty(); }));
-                auto completed = owner.disk_completed_.take();
+                ASSERT_TRUE(owner.cv_.wait_for(lock, 5s, [&] { return !owner.io_completed_.empty(); }));
+                auto completed = owner.io_completed_.take();
                 lock.unlock();
                 auto* entry = completed.pop();
                 ASSERT_EQ(entry, owner.entries_.back().get());

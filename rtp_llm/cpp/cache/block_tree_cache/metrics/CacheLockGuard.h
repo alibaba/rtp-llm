@@ -12,13 +12,13 @@ namespace rtp_llm {
 
 class CacheLockGuard final {
 public:
-    CacheLockGuard(std::mutex& mutex, const BlockTreeCacheMetricsReporter& reporter, const char* operation):
+    CacheLockGuard(std::mutex& mutex, const CacheObserver& reporter, const char* operation):
         CacheLockGuard(mutex, reporter, operation, std::defer_lock) {
         lock();
     }
 
     CacheLockGuard(std::mutex&                          mutex,
-                   const BlockTreeCacheMetricsReporter& reporter,
+                   const CacheObserver& reporter,
                    const char*                          operation,
                    std::defer_lock_t):
         CacheLockGuard(mutex,
@@ -33,7 +33,7 @@ public:
 
     template<typename StopPredicate>
     CacheLockGuard(std::mutex&                           mutex,
-                   const BlockTreeCacheMetricsReporter*  reporter,
+                   const CacheObserver*  reporter,
                    const char*                           operation,
                    std::chrono::steady_clock::time_point deadline,
                    std::chrono::steady_clock::duration   retry_interval,

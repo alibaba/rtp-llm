@@ -6,12 +6,11 @@
 #include <vector>
 
 #include "rtp_llm/cpp/cache/CacheTier.h"
-#include "rtp_llm/cpp/cache/KVCacheResource.h"
+#include "rtp_llm/cpp/cache/BlockIndex.h"
 
 namespace rtp_llm {
 
-// Sorting metadata for a candidate node. A single copy per GroupSetResource follows the
-// data to its current serving tier (steady-state single-tier-service invariant).
+// Sorting metadata for the current serving tier.
 struct CandidateMeta {
     uint64_t last_access_seq{0};  // LRU: logical clock of the last real match
     uint64_t admission_seq{0};    // FIFO: logical clock of entering the current tier
@@ -60,6 +59,8 @@ struct GroupSetResource {
     CandidateMeta candidate_meta;
     uint64_t      eviction_access_seq{0};
     uint64_t      generation{0};
+    bool          retained_host_replica{false};
+    bool          retained_disk_replica{false};
 
     bool hasTier(Tier tier) const {
         switch (tier) {
@@ -80,7 +81,10 @@ struct GroupSetResource {
                + static_cast<size_t>(hasTier(Tier::DISK));
     }
     bool isValidSteadyState() const {
-        return transfer_state == GroupSetTransferState::IDLE && servingTierCount() <= 1;
+        const size_t host_copy = retained_host_replica && hasCompleteDeviceValue() && hasTier(Tier::HOST);
+        const size_t disk_copy = retained_disk_replica && hasTier(Tier::DISK)
+                                 && (hasCompleteDeviceValue() || hasTier(Tier::HOST));
+        return transfer_state == GroupSetTransferState::IDLE && servingTierCount() <= 1 + host_copy + disk_copy;
     }
     bool is_empty() const {
         return !hasTier(Tier::DEVICE) && !hasTier(Tier::HOST) && !hasTier(Tier::DISK);
@@ -100,6 +104,7 @@ struct GroupSetResource {
     void                      evictFromTier(Tier tier);
     std::vector<BlockIdxType> getBlocks(Tier tier) const;
     void                      setBlocks(Tier tier, const std::vector<BlockIdxType>& blocks);
+    void                      setHostReplica(BlockIdxType block);
     Tier                      getTopTier() const {
         if (hasTier(Tier::DEVICE)) {
             return Tier::DEVICE;

@@ -1,3 +1,4 @@
+#include "rtp_llm/cpp/cache/block_tree_cache/diagnostic/CacheDiagnostics.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/load/LoadAsyncContext.h"
 
 #include <algorithm>
@@ -5,10 +6,7 @@
 #include <unordered_map>
 #include <utility>
 
-#include "rtp_llm/cpp/cache/BatchKVCacheResource.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/ScopeRollback.h"
-#include "rtp_llm/cpp/utils/AssertUtils.h"
-#include "rtp_llm/cpp/utils/TimeUtil.h"
 
 namespace rtp_llm {
 
@@ -28,10 +26,10 @@ LoadAsyncContext::LoadAsyncContext(std::vector<TransferDescriptor>              
     storage_backend_(std::move(storage_backend)),
     request_id_(storage_request.request_id),
     storage_request_(std::move(storage_request)),
-    backend_task_({}, storage_backend_ ? storage_backend_->timeout_ : std::chrono::milliseconds(0), request_id_),
+    backend_task_({}, storage_backend_ ? storage_backend_->timeout_ : std::nullopt, request_id_),
     need_backend_match_(storage_backend_ && !storage_request_.empty()),
     backend_pending_(need_backend_match_),
-    backend_deadline_state_(need_backend_match_ ? State::PENDING : State::SUCCEEDED),
+    backend_deadline_state_(need_backend_match_ && storage_backend_->timeout_ ? State::PENDING : State::SUCCEEDED),
     remaining_transfer_count_(std::count_if(load_descs_.begin(), load_descs_.end(), [](const auto& desc) {
         return desc.source_tier == Tier::HOST || desc.source_tier == Tier::DISK;
     })) {
@@ -104,7 +102,7 @@ size_t LoadAsyncContext::matchedBlocks(Tier tier, size_t prefix) const {
 }
 
 void LoadAsyncContext::setLocalMatchLengths(size_t device_blocks, size_t device_host_blocks) {
-    RTP_LLM_CHECK(device_blocks <= device_host_blocks && device_host_blocks <= local_matched_blocks_);
+    BTC_CHECK(device_blocks <= device_host_blocks && device_host_blocks <= local_matched_blocks_);
     device_ready_blocks_        = device_blocks;
     matched_device_host_blocks_ = device_host_blocks;
 }
@@ -124,18 +122,18 @@ bool LoadAsyncContext::needBackendMatch() const {
 }
 
 void LoadAsyncContext::setMatchCallback(MatchCallback callback) {
-    RTP_LLM_CHECK(need_backend_match_ && callback && !match_callback_ && !backend_started_);
+    BTC_CHECK(need_backend_match_ && callback && !match_callback_ && !backend_started_);
     match_callback_ = std::move(callback);
 }
 
 void LoadAsyncContext::setSettlementReadyCallback(SettlementReadyCallback callback) {
     std::lock_guard<std::mutex> lock(mutex_);
-    RTP_LLM_CHECK(callback && state_.load() == State::PENDING && !settlement_ready_ && !settlement_ready_callback_);
+    BTC_CHECK(callback && state_.load() == State::PENDING && !settlement_ready_ && !settlement_ready_callback_);
     settlement_ready_callback_ = std::move(callback);
 }
 
 void LoadAsyncContext::startBackendMatch() {
-    RTP_LLM_CHECK(need_backend_match_ && match_callback_ && !backend_started_);
+    BTC_CHECK(need_backend_match_ && match_callback_ && !backend_started_);
     if (done()) {
         return;
     }
@@ -148,6 +146,22 @@ void LoadAsyncContext::startBackendMatch() {
                 context->onBackendMatch(matched_blocks_num, std::move(match_meta), success);
             }
         });
+}
+
+void LoadAsyncContext::startBackendMatchPaused(MatchCallback callback) {
+    setMatchCallback(std::move(callback));
+    pause_backend_read_ = true;
+    startBackendMatch();
+}
+
+bool LoadAsyncContext::resumeBackendRead() {
+    std::lock_guard lock(backend_match_mutex_);
+    if (!backend_read_prepared_) {
+        return false;
+    }
+    backend_read_prepared_ = false;
+    launchBackendRead(std::move(paused_match_meta_));
+    return true;
 }
 
 void LoadAsyncContext::setTargetBlocks(size_t desc_index, std::vector<BlockIdxType> target_blocks) {
@@ -186,7 +200,7 @@ void LoadAsyncContext::onBackendMatch(size_t                                   m
     if (!success) {
         matched_blocks_num = local_matched_blocks_;
     }
-    RTP_LLM_CHECK(storage_request_.keys && storage_request_.keys->size() == storage_request_.handles.size()
+    BTC_CHECK(storage_request_.cacheKeyCount() == storage_request_.handles.size()
                   && storage_request_.local_matched_blocks_num == local_matched_blocks_
                   && matched_blocks_num >= local_matched_blocks_
                   && matched_blocks_num <= storage_request_.handles.size());
@@ -195,8 +209,7 @@ void LoadAsyncContext::onBackendMatch(size_t                                   m
     }
     backend_matched_blocks_ = matched_blocks_num;
     if (matched_blocks_num < storage_request_.handles.size()) {
-        storage_request_.keys = std::make_shared<CacheKeysType>(storage_request_.keys->begin(),
-                                                                storage_request_.keys->begin() + matched_blocks_num);
+        storage_request_.sliceKeys(0, matched_blocks_num);
         storage_request_.handles.resize(matched_blocks_num);
     }
     for (size_t key_index = 0; key_index < storage_request_.handles.size(); ++key_index) {
@@ -219,6 +232,15 @@ void LoadAsyncContext::onBackendMatch(size_t                                   m
         failBeforeCommit();
         return;
     }
+    if (pause_backend_read_) {
+        paused_match_meta_ = std::move(match_meta);
+        backend_read_prepared_ = true;
+        return;
+    }
+    launchBackendRead(std::move(match_meta));
+}
+
+void LoadAsyncContext::launchBackendRead(std::shared_ptr<StorageBackendMatchMeta> match_meta) {
     if (storage_request_.empty()) {
         onBackendRead(ErrorInfo::OkStatus());
         return;
@@ -311,7 +333,7 @@ void LoadAsyncContext::markAborted() {
         if (error_info_.ok()) {
             error_info_ = ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "load context aborted");
         }
-        completion_time_us_.store(autil::TimeUtility::currentTimeInMicroSeconds());
+        completion_time_us_.store(cacheNowUs());
         state_.store(State::FAILED);
     }
     notifyCompletion();
@@ -350,7 +372,7 @@ bool LoadAsyncContext::completeJoinedOne(bool     success,
         if (!join_trace_finished_.exchange(true))
             join_span_.finish();
         join_completed       = true;
-        join_wait_latency_us = currentTimeUs() - join_start_time_us_;
+        join_wait_latency_us = cacheNowUs() - join_start_time_us_;
     }
     return true;
 }
@@ -422,7 +444,7 @@ bool LoadAsyncContext::settle(bool success, bool host_success) {
         if (!completed_successfully && error_info_.ok()) {
             error_info_ = ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "load settlement failed");
         }
-        completion_time_us_.store(autil::TimeUtility::currentTimeInMicroSeconds());
+        completion_time_us_.store(cacheNowUs());
         state_.store(completed_successfully ? State::SUCCEEDED : State::FAILED);
     }
     notifyCompletion();
@@ -444,7 +466,7 @@ bool LoadAsyncContext::onTaskFail() {
         if (error_info_.ok()) {
             error_info_ = ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "load task failed");
         }
-        completion_time_us_.store(autil::TimeUtility::currentTimeInMicroSeconds());
+        completion_time_us_.store(cacheNowUs());
         discarded_callback = std::move(settlement_ready_callback_);
         state_.store(State::FAILED);
     }
@@ -471,7 +493,7 @@ void LoadAsyncContext::finishIfReadyLocked(bool& notify, SettlementReadyCallback
     } else if (!has_host_failure_) {
         device_ready_blocks_ = matched_device_host_blocks_;
     }
-    completion_time_us_.store(autil::TimeUtility::currentTimeInMicroSeconds());
+    completion_time_us_.store(cacheNowUs());
     state_.store(local_load_succeeded_ && backend_error_.ok() ? State::SUCCEEDED : State::FAILED);
     notify = true;
 }
@@ -488,7 +510,7 @@ void LoadAsyncContext::dispatchCompletion(bool notify, SettlementReadyCallback s
 void LoadAsyncContext::waitDone() {
     std::unique_lock<std::mutex> lock(mutex_);
     while (!done()) {
-        if (backend_pending_) {
+        if (backend_pending_ && storage_backend_->timeout_) {
             cv_.wait_until(lock, backend_task_.deadline(), [this] { return done(); });
         } else {
             cv_.wait(lock, [this] { return done(); });
@@ -565,9 +587,9 @@ ErrorInfo LoadAsyncContext::errorInfo() const {
     return completionErrorLocked();
 }
 
-void LoadAsyncContext::deferRelease(std::shared_ptr<BatchKVCacheResource> resource) {
+void LoadAsyncContext::deferRelease(std::function<void()> release_refs) {
     if (!coordinator_->defer_cleanup_
-        || !coordinator_->defer_cleanup_([self = shared_from_this(), resource = std::move(resource)] {
+        || !coordinator_->defer_cleanup_([self = shared_from_this(), release_refs = std::move(release_refs)] {
                std::lock_guard<std::mutex> lock(self->backend_match_mutex_);
                if (self->coordinator_->abort(*self)) {
                    self->markAborted();
@@ -575,19 +597,10 @@ void LoadAsyncContext::deferRelease(std::shared_ptr<BatchKVCacheResource> resour
                    // I/O pins remain with StorageBackend until the payload has settled.
                    self->onBackendRead(ErrorInfo(ErrorCode::DEADLINE_EXCEEDED, "match-to-ready deadline exceeded"));
                }
-               for (int batch = 0; batch < resource->batchSize(); ++batch) {
-                   for (const auto& tag : self->storage_backend_->topology().groupTags()) {
-                       for (const auto block : resource->blocks(batch, tag)) {
-                           if (!isNullBlockIdx(block)) {
-                               self->storage_backend_->devicePool(tag)->decRef(block, DeviceBlockRefType::REQUEST);
-                           }
-                       }
-                   }
-               }
-               resource->clearBlocks();
+               release_refs();
            })) {
         // Admission has closed. Keep request ownership rather than reuse an I/O target.
-        RTP_LLM_LOG_WARNING("load cleanup queue closed; retaining abandoned request block references");
+        BTC_LOG_WARNING("load cleanup queue closed; retaining abandoned request block references");
     }
 }
 

@@ -7,19 +7,25 @@
 #include <stdexcept>
 
 #include "rtp_llm/cpp/cache/block_tree_cache/ScopeRollback.h"
-#include "rtp_llm/cpp/utils/AssertUtils.h"
-#include "rtp_llm/cpp/utils/Logger.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/diagnostic/CacheDiagnostics.h"
 
 namespace rtp_llm {
 
-BlockTree::BlockTree(std::vector<GroupSetPtr> group_sets): group_sets_(std::move(group_sets)) {
+BlockTree::BlockTree(std::vector<GroupSetPtr> group_sets, size_t key_tokens):
+    key_tokens_(key_tokens), group_sets_(std::move(group_sets)) {
+    if (!key_tokens_) {
+        throw std::invalid_argument("BlockTree key token stride must be positive");
+    }
     for (size_t group_set_id = 0; group_set_id < group_sets_.size(); ++group_set_id) {
+        if (!group_sets_[group_set_id] || group_sets_[group_set_id]->pageTokens() % key_tokens_) {
+            throw std::invalid_argument("BlockTree group pages must be aligned to the key stride");
+        }
         const auto& group_tags = group_sets_[group_set_id]->groupTags();
         for (size_t member_group_id = 0; member_group_id < group_tags.size(); ++member_group_id) {
             const auto& tag = group_tags[member_group_id];
             const bool  inserted =
                 reusable_group_locations_.emplace(tag, ReusableGroupLocation{group_set_id, member_group_id}).second;
-            RTP_LLM_CHECK_WITH_INFO(inserted, "duplicate BlockTree reusable tag=%s", tag.c_str());
+            BTC_CHECK_WITH_INFO(inserted, "duplicate BlockTree reusable tag=%s", tag.c_str());
         }
     }
 
@@ -27,14 +33,6 @@ BlockTree::BlockTree(std::vector<GroupSetPtr> group_sets): group_sets_(std::move
     root_->cache_key = 0;
     root_->parent    = nullptr;
     root_->group_set_resources.resize(group_sets_.size());
-}
-
-BlockTree::BlockTree(ExternalGroups groups):
-    external_group_count_(groups.count), root_(std::make_unique<TreeNode>()) {
-    if (external_group_count_ == 0) {
-        throw std::invalid_argument("external BlockTree requires at least one group");
-    }
-    root_->group_set_resources.resize(external_group_count_);
 }
 
 const ReusableGroupLocation* BlockTree::reusableGroupLocation(std::string_view group_tag) const {
@@ -89,31 +87,54 @@ void BlockTree::releaseNode(TreeNode* node) {
         if (resource.hasTier(Tier::HOST)) {
             group_set->unreferenceBlocks(MultiNodeResource{group_set_id, Tier::HOST, {{node, {resource.host_block}}}},
                                          BlockTreeRefType::CACHE);
-            resource.host_block = NULL_BLOCK_IDX;
+            resource.evictFromTier(Tier::HOST);
         }
         if (resource.hasTier(Tier::DISK)) {
             group_set->unreferenceBlocks(MultiNodeResource{group_set_id, Tier::DISK, {{node, {resource.disk_block}}}},
                                          BlockTreeRefType::CACHE);
-            resource.disk_block = NULL_BLOCK_IDX;
+            resource.evictFromTier(Tier::DISK);
         }
         resource.transfer_state = GroupSetTransferState::IDLE;
     }
 }
 
-TreeNode* BlockTree::createNode(CacheKeyType key, TreeNode* parent) {
+TreeNode* BlockTree::createNode(BlockTreeKeyView key, TreeNode* parent) {
     auto node       = std::make_unique<TreeNode>();
-    node->cache_key = key;
+    if (key.isOpaque()) {
+        node->opaque = std::make_unique<OpaqueTreeNodeState>(key.bytes(), group_sets_.size());
+    } else {
+        node->cache_key = key.integer();
+    }
+    node->identity = ++next_node_identity_;
+    node->parent_identity = parent->identity;
+    node->depth     = parent->depth + 1;
     node->parent    = parent;
     node->index     = node_pool_.size();
-    node->group_set_resources.resize(group_sets_.size() + external_group_count_);
+    node->group_set_resources.resize(group_sets_.size());
     auto* raw = node.get();
+    cache_keys_.push_back(raw->cache_key);
+    block_tree_cache_detail::ScopeRollback key_rollback([this] { cache_keys_.pop_back(); });
     node_pool_.push_back(std::move(node));
-    cache_keys_.push_back(key);
+    block_tree_cache_detail::ScopeRollback node_rollback([this] { node_pool_.pop_back(); });
+    parent->children.emplace(raw->key(), raw);
+    opaque_node_count_ += key.isOpaque();
+    opaque_catalog_version_ += key.isOpaque();
     ++key_version_;
+    node_rollback.dismiss();
+    key_rollback.dismiss();
     return raw;
 }
 
 std::vector<TreeNode*> BlockTree::findNode(const CacheKeysType& cache_keys) const {
+    return findNodeImpl(cache_keys);
+}
+
+std::vector<TreeNode*> BlockTree::findNode(const BlockTreeKeys& cache_keys) const {
+    return findNodeImpl(cache_keys);
+}
+
+template<typename Keys>
+std::vector<TreeNode*> BlockTree::findNodeImpl(const Keys& cache_keys) const {
     std::vector<TreeNode*> path;
     TreeNode*              current = root_.get();
 
@@ -125,9 +146,8 @@ std::vector<TreeNode*> BlockTree::findNode(const CacheKeysType& cache_keys) cons
         TreeNode* child = it->second;
         for (const GroupSetResource& resource : child->group_set_resources) {
             if (resource.transfer_state == GroupSetTransferState::IDLE) {
-                RTP_LLM_CHECK_WITH_INFO(resource.isValidSteadyState(),
-                                        "BlockTree encountered invalid IDLE multi-tier resource, node_key=%ld",
-                                        child->cache_key);
+                BTC_CHECK_WITH_INFO(resource.isValidSteadyState(),
+                                    "BlockTree encountered an invalid idle resource at key row=%zu", i);
             }
         }
         current = child;
@@ -137,30 +157,68 @@ std::vector<TreeNode*> BlockTree::findNode(const CacheKeysType& cache_keys) cons
     return path;
 }
 
-std::vector<TreeNode*> BlockTree::ensureExternalPath(const CacheKeysType& cache_keys) {
-    RTP_LLM_CHECK(external_group_count_ != 0);
-    auto      path    = findNode(cache_keys);
-    TreeNode* current = path.empty() ? root_.get() : path.back();
-    path.reserve(cache_keys.size());
-    for (size_t i = path.size(); i < cache_keys.size(); ++i) {
-        auto* child = createNode(cache_keys[i], current);
-        current->children.emplace(cache_keys[i], child);
-        path.push_back(child);
-        current = child;
-    }
-    return path;
-}
-
 CacheKeysType BlockTree::cacheKeys() const {
-    return cache_keys_;
+    if (!opaque_node_count_) {
+        return cache_keys_;
+    }
+    CacheKeysType keys;
+    keys.reserve(node_pool_.size() - opaque_node_count_);
+    for (const auto& node : node_pool_) {
+        if (!node->key().isOpaque()) {
+            keys.push_back(node->cache_key);
+        }
+    }
+    return keys;
 }
 
 bool BlockTree::isLeafAtTier(const TreeNode* node, size_t group_set_id, Tier tier) const {
-    for (const auto& [_, child] : node->children) {
-        if (child->group_set_resources[group_set_id].hasTier(tier)) {
-            return false;
+    const auto blocks_per_page = group_sets_[group_set_id]->pageTokens() / key_tokens_;
+    if (blocks_per_page == 1) {
+        for (const auto& [_, child] : node->children) {
+            if (child->group_set_resources[group_set_id].hasTier(tier)) {
+                return false;
+            }
+        }
+        return true;
+    }
+    std::vector<std::pair<const TreeNode*, size_t>> remaining{{node, blocks_per_page}};
+    while (!remaining.empty()) {
+        const auto [prefix, distance] = remaining.back();
+        remaining.pop_back();
+        for (const auto& [_, child] : prefix->children) {
+            if (distance > 1) {
+                remaining.emplace_back(child, distance - 1);
+            } else if (child->group_set_resources[group_set_id].hasTier(tier)) {
+                return false;
+            }
         }
     }
+    return true;
+}
+
+const TreeNode* BlockTree::previousGroupPage(const TreeNode* node, size_t group_set_id) const {
+    const auto blocks_per_page = group_sets_[group_set_id]->pageTokens() / key_tokens_;
+    for (size_t i = 0; node && i < blocks_per_page; ++i) {
+        node = node->parent;
+    }
+    return node;
+}
+
+TreeNode* BlockTree::previousGroupPage(TreeNode* node, size_t group_set_id) const {
+    return const_cast<TreeNode*>(previousGroupPage(static_cast<const TreeNode*>(node), group_set_id));
+}
+
+bool BlockTree::retainHostReplica(TreeNode* node, size_t group_set_id, BlockIdxType host) {
+    assert(node && node->parent && "BlockTree replica requires an attached node");
+    auto& resource = node->group_set_resources.at(group_set_id);
+    const auto& group = group_sets_.at(group_set_id);
+    if (!group->pools().host || isNullBlockIdx(host) || resource.transfer_state != GroupSetTransferState::IDLE
+        || resource.transfer_detached || !resource.hasCompleteDeviceValue()
+        || resource.hasTier(Tier::HOST) || resource.hasTier(Tier::DISK)) {
+        return false;
+    }
+    group->referenceBlocks({group_set_id, Tier::HOST, {{node, {host}}}}, BlockTreeRefType::CACHE);
+    resource.setHostReplica(host);
     return true;
 }
 
@@ -168,14 +226,27 @@ BlockTreeInsertResult BlockTree::insertNode(const CacheKeysType&                
                                             const std::vector<std::vector<GroupSetResource>>& resources,
                                             bool                                              collect_path,
                                             bool                                              is_resident) {
+    return validateAndInsert(cache_keys, resources, collect_path, is_resident);
+}
+
+BlockTreeInsertResult BlockTree::insertNode(const BlockTreeKeys& cache_keys,
+                                            const std::vector<std::vector<GroupSetResource>>& resources,
+                                            bool collect_path, bool is_resident) {
+    return validateAndInsert(cache_keys, resources, collect_path, is_resident);
+}
+
+template<typename Keys>
+BlockTreeInsertResult BlockTree::validateAndInsert(const Keys& cache_keys,
+                                                   const std::vector<std::vector<GroupSetResource>>& resources,
+                                                   bool collect_path, bool is_resident) {
     BlockTreeInsertResult result;
     if (resources.size() != cache_keys.size()) {
-        RTP_LLM_LOG_WARNING("key/resource size mismatch, keys=%zu resources=%zu", cache_keys.size(), resources.size());
+        BTC_LOG_WARNING("key/resource size mismatch, keys=%zu resources=%zu", cache_keys.size(), resources.size());
         return result;
     }
     for (size_t i = 0; i < resources.size(); ++i) {
         if (resources[i].size() != group_sets_.size()) {
-            RTP_LLM_LOG_WARNING("GroupSetResource mismatch, index=%zu expected=%zu actual=%zu",
+            BTC_LOG_WARNING("GroupSetResource mismatch, index=%zu expected=%zu actual=%zu",
                                 i,
                                 group_sets_.size(),
                                 resources[i].size());
@@ -183,21 +254,23 @@ BlockTreeInsertResult BlockTree::insertNode(const CacheKeysType&                
         }
         for (size_t group_set_id = 0; group_set_id < group_sets_.size(); ++group_set_id) {
             const GroupSetResource& resource = resources[i][group_set_id];
-            RTP_LLM_CHECK_WITH_INFO(resource.isValidSteadyState()
-                                        && (!resource.hasTier(Tier::DEVICE) || resource.hasCompleteDeviceValue()),
-                                    "BlockTree insert requires an IDLE steady resource and complete DEVICE value: "
-                                    "key=%ld group_set_id=%zu state=%d tiers=%zu",
-                                    cache_keys[i],
-                                    group_set_id,
-                                    static_cast<int>(resource.transfer_state),
-                                    resource.servingTierCount());
+            BTC_CHECK_WITH_INFO(resource.isValidSteadyState() && resource.servingTierCount() <= 1
+                                     && (!resource.hasTier(Tier::DEVICE) || resource.hasCompleteDeviceValue()),
+                                "BlockTree insert requires an idle resource in one tier and complete device data: "
+                                "row=%zu group=%zu state=%d tiers=%zu",
+                                i, group_set_id, static_cast<int>(resource.transfer_state), resource.servingTierCount());
+            const auto stride = group_sets_[group_set_id]->pageTokens() / key_tokens_;
+            if (stride != 1 && !resource.is_empty() && (i + 1) % stride) {
+                throw std::invalid_argument("BlockTree resource is not aligned to its group page");
+            }
         }
     }
 
     return insertNodeImpl(cache_keys, resources, collect_path, is_resident);
 }
 
-BlockTreeInsertResult BlockTree::insertNodeImpl(const CacheKeysType&                              cache_keys,
+template<typename Keys>
+BlockTreeInsertResult BlockTree::insertNodeImpl(const Keys&                                       cache_keys,
                                                 const std::vector<std::vector<GroupSetResource>>& resources,
                                                 bool                                              collect_path,
                                                 bool                                              is_resident) {
@@ -238,8 +311,8 @@ BlockTreeInsertResult BlockTree::insertNodeImpl(const CacheKeysType&            
     };
 
     for (size_t i = 0; i < cache_keys.size(); ++i) {
-        CacheKeyType key = cache_keys[i];
-        if (pending_node_pool_.count(key)) {
+        BlockTreeKeyView key = cache_keys[i];
+        if (hasPendingKey(key, current)) {
             result.hard_stop = true;
             break;
         }
@@ -253,7 +326,7 @@ BlockTreeInsertResult BlockTree::insertNodeImpl(const CacheKeysType&            
                                    return resource.transfer_state != GroupSetTransferState::IDLE
                                           || resource.transfer_detached;
                                })) {
-                RTP_LLM_LOG_WARNING("resident insert stopped at busy prefix: key_index=%zu key=%ld", i, key);
+                BTC_LOG_WARNING("resident insert stopped at busy prefix: key_index=%zu", i);
                 break;
             }
             current                                = child;
@@ -325,7 +398,6 @@ BlockTreeInsertResult BlockTree::insertNodeImpl(const CacheKeysType&            
             }
         } else {
             TreeNode* child              = createNode(key, current);
-            current->children[key]       = child;
             current                      = child;
             current->group_set_resources = resources[i];
             for (size_t group_set_id = 0; group_set_id < group_sets_.size(); ++group_set_id) {
@@ -355,7 +427,7 @@ BlockTreeInsertResult BlockTree::insertNodeImpl(const CacheKeysType&            
     }
 
     settle_references.run();
-    RTP_LLM_LOG_DEBUG("keys=%zu created=%zu adopted=%zu tree_nodes=%zu",
+    BTC_LOG_DEBUG("keys=%zu created=%zu adopted=%zu tree_nodes=%zu",
                       inserted_prefix_length,
                       result.inserted_nodes.size(),
                       result.adopted_nodes.size(),
@@ -364,7 +436,7 @@ BlockTreeInsertResult BlockTree::insertNodeImpl(const CacheKeysType&            
 }
 
 void BlockTree::referenceNodeForNonOwnerTransfer(TreeNode* node) {
-    RTP_LLM_CHECK(node && node->parent);
+    BTC_CHECK(node && node->parent);
     ++node->non_owner_transfer_ref_count;
 }
 
@@ -380,15 +452,31 @@ bool BlockTree::canReleaseNode(TreeNode* node) const {
 }
 
 void BlockTree::removeNode(TreeNode* node) {
-    RTP_LLM_LOG_DEBUG("removing node key=%ld, pool_size=%zu", node->cache_key, node_pool_.size());
+    BTC_LOG_DEBUG("removing node, pool_size=%zu", node_pool_.size());
 
     if (node->parent == nullptr) {
-        RTP_LLM_CHECK(node->non_owner_transfer_ref_count == 0);
-        pending_node_pool_.erase(node->cache_key);
+        BTC_CHECK(node->non_owner_transfer_ref_count == 0);
+        const auto [begin, end] = pending_node_pool_.equal_range(node->key());
+        const auto found = std::find_if(begin, end, [node](const auto& entry) { return entry.second.get() == node; });
+        BTC_CHECK(found != end);
+        pending_node_pool_.erase(found);
         return;
     }
-    removePublishedKey(node->cache_key);
-    node->parent->children.erase(node->cache_key);
+    if (node->opaque) {
+        for (size_t group = 0; group < node->opaque->device_groups.size(); ++group) {
+            if (node->opaque->device_groups[group]) {
+                if (track_opaque_device_changes_) {
+                    opaque_device_changes_.push_back({node->opaque->key, group, false});
+                }
+                --opaque_device_groups_;
+            }
+        }
+        ++opaque_catalog_version_;
+    } else {
+        removePublishedKey(node->cache_key);
+    }
+    node->parent->children.erase(node->key());
+    opaque_node_count_ -= node->key().isOpaque();
     node->parent            = nullptr;
     const size_t index      = node->index;
     const size_t last_index = node_pool_.size() - 1;
@@ -399,16 +487,27 @@ void BlockTree::removeNode(TreeNode* node) {
     }
     node->index = std::numeric_limits<size_t>::max();
     if (!canReleaseNode(node)) {
-        pending_node_pool_.emplace(node->cache_key, std::move(node_pool_.back()));
+        pending_node_pool_.emplace(node->key(), std::move(node_pool_.back()));
     }
     node_pool_.pop_back();
     cache_keys_.pop_back();
     ++key_version_;
 }
 
+bool BlockTree::hasPendingKey(BlockTreeKeyView key, const TreeNode* parent) const {
+    const auto [begin, end] = pending_node_pool_.equal_range(key);
+    if (!key.isOpaque()) {
+        // RTP's integer canonical hashes retain their global pending-key fence.
+        return begin != end;
+    }
+    return std::any_of(begin, end, [parent](const auto& entry) {
+        return entry.second->parent_identity == parent->identity;
+    });
+}
+
 void BlockTree::removePendingNodes(const std::unordered_map<TreeNode*, size_t>& nodes) {
     for (const auto& [node, non_owner_transfer_refs] : nodes) {
-        RTP_LLM_CHECK(node && node->non_owner_transfer_ref_count >= non_owner_transfer_refs);
+        BTC_CHECK(node && node->non_owner_transfer_ref_count >= non_owner_transfer_refs);
         node->non_owner_transfer_ref_count -= non_owner_transfer_refs;
         if (node->parent == nullptr && canReleaseNode(node)) {
             removeNode(node);
@@ -416,20 +515,17 @@ void BlockTree::removePendingNodes(const std::unordered_map<TreeNode*, size_t>& 
     }
 }
 
-TreeNode* BlockTree::removeNodeAndEmptyAncestors(TreeNode* node, CacheKeysType* removed_keys) {
+TreeNode* BlockTree::removeNodeAndEmptyAncestors(TreeNode* node) {
     TreeNode* current       = node;
     size_t    removed_count = 0;
     while (isRemovable(current)) {
         TreeNode* parent = current->parent;
-        if (removed_keys) {
-            removed_keys->push_back(current->cache_key);
-        }
         removeNode(current);
         current = parent;
         ++removed_count;
     }
     if (removed_count != 0) {
-        RTP_LLM_LOG_DEBUG("removed %zu nodes", removed_count);
+        BTC_LOG_DEBUG("removed %zu nodes", removed_count);
     }
     return current;
 }
@@ -478,7 +574,14 @@ void BlockTree::removePublishedKey(CacheKeyType key) {
 }
 
 void BlockTree::refreshPublishedState(const TreeNode* node) {
-    if (!event_publisher_ || node->parent == nullptr) {
+    if (!node->parent) {
+        return;
+    }
+    if (node->opaque) {
+        refreshOpaqueDeviceState(*node);
+        return;
+    }
+    if (!event_publisher_) {
         return;
     }
     const auto          it = published_groups_.find(node->cache_key);
@@ -508,6 +611,38 @@ void BlockTree::refreshPublishedState(const TreeNode* node) {
     } else if (it != published_groups_.end()) {
         published_groups_.erase(it);
     }
+}
+
+void BlockTree::refreshOpaqueDeviceState(const TreeNode& node) {
+    for (size_t group = 0; group < group_sets_.size(); ++group) {
+        const auto& resource = node.group_set_resources[group];
+        const bool ready = !resource.transfer_detached && resource.hasCompleteDeviceValue()
+                           && resource.device_blocks.size() == group_sets_[group]->pools().device.size();
+        if (ready == node.opaque->device_groups[group]) {
+            continue;
+        }
+        if (track_opaque_device_changes_) {
+            opaque_device_changes_.push_back({node.opaque->key, group, ready});
+        }
+        node.opaque->device_groups[group] = ready;
+        if (ready) {
+            ++opaque_device_groups_;
+        } else {
+            --opaque_device_groups_;
+        }
+        ++opaque_catalog_version_;
+    }
+}
+
+void BlockTree::trackOpaqueDeviceChanges(bool enabled) {
+    track_opaque_device_changes_ = enabled;
+    if (!enabled) {
+        opaque_device_changes_.clear();
+    }
+}
+
+std::vector<OpaqueDeviceChange> BlockTree::takeOpaqueDeviceChanges() {
+    return std::exchange(opaque_device_changes_, {});
 }
 
 }  // namespace rtp_llm

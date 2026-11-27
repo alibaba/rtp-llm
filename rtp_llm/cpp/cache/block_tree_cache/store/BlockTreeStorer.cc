@@ -1,21 +1,24 @@
+#include "rtp_llm/cpp/cache/block_tree_cache/diagnostic/CacheDiagnostics.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/store/BlockTreeStorer.h"
 
 #include <utility>
+#include <type_traits>
 
-#include "rtp_llm/cpp/utils/AssertUtils.h"
 
 namespace rtp_llm {
 
 BlockTreeStorer::BlockTreeStorer(BlockTree*                      tree,
                                  BlockTreeEvictor&               evictor,
-                                 BlockTreeCacheMetricsReporter&  metrics_reporter,
+                                 CacheObserver&  metrics_reporter,
                                  std::shared_ptr<StorageBackend> storage_backend,
-                                 SettledFn                       settled):
+                                 SettledFn                       settled,
+                                 bool                            write_remote_on_publish):
     tree_(tree),
     evictor_(evictor),
     metrics_reporter_(metrics_reporter),
     storage_backend_(std::move(storage_backend)),
-    settled_(std::move(settled)) {}
+    settled_(std::move(settled)),
+    write_remote_on_publish_(write_remote_on_publish) {}
 
 StorageWriteTask BlockTreeStorer::storeLocked(const CacheKeysType&                              cache_keys,
                                               const std::vector<std::vector<GroupSetResource>>& resources,
@@ -25,15 +28,43 @@ StorageWriteTask BlockTreeStorer::storeLocked(const CacheKeysType&              
                                               std::optional<int64_t>                            request_id,
                                               size_t                                            remote_reuse_begin,
                                               size_t                                            remote_reuse_end) {
+    return storeLockedImpl(cache_keys, resources, target_tier, is_resident, resident_prefix_length,
+                           request_id, remote_reuse_begin, remote_reuse_end);
+}
+
+StorageWriteTask BlockTreeStorer::storeLocked(const BlockTreeKeys& cache_keys,
+                                              const std::vector<std::vector<GroupSetResource>>& resources,
+                                              Tier target_tier,
+                                              bool is_resident,
+                                              size_t& resident_prefix_length,
+                                              std::optional<int64_t> request_id,
+                                              size_t remote_reuse_begin,
+                                              size_t remote_reuse_end) {
+    return storeLockedImpl(cache_keys, resources, target_tier, is_resident, resident_prefix_length,
+                           request_id, remote_reuse_begin, remote_reuse_end);
+}
+
+template<class Keys>
+StorageWriteTask BlockTreeStorer::storeLockedImpl(const Keys& cache_keys,
+                                                  const std::vector<std::vector<GroupSetResource>>& resources,
+                                                  Tier target_tier,
+                                                  bool is_resident,
+                                                  size_t& resident_prefix_length,
+                                                  std::optional<int64_t> request_id,
+                                                  size_t remote_reuse_begin,
+                                                  size_t remote_reuse_end) {
     resident_prefix_length = 0;
-    RTP_LLM_CHECK_WITH_INFO(target_tier == Tier::DEVICE, "unsupported store target tier: %s", tierName(target_tier));
-    publishDeviceLocked(cache_keys, resources, is_resident, resident_prefix_length);
-    return storage_backend_ ? storage_backend_->prepareWrite(makeStorageRequest(
+    BTC_CHECK_WITH_INFO(target_tier == Tier::DEVICE || (std::is_same_v<Keys, BlockTreeKeys> && target_tier == Tier::HOST),
+                        "unsupported store target tier: %s", tierName(target_tier));
+    publishLocalLocked(cache_keys, resources, is_resident, resident_prefix_length);
+    return write_remote_on_publish_ && storage_backend_ && target_tier == Tier::DEVICE
+               && storage_backend_->supportsWriteTier(Tier::DEVICE) ? storage_backend_->prepareWrite(makeStorageRequest(
                                   cache_keys, resources, request_id, remote_reuse_begin, remote_reuse_end)) :
                               StorageWriteTask{};
 }
 
-void BlockTreeStorer::publishDeviceLocked(const CacheKeysType&                              cache_keys,
+template<class Keys>
+void BlockTreeStorer::publishLocalLocked(const Keys&                                        cache_keys,
                                           const std::vector<std::vector<GroupSetResource>>& resources,
                                           bool                                              is_resident,
                                           size_t&                                           resident_prefix_length) {
@@ -51,18 +82,25 @@ void BlockTreeStorer::publishDeviceLocked(const CacheKeysType&                  
     resident_prefix_length = insert_result.resident_prefix_length;
 }
 
-StorageRequest BlockTreeStorer::makeStorageRequest(const CacheKeysType&                              cache_keys,
+template<class Keys>
+StorageRequest BlockTreeStorer::makeStorageRequest(const Keys&                                       cache_keys,
                                                    const std::vector<std::vector<GroupSetResource>>& resources,
                                                    const std::optional<int64_t>&                     request_id,
                                                    size_t                                            remote_reuse_begin,
                                                    size_t remote_reuse_end) const {
-    RTP_LLM_CHECK(remote_reuse_begin <= remote_reuse_end && remote_reuse_end <= cache_keys.size());
+    BTC_CHECK(remote_reuse_begin <= remote_reuse_end && remote_reuse_end <= cache_keys.size());
     const size_t key_count = cache_keys.size() - (remote_reuse_end - remote_reuse_begin);
-    auto         keys      = std::make_shared<CacheKeysType>();
+    auto         keys      = std::make_shared<Keys>();
     keys->reserve(key_count);
     keys->insert(keys->end(), cache_keys.begin(), cache_keys.begin() + remote_reuse_begin);
     keys->insert(keys->end(), cache_keys.begin() + remote_reuse_end, cache_keys.end());
-    StorageRequest request{std::move(keys), std::vector<std::vector<StorageBlockHandle>>(key_count)};
+    StorageRequest request;
+    if constexpr (std::is_same_v<Keys, CacheKeysType>) {
+        request.keys = std::move(keys);
+    } else {
+        request.opaque_keys = std::move(keys);
+    }
+    request.handles.resize(key_count);
     request.request_id = request_id;
     size_t output      = 0;
     for (size_t key_index = 0; key_index < resources.size(); ++key_index) {

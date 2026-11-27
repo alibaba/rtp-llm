@@ -1,8 +1,8 @@
+#include "rtp_llm/cpp/cache/block_tree_cache/diagnostic/CacheDiagnostics.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/evict/EvictionHeap.h"
 
 #include <functional>
 
-#include "rtp_llm/cpp/utils/AssertUtils.h"
 
 namespace rtp_llm {
 
@@ -46,12 +46,12 @@ void EvictionHeap::upsert(TreeNode* node, const CandidateMeta& meta) {
     // Replace any existing entry so at most one entry per node remains.
     erase(node);
     auto [ordered_it, inserted] = ordered_.insert(makeEntry(node, meta));
-    RTP_LLM_CHECK_WITH_INFO(
+    BTC_CHECK_WITH_INFO(
         inserted, "EvictionHeap::upsert failed to insert a unique entry for node=%p", static_cast<void*>(node));
     auto index_result = index_.emplace(node, ordered_it);
     if (!index_result.second) {
         ordered_.erase(ordered_it);
-        RTP_LLM_FAIL("EvictionHeap::upsert failed to index node=%p", static_cast<void*>(node));
+        BTC_FAIL("EvictionHeap::upsert failed to index node=%p", static_cast<void*>(node));
     }
 }
 
@@ -62,7 +62,7 @@ bool EvictionHeap::updateIfPresent(TreeNode* node, const CandidateMeta& meta) {
     }
     ordered_.erase(index_it->second);
     auto [ordered_it, inserted] = ordered_.insert(makeEntry(node, meta));
-    RTP_LLM_CHECK_WITH_INFO(inserted,
+    BTC_CHECK_WITH_INFO(inserted,
                             "EvictionHeap::updateIfPresent failed to insert a unique entry for node=%p",
                             static_cast<void*>(node));
     index_it->second = ordered_it;

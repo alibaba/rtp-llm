@@ -12,7 +12,7 @@
 #include <vector>
 
 #include "rtp_llm/cpp/cache/AsyncContext.h"
-#include "rtp_llm/cpp/cache/Types.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/block_pool/MallocStatus.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/StorageBackend.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferTypes.h"
 
@@ -79,6 +79,10 @@ public:
     void setMatchCallback(MatchCallback callback);
     void setSettlementReadyCallback(SettlementReadyCallback callback);
     void startBackendMatch();
+    // A split scheduler obtains the native remote match before allocating
+    // Device targets, then resumes the same backend request after binding.
+    void startBackendMatchPaused(MatchCallback callback);
+    bool resumeBackendRead();
     void setTargetBlocks(size_t desc_index, std::vector<BlockIdxType> target_blocks);
     void setBackendTargetBlock(size_t key_index, size_t handle_index, BlockIdxType target_block);
 
@@ -111,13 +115,14 @@ public:
         return completion_time_us_.load();
     }
     ErrorInfo    errorInfo() const override;
-    void         deferRelease(std::shared_ptr<BatchKVCacheResource> resource);
+    void         deferRelease(std::function<void()> release_refs);
     MallocStatus mallocStatus() const;
 
 private:
     void markAborted();
     void rebuildMatchedBlocksByTier();
     void onBackendMatch(size_t matched_blocks_num, std::shared_ptr<StorageBackendMatchMeta> match_meta, bool success);
+    void launchBackendRead(std::shared_ptr<StorageBackendMatchMeta> match_meta);
     void onBackendRead(ErrorInfo error);
     void failBeforeCommit();
     void failCommit();
@@ -147,6 +152,9 @@ private:
     const bool                      need_backend_match_{false};
     bool                            backend_started_{false};
     bool                            backend_pending_{false};
+    bool                            pause_backend_read_{false};
+    bool                            backend_read_prepared_{false};
+    std::shared_ptr<StorageBackendMatchMeta> paused_match_meta_;
     // SUCCEEDED closes the remote business budget; FAILED latches its expiry.
     mutable std::atomic<State> backend_deadline_state_{State::SUCCEEDED};
     std::atomic<bool>          commit_started_{false};

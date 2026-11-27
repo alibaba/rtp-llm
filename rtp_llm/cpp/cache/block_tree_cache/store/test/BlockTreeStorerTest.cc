@@ -1,4 +1,5 @@
 #include <gtest/gtest.h>
+#include "rtp_llm/cpp/cache/block_tree_cache/integration/rtp_llm/RtpStorageBackend.h"
 
 #include <chrono>
 #include <condition_variable>
@@ -116,7 +117,7 @@ private:
     size_t                  submitted_count_{0};
 };
 
-class PendingWriteBackend: public StorageBackend {
+class PendingWriteBackend: public RtpStorageBackend {
 public:
     PendingWriteBackend(): PendingWriteBackend(std::make_shared<PendingWriteExecutor>()) {}
     ~PendingWriteBackend() override {
@@ -193,7 +194,7 @@ protected:
 
 private:
     explicit PendingWriteBackend(std::shared_ptr<PendingWriteExecutor> executor):
-        StorageBackend(executor), executor_(std::move(executor)) {}
+        RtpStorageBackend(executor), executor_(std::move(executor)) {}
 
     std::shared_ptr<PendingWriteExecutor> executor_;
     BlockTreeCache*                       cache_{nullptr};

@@ -1,7 +1,6 @@
 #include "ClientWrapper.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm/SdkBufferSafety.h"
 #include "kvcm_client/HostCacheStateCompat.h"
-#include "kvcm_client/TransferClientCompat.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm/Subscriber.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
@@ -172,7 +171,7 @@ bool ClientWrapper::initImpl(const ConfigMap&                     config_map,
             }
             first->gpu = std::move(memory_registrations.gpu);
         }
-        std::vector<std::unique_ptr<kv_cache_manager::TransferClient>> clients;
+        std::vector<SdkTransferClient> clients;
         clients.reserve(pool_registrations_.size());
         for (size_t index = 0; index < pool_registrations_.size(); ++index) {
             auto params = init_params_;
@@ -189,7 +188,7 @@ bool ClientWrapper::initImpl(const ConfigMap&                     config_map,
                 RTP_LLM_LOG_ERROR("init KVCM transfer client failed for pool %zu", index);
                 return false;
             }
-            clients.push_back(std::move(client));
+            clients.emplace_back(std::move(client));
         }
         transfer_clients_ = std::move(clients);
         tag_to_index_     = std::move(pending_tags);
@@ -336,13 +335,15 @@ std::shared_ptr<kv_cache_manager::MetaClient> ClientWrapper::getMetaClient(const
 #define CHECK_INIT2(unique_id) CHECK_INIT_BASE(unique_id, DEFER({false, {}}))
 #define CHECK_INIT1(unique_id) CHECK_INIT_BASE(unique_id, false)
 
-#define CALL_CLIENT2(function_name, ...)                                                                               \
-    auto [ec, result] = client->function_name(__VA_ARGS__);                                                            \
+#define CALL_CLIENT_RESULT2(function_name, ...)                                                                        \
+    auto [ec, result] = (__VA_ARGS__);                                                                                 \
     if (!checkError(ec, client)) {                                                                                     \
         RTP_LLM_LOG_WARNING(#function_name " fail, ec [%d]", ec);                                                      \
         return {false, {}};                                                                                            \
     }                                                                                                                  \
     return {true, std::move(result)};
+
+#define CALL_CLIENT2(function_name, ...) CALL_CLIENT_RESULT2(function_name, client->function_name(__VA_ARGS__))
 
 std::pair<bool, kv_cache_manager::Locations>
 ClientWrapper::match(const std::string&                      unique_id,
@@ -364,8 +365,9 @@ ClientWrapper::getWriteLocation(const std::string&              unique_id,
                                 int64_t                         write_timeout_seconds,
                                 int32_t                         min_replica_count) {
     CHECK_INIT2(unique_id);
-    CALL_CLIENT2(
-        StartWrite, trace_id, keys, tokens, location_spec_group_names, write_timeout_seconds, min_replica_count);
+    CALL_CLIENT_RESULT2(StartWrite,
+                        startSdkWrite(*client, trace_id, keys, tokens, location_spec_group_names,
+                                      write_timeout_seconds, min_replica_count));
 }
 
 bool ClientWrapper::removeCache(const std::string&                 unique_id,
@@ -386,14 +388,8 @@ ClientWrapper::getCacheLocationsByBackend(const std::string&                 uni
                                           const std::vector<std::string>&    location_spec_names,
                                           kv_cache_manager::StorageType      backend_type) {
     CHECK_INIT2(unique_id);
-    CALL_CLIENT2(GetCacheLocationsByBackend,
-                 trace_id,
-                 keys,
-                 tokens,
-                 block_mask,
-                 location_spec_names,
-                 backend_type,
-                 kv_cache_manager::BackendSelectStrategy::LSS_WEIGHTED_RANDOM);
+    CALL_CLIENT_RESULT2(GetCacheLocationsByBackend,
+                        querySdkLocations(*client, trace_id, keys, tokens, block_mask, location_spec_names, backend_type));
 }
 
 std::pair<bool, kv_cache_manager::HostCacheState>
@@ -418,7 +414,7 @@ bool ClientWrapper::finishWrite(const std::string&                 unique_id,
                                 const kv_cache_manager::BlockMask& block_mask,
                                 const kv_cache_manager::Locations& locations) {
     CHECK_INIT1(unique_id);
-    auto ec = client->FinishWrite(trace_id, write_session_id, block_mask, locations);
+    auto ec = finishSdkWrite(*client, trace_id, write_session_id, block_mask, locations);
     if (!checkError(ec, client)) {
         RTP_LLM_LOG_WARNING("FinishWrite fail, ec [%d]", ec);
         return false;
@@ -436,7 +432,7 @@ bool ClientWrapper::abortWrite(const std::string& unique_id,
     constexpr int max_attempts  = 3;
     auto          attempt_abort = [&]() -> std::optional<kv_cache_manager::ClientErrorCode> {
         CHECK_INIT_BASE(unique_id, std::nullopt);
-        const auto ec = client->FinishWrite(trace_id, write_session_id, kv_cache_manager::BlockMaskOffset{0}, {});
+        const auto ec = finishSdkWrite(*client, trace_id, write_session_id, kv_cache_manager::BlockMaskOffset{0}, {});
         checkError(ec, client);
         return ec;
     };
@@ -655,7 +651,7 @@ ClientWrapper::loadKvCachesForTagWithStatus(const std::string&                  
         *completion = TransferCompletion::UNKNOWN;
     const int64_t deadline_ms =
         deadline ? std::chrono::duration_cast<std::chrono::milliseconds>(deadline->time_since_epoch()).count() : 0;
-    auto ec = loadSdkKvCaches(*transfer_clients_[slot->second], uri_str_vec, block_buffers, deadline_ms, trace_info);
+    auto ec = transfer_clients_[slot->second].load(uri_str_vec, block_buffers, deadline_ms, trace_info);
     if (completion)
         *completion = sdkResultCompletion(ec);
     if (ec != kv_cache_manager::ClientErrorCode::ER_OK) {
@@ -699,7 +695,7 @@ ClientWrapper::saveKvCachesForTagWithStatus(const std::string&                  
     const int64_t deadline_ms =
         deadline ? std::chrono::duration_cast<std::chrono::milliseconds>(deadline->time_since_epoch()).count() : 0;
     auto [ec, result] =
-        saveSdkKvCaches(*transfer_clients_[slot->second], uri_str_vec, block_buffers, deadline_ms, trace_info);
+        transfer_clients_[slot->second].save(uri_str_vec, block_buffers, deadline_ms, trace_info);
     if (completion)
         *completion = sdkResultCompletion(ec);
     if (ec != kv_cache_manager::ClientErrorCode::ER_OK) {

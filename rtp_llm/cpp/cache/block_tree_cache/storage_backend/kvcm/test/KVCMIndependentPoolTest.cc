@@ -232,7 +232,7 @@ protected:
                 std::rotate(tags.begin(), tags.begin() + 1, tags.end());
                 std::rotate(pools.begin(), pools.begin() + 1, pools.end());
             }
-            StorageBackend::PoolsByTag pools_by_tag;
+            RtpStorageBackend::PoolsByTag pools_by_tag;
             for (size_t i = 0; i < tags.size(); ++i) {
                 EXPECT_TRUE(pools_by_tag.emplace(tags[i], pools[i]).second);
             }

@@ -1652,7 +1652,8 @@ void LocalRpcServer::reportCacheStatusTime(int64_t request_begin_time_us) {
     FunctionRequestPB bounded_request;
     if (request->has_remote_request()
         && (request->remote_request().op() == REMOTE_OPERATION_READ
-            || request->remote_request().op() == REMOTE_OPERATION_WRITE)) {
+            || request->remote_request().op() == REMOTE_OPERATION_WRITE
+            || request->remote_request().op() == REMOTE_OPERATION_TRACKED_WRITE)) {
         if (request->remote_request().timeout_ms() <= 0) {
             return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "remote task budget must be positive");
         }

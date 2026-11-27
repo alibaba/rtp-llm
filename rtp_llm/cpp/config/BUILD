@@ -28,6 +28,7 @@ cc_library(
     hdrs = ["ConfigModules.h"],
     srcs = ["ConfigModules.cc"],
     deps = [
+        "//rtp_llm/cpp/cache/block_tree_cache:tier_watermark",
         "@havenask//aios/autil:env_util",
         ":role_types",
         ":eplb_config",

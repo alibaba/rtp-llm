@@ -129,6 +129,44 @@ TEST(KVCMSafetyTest, WorkerPublishesSdkStatusAndRejectsInvalidRequestBeforeIo) {
     EXPECT_EQ(response.transfer_status(), REMOTE_TRANSFER_STATUS_FAILED);
 }
 
+TEST(KVCMSafetyTest, TrackedWriteLedgerRequiresOriginalWorkerToStop) {
+    auto environment = makeBackendEnvironment("kvcm_tracked_write_completion");
+    auto wrapper = std::make_shared<MockClientWrapper>();
+    EXPECT_CALL(*wrapper, initForPools(_, _, _, _)).WillOnce(Return(true));
+    EXPECT_CALL(*wrapper, shutdown()).Times(1);
+    auto backend = makeBackend(environment, singleRankConfig(), wrapper);
+    ASSERT_TRUE(initSingleRank(*backend.backend, environment));
+
+    std::promise<void> entered;
+    auto entered_future = entered.get_future();
+    std::promise<void> release;
+    auto release_future = release.get_future();
+    EXPECT_CALL(*wrapper, saveKvCachesForTagWithStatus("default", _, _, _))
+        .WillOnce(Invoke([&](const auto&, const auto&, auto&, const auto&) {
+            entered.set_value();
+            EXPECT_EQ(release_future.wait_for(std::chrono::seconds(5)), std::future_status::ready);
+            return std::make_pair(kv_cache_manager::ER_OK, kv_cache_manager::UriStrVec{});
+        }));
+    RemoteOperationRequestPB request;
+    request.set_op(REMOTE_OPERATION_TRACKED_WRITE);
+    request.set_trace_id("tracked_write_original");
+    request.add_group_tags("default");
+    request.add_block_ids(environment.block_id);
+    request.add_uris("uri");
+    auto running = std::async(std::launch::async, [&] {
+        RemoteOperationResponsePB response;
+        return backend->execute(request, response) && response.payload_buffer_safe();
+    });
+    ASSERT_EQ(entered_future.wait_for(std::chrono::seconds(5)), std::future_status::ready);
+    EXPECT_EQ(backend->queryReadCompletion(request.trace_id()), TransferTaskRegistry::State::RUNNING);
+    RemoteOperationResponsePB duplicate;
+    EXPECT_FALSE(backend->execute(request, duplicate));
+    EXPECT_FALSE(duplicate.payload_buffer_safe());
+    release.set_value();
+    EXPECT_TRUE(await(running));
+    EXPECT_EQ(backend->queryReadCompletion(request.trace_id()), TransferTaskRegistry::State::BUFFER_SAFE);
+}
+
 struct SafetyBroadcastGroup {
     std::vector<std::shared_ptr<KVCMBroadcastState>>     states;
     std::vector<std::unique_ptr<KVCMBroadcastRpcServer>> servers;
@@ -293,7 +331,9 @@ TEST(KVCMSafetyTest, RejectedBroadcastHasNoSubmittedWorkersAndDoesNotFreeze) {
 }
 
 TEST(KVCMSafetyTest, TimeoutKeepsReadDestinationFrozenAndReleasesAbortedWriteSource) {
-    for (const bool is_write : {false, true}) {
+    for (const auto operation : {REMOTE_OPERATION_READ, REMOTE_OPERATION_WRITE, REMOTE_OPERATION_TRACKED_WRITE}) {
+        const bool is_write = operation != REMOTE_OPERATION_READ;
+        const bool tracked_write = operation == REMOTE_OPERATION_TRACKED_WRITE;
         SafetyBroadcastGroup group;
         ASSERT_TRUE(group.start());
         auto               entered        = std::make_shared<std::promise<void>>();
@@ -324,7 +364,8 @@ TEST(KVCMSafetyTest, TimeoutKeepsReadDestinationFrozenAndReleasesAbortedWriteSou
         EXPECT_CALL(*wrapper, shutdown()).Times(1);
         auto backend = makeBackend(environment, safetyTp2(), wrapper, group.manager, 100);
         ASSERT_TRUE(initSingleRank(*backend.backend, environment));
-        std::future<ErrorInfo> read_future;
+        auto promise = std::make_shared<std::promise<StorageTransferOutcome>>();
+        auto outcome_future = promise->get_future();
         if (is_write) {
             auto write_location      = singleWriteLocation();
             write_location.locations = tp2Locations();
@@ -335,24 +376,27 @@ TEST(KVCMSafetyTest, TimeoutKeepsReadDestinationFrozenAndReleasesAbortedWriteSou
                                     ::testing::VariantWith<kv_cache_manager::BlockMaskOffset>(::testing::Eq(0u)),
                                     ::testing::IsEmpty()))
                 .WillOnce(Return(true));
-            EXPECT_TRUE(backend->write(backend->prepareWrite(makeStorageRequest(environment))));
+            auto request = makeStorageRequest(environment);
+            request.positional_replicas = tracked_write;
+            EXPECT_TRUE(backend->write(backend->prepareWrite(std::move(request)),
+                                       [promise](StorageTransferOutcome value) {
+                                           promise->set_value(std::move(value));
+                                       }));
         } else {
             EXPECT_CALL(*wrapper, match(_, _, _, _, _, _)).WillOnce(Return(std::make_pair(true, tp2Locations())));
             auto matched = match(*backend.backend, makeStorageRequest(environment));
             ASSERT_TRUE(matched.success);
-            auto promise = std::make_shared<std::promise<ErrorInfo>>();
-            read_future  = promise->get_future();
-            backend->read(
-                makeStorageRequest(environment), matched.match_meta, [promise, &environment](ErrorInfo error) {
+            backend->readOwned(
+                makeStorageRequest(environment), matched.match_meta, [promise, &environment](StorageTransferOutcome value) {
                     EXPECT_TRUE(environment.device_pool->isFrozen(environment.block_id));
-                    promise->set_value(std::move(error));
+                    promise->set_value(std::move(value));
                 });
         }
         EXPECT_EQ(entered_future.wait_for(std::chrono::seconds(5)), std::future_status::ready);
         const auto late_requests = snapshotRequests(group.states[1]);
         EXPECT_EQ(late_requests.size(), 1u);
         if (late_requests.size() == 1) {
-            EXPECT_EQ(late_requests.front().op(), is_write ? REMOTE_OPERATION_WRITE : REMOTE_OPERATION_READ);
+            EXPECT_EQ(late_requests.front().op(), operation);
             EXPECT_EQ(late_requests.front().group_tags_size(), 1);
             EXPECT_EQ(late_requests.front().block_ids_size(), 1);
             EXPECT_EQ(late_requests.front().uris_size(), 1);
@@ -361,8 +405,13 @@ TEST(KVCMSafetyTest, TimeoutKeepsReadDestinationFrozenAndReleasesAbortedWriteSou
             }
         }
         EXPECT_TRUE(waitForBackendOperationsForTest(*backend.backend));
-        if (!is_write) {
-            EXPECT_EQ(await(read_future).code(), ErrorCode::DEADLINE_EXCEEDED);
+        auto outcome = await(outcome_future);
+        EXPECT_EQ(outcome.error.code(), ErrorCode::DEADLINE_EXCEEDED);
+        EXPECT_FALSE(outcome.safe);
+        EXPECT_EQ(outcome.recovery != nullptr, !is_write || tracked_write);
+        if (tracked_write && outcome.recovery) {
+            EXPECT_EQ(outcome.recovery->execution().operation, "write");
+            EXPECT_EQ(outcome.recovery->execution().expected_rank_count, 2u);
         }
         // Drop the caller's hold while the remote worker is still running.
         EXPECT_EQ(environment.device_pool->refCount(environment.block_id), is_write ? 1u : 2u);

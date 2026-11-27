@@ -16,6 +16,7 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/BlockTransferDispatcher.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/PerRankBlockTransferEngine.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeTaskPool.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/block_pool/DeviceBlockPool.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/benchmark/BenchmarkFixture.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/load/LoadAsyncContext.h"
 #include "rtp_llm/cpp/utils/Logger.h"
@@ -201,7 +202,7 @@ public:
     void publishInsert(const PathKeys&                path,
                        size_t                         actual_matched_depth,
                        PreparedRequestResources&      out,
-                       std::vector<BlockIndicesType>& request_blocks,
+                       std::vector<BlockIdList>& request_blocks,
                        std::vector<std::string>&      request_group_tags) override {
         requestPools(request_blocks, request_group_tags);
         const auto&                                group_sets = cache_.groupSets();
@@ -222,7 +223,7 @@ public:
         releasePrepared(out);
     }
 
-    void releaseRequestBlocks(std::vector<BlockIndicesType>& blocks, std::vector<std::string>& tags) override {
+    void releaseRequestBlocks(std::vector<BlockIdList>& blocks, std::vector<std::string>& tags) override {
         const auto pools = requestPools(blocks, tags);
         for (size_t row = 0; row < blocks.size(); ++row) {
             if (!blocks[row].empty()) {
@@ -234,7 +235,7 @@ public:
     }
 
     void rollback(PreparedRequestResources&      out,
-                  std::vector<BlockIndicesType>& request_blocks,
+                  std::vector<BlockIdList>& request_blocks,
                   std::vector<std::string>&      request_group_tags) override {
         requestPools(request_blocks, request_group_tags);
         releasePrepared(out);
@@ -253,7 +254,7 @@ public:
     }
 
 private:
-    std::vector<DeviceBlockPoolPtr> requestPools(const std::vector<BlockIndicesType>& blocks,
+    std::vector<DeviceBlockPoolPtr> requestPools(const std::vector<BlockIdList>& blocks,
                                                  const std::vector<std::string>&      tags) const {
         RTP_LLM_CHECK(blocks.size() == tags.size());
         std::unordered_set<std::string> seen;
@@ -284,8 +285,8 @@ private:
     }
 
     static void appendRequestBlocks(const GroupSetPtr&             group_set,
-                                    const BlockIndicesType&        blocks,
-                                    std::vector<BlockIndicesType>& request_blocks,
+                                    const BlockIdList&        blocks,
+                                    std::vector<BlockIdList>& request_blocks,
                                     std::vector<std::string>&      request_group_tags) {
         const auto& group_tags = group_set->groupTags();
         RTP_LLM_CHECK(group_tags.size() == blocks.size());
@@ -313,14 +314,14 @@ private:
         }
     }
 
-    static BlockIndicesType uniqueHeldBlocks(const PreparedRequestResources& out, size_t group_set_id) {
+    static BlockIdList uniqueHeldBlocks(const PreparedRequestResources& out, size_t group_set_id) {
         std::unordered_set<BlockIdxType> unique;
         for (const auto* groups : {&out.load_target_blocks, &out.suffix_blocks}) {
             if (group_set_id < groups->size()) {
                 unique.insert((*groups)[group_set_id].begin(), (*groups)[group_set_id].end());
             }
         }
-        return BlockIndicesType(unique.begin(), unique.end());
+        return BlockIdList(unique.begin(), unique.end());
     }
 
     void releasePrepared(PreparedRequestResources& out) {
@@ -329,7 +330,7 @@ private:
             if (group_sets[gs]->devicePools().empty()) {
                 continue;
             }
-            BlockIndicesType held = uniqueHeldBlocks(out, gs);
+            BlockIdList held = uniqueHeldBlocks(out, gs);
             if (held.empty()) {
                 continue;
             }
@@ -386,7 +387,7 @@ bool insertPathFromPrefix(BlockTreeCache& cache, const PathKeys& path, size_t ex
         if (group_sets[gs]->devicePools().empty()) {
             continue;
         }
-        BlockIndicesType inserted_blocks;
+        BlockIdList inserted_blocks;
         inserted_blocks.reserve(path.size() - existing_prefix_length);
         for (size_t i = existing_prefix_length; i < path.size(); ++i) {
             inserted_blocks.insert(

@@ -4,6 +4,8 @@
 #include <cstring>
 #include <limits>
 
+#include <torch/torch.h>
+
 #include "gtest/gtest.h"
 
 namespace rtp_llm {

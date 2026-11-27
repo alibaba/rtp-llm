@@ -9,11 +9,11 @@
 #include <cstdint>
 #include <mutex>
 #include <string>
+#include <thread>
 #include <vector>
 
-#include "autil/LoopThread.h"
 #include "rtp_llm/cpp/cache/CacheTier.h"
-#include "rtp_llm/cpp/cache/KVCacheResource.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeKey.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/group_set/GroupSetResource.h"
 
 namespace rtp_llm {
@@ -69,14 +69,14 @@ std::string formatViolationDetail(const FullViolationDetail& detail);
 // most 128 nodes across the interval. Cache lock acquisition retries with sleeps
 // for up to 10 ms; a timeout skips the window/batch without advancing the cursor.
 // Observation only: it never mutates the tree, resources, block pools or refcounts.
-class BlockTreeCacheMetricsReporter;
+class CacheObserver;
 
 class FullPrefixInvariantScanner {
 public:
     FullPrefixInvariantScanner(const BlockTree&                     tree,
                                std::mutex&                          cache_mutex,
                                int64_t                              interval_ms,
-                               const BlockTreeCacheMetricsReporter* metrics_reporter = nullptr);
+                               const CacheObserver* metrics_reporter = nullptr);
     ~FullPrefixInvariantScanner();
 
     FullPrefixInvariantScanner(const FullPrefixInvariantScanner&)            = delete;
@@ -97,14 +97,14 @@ private:
                                               size_t                                  tree_size,
                                               bool                                    cycle_complete);
 
-    const BlockTreeCacheMetricsReporter* metrics_reporter_;
+    const CacheObserver* metrics_reporter_;
     const BlockTree& tree_;
     std::mutex&      cache_mutex_;
     const int64_t    interval_ms_;
 
     // Cancels scheduled batches and wakes lock-retry/inter-batch waits on shutdown.
     std::atomic<bool>       stopping_{false};
-    autil::LoopThreadPtr    loop_thread_;
+    std::thread             loop_thread_;
     std::mutex              wait_mutex_;
     std::condition_variable stop_condition_;
 

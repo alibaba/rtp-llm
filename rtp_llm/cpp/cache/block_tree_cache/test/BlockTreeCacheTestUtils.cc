@@ -1,4 +1,6 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/test/BlockTreeCacheTestUtils.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/metrics/BlockTreeCacheMetricsReporter.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/integration/rtp_llm/RtpStorageBackend.h"
 
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeTaskPool.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/evict/EvictionTaskRunner.h"
@@ -13,6 +15,7 @@
 #include <cmath>
 #include <cstring>
 #include <exception>
+#include <iterator>
 #include <numeric>
 #include <stdexcept>
 #include <utility>
@@ -23,6 +26,14 @@
 #include "rtp_llm/cpp/utils/TimeUtil.h"
 
 namespace rtp_llm::block_tree_cache_test {
+
+TreeNode* pendingNodeForTest(const BlockTree& tree, CacheKeyType key) {
+    const auto range = tree.pending_node_pool_.equal_range(BlockTreeKeyView(key));
+    if (range.first == range.second || std::next(range.first) != range.second) {
+        throw std::out_of_range("expected exactly one pending node for the cache key");
+    }
+    return range.first->second.get();
+}
 
 void CallbackBarrier::enterAndWait() {
     std::unique_lock<std::mutex> lock(mutex_);
@@ -312,8 +323,8 @@ MultiNodeResource makeMultiNodeResourceForTest(size_t                        gro
 size_t unreferencedBlocksNum(const DeviceBlockPool& pool) {
     std::lock_guard<std::mutex> lock(pool.mutex_);
     size_t                      count = 0;
-    for (size_t block = 1; block < pool.allocated_.size(); ++block) {
-        if (pool.allocated_[block] != 0 && pool.refcounts_[block] == 0) {
+    for (size_t block = 1; block < pool.refcounts_.size(); ++block) {
+        if (pool.refcounts_[block] == 0 && pool.pageIdentityNoLock(static_cast<BlockIdxType>(block))) {
             ++count;
         }
     }
@@ -487,8 +498,8 @@ std::unique_ptr<BlockTreeCache> makeBlockTreeCacheForTest(std::vector<GroupSetPt
         storage_backend = nullptr;
     }
     std::shared_ptr<const CacheTopology> storage_topology;
-    StorageBackend::PoolsByTag           storage_pools;
-    StorageBackend::BufferResolver       storage_buffer_resolver;
+    RtpStorageBackend::PoolsByTag           storage_pools;
+    RtpStorageBackend::BufferResolver       storage_buffer_resolver;
     if (storage_backend != nullptr) {
         storage_topology = group_sets.front()->topologyPtr();
         for (const auto& group_set : group_sets) {
@@ -532,9 +543,10 @@ std::unique_ptr<BlockTreeCache> makeBlockTreeCacheForTest(std::vector<GroupSetPt
                                                   std::move(task_pool),
                                                   std::move(cache_metrics_reporter));
     if (cache->storageBackend()) {
-        RTP_LLM_CHECK_WITH_INFO(cache->storageBackend()->init(std::move(storage_topology),
-                                                              std::move(storage_pools),
-                                                              std::move(storage_buffer_resolver)),
+        RTP_LLM_CHECK_WITH_INFO(RtpStorageBackend::initEngine(*cache->storageBackend(),
+                                                                 std::move(storage_topology),
+                                                                 std::move(storage_pools),
+                                                                 std::move(storage_buffer_resolver)),
                                 "StorageBackend init failed");
     }
     if (!cache->init()) {
@@ -798,10 +810,10 @@ std::shared_ptr<TransferAsyncContext> ScriptedPerRankBlockTransferEngine::execut
         return PerRankBlockTransferEngine::executeBatch(std::move(task));
     }
     if (success) {
-        return std::make_shared<CompletedTransferAsyncContext>(ErrorInfo::OkStatus());
+        return std::make_shared<CompletedTransferAsyncContext>(terminalCopyResultForTest());
     }
     return std::make_shared<CompletedTransferAsyncContext>(
-        ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "scripted transfer failure"));
+        terminalCopyResultForTest(ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "scripted transfer failure")));
 }
 
 void ScriptedPerRankBlockTransferEngine::enqueue(bool success) {

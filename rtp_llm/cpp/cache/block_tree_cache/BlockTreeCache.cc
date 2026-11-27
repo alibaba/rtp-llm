@@ -1,3 +1,4 @@
+#include "rtp_llm/cpp/cache/block_tree_cache/diagnostic/CacheDiagnostics.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeCache.h"
 
 #include <algorithm>
@@ -10,11 +11,7 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/diagnostic/FullPrefixInvariantScanner.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/evict/BlockTreeEvictor.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/BlockTransferDispatcher.h"
-#include "rtp_llm/cpp/cache/block_tree_cache/block_pool/DiskBlockPool.h"
-#include "rtp_llm/cpp/cache/block_tree_cache/block_pool/HostBlockPool.h"
 #include "rtp_llm/cpp/cache/AsyncContext.h"
-#include "rtp_llm/cpp/utils/AssertUtils.h"
-#include "rtp_llm/cpp/utils/Logger.h"
 
 namespace rtp_llm {
 
@@ -23,13 +20,13 @@ BlockTreeCache::BlockTreeCache(std::unique_ptr<BlockTree>                     tr
                                std::shared_ptr<StorageBackend>                storage_backend,
                                std::unique_ptr<BlockTransferDispatcher>       transfer_dispatcher,
                                std::unique_ptr<BlockTreeTaskPool>             task_pool,
-                               std::shared_ptr<BlockTreeCacheMetricsReporter> metrics_reporter):
+                               std::shared_ptr<CacheObserver> metrics_reporter):
     config_(std::move(config)),
     tree_(std::move(tree)),
     storage_backend_(std::move(storage_backend)),
     transfer_dispatcher_(std::move(transfer_dispatcher)),
     task_pool_(std::move(task_pool)),
-    metrics_reporter_(std::move(metrics_reporter)),
+    metrics_reporter_(metrics_reporter ? std::move(metrics_reporter) : std::make_shared<CacheObserver>()),
     evictor_(
         tree_.get(),
         config_.device_eviction_policy,
@@ -44,7 +41,8 @@ BlockTreeCache::BlockTreeCache(std::unique_ptr<BlockTree>                     tr
         config_.max_descriptors_per_transfer_batch,
         [this](Tier tier) { return config_.isTierEnabled(tier); },
         [this](bool check_watermark) { onWorkflowSettledLocked(check_watermark); },
-        config_.disk_cache_evict_max_pending_bytes),
+        config_.disk_cache_evict_max_pending_bytes,
+        config_.write_remote_on_host_pressure ? storage_backend_ : nullptr),
     loader_(tree_.get(),
             evictor_,
             transfer_dispatcher_.get(),
@@ -56,9 +54,12 @@ BlockTreeCache::BlockTreeCache(std::unique_ptr<BlockTree>                     tr
             config_.enable_device_cache,
             storage_backend_,
             [this](bool check_watermark) { onWorkflowSettledLocked(check_watermark); }),
-    storer_(tree_.get(), evictor_, *metrics_reporter_, storage_backend_, [this](bool check_watermark) {
-        onWorkflowSettledLocked(check_watermark);
-    }) {
+    storer_(tree_.get(), evictor_, *metrics_reporter_, storage_backend_,
+            [this](bool check_watermark) { onWorkflowSettledLocked(check_watermark); },
+            !config_.write_remote_on_host_pressure) {
+    evictor_.setHostReleaseFailureCallback([this](const HostBlockPool& pool) {
+        loader_.failRemotePrefetchesLocked(pool);
+    });
     metrics_reporter_->initEvictionMetricGroupTypes(tree_->groupSets());
     if (storage_backend_)
         storage_backend_->setStageMetricsReporter(metrics_reporter_);
@@ -66,14 +67,14 @@ BlockTreeCache::BlockTreeCache(std::unique_ptr<BlockTree>                     tr
 
 bool BlockTreeCache::init() {
     if (initialized_) {
-        RTP_LLM_LOG_ERROR("cache is already initialized");
+        BTC_LOG_ERROR("cache is already initialized");
         return false;
     }
     if (!task_pool_->start()) {
-        RTP_LLM_LOG_ERROR("failed to start task pool, size=%d", config_.task_pool_size);
+        BTC_LOG_ERROR("failed to start task pool, size=%d", config_.task_pool_size);
         return false;
     }
-    RTP_LLM_LOG_INFO("initialized with %zu group sets, %zu reusable topology groups, "
+    BTC_LOG_INFO("initialized with %zu group sets, %zu reusable topology groups, "
                      "pool_threads=%d, storage_backend=%s, "
                      "device=%s, host=%s, disk=%s, remote=%s",
                      tree_->groupSets().size(),
@@ -85,18 +86,18 @@ bool BlockTreeCache::init() {
                      config_.enable_disk_cache ? "on" : "off",
                      config_.enable_remote_cache ? "on" : "off");
     for (const GroupSetPtr& group_set : tree_->groupSets()) {
-        RTP_LLM_LOG_INFO("  group_set[%zu] type=%s host_pool=%s disk_pool=%s",
+        BTC_LOG_INFO("  group_set[%zu] type=%s host_pool=%s disk_pool=%s",
                          group_set->groupSetId(),
                          cacheGroupTypeName(group_set->groupType()),
-                         group_set->hostPool() ? "enabled" : "null",
-                         group_set->diskPool() ? "enabled" : "null");
+                         group_set->pools().host ? "enabled" : "null",
+                         group_set->pools().disk ? "enabled" : "null");
     }
     if (config_.full_prefix_scan_interval_ms > 0) {
         auto scanner = std::make_unique<FullPrefixInvariantScanner>(
             *tree_, mutex_, config_.full_prefix_scan_interval_ms, metrics_reporter_.get());
         if (scanner->start()) {
             full_prefix_scanner_ = std::move(scanner);
-            RTP_LLM_LOG_INFO("FULL prefix invariant scanner enabled, interval_ms=%ld",
+            BTC_LOG_INFO("FULL prefix invariant scanner enabled, interval_ms=%ld",
                              config_.full_prefix_scan_interval_ms);
         }
     }
@@ -107,12 +108,12 @@ bool BlockTreeCache::init() {
 BlockTreeCache::~BlockTreeCache() {
     stopping_.store(true);
     full_prefix_scanner_.reset();
-    RTP_LLM_LOG_INFO("destroying, closing load tickets...");
+    BTC_LOG_INFO("destroying, closing load tickets...");
     shutdownLoads();
     if (storage_backend_) {
         storage_backend_->shutdown();
     }
-    RTP_LLM_LOG_INFO("load tickets closed, draining cache tasks...");
+    BTC_LOG_INFO("load tickets closed, draining cache tasks...");
     task_pool_->stopAdmission();
     if (transfer_dispatcher_) {
         transfer_dispatcher_->cancelPendingStagingTransfers();
@@ -127,7 +128,7 @@ BlockTreeCache::~BlockTreeCache() {
     task_pool_->waitForIdle();
     transfer_dispatcher_.reset();
     task_pool_.reset();
-    RTP_LLM_LOG_INFO("destroyed");
+    BTC_LOG_INFO("destroyed");
 }
 
 void BlockTreeCache::shutdownLoads() {
@@ -177,7 +178,7 @@ TransferResult BlockTreeCache::executeTransfer(TransferTask task) {
     context->waitDone();
     auto result = context->result();
     if (!result.ok()) {
-        RTP_LLM_LOG_WARNING("per-rank block transfer failed: %s", result.status.ToString().c_str());
+        BTC_LOG_WARNING("per-rank block transfer failed: %s", result.status.ToString().c_str());
     }
     return result;
 }
@@ -196,138 +197,95 @@ BlockTreeMatchResult BlockTreeCache::match(const CacheKeysType&               ca
     return result;
 }
 
-namespace {
-
-std::optional<ExternalMatchBinding> externalBinding(const TreeNode& node, ExternalMatchPosition need,
-                                                    const ExternalJoinLookup& lookup_join) {
-    const auto& resource = node.group_set_resources[need.group];
-    const bool ready = resource.hasCompleteDeviceValue() && resource.transfer_state == GroupSetTransferState::IDLE;
-    if (!ready && lookup_join) {
-        if (const auto joined = lookup_join(node, need.group)) {
-            return ExternalMatchBinding{need.group, need.row, Tier::DEVICE, joined->slot, ExternalBindingKind::JOIN,
-                                        joined->generation, joined->operation};
-        }
+BlockTreeMatchResult BlockTreeCache::match(const BlockTreeKeys& cache_keys,
+                                           const std::function<bool(size_t)>& valid_prefix,
+                                           bool enable_storage_backend,
+                                           std::optional<int64_t> request_id,
+                                           bool skip_linear,
+                                           const std::vector<bool>& selected_groups,
+                                           size_t max_load_pages,
+                                           bool stage_disk_through_host) {
+    if (!selected_groups.empty() && selected_groups.size() != tree_->groupSets().size()) {
+        throw std::invalid_argument("cache group selection does not match the tree topology");
     }
-    if (!resource.isMatchUsable() || resource.transfer_state != GroupSetTransferState::IDLE)
-        return std::nullopt;
-    const auto tier = resource.getTopTier();
-    const auto slot = tier == Tier::DEVICE ? resource.device_blocks.front() :
-                      tier == Tier::HOST   ? resource.host_block : resource.disk_block;
-    return ExternalMatchBinding{need.group, need.row, tier, slot,
-                                ready ? ExternalBindingKind::READY : ExternalBindingKind::LOAD};
-}
-
-ExternalBlockTreeMatchResult matchExternalEndpoints(
-    const std::vector<TreeNode*>& path, size_t groups,
-    const std::vector<ExternalMatchEndpoint>& endpoints, const ExternalJoinLookup& lookup_join) {
-    ExternalBlockTreeMatchResult result;
-    for (auto endpoint = endpoints.rbegin(); endpoint != endpoints.rend(); ++endpoint) {
-        if (endpoint->needs.empty()) {
-            continue;
-        }
-        std::vector<ExternalMatchBinding> bindings;
-        bindings.reserve(endpoint->needs.size());
-        bool device_only = true;
-        for (const auto& need : endpoint->needs) {
-            if (need.group >= groups) {
-                throw std::invalid_argument("external match refers to an unknown group");
-            }
-            if (need.row >= path.size()) {
-                break;
-            }
-            const auto binding = externalBinding(*path[need.row], need, lookup_join);
-            if (!binding)
-                break;
-            bindings.push_back(*binding);
-            device_only = device_only && binding->kind == ExternalBindingKind::READY;
-        }
-        if (bindings.size() != endpoint->needs.size()) {
-            continue;
-        }
-        if (result.total_tokens == 0) {
-            result.total_tokens = endpoint->tokens;
-            result.bindings = bindings;
-        }
-        if (device_only) {
-            result.device_tokens = endpoint->tokens;
-            result.device_bindings = std::move(bindings);
-            break;
-        }
+    BlockTreeMatchResult result;
+    {
+        CacheLockGuard lock(mutex_, *metrics_reporter_, "match");
+        result = loader_.matchLocked(cache_keys, valid_prefix, enable_storage_backend, request_id,
+                                     skip_linear, selected_groups, max_load_pages, stage_disk_through_host);
     }
-    RTP_LLM_LOG_DEBUG("external BlockTreeCache::match nodes=%zu D=%zu L=%zu",
-                      path.size(), result.device_tokens, result.total_tokens);
+    metrics_reporter_->reportCacheReuseTimeMetrics(result.reuse_time_metrics);
     return result;
 }
 
-}  // namespace
-
-ExternalBlockTreeMatchResult BlockTreeCache::match(
-    const CacheKeysType& cache_keys, const std::vector<ExternalMatchEndpoint>& endpoints,
-    ExternalMatchMode, const ExternalJoinLookup& lookup_join) {
-    CacheLockGuard lock(mutex_, *metrics_reporter_, "external_match");
-    const auto groups = tree_->externalGroupCount();
-    if (!groups)
-        throw std::logic_error("external match requires an external BlockTree");
-    return matchExternalEndpoints(tree_->findNode(cache_keys), groups, endpoints, lookup_join);
+std::shared_ptr<LocalMatchAdmission> BlockTreeCache::prepareHostAdmission(
+    const BlockTreeKeys& keys, const std::function<bool(size_t)>& valid_prefix,
+    std::optional<int64_t> request_id, const std::vector<bool>& selected_groups,
+    size_t max_load_pages, bool stage_disk_through_host, size_t max_load_rows) {
+    if (!selected_groups.empty() && selected_groups.size() != tree_->groupSets().size()) {
+        throw std::invalid_argument("cache group selection does not match the tree topology");
+    }
+    if (std::any_of(keys.begin(), keys.end(), [](const auto& key) { return !key.isOpaque(); })) {
+        throw std::invalid_argument("Host admission requires opaque cache keys");
+    }
+    CacheLockGuard lock(mutex_, *metrics_reporter_, "match");
+    return loader_.prepareHostAdmissionLocked(
+        keys, valid_prefix, request_id, selected_groups, max_load_pages, stage_disk_through_host, max_load_rows);
 }
 
-ExternalBlockTreeMatchResult BlockTreeCache::matchWholePages(
-    const CacheKeysType& cache_keys, size_t maximum_tokens, size_t hash_step,
-    const std::vector<ExternalPageGroup>& groups, const ExternalJoinLookup& lookup_join) {
-    CacheLockGuard lock(mutex_, *metrics_reporter_, "external_match");
-    if (hash_step == 0 || groups.empty() || groups.size() != tree_->externalGroupCount())
-        throw std::invalid_argument("invalid external whole-page match geometry");
-    std::vector<size_t> strides;
-    for (const auto& group : groups) {
-        if (!group.block_size || group.block_size % hash_step)
-            throw std::invalid_argument("external group must be a whole number of hash rows");
-        strides.push_back(group.block_size / hash_step);
+std::optional<BlockTreeMatchResult> BlockTreeCache::completeHostAdmission(
+    const std::shared_ptr<LocalMatchAdmission>& admission, const std::shared_ptr<HostPrefetchMatch>& warmed) {
+    if (!admission) {
+        throw std::invalid_argument("Missing local cache admission");
     }
+    std::optional<BlockTreeMatchResult> result;
+    {
+        CacheLockGuard lock(mutex_, *metrics_reporter_, "complete_host_admission");
+        result = loader_.completeHostAdmissionLocked(*admission, warmed);
+    }
+    if (result) {
+        metrics_reporter_->reportCacheReuseTimeMetrics(result->reuse_time_metrics);
+    }
+    return result;
+}
 
-    const auto path = tree_->findNode(cache_keys);
-    const size_t limit = std::min(path.size(), maximum_tokens / hash_step);
-    // FULL coverage is cumulative. A missing recurrent checkpoint affects
-    // only its own boundary; a later complete checkpoint can restore a hit.
-    std::vector<bool> full_available(groups.size(), true), full_ready(groups.size(), true);
-    size_t total_rows = 0, device_rows = 0;
-    for (size_t row = 0; row < limit; ++row) {
-        bool available = true, ready = true;
-        for (size_t group = 0; group < groups.size(); ++group) {
-            if ((row + 1) % strides[group]) {
-                available = ready = false;
-                continue;
-            }
-            const auto binding = externalBinding(*path[row], {group, row}, lookup_join);
-            const bool page_ready = binding && binding->kind == ExternalBindingKind::READY;
-            if (groups[group].last_checkpoint) {
-                available = available && binding.has_value();
-                ready = ready && page_ready;
-            } else {
-                full_available[group] = full_available[group] && binding.has_value();
-                full_ready[group] = full_ready[group] && page_ready;
-                available = available && full_available[group];
-                ready = ready && full_ready[group];
-            }
-        }
-        if (available) total_rows = row + 1;
-        if (ready) device_rows = row + 1;
+bool BlockTreeCache::prefetchRemote(const BlockTreeKeys& cache_keys,
+                                    size_t locally_matched_rows,
+                                    const std::function<bool(size_t)>& valid_prefix,
+                                    const std::vector<bool>& selected_groups,
+                                    size_t max_load_pages,
+                                    std::optional<int64_t> request_id,
+                                    std::function<bool()> still_needed,
+                                    std::function<void(bool)> notice,
+                                    BlockTreeLoader::RemotePrefetchDone on_ready) {
+    if (stopping_.load() || !config_.enable_host_cache || !config_.enable_remote_cache) {
+        return false;
     }
-    // Materialize only the winning endpoints. Use the same binding order,
-    // tier priority and JOIN handling as the generic external matcher.
-    std::vector<ExternalMatchEndpoint> endpoints;
-    auto add = [&](size_t rows) {
-        if (!rows) return;
-        auto& endpoint = endpoints.emplace_back(ExternalMatchEndpoint{rows * hash_step, {}});
-        for (size_t group = 0; group < groups.size(); ++group) {
-            const size_t pages = rows / strides[group];
-            const size_t first = groups[group].last_checkpoint ? pages - 1 : 0;
-            for (size_t i = first; i < pages; ++i)
-                endpoint.needs.push_back({group, (i + 1) * strides[group] - 1});
-        }
-    };
-    add(device_rows);
-    if (total_rows != device_rows) add(total_rows);
-    return matchExternalEndpoints(path, groups.size(), endpoints, lookup_join);
+    if (!selected_groups.empty() && selected_groups.size() != tree_->groupSets().size()) {
+        throw std::invalid_argument("cache group selection does not match the tree topology");
+    }
+    return loader_.prefetchRemote(cache_keys, locally_matched_rows, valid_prefix, selected_groups, max_load_pages, request_id,
+        std::chrono::milliseconds(config_.host_cache_sync_timeout_ms),
+        [this](const BlockTreeKeys& keys, const std::vector<std::vector<GroupSetResource>>& resources) {
+            size_t unused = 0;
+            const auto write = storer_.storeLocked(keys, resources, Tier::HOST, false, unused, {}, 0, 0);
+            BTC_CHECK(!write);
+        }, std::move(still_needed), std::move(notice), std::move(on_ready));
+}
+
+void BlockTreeCache::advanceRemotePrefetch() {
+    std::lock_guard lock(mutex_);
+    loader_.resumeRemotePrefetchesLocked(!stopping_.load());
+}
+
+void BlockTreeCache::expireRemotePrefetches() {
+    std::lock_guard lock(mutex_);
+    loader_.resumeRemotePrefetchesLocked(false);
+}
+
+void BlockTreeCache::notifyRemoteHostPressureFailure(const HostBlockPool& pool) {
+    std::lock_guard lock(mutex_);
+    loader_.failRemotePrefetchesLocked(pool);
 }
 
 void BlockTreeCache::insert(const CacheKeysType&                              cache_keys,
@@ -343,6 +301,27 @@ size_t BlockTreeCache::insert(const CacheKeysType&                              
                               std::optional<int64_t>                            request_id,
                               size_t                                            remote_reuse_begin,
                               size_t                                            remote_reuse_end) {
+    return insertImpl(cache_keys, resources, target_tier, is_resident, request_id, remote_reuse_begin, remote_reuse_end);
+}
+
+size_t BlockTreeCache::insert(const BlockTreeKeys& cache_keys,
+                              const std::vector<std::vector<GroupSetResource>>& resources,
+                              Tier target_tier,
+                              bool is_resident,
+                              std::optional<int64_t> request_id,
+                              size_t remote_reuse_begin,
+                              size_t remote_reuse_end) {
+    return insertImpl(cache_keys, resources, target_tier, is_resident, request_id, remote_reuse_begin, remote_reuse_end);
+}
+
+template<class Keys>
+size_t BlockTreeCache::insertImpl(const Keys& cache_keys,
+                                  const std::vector<std::vector<GroupSetResource>>& resources,
+                                  Tier target_tier,
+                                  bool is_resident,
+                                  std::optional<int64_t> request_id,
+                                  size_t remote_reuse_begin,
+                                  size_t remote_reuse_end) {
     size_t           resident_prefix_length = 0;
     StorageWriteTask storage_write;
     {
@@ -375,7 +354,7 @@ int BlockTreeCache::evictForGroup(std::string_view group_tag, size_t num_blocks)
     }
     const size_t reclaimed =
         evictor_.reclaimDeviceBlocksLocked(location->group_set_id, location->member_group_id, num_blocks);
-    RTP_LLM_LOG_DEBUG("tag=%.*s group_set[%zu] reclaimed %zu/%zu device blocks",
+    BTC_LOG_DEBUG("tag=%.*s group_set[%zu] reclaimed %zu/%zu device blocks",
                       static_cast<int>(group_tag.size()),
                       group_tag.data(),
                       location->group_set_id,
@@ -384,9 +363,40 @@ int BlockTreeCache::evictForGroup(std::string_view group_tag, size_t num_blocks)
     return static_cast<int>(reclaimed);
 }
 
-BlockIndicesType BlockTreeCache::matchedBlocksForGroup(std::string_view                      group_tag,
+BlockIdList BlockTreeCache::matchedBlocksForGroup(std::string_view                      group_tag,
                                                        const std::vector<MultiNodeResource>& matched_resources) const {
     return loader_.matchedBlocksForGroup(group_tag, matched_resources);
+}
+
+size_t BlockTreeCache::releaseDevicePages(const IBlockPool& pool, const std::vector<BlockIdList>& slots,
+                                          size_t requested_slots, const BlockIdList& eligible, size_t pressure,
+                                         bool copy_only, bool demote_to_host, bool cascade) {
+    CacheLockGuard lock(mutex_, *metrics_reporter_, "force_drop");
+    return evictor_.releaseDevicePagesLocked(pool, slots, requested_slots, eligible, pressure,
+                                             copy_only, demote_to_host, cascade);
+}
+
+bool BlockTreeCache::invalidateDevicePages(const IBlockPool& pool, const BlockIdList& blocks) {
+    CacheLockGuard lock(mutex_, *metrics_reporter_, "invalidate");
+    return evictor_.invalidateDevicePagesLocked(pool, blocks);
+}
+
+size_t BlockTreeCache::reclaimLocalPages(Tier tier, size_t group_id, size_t pressure) {
+    CacheLockGuard lock(mutex_, *metrics_reporter_, "local_reclaim");
+    return evictor_.reclaimLocalPagesLocked(tier, group_id, pressure);
+}
+
+void BlockTreeCache::balanceDevicePages(const IBlockPool& pool, const std::vector<BlockIdList>& slots,
+                                        size_t eligible_count, size_t capacity, size_t free_slots,
+                                        size_t returning, bool& triggered) {
+    CacheLockGuard lock(mutex_, *metrics_reporter_, "device_watermark");
+    evictor_.balanceDevicePagesLocked(pool, slots, eligible_count, capacity, free_slots, returning,
+                                     config_.watermark_device, triggered);
+}
+
+void BlockTreeCache::setLocalEvictionPolicy(Tier tier, EvictionPolicy policy) {
+    CacheLockGuard lock(mutex_, *metrics_reporter_, "eviction_policy");
+    evictor_.setLocalEvictionPolicyLocked(tier, policy);
 }
 
 CacheStats BlockTreeCache::getStats() const {
@@ -442,6 +452,11 @@ KVCacheSnapshot BlockTreeCache::logicalCacheSnapshot() const {
     return tree_->logicalCacheSnapshot();
 }
 
+void BlockTreeCache::visitTreeLocked(const std::function<void(const BlockTree&)>& visit) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    visit(*tree_);
+}
+
 BlockTreeKeySnapshot BlockTreeCache::getKeySnapshot(int64_t latest_version) const {
     CacheLockGuard       lock(mutex_, *metrics_reporter_, "snapshot");
     BlockTreeKeySnapshot snapshot;
@@ -457,16 +472,28 @@ bool BlockTreeCache::abortPendingLoad(const std::shared_ptr<AsyncContext>& conte
 }
 
 void BlockTreeCache::onWorkflowSettledLocked(bool check_watermark) {
+    loader_.resumeRemotePrefetchesLocked(!stopping_.load());
     if (check_watermark) {
         checkWatermark();
     }
 }
 
 void BlockTreeCache::checkWatermark() {
+    if (stopping_.load()) {
+        return;
+    }
     for (Tier tier : {Tier::DISK, Tier::HOST, Tier::DEVICE}) {
         const auto watermark = config_.watermarkForTier(tier);
         if (!config_.isTierEnabled(tier)) {
             continue;
+        }
+        if (config_.external_device_capacity) {
+            if (tier == Tier::DEVICE || watermark.low_ratio == 1.0)
+                continue;
+            if (tier == Tier::HOST) {
+                evictor_.balanceHostPoolsLocked(watermark);
+                continue;
+            }
         }
         evictor_.scheduleWatermarkEvictionsLocked(tier, watermark);
     }

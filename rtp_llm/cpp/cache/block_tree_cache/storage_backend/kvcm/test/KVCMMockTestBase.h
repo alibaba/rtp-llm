@@ -320,7 +320,7 @@ public:
 struct BackendEnvironment {
     CacheConfig                cache_config;
     DeviceBlockPoolPtr         device_pool;
-    StorageBackend::PoolsByTag pools_by_tag;
+    RtpStorageBackend::PoolsByTag pools_by_tag;
     BlockIdxType               block_id{NULL_BLOCK_IDX};
 
     BackendEnvironment()                                     = default;

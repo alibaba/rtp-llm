@@ -1,3 +1,4 @@
+#include "rtp_llm/cpp/cache/block_tree_cache/diagnostic/CacheDiagnostics.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/FrozenTaskRecovery.h"
 
 #include <algorithm>
@@ -6,7 +7,6 @@
 #include <stdexcept>
 #include <utility>
 
-#include "rtp_llm/cpp/utils/Logger.h"
 
 namespace rtp_llm {
 namespace {
@@ -98,11 +98,11 @@ void logReleased(const FrozenTask& task, bool forced) noexcept {
         duration_ms            = std::max<int64_t>(0, snapshot.released_at_us - snapshot.frozen_at_us) / 1000;
         const auto description = task.debugString();
         if (forced) {
-            RTP_LLM_LOG_WARNING("FrozenTask recovery forced release after timeout frozen_duration_ms=%lld %s",
+            BTC_LOG_WARNING("FrozenTask recovery forced release after timeout frozen_duration_ms=%lld %s",
                                 static_cast<long long>(duration_ms),
                                 description.c_str());
         } else {
-            RTP_LLM_LOG_INFO("FrozenTask recovery released frozen_duration_ms=%lld %s",
+            BTC_LOG_INFO("FrozenTask recovery released frozen_duration_ms=%lld %s",
                              static_cast<long long>(duration_ms),
                              description.c_str());
         }
@@ -176,7 +176,7 @@ void FrozenTaskRecovery::backgroundLoop(int interval_ms, int query_timeout_ms) n
     } catch (...) {
         stop_requested_.store(true, std::memory_order_release);
         try {
-            RTP_LLM_LOG_WARNING("FrozenTask recovery background worker stopped after an unexpected exception");
+            BTC_LOG_WARNING("FrozenTask recovery background worker stopped after an unexpected exception");
         } catch (...) {}
     }
 }
@@ -271,8 +271,8 @@ FrozenTaskRecovery::Summary FrozenTaskRecovery::runOnce(int                     
         const auto now_us =
             std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::system_clock::now().time_since_epoch())
                 .count();
-        const bool expired =
-            force_release_timeout_us_ > 0 && now_us - snapshot.frozen_at_us >= force_release_timeout_us_;
+        const bool expired = !task->execution().requires_buffer_proof && force_release_timeout_us_ > 0
+                             && now_us - snapshot.frozen_at_us >= force_release_timeout_us_;
         if ((safe || expired) && snapshot.state == FrozenTask::State::FROZEN) {
             if (stop())
                 break;
@@ -283,11 +283,11 @@ FrozenTaskRecovery::Summary FrozenTaskRecovery::runOnce(int                     
                         on_released_(task->execution(), expired && !safe);
                 } catch (const std::exception& error) {
                     try {
-                        RTP_LLM_LOG_WARNING("FrozenTask release observer failed: %s", error.what());
+                        BTC_LOG_WARNING("FrozenTask release observer failed: %s", error.what());
                     } catch (...) {}
                 } catch (...) {
                     try {
-                        RTP_LLM_LOG_WARNING("FrozenTask release observer failed: unknown exception");
+                        BTC_LOG_WARNING("FrozenTask release observer failed: unknown exception");
                     } catch (...) {}
                 }
                 logReleased(*task, expired && !safe);
@@ -308,7 +308,7 @@ void FrozenTaskRecovery::logPending(const Summary& summary) noexcept {
         return;
     next_pending_log_ = now + std::chrono::seconds(60);
     try {
-        RTP_LLM_LOG_INFO("FrozenTask recovery pending inspected=%zu queried=%zu released=%zu pending=%zu "
+        BTC_LOG_INFO("FrozenTask recovery pending inspected=%zu queried=%zu released=%zu pending=%zu "
                          "query_failed=%zu source_failed=%d cleanup_failed=%d",
                          summary.inspected,
                          summary.queried,

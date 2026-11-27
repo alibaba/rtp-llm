@@ -16,6 +16,7 @@
 #include "kvcm_client/transfer_client.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm/ClientFactory.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm/KVCMConfig.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm/SdkClient.h"
 
 namespace rtp_llm {
 namespace kvcm {
@@ -173,7 +174,7 @@ private:
     std::shared_mutex transfer_mutex_;
 
     std::unique_ptr<ClientFactory>                                 client_factory_;
-    std::vector<std::unique_ptr<kv_cache_manager::TransferClient>> transfer_clients_;
+    std::vector<SdkTransferClient>                                  transfer_clients_;
     std::unique_ptr<kvcm::Subscriber>                              subscriber_;
 
     // Protects recovery state and metadata client snapshots; SDK calls run unlocked.

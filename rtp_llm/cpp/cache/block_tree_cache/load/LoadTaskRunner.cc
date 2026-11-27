@@ -5,7 +5,7 @@
 #include <string>
 #include <utility>
 
-#include "rtp_llm/cpp/cache/block_tree_cache/metrics/BlockTreeCacheMetricsReporter.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/metrics/CacheObserver.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/BlockTransferDispatcher.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/CompletionStage.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferStageState.h"
@@ -50,7 +50,7 @@ LoadTaskRunner::TaskPtr LoadTaskRunner::createTask(const std::shared_ptr<LoadAsy
 
 void LoadTaskRunner::runTransfer(TaskPtr                        task,
                                  const BlockTransferDispatcher& transfer_dispatcher,
-                                 BlockTreeCacheMetricsReporter& metrics_reporter,
+                                 CacheObserver& metrics_reporter,
                                  TransferDoneCallback           callback) {
     task->phase = Task::Phase::TRANSFERRING;
     const auto& completion_transfer =
@@ -145,7 +145,7 @@ void LoadTaskRunner::runTransfer(TaskPtr                        task,
 }
 
 void LoadTaskRunner::reportStageFinished(const Task&                    task,
-                                         BlockTreeCacheMetricsReporter& metrics_reporter,
+                                         CacheObserver& metrics_reporter,
                                          Tier                           source_tier,
                                          DescriptorView                 descriptors,
                                          int64_t                        begin_time_us,

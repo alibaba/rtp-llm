@@ -603,6 +603,37 @@ TEST(KVCMLocalTest, MatchAndReadUseReturnedLocation) {
     EXPECT_TRUE(read(*backend.backend, makeStorageRequest(environment), std::move(observation.match_meta)));
 }
 
+TEST(KVCMLocalTest, PositionalReplicaDescriptorBindsActualDeviceTarget) {
+    auto environment    = makeBackendEnvironment("kvcm_storage_backend_planned_replica");
+    auto client_wrapper = std::make_shared<MockClientWrapper>();
+    EXPECT_CALL(*client_wrapper, initForPools(_, _, _, _)).WillOnce(Return(true));
+    EXPECT_CALL(*client_wrapper, shutdown()).Times(1);
+    auto backend = makeBackend(environment, singleRankConfig(), client_wrapper);
+    ASSERT_TRUE(initSingleRank(*backend.backend, environment));
+
+    const kv_cache_manager::Locations locations{
+        kv_cache_manager::Location{kv_cache_manager::LocationSpecUnit{"tp0_Fdefault", "planned_uri"}}};
+    EXPECT_CALL(*client_wrapper,
+                match(_, _, kv_cache_manager::QueryType::QT_BATCH_GET, std::vector<int64_t>{101}, _, _))
+        .WillOnce(Return(std::make_pair(true, locations)));
+    auto query = makeStorageRequest(environment);
+    query.positional_replicas = true;
+    auto observation = match(*backend.backend, std::move(query));
+    ASSERT_TRUE(observation.success);
+    ASSERT_NE(observation.match_meta, nullptr);
+    EXPECT_EQ(observation.matched_blocks_num, 0u);
+    EXPECT_TRUE(observation.match_meta->replicaDescriptor(0, {"no_layout_match"}).empty());
+    auto descriptor = observation.match_meta->replicaDescriptor(0, {"default"});
+    ASSERT_FALSE(descriptor.empty());
+
+    auto actual = makeStorageRequest(environment);
+    actual.replica_descriptors = {{std::move(descriptor)}};
+    EXPECT_CALL(*client_wrapper,
+                loadKvCachesForTag("default", kv_cache_manager::UriStrVec{"planned_uri"}, _, _))
+        .WillOnce(Return(true));
+    EXPECT_TRUE(read(*backend.backend, std::move(actual), nullptr));
+}
+
 TEST(KVCMLocalTest, SuccessfulMatchPreservesLocalPrefixAndReadsOnlyRemoteSuffix) {
     auto environment    = makeBackendEnvironment("kvcm_storage_backend_partial_local_prefix");
     auto client_wrapper = std::make_shared<MockClientWrapper>();

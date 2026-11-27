@@ -1,3 +1,4 @@
+#include "rtp_llm/cpp/cache/block_tree_cache/diagnostic/CacheDiagnostics.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/FrozenTask.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferCompletionTypes.h"
 
@@ -89,15 +90,24 @@ void writeBlocks(std::ostream& out, const std::vector<FrozenTask::BlockInfo>& bl
 }  // namespace
 
 FrozenTask::PreparedExecution FrozenTask::prepare(ExecutionInfo execution) {
-    RTP_LLM_CHECK_WITH_INFO(validTransferExecutionTrace(execution.trace_id), "frozen execution requires a valid trace");
+    BTC_CHECK_WITH_INFO(validTransferExecutionTrace(execution.trace_id), "frozen execution requires a valid trace");
     std::vector<TargetPool>                                           targets;
     std::unordered_map<IBlockPool*, size_t>                           pool_indices;
     std::unordered_map<IBlockPool*, std::unordered_set<BlockIdxType>> seen;
     size_t                                                            target_block_count = 0;
+    const auto hold = [&](const BlockInfo& block) {
+        if (!seen[block.pool.get()].insert(block.block).second) {
+            return false;
+        }
+        const auto [position, inserted] = pool_indices.emplace(block.pool.get(), targets.size());
+        if (inserted) {
+            targets.push_back(TargetPool{block.pool, {}, {}});
+        }
+        targets[position->second].blocks.push_back(block.block);
+        return true;
+    };
     for (auto& descriptor : execution.descriptors) {
         for (auto& source : descriptor.sources) {
-            // Source metadata can be unavailable on a diagnostic-only/mock
-            // path. Sources never contribute frozen references.
             if (source.pool) {
                 source.pool_name = source.pool->poolName();
             } else if (source.pool_name.empty()) {
@@ -105,17 +115,18 @@ FrozenTask::PreparedExecution FrozenTask::prepare(ExecutionInfo execution) {
             }
         }
         for (auto& target : descriptor.targets) {
-            RTP_LLM_CHECK_WITH_INFO(target.pool != nullptr, "frozen target requires a physical pool");
+            BTC_CHECK_WITH_INFO(target.pool != nullptr, "frozen target requires a physical pool");
             target.pool_name = target.pool->poolName();
-            if (!seen[target.pool.get()].insert(target.block).second) {
-                continue;
+            target_block_count += hold(target);
+        }
+    }
+    if (execution.requires_buffer_proof) {
+        for (const auto& descriptor : execution.descriptors) {
+            for (const auto& source : descriptor.sources) {
+                if (source.pool && !isNullBlockIdx(source.block)) {
+                    hold(source);
+                }
             }
-            auto [position, inserted] = pool_indices.emplace(target.pool.get(), targets.size());
-            if (inserted) {
-                targets.push_back(TargetPool{target.pool, {}, {}});
-            }
-            targets[position->second].blocks.push_back(target.block);
-            ++target_block_count;
         }
     }
     for (auto& target : targets) {
@@ -133,9 +144,9 @@ FrozenTask::FrozenTask(PreparedExecution&&                 prepared,
     target_block_count_(prepared.target_block_count_),
     created_at_us_(wallTimeUs()),
     cleanup_(std::move(cleanup)) {
-    RTP_LLM_CHECK_WITH_INFO(failure_.status.code() == ErrorCode::TRANSFER_COMPLETION_UNKNOWN,
+    BTC_CHECK_WITH_INFO(failure_.status.code() == ErrorCode::TRANSFER_COMPLETION_UNKNOWN,
                             "only completion-unknown executions can create a frozen task");
-    RTP_LLM_CHECK_WITH_INFO(!failure_.execution_diagnostics
+    BTC_CHECK_WITH_INFO(!failure_.execution_diagnostics
                                 || failure_.execution_diagnostics->trace_id == execution_.trace_id,
                             "frozen execution diagnostics belong to a different trace");
 }
@@ -162,8 +173,7 @@ bool FrozenTask::unfreeze() noexcept {
         }
         state_ = State::RELEASING;
     }
-    // Each prepared closure releases one reference per target, never source
-    // ownership. No task/table mutex is held while pool notifications run.
+    // Pool notifications run without the task mutex.
     for (const auto& target : targets_) {
         target.release();
     }
@@ -209,7 +219,8 @@ std::string FrozenTask::debugString() const {
     if (const auto* numeric = std::get_if<uint64_t>(&execution_.trace_id)) {
         out << *numeric << ",execution_type=transfer";
     } else {
-        out << std::quoted(std::get<std::string>(execution_.trace_id)) << ",execution_type=kvcm_read";
+        out << std::quoted(std::get<std::string>(execution_.trace_id))
+            << (execution_.operation == "write" ? ",execution_type=kvcm_write" : ",execution_type=kvcm_read");
     }
     out << ",operation=" << std::quoted(execution_.operation) << ",request=";
     writeOptional(out, execution_.request_id);

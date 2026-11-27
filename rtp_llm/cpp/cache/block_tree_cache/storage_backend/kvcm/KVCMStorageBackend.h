@@ -6,7 +6,7 @@
 #include <vector>
 
 #include "rtp_llm/cpp/cache/CacheConfig.h"
-#include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/StorageBackend.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/integration/rtp_llm/RtpStorageBackend.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferTaskRegistry.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/FrozenTask.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
@@ -29,7 +29,7 @@ class ClientWrapper;
 // KVCM adapter for the BlockTree remote tier. Metadata operations are owned by
 // rank 0; payload copies are broadcast to the per-rank adapters so every
 // process transfers its own GPU blocks through its locally registered client.
-class KVCMStorageBackend final: public StorageBackend {
+class KVCMStorageBackend final: public RtpStorageBackend {
 public:
     KVCMStorageBackend(const CacheConfig&                         cache_config,
                        const KVCacheConfig&                       kv_cache_config,
@@ -50,6 +50,7 @@ public:
                        std::shared_ptr<kmonitor::MetricsReporter> metrics_reporter = nullptr);
     ~KVCMStorageBackend() override;
     BlockTreeQueueSizes queueSizes() const override;
+    bool supportsPositionalReplicas() const noexcept override { return true; }
 
     struct ControlConfig {
         std::string              instance_group;
@@ -66,18 +67,17 @@ public:
     // Returns whether the request was handled and response is valid. Transfer
     // success, failure, and timeout are carried by response.transfer_status().
     bool execute(const RemoteOperationRequestPB& request, RemoteOperationResponsePB& response);
-    // Local READ completion evidence; this accessor does not issue a query RPC.
+    // Local tracked payload completion evidence. This accessor does not issue a query RPC.
     const TransferTaskRegistry& taskRegistry() const;
     void cleanupExpiredMissing();
 
-    // Recovery query atomically prevents a previously unseen READ from starting.
+    // Recovery query atomically prevents a previously unseen tracked payload from starting.
     TransferTaskRegistry::State queryReadCompletion(const std::string& trace_id) const;
-    // Removes only completed READ evidence. Running executions remain queryable.
+    // Removes only completed payload evidence. Running executions remain queryable.
     TransferTaskRegistry::ForgetResult forgetReadCompletion(const std::string& trace_id);
-    // Configure before serving READ requests; cleanup does not own their buffers.
+    // Configure before accepting tracked payloads. Cleanup does not own buffers.
     void setCompletionCleanup(std::shared_ptr<TransferCompletionCleanup> cleanup);
-    // Retained non-protected READ targets; enumeration removes only RELEASED
-    // records. It never queries completion or releases frozen references.
+    // Retained uncertain payloads. Enumeration removes only RELEASED records.
     std::vector<std::shared_ptr<FrozenTask>> frozenTasks() const;
 
 protected:

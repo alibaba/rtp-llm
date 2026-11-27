@@ -21,6 +21,13 @@ size_t stagingBytes(size_t block_count, size_t stride_bytes) {
 
 }  // namespace
 
+HostStagingBlockLease::HostStagingBlockLease(HostStagingBlockPool* pool, size_t block_id):
+    pool_(pool), block_id_(block_id), release_([](HostStagingBlockPool* owner, size_t id) { owner->free(id); }) {}
+
+HostBufferView HostStagingBlockLease::blockBuffer(size_t payload_bytes) const {
+    return pool_->blockBuffer(block_id_, payload_bytes);
+}
+
 HostStagingBlockPool::HostStagingBlockPool(size_t block_count, size_t stride_bytes):
     block_count_(block_count),
     stride_bytes_(stride_bytes),

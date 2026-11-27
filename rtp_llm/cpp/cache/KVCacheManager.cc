@@ -119,11 +119,11 @@ void logFrozenCacheBlocks(const BlockTreeCache& cache) {
         }
     };
     for (const auto& group_set : cache.groupSets()) {
-        for (const auto& pool : group_set->devicePools()) {
+        for (const auto& pool : group_set->pools().device) {
             add_pool(0, pool.get());
         }
-        add_pool(1, group_set->hostPool().get());
-        add_pool(2, group_set->diskPool().get());
+        add_pool(1, group_set->pools().host.get());
+        add_pool(2, group_set->pools().disk.get());
     }
     const auto device = frozenBlockSummary(pools[0]);
     const auto host   = frozenBlockSummary(pools[1]);
@@ -575,6 +575,24 @@ void KVCacheManager::free(const FreeInfo& free_info) {
 
 bool KVCacheManager::abortPendingLoad(const std::shared_ptr<AsyncContext>& context) {
     return coordinator_manager_ != nullptr && coordinator_manager_->abortPendingLoad(context);
+}
+
+void KVCacheManager::deferLoadResourceRelease(LoadAsyncContext& context, BatchKVCacheResourcePtr resource) const {
+    context.deferRelease([resource = std::move(resource),
+                          tags = config_.groupTags(),
+                          pools = coordinator_manager_->groupBlockPools()] {
+        for (int batch = 0; batch < resource->batchSize(); ++batch) {
+            for (size_t group = 0; group < tags.size(); ++group) {
+                const auto& ids = resource->blocks(batch, tags[group]);
+                for (const auto block : ids) {
+                    if (!isNullBlockIdx(block)) {
+                        pools[group]->decRef(block, DeviceBlockRefType::REQUEST);
+                    }
+                }
+            }
+        }
+        resource->clearBlocks();
+    });
 }
 
 bool KVCacheManager::detachSharedBlocksForRecompute(const BatchKVCacheResourcePtr& resource,
@@ -1244,7 +1262,8 @@ bool KVCacheManager::executeFunction(const FunctionRequestPB& request, FunctionR
         const auto operation = request.remote_request().op();
         // Read/write results are application state and must reach rank 0 even
         // when the SDK failed or timed out. Metadata handlers retain their contract.
-        return operation == REMOTE_OPERATION_READ || operation == REMOTE_OPERATION_WRITE ? true : success;
+        return operation == REMOTE_OPERATION_READ || operation == REMOTE_OPERATION_WRITE
+            || operation == REMOTE_OPERATION_TRACKED_WRITE || success;
 #else
         RTP_LLM_LOG_WARNING("KVCacheManager::executeFunction: KVCM support is not compiled in");
         return false;

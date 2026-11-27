@@ -11,6 +11,7 @@
 #include "rtp_llm/cpp/cache/BlockInfo.h"
 #include "rtp_llm/cpp/cache/CacheGroupType.h"
 #include "rtp_llm/cpp/cache/CacheTier.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/block_pool/MallocStatus.h"
 #include "rtp_llm/models_py/bindings/core/Types.h"
 #include "rtp_llm/cpp/cache/BatchKVCacheResource.h"
 
@@ -107,15 +108,6 @@ struct MallocInfo {
     int max_chunk_tokens = 0;
 
     int incrSeqLen() const;
-};
-
-// Separates "the pools are momentarily full, retry later" from "this request can never fit".
-// A RETRYABLE failure keeps the stream WAITING instead of erroring it out under cache pressure.
-enum class MallocStatus : uint8_t {
-    NONE = 0,
-    RETRYABLE_RESOURCE_EXHAUSTED,
-    PERMANENT_RESOURCE_EXHAUSTED,
-    INTERNAL_ERROR,
 };
 
 struct MallocResult {

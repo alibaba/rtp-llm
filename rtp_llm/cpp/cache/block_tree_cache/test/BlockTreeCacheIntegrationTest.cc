@@ -22,6 +22,7 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeCache.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/group_set/FullGroupSet.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/test/BlockTreeCacheTestUtils.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/transfer/CrcCopyExecutor.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/test/PerRankBlockTransferEngineTestUtils.h"
 #include "rtp_llm/cpp/utils/AsyncProfilingScope.h"
 
@@ -325,7 +326,9 @@ public:
             }
             context = contexts_[index];
         }
-        return context->completeIfPending(std::move(error));
+        auto result = TransferResult(std::move(error));
+        result.buffer_safe = result.status.code() != ErrorCode::TRANSFER_COMPLETION_UNKNOWN;
+        return context->completeIfPending(std::move(result));
     }
 
     std::vector<TransferDescriptor> descriptors() const {
@@ -1143,7 +1146,7 @@ TEST_F(BlockTreeCacheIntegrationTest, DirectDropDetachesInFlightEvictionAndDisca
     EXPECT_TRUE(cache->tree()->findNode({100, 200}).empty());
     EXPECT_EQ(cache->tree()->size(), 0u);
     ASSERT_EQ(cache->tree()->pending_node_pool_.size(), 1u);
-    EXPECT_EQ(cache->tree()->pending_node_pool_.at(200).get(), path[1]);
+    EXPECT_EQ(block_tree_cache_test::pendingNodeForTest(*cache->tree(), 200), path[1]);
     EXPECT_EQ(path[1]->parent, nullptr);
     EXPECT_TRUE(path[1]->group_set_resources[0].transfer_detached);
     expectEvictionTimeSamples(metrics_reporter, Tier::DEVICE, "force_drop", 1);
@@ -1210,7 +1213,7 @@ TEST_F(BlockTreeCacheIntegrationTest, DirectDropDetachesPendingLoadAndFailsForFa
     EXPECT_EQ(cache->evictForGroup("group0", /*num_blocks=*/1), 1);
     EXPECT_TRUE(cache->tree()->findNode({100, 200}).empty());
     ASSERT_EQ(cache->tree()->pending_node_pool_.size(), 1u);
-    EXPECT_EQ(cache->tree()->pending_node_pool_.at(200).get(), path[1]);
+    EXPECT_EQ(block_tree_cache_test::pendingNodeForTest(*cache->tree(), 200), path[1]);
     EXPECT_TRUE(path[1]->group_set_resources[0].transfer_detached);
     expectEvictionTimeSamples(metrics_reporter, Tier::DEVICE, "force_drop", 1);
     expectEvictionTimeSamples(metrics_reporter, Tier::HOST, "force_drop", 1);
@@ -1331,7 +1334,7 @@ TEST_F(BlockTreeCacheIntegrationTest, DirectDropDetachesInFlightLoadAndDiscardsI
     EXPECT_EQ(cache->evictForGroup("group0", /*num_blocks=*/1), 1);
     EXPECT_TRUE(cache->tree()->findNode({100, 200}).empty());
     ASSERT_EQ(cache->tree()->pending_node_pool_.size(), 1u);
-    EXPECT_EQ(cache->tree()->pending_node_pool_.at(200).get(), path[1]);
+    EXPECT_EQ(block_tree_cache_test::pendingNodeForTest(*cache->tree(), 200), path[1]);
     EXPECT_TRUE(path[1]->group_set_resources[0].transfer_detached);
     expectEvictionTimeSamples(metrics_reporter, Tier::DEVICE, "force_drop", 1);
     expectEvictionTimeSamples(metrics_reporter, Tier::HOST, "force_drop", 1);

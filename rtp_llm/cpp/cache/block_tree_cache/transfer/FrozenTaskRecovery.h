@@ -60,7 +60,7 @@ public:
     // immediately before release; a throwing stop predicate stops this pass.
     // Positive query timeout is required. Diagnostics are best effort and do
     // not revoke an already validated buffer-safety proof.
-    // A positive force-release age also permits release without safety proof; zero disables that fallback.
+    // A positive force-release age applies only to records that do not require explicit buffer proof.
     Summary runOnce(int query_timeout_ms, const std::function<bool()>& should_stop = {}) noexcept;
 
 private:

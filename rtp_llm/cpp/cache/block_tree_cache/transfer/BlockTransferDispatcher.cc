@@ -1,3 +1,4 @@
+#include "rtp_llm/cpp/cache/block_tree_cache/diagnostic/CacheDiagnostics.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/BlockTransferDispatcher.h"
 
 #include <algorithm>
@@ -9,18 +10,16 @@
 #include <limits>
 #include <memory>
 #include <optional>
+#include <stdexcept>
 #include <string>
 #include <utility>
 
+#include "rtp_llm/cpp/cache/block_tree_cache/group_set/GroupSet.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferAsyncContext.h"
-#include "rtp_llm/cpp/cache/block_tree_cache/transfer/MultiRankBlockTransferEngine.h"
-#include "rtp_llm/cpp/cache/block_tree_cache/transfer/PerRankBlockTransferEngine.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferBatchAsyncContext.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferStageState.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferCompletionCleanup.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/ScopeRollback.h"
-#include "rtp_llm/cpp/utils/AssertUtils.h"
-#include "rtp_llm/cpp/utils/Logger.h"
 
 namespace rtp_llm {
 
@@ -28,12 +27,12 @@ class BlockTransferDispatcher::InflightTicket {
 public:
     explicit InflightTicket(const BlockTransferDispatcher& dispatcher): dispatcher_(dispatcher) {
         std::lock_guard<std::mutex> lock(dispatcher_.inflight_mutex_);
-        RTP_LLM_CHECK(dispatcher_.inflight_count_ < std::numeric_limits<size_t>::max());
+        BTC_CHECK(dispatcher_.inflight_count_ < std::numeric_limits<size_t>::max());
         ++dispatcher_.inflight_count_;
     }
     ~InflightTicket() noexcept {
         std::lock_guard<std::mutex> lock(dispatcher_.inflight_mutex_);
-        RTP_LLM_CHECK(dispatcher_.inflight_count_ != 0);
+        BTC_CHECK(dispatcher_.inflight_count_ != 0);
         if (--dispatcher_.inflight_count_ == 0) {
             dispatcher_.inflight_cv_.notify_all();
         }
@@ -59,9 +58,9 @@ struct BlockTransferDispatcher::CoordinatedExecution {
         prepared_slot.emplace_back();
         if (owner->completion_cleanup_) {
             TransferCompletionTarget target;
-            target.remote = owner->multi_rank_engine_ != nullptr;
+            target.remote = static_cast<bool>(owner->transport_.execute_parallel);
             if (target.remote) {
-                const auto& addresses = owner->multi_rank_engine_->participantAddresses();
+                const auto& addresses = owner->transport_.participant_addresses;
                 target.peers.reserve(addresses.size());
                 for (size_t rank = 0; rank < addresses.size(); ++rank)
                     target.peers.push_back({rank, addresses[rank]});
@@ -86,7 +85,7 @@ struct BlockTransferDispatcher::CoordinatedExecution {
             result.copy_error = CacheCopyError::RPC_FAILED;
         }
         try {
-            if (result.status.code() == ErrorCode::TRANSFER_COMPLETION_UNKNOWN) {
+            if (result.status.code() == ErrorCode::TRANSFER_COMPLETION_UNKNOWN && !result.buffer_safe) {
                 // The immutable task snapshot survives worker preparation. Resolve
                 // physical pools only when freezing, before business settlement.
                 auto execution = owner->buildExecutionInfo(*task, operation.c_str());
@@ -119,7 +118,7 @@ struct BlockTransferDispatcher::CoordinatedExecution {
                 frozen->freeze();
                 owner->retainFrozenTask(prepared_slot);
                 try {
-                    RTP_LLM_LOG_WARNING("transfer frozen: %s", frozen->debugString().c_str());
+                    BTC_LOG_WARNING("transfer frozen: %s", frozen->debugString().c_str());
                 } catch (...) {
                     // Diagnostics are best-effort after protection is established.
                 }
@@ -167,12 +166,13 @@ std::shared_ptr<BlockTransferDispatcher::InflightTicket> BlockTransferDispatcher
     return std::make_shared<InflightTicket>(*this);
 }
 
-BlockTransferDispatcher::BlockTransferDispatcher(std::shared_ptr<PerRankBlockTransferEngine>   per_rank_engine,
-                                                 std::shared_ptr<MultiRankBlockTransferEngine> multi_rank_engine):
-    per_rank_engine_(std::move(per_rank_engine)), multi_rank_engine_(std::move(multi_rank_engine)) {
-    RTP_LLM_LOG_INFO("transfer_lifecycle event=dispatcher_init registry=%s engine=%p",
-                     task_registry_->epoch().c_str(),
-                     static_cast<const void*>(per_rank_engine_.get()));
+BlockTransferDispatcher::BlockTransferDispatcher(std::vector<std::shared_ptr<GroupSet>> groups,
+                                                 TransferTransport transport):
+    groups_(std::move(groups)), transport_(std::move(transport)) {
+    if (!transport_.execute_local) {
+        throw std::invalid_argument("block transfer transport requires a local executor");
+    }
+    BTC_LOG_INFO("transfer_lifecycle event=dispatcher_init registry=%s", task_registry_->epoch().c_str());
 }
 
 BlockTransferDispatcher::~BlockTransferDispatcher() {
@@ -180,8 +180,8 @@ BlockTransferDispatcher::~BlockTransferDispatcher() {
 }
 
 void BlockTransferDispatcher::shutdown() const {
-    if (per_rank_engine_)
-        per_rank_engine_->shutdown();
+    if (transport_.shutdown)
+        transport_.shutdown();
     waitForTransfers();
 }
 
@@ -198,7 +198,7 @@ void BlockTransferDispatcher::waitForTransfers() const {
 std::shared_ptr<TransferAsyncContext> BlockTransferDispatcher::executePerRank(TransferTask task) const {
     const auto numeric_trace_id = task.traceId();
     const auto trace_id         = std::to_string(numeric_trace_id);
-    RTP_LLM_LOG_INFO("transfer_lifecycle event=worker_execute_enter trace=%s request=%ld registry=%s",
+    BTC_LOG_INFO("transfer_lifecycle event=worker_execute_enter trace=%s request=%ld registry=%s",
                      trace_id.c_str(),
                      task.requestId().value_or(-1),
                      task_registry_->epoch().c_str());
@@ -210,7 +210,7 @@ std::shared_ptr<TransferAsyncContext> BlockTransferDispatcher::executePerRank(Tr
         [registry = task_registry_, trace_id] { registry->finish(trace_id, true); });
     if (numeric_trace_id == 0 || !task_registry_->begin(trace_id)) {
         const auto* reason = numeric_trace_id == 0 ? "empty transfer trace" : "duplicate transfer trace";
-        RTP_LLM_LOG_WARNING("%s: trace=%s", reason, trace_id.c_str());
+        BTC_LOG_WARNING("%s: trace=%s", reason, trace_id.c_str());
         TransferResult result(ErrorInfo(ErrorCode::INVALID_PARAMS, std::string(reason) + ": " + trace_id),
                               CacheCopyError::NOT_EXECUTED);
         // This input never reaches I/O. Do not finish or overwrite the existing trace.
@@ -235,7 +235,7 @@ std::shared_ptr<TransferAsyncContext> BlockTransferDispatcher::executePerRank(Tr
         ErrorInfo(ErrorCode::TRANSFER_COMPLETION_UNKNOWN, "failed to observe submitted local transfer completion"));
     task.setCompletionProof(std::move(proof));
     close_submission.dismiss();
-    auto child = per_rank_engine_->execute(std::move(task));
+    auto child = transport_.execute_local(std::move(task));
     if (!child) {
         context->complete(ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "transfer engine returned a null context"));
     } else {
@@ -265,7 +265,7 @@ void BlockTransferDispatcher::warnRegistrySize() const noexcept {
                 next = next > std::numeric_limits<size_t>::max() / 2 ? 0 : next * 2;
             } while (next != 0 && count >= next);
             if (next_registry_warning_.compare_exchange_weak(threshold, next, std::memory_order_relaxed)) {
-                RTP_LLM_LOG_WARNING("worker transfer registry retains %zu records (warning threshold=%zu); "
+                BTC_LOG_WARNING("worker transfer registry retains %zu records (warning threshold=%zu); "
                                     "records are not deleted and admission remains open",
                                     count,
                                     threshold);
@@ -279,8 +279,8 @@ void BlockTransferDispatcher::warnRegistrySize() const noexcept {
 
 std::shared_ptr<TransferAsyncContext>
 BlockTransferDispatcher::executeMultiRank(TransferTask task, const char* completion_operation) const {
-    if (multi_rank_engine_ != nullptr) {
-        return multi_rank_engine_->execute(std::move(task), completion_operation);
+    if (transport_.execute_parallel) {
+        return transport_.execute_parallel(std::move(task), completion_operation);
     }
     return executePerRank(std::move(task));
 }
@@ -293,9 +293,10 @@ FrozenTask::ExecutionInfo BlockTransferDispatcher::buildExecutionInfo(const Tran
     info.request_id      = task.requestId();
     info.workflow_id     = task.workflowId();
     info.parent_trace_id = task.parentTraceId();
-    info.remote          = multi_rank_engine_ != nullptr;
-    if (multi_rank_engine_) {
-        const auto& addresses = multi_rank_engine_->participantAddresses();
+    info.requires_buffer_proof = true;
+    info.remote          = static_cast<bool>(transport_.execute_parallel);
+    if (info.remote) {
+        const auto& addresses = transport_.participant_addresses;
         info.expected_peers.reserve(addresses.size());
         for (size_t rank = 0; rank < addresses.size(); ++rank)
             info.expected_peers.push_back({rank, addresses[rank]});
@@ -303,7 +304,6 @@ FrozenTask::ExecutionInfo BlockTransferDispatcher::buildExecutionInfo(const Tran
         info.expected_peers.push_back({0, "local"});
     }
     info.expected_rank_count = info.expected_peers.size();
-    const auto& groups       = multi_rank_engine_ ? multi_rank_engine_->groupSets() : per_rank_engine_->groupSets();
     info.descriptors.reserve(task.descriptors().size());
     for (const auto& descriptor : task.descriptors()) {
         FrozenTask::DescriptorInfo saved;
@@ -312,19 +312,19 @@ FrozenTask::ExecutionInfo BlockTransferDispatcher::buildExecutionInfo(const Tran
         saved.source_tier  = descriptor.source_tier;
         saved.target_tier  = descriptor.target_tier;
         const GroupSet* group =
-            descriptor.group_set_id < groups.size() ? groups[descriptor.group_set_id].get() : nullptr;
+            descriptor.group_set_id < groups_.size() ? groups_[descriptor.group_set_id].get() : nullptr;
         const auto capture = [group](Tier tier, const std::vector<BlockIdxType>& blocks) {
             std::vector<FrozenTask::BlockInfo> saved_blocks;
             saved_blocks.reserve(blocks.size());
             for (size_t member = 0; member < blocks.size(); ++member) {
                 std::shared_ptr<IBlockPool> pool;
                 if (group) {
-                    if (tier == Tier::DEVICE && member < group->devicePools().size())
-                        pool = group->devicePools()[member];
+                    if (tier == Tier::DEVICE && member < group->pools().device.size())
+                        pool = group->pools().device[member];
                     else if (tier == Tier::HOST)
-                        pool = group->hostPool();
+                        pool = group->pools().host;
                     else if (tier == Tier::DISK)
-                        pool = group->diskPool();
+                        pool = group->pools().disk;
                 }
                 saved_blocks.push_back({pool, blocks[member], member});
             }
@@ -352,7 +352,7 @@ void BlockTransferDispatcher::submitCoordinated(TransferTask         task,
     try {
         context = executeMultiRank(std::move(task), completion_operation);
         if (!context) {
-            execution->complete(ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "transfer engine returned a null context"));
+            execution->complete(TransferResult::executionException(true, "transfer engine rejected the request"));
             return;
         }
         context->onDone(std::move(complete));
@@ -418,7 +418,7 @@ void BlockTransferDispatcher::runTransfer(TransferTask         task,
     callback = [ticket, block_count = task.descriptors().size(), done = std::move(callback)](TransferResult result) {
         if (!result.ok()) {
             try {
-                RTP_LLM_LOG_ERROR(
+                BTC_LOG_ERROR(
                     "block transfer failed: descriptor_count=%zu, error_type=%s, error_code=%d, details=%s",
                     block_count,
                     cacheCopyErrorName(result.copy_error),
@@ -430,15 +430,28 @@ void BlockTransferDispatcher::runTransfer(TransferTask         task,
         }
         done(std::move(result));
     };
+    if (task.descriptors().empty()) {
+        TransferResult result(ErrorInfo(ErrorCode::INVALID_PARAMS, "empty transfer task"), CacheCopyError::NOT_EXECUTED);
+        result.buffer_safe = true;
+        callback(std::move(result));
+        return;
+    }
+    if (transport_.execute_parallel && transport_.participant_addresses.empty()) {
+        auto result = TransferResult::executionException(true, "Parallel block transfer has no participants");
+        result.copy_error = CacheCopyError::NOT_EXECUTED;
+        callback(std::move(result));
+        return;
+    }
     submitCoordinated(task.rpcSubtask(), std::move(callback), completion_operation);
 }
 
 void BlockTransferDispatcher::cancelPendingStagingTransfers() const {
-    per_rank_engine_->cancelPendingStagingTransfers();
+    if (transport_.cancel_pending)
+        transport_.cancel_pending();
 }
 
 BlockTreeQueueSizes BlockTransferDispatcher::queueSizes() const {
-    return per_rank_engine_->queueSizes();
+    return transport_.queue_sizes ? transport_.queue_sizes() : BlockTreeQueueSizes{};
 }
 
 }  // namespace rtp_llm

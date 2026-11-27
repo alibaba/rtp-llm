@@ -13,7 +13,7 @@
 namespace rtp_llm {
 namespace {
 
-TransferDescriptor removedDiskToHost(size_t group, BlockIdxType disk, BlockIdxType host) {
+TransferDescriptor diskToHost(size_t group, BlockIdxType disk, BlockIdxType host) {
     auto desc = TransferDescriptor::hostToDisk(group, host, disk);
     std::swap(desc.source_tier, desc.target_tier);
     std::swap(desc.source_blocks, desc.target_blocks);
@@ -139,7 +139,7 @@ TEST(TransferDescriptorTest, IsExecutableRequiresResolvedEndpointsPerDirection) 
     EXPECT_TRUE(TransferDescriptor::deviceToHost(0, {1, 2}, 3).isExecutable());
     EXPECT_TRUE(TransferDescriptor::hostToDevice(0, 3, {1, 2}).isExecutable());
     EXPECT_TRUE(TransferDescriptor::hostToDisk(0, 1, 2).isExecutable());
-    EXPECT_FALSE(removedDiskToHost(0, 1, 2).isExecutable());
+    EXPECT_TRUE(diskToHost(0, 1, 2).isExecutable());
     EXPECT_FALSE(removedDeviceToDisk(0, {1}, 2).isExecutable());
     EXPECT_TRUE(TransferDescriptor::diskToDevice(0, 2, {1}).isExecutable());
 
@@ -155,7 +155,7 @@ TEST(TransferDescriptorTest, IsExecutableRequiresResolvedEndpointsPerDirection) 
     TransferDescriptor host_to_disk = TransferDescriptor::hostToDisk(0, 1, 2);
     host_to_disk.source_blocks      = {1, 3};
     EXPECT_FALSE(host_to_disk.isExecutable());
-    TransferDescriptor disk_to_host = removedDiskToHost(0, 1, 2);
+    TransferDescriptor disk_to_host = diskToHost(0, 1, 2);
     disk_to_host.target_blocks      = {2, 3};
     EXPECT_FALSE(disk_to_host.isExecutable());
 }
@@ -280,7 +280,7 @@ TEST(BlockTransferRequestConverterTest, DecodesHostToDiskUsingTierSpecificFields
 
 TEST(BlockTransferRequestConverterTest, RejectsRemovedDirectionsOnEncodeAndDecode) {
     const std::vector<std::pair<TransferDescriptor, MemoryOperationRequestPB::CopyDirection>> removed{
-        {removedDiskToHost(4, 71, 81), MemoryOperationRequestPB::DISK2H},
+        {diskToHost(4, 71, 81), MemoryOperationRequestPB::DISK2H},
         {removedDeviceToDisk(3, {51}, 61), MemoryOperationRequestPB::D2DISK},
     };
     for (const auto& [descriptor, direction] : removed) {

@@ -1,4 +1,5 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/load/LoadAsyncContext.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/integration/rtp_llm/RtpStorageBackend.h"
 
 #include <chrono>
 #include <condition_variable>
@@ -220,20 +221,20 @@ std::shared_ptr<const CacheTopology> makeTopology(std::vector<CacheGroupType> ty
 }
 
 void initBackend(ManualBackend& backend, const DeviceBlockPoolPtr& pool) {
-    RTP_LLM_CHECK(backend.init(
-        makeTopology(), {{"group_0", pool}}, [](int, const std::string&, int) { return std::vector<BlockInfo>{}; }));
+    RTP_LLM_CHECK(RtpStorageBackend::initEngine(
+        backend,         makeTopology(), {{"group_0", pool}}, [](int, const std::string&, int) { return std::vector<BlockInfo>{}; }));
 }
 
 void initBackend(ManualBackend&                         backend,
                  std::shared_ptr<const CacheTopology>   topology,
                  const std::vector<DeviceBlockPoolPtr>& pools) {
-    StorageBackend::PoolsByTag pools_by_tag;
+    RtpStorageBackend::PoolsByTag pools_by_tag;
     RTP_LLM_CHECK(topology->groupTags().size() == pools.size());
     for (size_t i = 0; i < pools.size(); ++i) {
         RTP_LLM_CHECK(pools_by_tag.emplace(topology->groupTags()[i], pools[i]).second);
     }
-    RTP_LLM_CHECK(backend.init(
-        topology, std::move(pools_by_tag), [](int, const std::string&, int) { return std::vector<BlockInfo>{}; }));
+    RTP_LLM_CHECK(RtpStorageBackend::initEngine(
+        backend,         topology, std::move(pools_by_tag), [](int, const std::string&, int) { return std::vector<BlockInfo>{}; }));
 }
 
 StorageRequest makeRequest(size_t key_count) {

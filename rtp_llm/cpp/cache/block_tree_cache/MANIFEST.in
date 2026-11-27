@@ -1,0 +1,4 @@
+include CMakeLists.txt native_sources.bzl
+recursive-include include *.h *.hpp
+recursive-include bindings/python *.py
+recursive-include tests/contract *.cc *.py
