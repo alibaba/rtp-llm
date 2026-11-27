@@ -381,8 +381,9 @@ class BaseMoEExperts(RtpModule):
         if source_family is None:
             raise ValueError(
                 f"MoE layer {self.prefix} does not support model quantization "
-                f"method {source_method!r}; disable NewLoader or register its "
-                "runtime family"
+                f"method {source_method!r}; use a checkpoint with a supported "
+                "expert weight format. If only dense layers are quantized, "
+                "exclude the floating-point expert projections in the quantization config."
             )
         if source_family != self._quant_family:
             raise ValueError(

@@ -9,7 +9,11 @@ from unittest import mock
 import torch
 from safetensors.torch import save_file
 
-from rtp_llm.config.quant_config import CompressedW8A8Int8PerChannelQuantConfig
+from rtp_llm.config.quant_config import (
+    CompressedW8A8Int8PerChannelQuantConfig,
+    OmniQuantConfig,
+    SmoothQuantConfig,
+)
 from rtp_llm.models_py.checkpoint_reader_test_support import checkpoint_readers, requires_native_fst
 from rtp_llm.models_py.layers.moe_experts import BaseMoEExperts
 from rtp_llm.models_py.model_loader import NewLoaderConfig, NewModelLoader
@@ -69,6 +73,21 @@ class _MoeModel(RtpModule):
 
 
 class W8A8Int8MoETest(unittest.TestCase):
+    def test_unsupported_expert_format_identifies_layer_and_recovery(self):
+        for source in (SmoothQuantConfig(), OmniQuantConfig()):
+            method = source.get_method()
+            cfg = types.SimpleNamespace(
+                activation_type="SiGLU", hidden_size=8, quant_config=source
+            )
+            load = NewLoaderConfig(
+                device="cpu",
+                quant_config=QuantizationConfig(method, source_config=source),
+            )
+            with self.subTest(method=method), self.assertRaisesRegex(
+                ValueError, f"MoE layer experts .*{method}.*supported expert weight format"
+            ):
+                _MoeModel(cfg, load)
+
     def test_real_consumer_classes_import_without_cuda_fp8_native_symbol(self):
         # Import the actual PPU closure, not stand-in executors. This checks
         # Python dependency isolation only, never PPU kernel/DeepEP execution.
