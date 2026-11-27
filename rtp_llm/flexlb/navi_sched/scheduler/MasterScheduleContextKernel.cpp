@@ -574,6 +574,7 @@ void MasterScheduleResultKernel::logAdmissionPredictions(
                       std::to_string(features.getMaxExternalReadTokens())
                 : std::string();
         const auto workloadSuffix=geometrySuffix +
+            " native_step_token_budget=" + std::to_string(node.getNativeStepTokenBudget()) +
             " kv_preparing_expected_moments="+expectedMoments(features)+
             " kv_preparing_floor_expected_moments="+expectedMoments(floor);
         NAVI_KERNEL_LOG(

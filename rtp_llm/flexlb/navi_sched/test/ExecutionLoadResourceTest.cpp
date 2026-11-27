@@ -1,3 +1,4 @@
+#include "autil/DataBuffer.h"
 #include "aios/navi_sched/resource/MasterKVReadyWorkload.h"
 #include "aios/navi_sched/config/NaviSchedConfigBuilder.h"
 #include "aios/navi_sched/data/MasterResponseToClientData.h"
@@ -924,5 +925,190 @@ TEST_F(MasterKVPreparationLifecycleTest, InvalidReservationTransitionCannotTrain
     ASSERT_TRUE(preparing->valid());
     ASSERT_TRUE(runtime.reportAgent("kv_lifecycle",preparing));
     EXPECT_EQ(count,state->_kvPreparationForecasts.model().samples());
+}
+}
+
+namespace navi_sched {
+namespace {
+NaviSchedNodeSnapshot nativeStepForecastSnapshot(int64_t tokenBudget = 8192) {
+    auto snapshot = preparationProjectionSnapshot();
+    auto info = std::make_shared<NaviSchedNodeInfo>(*snapshot.info);
+    info->latencyModelFingerprint =
+        R"({"unified_capacity_batch_count_unit": "native_positive_prefill_step_v1"})";
+    snapshot.info = info;
+    auto model = std::make_shared<NaviSchedLatencyModel>(*snapshot.latencyModel);
+    model->parameters.assign(19, 0.0);
+    model->parameters[8] = 1.0;
+    model->parameters[6] = 100.0 / NonLinearPrefillModelR::getParameterScale(6);
+    model->parameters[15] = 5.0 / NonLinearPrefillModelR::getParameterScale(15);
+    EXPECT_TRUE(NonLinearPrefillModelR::validateParameters(model->parameters));
+    snapshot.latencyModel = model;
+    TPUPrefillExecutionPolicyConfig policy;
+    policy.maxScheduledTokens = tokenBudget;
+    snapshot.prefillExecutionPolicy = policy;
+    snapshot.workload.executionLoadTracked = false;
+    snapshot.workload.executionLoadRequests.clear();
+    snapshot.kvPreparationEstimates.clear();
+    return snapshot;
+}
+NaviSchedLatencyFeatures nativeStepInput(int64_t runningTokens, int64_t waitingTokens = 0) {
+    NaviSchedLatencyFeatures features;
+    EXPECT_TRUE(features.appendCapacitySplitAggregate(
+        6, 1, 0, runningTokens, double(runningTokens) * runningTokens, 0,
+        waitingTokens > 0 ? 1 : 0, 0, waitingTokens,
+        double(waitingTokens) * waitingTokens, 0));
+    return features;
+}
+}
+
+TEST(ExecutionLoadResourceTest, NativeStepForecastUsesReportedBudgetAndMatchesSmoothOptimizerAtWholeSteps) {
+    for (const int64_t budget : {4096, 8192}) {
+        auto snapshot = nativeStepForecastSnapshot(budget);
+        const auto parameters = snapshot.latencyModel->parameters;
+        NaviSchedScheduleNode node(nullptr, std::move(snapshot), 1);
+        EXPECT_EQ(budget, node.getNativeStepTokenBudget());
+        auto features = nativeStepInput(8 * budget, 8 * budget);
+        auto expected = features;
+        ASSERT_TRUE(expected.setBatchCount(16));
+        const auto exact = NonLinearPrefillModelR::predict(expected, parameters);
+        ASSERT_GT(exact, 0.0);
+        EXPECT_NEAR(exact, node.predictBaseLatency(features), 1e-8);
+        EXPECT_NEAR(exact, NonLinearPrefillModelR::predict(features, node.getLatencyParameters()), 1e-8);
+        EXPECT_DOUBLE_EQ(0.0, node.getLatencyParameters()[6]);
+        ASSERT_TRUE(node.prepareLatencyPredictionFeatures(features));
+        EXPECT_EQ(16, features.getBatchCount());
+        ASSERT_TRUE(node.prepareLatencyPredictionFeatures(features));
+        EXPECT_EQ(16, features.getBatchCount());
+        EXPECT_NEAR(exact, node.predictBaseLatency(features), 1e-8);
+    }
+}
+
+TEST(ExecutionLoadResourceTest, NativeStepForecastWeightsPreparationTokensAndDropsLogicalExpectedBatchCount) {
+    auto snapshot = nativeStepForecastSnapshot();
+    NaviSchedScheduleNode node(nullptr, std::move(snapshot), 1);
+    auto features = nativeStepInput(8192);
+    NaviSchedExpectedKVWorkload expected;
+    expected.precedingRequests = 0.25;
+    expected.running = {0.25, 0.0, 2048.0, 16777216.0, 0.0};
+    expected.batchCount = 99.0;
+    ASSERT_TRUE(features.setExpectedKVWorkload(expected));
+    ASSERT_TRUE(node.prepareLatencyPredictionFeatures(features));
+    EXPECT_EQ(2, features.getBatchCount());
+    const auto actual = features.getExpectedKVWorkload();
+    ASSERT_NE(nullptr, actual);
+    EXPECT_DOUBLE_EQ(0.25, actual->precedingRequests);
+    EXPECT_DOUBLE_EQ(2048.0, actual->running[2]);
+    EXPECT_DOUBLE_EQ(16777216.0, actual->running[3]);
+    EXPECT_DOUBLE_EQ(0.0, actual->batchCount);
+    EXPECT_GT(node.predictBaseLatency(features),
+              NonLinearPrefillModelR::predict(nativeStepInput(8192), node.getLatencyParameters()));
+}
+
+TEST(ExecutionLoadResourceTest, NativeStepForecastWholeStepBoundaryDoesNotAlterOtherFeatures) {
+    auto snapshot = nativeStepForecastSnapshot();
+    NaviSchedScheduleNode node(nullptr, std::move(snapshot), 1);
+    auto features = nativeStepInput(8193);
+    const auto tokens = features.getCacheMissTokenCount();
+    const auto square = features.getCacheMissTokenSquareSum();
+    const auto requests = features.getBatchSize();
+    ASSERT_TRUE(node.prepareLatencyPredictionFeatures(features));
+    EXPECT_EQ(2, features.getBatchCount());
+    EXPECT_EQ(tokens, features.getCacheMissTokenCount());
+    EXPECT_DOUBLE_EQ(square, features.getCacheMissTokenSquareSum());
+    EXPECT_EQ(requests, features.getBatchSize());
+    EXPECT_FALSE(features.setBatchCount(-1));
+    EXPECT_EQ(2, features.getBatchCount());
+}
+
+TEST(ExecutionLoadResourceTest, NativeStepForecastDoesNotChangeLegacyModelsOrGuessMissingPolicy) {
+    for (const auto &fingerprint : {std::string("legacy-3.7-model"),
+             std::string(R"({"unified_capacity_batch_count_unit":"logical_batch"})")}) {
+        auto snapshot = nativeStepForecastSnapshot();
+        auto info = std::make_shared<NaviSchedNodeInfo>(*snapshot.info);
+        info->latencyModelFingerprint = fingerprint;
+        snapshot.info = info;
+        snapshot.prefillExecutionPolicy.reset();
+        const auto parameters = snapshot.latencyModel->parameters;
+        NaviSchedScheduleNode node(nullptr, std::move(snapshot), 1);
+        auto features = nativeStepInput(131072);
+        const auto before = NonLinearPrefillModelR::predict(features, parameters);
+        EXPECT_EQ(0, node.getNativeStepTokenBudget());
+        ASSERT_TRUE(node.prepareLatencyPredictionFeatures(features));
+        EXPECT_EQ(6, features.getBatchCount());
+        EXPECT_EQ(parameters, node.getLatencyParameters());
+        EXPECT_DOUBLE_EQ(before, node.predictBaseLatency(features));
+    }
+    auto missing = nativeStepForecastSnapshot();
+    missing.prefillExecutionPolicy.reset();
+    EXPECT_THROW(NaviSchedScheduleNode(nullptr, std::move(missing), 1), std::invalid_argument);
+    auto zero = nativeStepForecastSnapshot(0);
+    EXPECT_THROW(NaviSchedScheduleNode(nullptr, std::move(zero), 1), std::invalid_argument);
+}
+}
+
+namespace navi_sched {
+TEST(ExecutionLoadResourceTest, NativeStepPredictionWirePreservesNormalizedFullAndFloorFeatures) {
+    auto snapshot = nativeStepForecastSnapshot();
+    const auto parameters = snapshot.latencyModel->parameters;
+    NaviSchedScheduleNode node(nullptr, std::move(snapshot), 1);
+    NaviSchedLatencyPrediction prediction;
+    prediction.features = nativeStepInput(131073);
+    prediction.floorFeatures = nativeStepInput(8193);
+    NaviSchedExpectedKVWorkload expected;
+    expected.precedingRequests = 0.25;
+    expected.running = {0.25, 0.0, 2048.0, 16777216.0, 0.0};
+    ASSERT_TRUE(prediction.features.setExpectedKVWorkload(expected));
+    ASSERT_TRUE(node.prepareLatencyPredictionFeatures(prediction.features));
+    ASSERT_TRUE(node.prepareLatencyPredictionFeatures(prediction.floorFeatures));
+    prediction.recomputable = true;
+    prediction.hasFloor = true;
+    autil::DataBuffer buffer;
+    prediction.serialize(buffer);
+    buffer.write(int64_t(77881));
+    NaviSchedLatencyPrediction decoded;
+    decoded.deserialize(buffer);
+    int64_t sentinel = 0;
+    buffer.read(sentinel);
+    ASSERT_TRUE(decoded.valid());
+    EXPECT_EQ(77881, sentinel);
+    EXPECT_EQ(17, decoded.features.getBatchCount());
+    EXPECT_EQ(2, decoded.floorFeatures.getBatchCount());
+    ASSERT_NE(nullptr, decoded.features.getExpectedKVWorkload());
+    EXPECT_DOUBLE_EQ(0.25, decoded.features.getExpectedKVWorkload()->precedingRequests);
+    EXPECT_DOUBLE_EQ(NonLinearPrefillModelR::predict(prediction.features, parameters),
+                     NonLinearPrefillModelR::predict(decoded.features, parameters));
+    EXPECT_DOUBLE_EQ(NonLinearPrefillModelR::predict(prediction.floorFeatures, parameters),
+                     NonLinearPrefillModelR::predict(decoded.floorFeatures, parameters));
+}
+}
+
+namespace navi_sched {
+TEST(ExecutionLoadResourceTest, NativeStepOptimizerBaselineUsesContinuousWorkLikeItsCandidateCost) {
+    auto snapshot = nativeStepForecastSnapshot();
+    snapshot.workloadFeatures = nativeStepInput(8193);
+    snapshot.reportedWorkloadFeatures = snapshot.workloadFeatures;
+    NaviSchedScheduleNode node(nullptr, std::move(snapshot), 1);
+    const auto &features = node.getWorkloadFeatures();
+    const auto smooth = node.applyLatencyResidual(
+        NonLinearPrefillModelR::predict(features, node.getLatencyParameters()));
+    ASSERT_GT(smooth, 0.0);
+    ASSERT_LT(smooth, node.predictLatency(features));
+    node.refreshExistingUnifiedLatency();
+    EXPECT_DOUBLE_EQ(smooth, node.getExistingUnifiedLatencyMs());
+    EXPECT_DOUBLE_EQ(0.0, smooth - node.getExistingUnifiedLatencyMs());
+}
+
+TEST(ExecutionLoadResourceTest, LegacyOptimizerBaselineKeepsItsOriginalPrediction) {
+    auto snapshot = nativeStepForecastSnapshot();
+    auto info = std::make_shared<NaviSchedNodeInfo>(*snapshot.info);
+    info->latencyModelFingerprint = "legacy-3.7-model";
+    snapshot.info = info;
+    snapshot.workloadFeatures = nativeStepInput(8193);
+    snapshot.reportedWorkloadFeatures = snapshot.workloadFeatures;
+    NaviSchedScheduleNode node(nullptr, std::move(snapshot), 1);
+    const auto original = node.predictLatency(node.getWorkloadFeatures());
+    ASSERT_GT(original, 0.0);
+    node.refreshExistingUnifiedLatency();
+    EXPECT_DOUBLE_EQ(original, node.getExistingUnifiedLatencyMs());
 }
 }

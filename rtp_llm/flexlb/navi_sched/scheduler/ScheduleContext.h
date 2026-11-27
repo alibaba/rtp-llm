@@ -203,6 +203,8 @@ public:
     double applyLatencyResidual(double basePredictionMs,
                                 double *derivativeFactor = nullptr) const;
     double predictBaseLatency(const NaviSchedLatencyFeatures &features) const;
+    bool prepareLatencyPredictionFeatures(NaviSchedLatencyFeatures &features) const;
+    int64_t getNativeStepTokenBudget() const { return _nativeStepTokenBudget; }
     double predictLatency(const NaviSchedLatencyFeatures &features) const;
     bool usesUnifiedLatencyPrediction() const;
     const std::optional<TPUPrefillExecutionPolicyConfig> &getPrefillExecutionPolicy()
@@ -278,6 +280,8 @@ private:
     int64_t _scheduleTimeUs = 0;
     double _timeCompression = 1.0;
     bool _unifiedLatencyPrediction = false;
+    // Nonzero only when the reported model declares Native positive prefill steps.
+    int64_t _nativeStepTokenBudget = 0;
     NaviSchedWorkloadSnapshot _workload;
     std::vector<MasterBatchReservation::UnfinishedRequest> _nativePrefillReservations;
     mutable std::shared_ptr<const TPUPrefillPP4ObservationInput>

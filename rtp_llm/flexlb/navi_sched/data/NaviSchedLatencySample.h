@@ -65,6 +65,12 @@ public:
         double waitingCacheMissTokenSquareSum, double waitingCacheHitMissTokenProductSum);
     void appendWaitingRequest(int64_t cacheHitTokenCount, int64_t cacheMissTokenCount);
     bool appendBatchCount(int64_t batchCount);
+    bool setBatchCount(int64_t batchCount)
+    {
+        if (batchCount < 0) return false;
+        _batchCount = batchCount;
+        return true;
+    }
     bool appendPrecedingRequestCount(int64_t requestCount);
     bool appendRunningElapsedTimeMs(double elapsedTimeMs);
     bool appendRunningDecodeProgress(int64_t requestCount, int64_t generatedTokenCount,

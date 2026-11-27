@@ -9,6 +9,7 @@
 #include "aios/navi_sched/resource/MasterLatencyModelR.h"
 #include "aios/navi_sched/resource/NonLinearPrefillModelR.h"
 #include "autil/HashUtil.h"
+#include "autil/legacy/json.h"
 
 #include <cmath>
 #include <stdexcept>
@@ -16,6 +17,25 @@
 #include <algorithm>
 
 namespace navi_sched {
+
+namespace {
+bool usesNativePositivePrefillSteps(const std::string &fingerprint)
+{
+    if (fingerprint.find("\"unified_capacity_batch_count_unit\"") == std::string::npos)
+        return false;
+    try {
+        autil::legacy::json::JsonMap values;
+        autil::legacy::FromJsonString(values, fingerprint);
+        const auto found = values.find("unified_capacity_batch_count_unit");
+        return found != values.end() &&
+               autil::legacy::AnyCast<std::string>(found->second) ==
+                   "native_positive_prefill_step_v1";
+    } catch (const std::exception &) {
+        // Existing model fingerprints may be opaque identities rather than JSON.
+        return false;
+    }
+}
+}
 
 int64_t NaviSchedScheduleContext::getScheduleTimeUs() const { return _scheduleTimeUs; }
 
@@ -67,6 +87,28 @@ NaviSchedScheduleNode::NaviSchedScheduleNode(NaviSchedNodeConstPtr node,
         // always use versioned parameters and complete-batch geometry.
         _legacyLatencyParameters = NonLinearPrefillModelR::parametersForLegacyPrediction(
             _latencyModel->parameters, _latencyModel->binaryVersion);
+    }
+    if (_unifiedLatencyPrediction && _latencyModel &&
+        _latencyModel->binaryVersion == NonLinearPrefillModelR::BINARY_VERSION &&
+        NonLinearPrefillModelR::usesCapacitySplitParameters(_latencyModel->parameters) &&
+        _info && usesNativePositivePrefillSteps(_info->latencyModelFingerprint)) {
+        if (!_prefillExecutionPolicy || _prefillExecutionPolicy->maxScheduledTokens <= 0)
+            throw std::invalid_argument("Native step model requires reported token budget");
+        _nativeStepTokenBudget = _prefillExecutionPolicy->maxScheduledTokens;
+        // The optimizer uses continuous steps so its request-cost sum and gradient
+        // remain additive. Final predictions use the corresponding whole-step count.
+        _legacyLatencyParameters = _latencyModel->parameters;
+        constexpr size_t stepParameterIndex = 6;
+        constexpr size_t runningMissParameterIndex = 3;
+        constexpr size_t waitingMissParameterIndex = 12;
+        const double stepCost = _legacyLatencyParameters[stepParameterIndex] *
+                                NonLinearPrefillModelR::getParameterScale(stepParameterIndex);
+        const double stepsPerKToken = 1024.0 / _nativeStepTokenBudget;
+        for (const size_t index : {runningMissParameterIndex, waitingMissParameterIndex}) {
+            _legacyLatencyParameters[index] += stepCost * stepsPerKToken /
+                NonLinearPrefillModelR::getParameterScale(index);
+        }
+        _legacyLatencyParameters[stepParameterIndex] = 0.0;
     }
     if (_unifiedLatencyPrediction && _workloadReportReceiveTimeUs > 0) {
         const auto workloadReportAgeMs = getWorkloadReportAgeMs();
@@ -343,8 +385,20 @@ void NaviSchedScheduleNode::refreshExistingUnifiedLatency()
     NaviSchedLatencyFeatures floorFeatures;
     if (usesUnifiedLatencyPrediction() && hasLatencyModel() &&
         getUnifiedDecayFloorFeatures(floorFeatures)) {
-        _existingUnifiedLatencyMs = decayUnifiedLatency(predictLatency(_workloadFeatures),
-                                                        predictLatency(floorFeatures));
+        if (_nativeStepTokenBudget > 0) {
+            // This cached value is the optimizer's baseline. Mixing a rounded
+            // baseline with continuous candidate costs would invent negative work.
+            const auto predictOptimizationLatency = [this](const NaviSchedLatencyFeatures &features) {
+                return applyLatencyResidual(NonLinearPrefillModelR::predict(
+                    features, getLatencyParameters()));
+            };
+            _existingUnifiedLatencyMs = decayUnifiedLatency(
+                predictOptimizationLatency(_workloadFeatures),
+                predictOptimizationLatency(floorFeatures));
+        } else {
+            _existingUnifiedLatencyMs = decayUnifiedLatency(predictLatency(_workloadFeatures),
+                                                            predictLatency(floorFeatures));
+        }
     }
 }
 
@@ -570,12 +624,37 @@ double NaviSchedScheduleNode::predictBaseLatency(
     if (!_latencyModel) {
         return 0.0;
     }
+    if (_nativeStepTokenBudget > 0) {
+        auto predictionFeatures = features;
+        if (!prepareLatencyPredictionFeatures(predictionFeatures))
+            throw std::invalid_argument("invalid Native step prediction features");
+        return NonLinearPrefillModelR::predict(predictionFeatures, _latencyModel->parameters);
+    }
     if (NonLinearPrefillModelR::usesGeometryForVersion(_latencyModel->binaryVersion)) {
         return NonLinearPrefillModelR::predictForVersion(
             features, _latencyModel->parameters, _latencyModel->binaryVersion);
     }
     // Preserve the legacy prediction path and its numerical coordinates.
     return NonLinearPrefillModelR::predict(features, getLatencyParameters());
+}
+
+bool NaviSchedScheduleNode::prepareLatencyPredictionFeatures(
+    NaviSchedLatencyFeatures &features) const
+{
+    if (_nativeStepTokenBudget == 0) return true;
+    const long double missTokens = features.getPlanningCacheMissTokenCount();
+    if (!std::isfinite(missTokens) || missTokens < 0) return false;
+    long double steps = std::ceil(missTokens / _nativeStepTokenBudget);
+    const auto expected = features.getExpectedKVWorkload();
+    if (steps == 0 && (features.getBatchSize() > 0 ||
+                      (expected && expected->precedingRequests > 0))) steps = 1;
+    if (steps > std::numeric_limits<int64_t>::max()) return false;
+    if (expected && expected->batchCount != 0.0) {
+        auto nativeExpected = *expected;
+        nativeExpected.batchCount = 0.0;
+        if (!features.setExpectedKVWorkload(nativeExpected)) return false;
+    }
+    return features.setBatchCount(static_cast<int64_t>(steps));
 }
 
 double NaviSchedScheduleNode::predictLatency(
@@ -1917,6 +1996,7 @@ double NaviSchedScheduleContext::estimateBatchExecutionLatencyMs(
         }
     }
     if (!node.usesUnifiedLatencyPrediction()) {
+        if (!node.prepareLatencyPredictionFeatures(requestFeatures)) return 0.0;
         const auto prediction = node.predictLatency(requestFeatures);
         if (latencyPrediction) {
             latencyPrediction->features = requestFeatures;
@@ -1935,6 +2015,8 @@ double NaviSchedScheduleContext::estimateBatchExecutionLatencyMs(
         !withoutReportedWorkload.append(floorFeatures)) {
         return 0.0;
     }
+    if (!node.prepareLatencyPredictionFeatures(withReportedWorkload) ||
+        !node.prepareLatencyPredictionFeatures(withoutReportedWorkload)) return 0.0;
     const auto withReportedPrediction = node.predictLatency(withReportedWorkload);
     const auto withoutReportedPrediction = node.predictLatency(withoutReportedWorkload);
     const auto prediction =
