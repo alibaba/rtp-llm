@@ -13,6 +13,7 @@
 #include "autil/TimeUtility.h"
 #include "unittest/unittest.h"
 #include <numeric>
+#include "aios/navi_sched/scheduler/CostSchedulerKernelInternal.h"
 
 namespace navi_sched {
 AgentUpdateToMasterDataPtr makeControlUpdate(NaviSchedAgentEvent::Type event, int64_t eventTimeUs = 0) {
@@ -1346,5 +1347,316 @@ TEST(ExecutionLoadResourceTest, NativeWorkloadCaptureSupportsQueryReportsWithout
     EXPECT_EQ(query.receiveState, copy.receiveState);
     EXPECT_FALSE(NaviSchedScheduleReplayJson::captureNativeWorkload(workload, 21, true));
     EXPECT_FALSE(NaviSchedScheduleReplayJson::captureNativeWorkload(workload, 20, true, 16));
+}
+}
+
+
+namespace navi_sched {
+namespace {
+TPUPrefillExecutionPolicyConfig stepPackingPolicy() {
+    TPUPrefillExecutionPolicyConfig policy;
+    policy.pcpSize = 8;
+    policy.interleaveSize = 256;
+    policy.compileSizes = {256, 512, 1024};
+    policy.maxScheduledTokens = 8192;
+    policy.hashBlockSize = 4096;
+    policy.schedulerBlockSize = 4096;
+    return policy;
+}
+NaviSchedLatencyFeatures emptyStepPackingFeatures() {
+    NaviSchedLatencyFeatures features;
+    EXPECT_TRUE(features.appendCapacitySplitAggregate(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0));
+    return features;
+}
+NaviSchedNodeSnapshot emptyStepPackingSnapshot() {
+    auto snapshot = nativeStepForecastSnapshot();
+    snapshot.prefillExecutionPolicy = stepPackingPolicy();
+    snapshot.workload = {};
+    snapshot.workload.executionLoadTracked = true;
+    snapshot.workloadFeatures = emptyStepPackingFeatures();
+    snapshot.reportedWorkloadFeatures = emptyStepPackingFeatures();
+    snapshot.reservedWorkloadFeatures = emptyStepPackingFeatures();
+    snapshot.workloadRunningCapacitySlotCount = 0;
+    return snapshot;
+}
+}
+
+TEST(ExecutionLoadResourceTest, StepPackingAccountsForMambaBudgetHolesWithoutChangingOtherFeatures) {
+    auto features = emptyStepPackingFeatures();
+    std::vector<NativePrefillStepRequest> requests;
+    for (uint64_t id = 1; id <= 3; ++id) {
+        features.appendRequest(0, 5000);
+        requests.push_back({id, {5000, 0, 0}, false, false});
+    }
+    ASSERT_TRUE(features.setBatchCount(2));
+    const auto volume = features.getCacheMissTokenCount();
+    const auto square = features.getRunningCacheMissTokenSquareSum();
+    ASSERT_TRUE(NativePrefillStepForecast::prepare(features, requests, stepPackingPolicy()));
+    EXPECT_EQ(3, features.getBatchCount());
+    EXPECT_EQ(volume, features.getCacheMissTokenCount());
+    EXPECT_DOUBLE_EQ(square, features.getRunningCacheMissTokenSquareSum());
+}
+
+TEST(ExecutionLoadResourceTest, StepPackingRejectsIncompleteVolumeAndPreparationInsteadOfDroppingWork) {
+    auto features = emptyStepPackingFeatures();
+    features.appendRequest(0, 5000);
+    features.appendRequest(0, 5000);
+    ASSERT_TRUE(features.setBatchCount(9));
+    std::vector<NativePrefillStepRequest> requests{{1, {5000, 0, 0}, false, true}};
+    EXPECT_FALSE(NativePrefillStepForecast::prepare(features, requests, stepPackingPolicy()));
+    EXPECT_EQ(9, features.getBatchCount());
+    requests.push_back({2, {5000, 0, 0}, false, true});
+    NaviSchedExpectedKVWorkload expected;
+    expected.precedingRequests = 0.5;
+    expected.running = {0.5, 0, 2500, 12500000, 0};
+    ASSERT_TRUE(features.setExpectedKVWorkload(expected));
+    EXPECT_FALSE(NativePrefillStepForecast::prepare(features, requests, stepPackingPolicy()));
+    EXPECT_EQ(9, features.getBatchCount());
+}
+
+TEST(ExecutionLoadResourceTest, StepPackingMissingBoundaryDoesNotBecomeZeroAndPreparingZeroWeightStaysExcluded) {
+    for (int mode = 0; mode < 3; ++mode) {
+        auto snapshot = emptyStepPackingSnapshot();
+        snapshot.workload.executionLoadRequests.push_back(
+            {11, 1, 1, 0, 5000, true,
+             mode == 2 ? NativeKVExecutionState::PREPARING : NativeKVExecutionState::EXECUTING});
+        MasterBatchReservation::UnfinishedRequest entry;
+        entry.state = MasterBatchReservation::RequestState::DISPATCHED;
+        entry.request.requestId = 11;
+        entry.request.totalTokenCount = 5000;
+        if (mode != 0) entry.request.predictedSharedPrefixBoundary = 0;
+        snapshot.nativePrefillReservations.push_back(entry);
+        NaviSchedScheduleNode node(nullptr, std::move(snapshot), 1);
+        EXPECT_EQ(mode == 1, node._nativeStepPackingRequests.has_value()) << mode;
+        if (mode == 1) {
+            ASSERT_EQ(1u, node._nativeStepPackingRequests->size());
+            EXPECT_TRUE(node._nativeStepPackingRequests->front().executing);
+            EXPECT_EQ(0, node._nativeStepPackingRequests->front().input.sharedPrefixBoundary);
+        }
+    }
+}
+
+TEST(ExecutionLoadResourceTest, StepPackingReservationReplayPreservesObservedBoundaryAndAcceptsOlderState) {
+    MasterBatchReservation::Request request;
+    request.requestId = 11;
+    request.totalTokenCount = 10000;
+    request.blockSize = 512;
+    request.predictedSharedPrefixBoundary = 8192;
+    MasterBatchReservation original;
+    ASSERT_TRUE(original.init(1, 1, 10.0, {request}, nullptr));
+    const auto state = original.makeReplayState();
+    MasterBatchReservation restored;
+    ASSERT_TRUE(restored.restoreReplayState(state));
+    EXPECT_TRUE(original.sameDefinition(restored));
+    std::vector<MasterBatchReservation::UnfinishedRequest> requests;
+    restored.appendUnfinishedRequests(requests);
+    ASSERT_EQ(1u, requests.size());
+    EXPECT_EQ(8192, requests[0].request.predictedSharedPrefixBoundary);
+    auto oldState = state;
+    std::vector<autil::legacy::json::JsonMap> records;
+    autil::legacy::FromJson(records, oldState.at("requests"));
+    records[0].erase("predicted_shared_prefix_boundary");
+    oldState["requests"] = autil::legacy::ToJson(records);
+    MasterBatchReservation older;
+    ASSERT_TRUE(older.restoreReplayState(oldState));
+    requests.clear();
+    older.appendUnfinishedRequests(requests);
+    EXPECT_EQ(-1, requests[0].request.predictedSharedPrefixBoundary);
+    EXPECT_FALSE(original.sameDefinition(older));
+    request.predictedSharedPrefixBoundary = 10001;
+    MasterBatchReservation invalid;
+    EXPECT_FALSE(invalid.init(2, 1, 10.0, {request}, nullptr));
+}
+
+TEST(ExecutionLoadResourceTest, StepPackingFinalPredictionFreezesPackedStepsAndKeepsContinuousOptimizerBaseline) {
+    auto snapshot = emptyStepPackingSnapshot();
+    auto info = std::make_shared<NaviSchedNodeInfo>(*snapshot.info);
+    info->bizName = "kv_load_test";
+    info->agentId = "agent_0";
+    info->serverAddress = "127.0.0.1:19001";
+    info->pdSeparated = true;
+    snapshot.info = info;
+    auto source = std::make_shared<InitialKVLoadNode>();
+    source->totalBlocks = {0};
+    source->hbmBlocks = {0};
+    NaviSchedScheduleContext context;
+    for (uint64_t id = 1; id <= 3; ++id) {
+        NaviSchedScheduleItem item;
+        item.request.requestId = id;
+        item.request.promptTokenCount = 5000;
+        item.request.blockSize = 512;
+        context._requests.push_back(item);
+    }
+    auto second = snapshot;
+    auto secondInfo = std::make_shared<NaviSchedNodeInfo>(*info);
+    secondInfo->agentId = "agent_1";
+    secondInfo->serverAddress = "127.0.0.1:19002";
+    second.info = secondInfo;
+    context.setNodes({source, source}, {snapshot, second});
+    ASSERT_TRUE(context.prepare());
+    NaviSchedLatencyPrediction prediction;
+    const auto latency = context.estimateBatchExecutionLatencyMs(0, {0, 1, 2}, &prediction);
+    EXPECT_GT(latency, 0.0);
+    EXPECT_EQ(3, prediction.features.getBatchCount());
+    EXPECT_EQ(3, prediction.floorFeatures.getBatchCount());
+    EXPECT_EQ(15000, prediction.features.getCacheMissTokenCount());
+    const auto &node = context.getNode(0);
+    EXPECT_DOUBLE_EQ(node.predictFrozenLatency(prediction.features), latency);
+    EXPECT_LT(node.predictLatency(prediction.features), latency);
+    EXPECT_DOUBLE_EQ(NonLinearPrefillModelR::predict(
+                         prediction.features, snapshot.latencyModel->parameters),
+                     node.predictFrozenBaseLatency(prediction.features));
+    EXPECT_DOUBLE_EQ(latency, node.applyLatencyResidual(
+                                  node.predictFrozenBaseLatency(prediction.features)));
+    EXPECT_DOUBLE_EQ(node.predictFrozenLatency(prediction.floorFeatures),
+                     node.applyLatencyResidual(node.predictFrozenBaseLatency(
+                         prediction.floorFeatures)));
+    // Raw frozen features must survive the client/Agent wire without re-ceiling.
+    autil::DataBuffer buffer;
+    prediction.serialize(buffer);
+    NaviSchedLatencyPrediction decoded;
+    decoded.deserialize(buffer);
+    EXPECT_EQ(3, decoded.features.getBatchCount());
+    EXPECT_DOUBLE_EQ(node.predictFrozenLatency(decoded.features), latency);
+    const float costs[12] = {};
+    uint32_t assignments[3] = {0, 0, 0};
+    const int64_t tokens[3] = {5000, 5000, 5000};
+    const double inverse[3] = {1.0 / 5000, 1.0 / 5000, 1.0 / 5000};
+    CostSchedulerKernelInternal::DiscreteForwardWorkspace workspace;
+    const auto discrete = CostSchedulerKernelInternal::forwardDiscrete(
+        context, costs, assignments, tokens, inverse, 15000, 1.0, 0.0, workspace);
+    EXPECT_NEAR((latency - node.getExistingDiscreteUnifiedLatencyMs()) / 15000,
+                discrete, 1e-12);
+    double refined = 0.0;
+    CostSchedulerKernelInternal::DiscreteRefinementStats stats;
+    ASSERT_TRUE(CostSchedulerKernelInternal::refineDiscreteAssignment(
+        context, costs, assignments, tokens, inverse, 15000, 0.5, 0.0,
+        refined, -1, 20, stats));
+    EXPECT_GT(stats.evaluations, 0u);
+    CostSchedulerKernelInternal::DiscreteForwardWorkspace recomputed;
+    EXPECT_NEAR(refined, CostSchedulerKernelInternal::forwardDiscrete(
+        context, costs, assignments, tokens, inverse, 15000, 0.5, 0.0, recomputed), 1e-12);
+}
+}
+
+namespace navi_sched {
+TEST(ExecutionLoadResourceTest, StepPackingReplayJsonPreservesPolicyWithoutNativePPState) {
+    NaviSchedScheduleReplay replay;
+    NaviSchedNodeInfo info;
+    info.workloadFeatureSnapshotValid = true;
+    info.nativePrefillPipelineStages = 0;
+    info.prefillExecutionPolicy = stepPackingPolicy();
+    info.nativeStepPackingRequests.emplace();
+    info.nativeStepPackingRequests->push_back({42, {10000, 4096, 8192}, true, true});
+    replay.nodes.push_back(info);
+    NaviSchedScheduleReplay decoded;
+    const auto encoded = NaviSchedScheduleReplayJson::toJsonString(replay);
+    NaviSchedScheduleReplayJson::fromJsonString(encoded, decoded);
+    ASSERT_EQ(1u, decoded.nodes.size());
+    const auto &node = decoded.nodes.front();
+    ASSERT_TRUE(node.nativeStepPackingRequests);
+    ASSERT_EQ(1u, node.nativeStepPackingRequests->size());
+    EXPECT_EQ(42u, node.nativeStepPackingRequests->front().requestId);
+    EXPECT_EQ(8192, node.nativeStepPackingRequests->front().input.sharedPrefixBoundary);
+    EXPECT_TRUE(node.nativeStepPackingRequests->front().executing);
+    EXPECT_TRUE(node.nativeStepPackingRequests->front().reported);
+    EXPECT_EQ(8192, node.prefillExecutionPolicy.maxScheduledTokens);
+    EXPECT_EQ(4096, node.prefillExecutionPolicy.schedulerBlockSize);
+    EXPECT_FALSE(node.workload.nativePPState);
+    replay.nodes.front().nativeStepPackingRequests.reset();
+    NaviSchedScheduleReplay older;
+    NaviSchedScheduleReplayJson::fromJsonString(
+        NaviSchedScheduleReplayJson::toJsonString(replay), older);
+    EXPECT_FALSE(older.nodes.front().nativeStepPackingRequests);
+    replay.nodes.front().nativeStepPackingRequests.emplace();
+    NaviSchedScheduleReplay empty;
+    NaviSchedScheduleReplayJson::fromJsonString(
+        NaviSchedScheduleReplayJson::toJsonString(replay), empty);
+    ASSERT_TRUE(empty.nodes.front().nativeStepPackingRequests);
+    EXPECT_TRUE(empty.nodes.front().nativeStepPackingRequests->empty());
+}
+
+TEST(ExecutionLoadResourceTest, StepPackingRequiresUniqueIdentityAndPreservesWaitingAndLegacyPaths) {
+    auto features = emptyStepPackingFeatures();
+    features.appendRequest(0, 5000);
+    features.appendRequest(0, 5000);
+    std::vector<NativePrefillStepRequest> duplicates{
+        {1, {5000, 0, 0}, false, true}, {1, {5000, 0, 0}, false, true}};
+    EXPECT_FALSE(NativePrefillStepForecast::prepare(features, duplicates, stepPackingPolicy()));
+    auto waiting = emptyStepPackingFeatures();
+    waiting.appendWaitingRequest(0, 5000);
+    const std::vector<NativePrefillStepRequest> one{{1, {5000, 0, 0}, false, true}};
+    EXPECT_FALSE(NativePrefillStepForecast::prepare(waiting, one, stepPackingPolicy()));
+    auto legacy = emptyStepPackingSnapshot();
+    auto info = std::make_shared<NaviSchedNodeInfo>(*legacy.info);
+    info->latencyModelFingerprint = "legacy-3.7-model";
+    legacy.info = info;
+    NaviSchedScheduleNode node(nullptr, std::move(legacy), 1);
+    EXPECT_FALSE(node._nativeStepPackingRequests);
+    EXPECT_EQ(0, node.getNativeStepTokenBudget());
+}
+}
+
+namespace navi_sched {
+TEST(ExecutionLoadResourceTest, FrozenPredictionKeepsLegacyAndUnknownModelBehavior) {
+    auto snapshot = nativeStepForecastSnapshot();
+    auto info = std::make_shared<NaviSchedNodeInfo>(*snapshot.info);
+    info->latencyModelFingerprint = "legacy-3.7-model";
+    snapshot.info = info;
+    NaviSchedScheduleNode legacy(nullptr, snapshot, 1);
+    auto features = nativeStepInput(8193);
+    EXPECT_DOUBLE_EQ(legacy.predictBaseLatency(features), legacy.predictFrozenBaseLatency(features));
+    EXPECT_DOUBLE_EQ(legacy.predictLatency(features), legacy.predictFrozenLatency(features));
+    snapshot.latencyModel.reset();
+    NaviSchedScheduleNode missing(nullptr, snapshot, 1);
+    EXPECT_DOUBLE_EQ(0.0, missing.predictFrozenBaseLatency(features));
+    EXPECT_DOUBLE_EQ(0.0, missing.predictFrozenLatency(features));
+}
+}
+
+namespace navi_sched {
+TEST(ExecutionLoadResourceTest, FrozenStepBaseAndResidualStayDistinctForAuditAndQueueFeatures) {
+    auto snapshot = emptyStepPackingSnapshot();
+    auto model = std::make_shared<NaviSchedLatencyModel>(*snapshot.latencyModel);
+    model->residualParameters.assign(LatencyResidualModel::PARAMETER_COUNT, 50.0);
+    model->residualParameters.front() = 0.0;
+    model->residualParameters.back() = 0.0;
+    model->residualLastUpdateTimeUs = 1000000;
+    ASSERT_TRUE(LatencyResidualModel::validateParameters(model->residualParameters));
+    snapshot.latencyModel = model;
+    NaviSchedScheduleNode node(nullptr, snapshot, 1000001);
+    auto frozen = emptyStepPackingFeatures();
+    for (int i = 0; i < 3; ++i) frozen.appendRequest(0, 5000);
+    ASSERT_TRUE(frozen.setBatchCount(3));
+    const auto base = node.predictFrozenBaseLatency(frozen);
+    EXPECT_DOUBLE_EQ(NonLinearPrefillModelR::predict(frozen, model->parameters), base);
+    EXPECT_GT(base, node.predictBaseLatency(frozen));
+    EXPECT_GT(node.predictFrozenLatency(frozen), base);
+    EXPECT_DOUBLE_EQ(node.applyLatencyResidual(base), node.predictFrozenLatency(frozen));
+}
+
+TEST(ExecutionLoadResourceTest, NativeBacklogUsesPackedStepsWithoutChangingContinuousOptimizationCoordinates) {
+    auto snapshot = emptyStepPackingSnapshot();
+    auto info = std::make_shared<NaviSchedNodeInfo>(*snapshot.info);
+    info->workloadFeatureSnapshotValid = true;
+    info->nativeStepPackingRequests.emplace();
+    for (uint64_t id = 1; id <= 3; ++id) {
+        info->nativeStepPackingRequests->push_back({id, {5000, 0, 0}, true, true});
+        snapshot.reportedWorkloadFeatures.appendRequest(0, 5000);
+    }
+    snapshot.workloadFeatures = snapshot.reportedWorkloadFeatures;
+    snapshot.info = info;
+    NaviSchedScheduleNode node(nullptr, snapshot, 1);
+    auto packed = node.getWorkloadFeatures();
+    ASSERT_TRUE(NativePrefillStepForecast::prepare(
+        packed, *info->nativeStepPackingRequests, *snapshot.prefillExecutionPolicy));
+    EXPECT_EQ(3, packed.getBatchCount());
+    EXPECT_DOUBLE_EQ(node.predictFrozenLatency(packed), node.getEstimatedBacklogLatencyMs());
+    EXPECT_DOUBLE_EQ(node.getExistingDiscreteUnifiedLatencyMs(), node.getEstimatedBacklogLatencyMs());
+    node.refreshExistingUnifiedLatency();
+    EXPECT_LT(node.getExistingUnifiedLatencyMs(), node.getEstimatedBacklogLatencyMs());
+    EXPECT_DOUBLE_EQ(node.applyLatencyResidual(NonLinearPrefillModelR::predict(
+                         node.getWorkloadFeatures(), node.getLatencyParameters())),
+                     node.getExistingUnifiedLatencyMs());
 }
 }

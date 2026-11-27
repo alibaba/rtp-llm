@@ -18,24 +18,6 @@
 
 namespace navi_sched {
 
-namespace {
-bool usesNativePositivePrefillSteps(const std::string &fingerprint)
-{
-    if (fingerprint.find("\"unified_capacity_batch_count_unit\"") == std::string::npos)
-        return false;
-    try {
-        autil::legacy::json::JsonMap values;
-        autil::legacy::FromJsonString(values, fingerprint);
-        const auto found = values.find("unified_capacity_batch_count_unit");
-        return found != values.end() &&
-               autil::legacy::AnyCast<std::string>(found->second) ==
-                   "native_positive_prefill_step_v1";
-    } catch (const std::exception &) {
-        // Existing model fingerprints may be opaque identities rather than JSON.
-        return false;
-    }
-}
-}
 
 int64_t NaviSchedScheduleContext::getScheduleTimeUs() const { return _scheduleTimeUs; }
 
@@ -91,7 +73,7 @@ NaviSchedScheduleNode::NaviSchedScheduleNode(NaviSchedNodeConstPtr node,
     if (_unifiedLatencyPrediction && _latencyModel &&
         _latencyModel->binaryVersion == NonLinearPrefillModelR::BINARY_VERSION &&
         NonLinearPrefillModelR::usesCapacitySplitParameters(_latencyModel->parameters) &&
-        _info && usesNativePositivePrefillSteps(_info->latencyModelFingerprint)) {
+        _info && NativePrefillStepForecast::declaredBy(_info->latencyModelFingerprint)) {
         if (!_prefillExecutionPolicy || _prefillExecutionPolicy->maxScheduledTokens <= 0)
             throw std::invalid_argument("Native step model requires reported token budget");
         _nativeStepTokenBudget = _prefillExecutionPolicy->maxScheduledTokens;
@@ -202,6 +184,59 @@ NaviSchedScheduleNode::NaviSchedScheduleNode(NaviSchedNodeConstPtr node,
             throw std::invalid_argument("invalid expected KV workload moments");
         }
     }
+    initializeNativeStepPackingRequests();
+}
+
+void NaviSchedScheduleNode::initializeNativeStepPackingRequests()
+{
+    if (_nativeStepTokenBudget <= 0 || !_prefillExecutionPolicy) return;
+    if (_info && _info->workloadFeatureSnapshotValid) {
+        _nativeStepPackingRequests = _info->nativeStepPackingRequests;
+        return;
+    }
+    if (!_workload.executionLoadTracked) return;
+    std::unordered_map<uint64_t, const MasterBatchReservation::UnfinishedRequest *> metadata;
+    for (const auto &entry : _nativePrefillReservations)
+        if (!metadata.emplace(entry.request.requestId, &entry).second) return;
+    std::unordered_set<uint64_t> reported;
+    std::vector<NativePrefillStepRequest> requests;
+    for (const auto &record : _workload.executionLoadRequests) {
+        if (record.state == NativeKVExecutionState::PREPARING) return;
+        if (!reported.insert(record.requestId).second) return;
+        if (record.state == NativeKVExecutionState::FAILED || record.computeTokens == 0)
+            continue;
+        if (record.state != NativeKVExecutionState::READY &&
+            record.state != NativeKVExecutionState::EXECUTING) return;
+        const auto found = metadata.find(record.requestId);
+        if (found == metadata.end()) return;
+        const auto &request = found->second->request;
+        if (request.predictedSharedPrefixBoundary < 0 ||
+            record.contextTokens < 0 || record.computeTokens < 0 ||
+            record.contextTokens > request.totalTokenCount ||
+            record.computeTokens != request.totalTokenCount - record.contextTokens) return;
+        requests.push_back({record.requestId,
+                           {request.totalTokenCount, record.contextTokens,
+                            request.predictedSharedPrefixBoundary},
+                           record.state == NativeKVExecutionState::EXECUTING, true});
+    }
+    for (const auto &entry : _nativePrefillReservations) {
+        const auto &request = entry.request;
+        if (reported.count(request.requestId) ||
+            entry.state != MasterBatchReservation::RequestState::WAITING ||
+            request.totalTokenCount == request.predictedCacheHitTokenCount) continue;
+        if (request.executionLoadIncluded != std::optional<bool>(true) ||
+            request.predictedSharedPrefixBoundary < 0) return;
+        requests.push_back({request.requestId,
+                           {request.totalTokenCount, request.predictedCacheHitTokenCount,
+                            request.predictedSharedPrefixBoundary}, false, false});
+    }
+    // Reports are sorted by request ID for serialization, not by Native queue.
+    // Executing members retain priority; order within each group is a forecast.
+    std::sort(requests.begin(), requests.end(), [](const auto &a, const auto &b) {
+        if (a.executing != b.executing) return a.executing > b.executing;
+        return a.requestId < b.requestId;
+    });
+    _nativeStepPackingRequests = std::move(requests);
 }
 
 namespace {
@@ -486,6 +521,8 @@ double NaviSchedScheduleNode::getEstimatedBacklogLatencyMs() const
                                _workloadFeatures.getPrecedingRequestCount() == 0)) {
         return 0.0;
     }
+    if (_nativeStepTokenBudget > 0)
+        return std::max(0.0, getExistingDiscreteUnifiedLatencyMs());
     const auto latencyWithReportedWorkloadMs = predictLatency(_workloadFeatures);
     NaviSchedLatencyFeatures floorFeatures;
     if (!getUnifiedDecayFloorFeatures(floorFeatures)) {
@@ -655,6 +692,48 @@ bool NaviSchedScheduleNode::prepareLatencyPredictionFeatures(
         if (!features.setExpectedKVWorkload(nativeExpected)) return false;
     }
     return features.setBatchCount(static_cast<int64_t>(steps));
+}
+
+double NaviSchedScheduleNode::predictFrozenBaseLatency(
+    const NaviSchedLatencyFeatures &features) const
+{
+    if (!_latencyModel) return 0.0;
+    if (_nativeStepTokenBudget > 0)
+        return NonLinearPrefillModelR::predict(features, _latencyModel->parameters);
+    return predictBaseLatency(features);
+}
+
+double NaviSchedScheduleNode::predictFrozenLatency(
+    const NaviSchedLatencyFeatures &features) const
+{
+    if (!_latencyModel) return 0.0;
+    return applyLatencyResidual(predictFrozenBaseLatency(features));
+}
+
+double NaviSchedScheduleNode::getExistingDiscreteUnifiedLatencyMs() const
+{
+    if (_nativeStepTokenBudget <= 0) return getExistingUnifiedLatencyMs();
+    auto with = _workloadFeatures;
+    NaviSchedLatencyFeatures floor;
+    if (!getUnifiedDecayFloorFeatures(floor) ||
+        !prepareLatencyPredictionFeatures(with) ||
+        !prepareLatencyPredictionFeatures(floor))
+        return std::numeric_limits<double>::quiet_NaN();
+    if (_nativeStepPackingRequests && _prefillExecutionPolicy) {
+        std::vector<NativePrefillStepRequest> reserved;
+        for (const auto &request : *_nativeStepPackingRequests)
+            if (!request.reported) reserved.push_back(request);
+        auto packedWith = with, packedFloor = floor;
+        if (NativePrefillStepForecast::prepare(
+                packedWith, *_nativeStepPackingRequests, *_prefillExecutionPolicy) &&
+            NativePrefillStepForecast::prepare(
+                packedFloor, reserved, *_prefillExecutionPolicy)) {
+            with = std::move(packedWith);
+            floor = std::move(packedFloor);
+        }
+    }
+    return decayUnifiedLatency(predictFrozenLatency(with),
+                               predictFrozenLatency(floor));
 }
 
 double NaviSchedScheduleNode::predictLatency(
@@ -2017,8 +2096,51 @@ double NaviSchedScheduleContext::estimateBatchExecutionLatencyMs(
     }
     if (!node.prepareLatencyPredictionFeatures(withReportedWorkload) ||
         !node.prepareLatencyPredictionFeatures(withoutReportedWorkload)) return 0.0;
-    const auto withReportedPrediction = node.predictLatency(withReportedWorkload);
-    const auto withoutReportedPrediction = node.predictLatency(withoutReportedWorkload);
+    const auto unpackedSteps = withReportedWorkload.getBatchCount();
+    bool packedSteps = false;
+    if (node._nativeStepTokenBudget > 0 && node._nativeStepPackingRequests &&
+        node._prefillExecutionPolicy) {
+        auto withRequests = *node._nativeStepPackingRequests;
+        std::vector<NativePrefillStepRequest> floorRequests;
+        for (const auto &request : withRequests)
+            if (!request.reported) floorRequests.push_back(request);
+        const auto inputs = getExecutionCacheInputs(nodeIndex);
+        bool complete = inputs && inputs->size() == _requests.size();
+        for (auto requestIndex : requestIndexes) {
+            if (!complete) break;
+            const auto storageIndex = resolveRequestIndex(requestIndex);
+            const auto &input = (*inputs)[storageIndex];
+            const auto &request = _requests[storageIndex].request;
+            const auto matched = (matchedBlockCounts ? (*matchedBlockCounts)[requestIndex]
+                                                    : getCacheHitBlockCount(requestIndex, nodeIndex)) * request.blockSize;
+            if (matched != input.computedTokens || request.promptTokenCount != input.promptTokens) {
+                complete = false;
+                break;
+            }
+            if (input.promptTokens > input.computedTokens) {
+                NativePrefillStepRequest member{request.requestId, input, false, false};
+                withRequests.push_back(member);
+                floorRequests.push_back(member);
+            }
+        }
+        auto packedWith = withReportedWorkload;
+        auto packedFloor = withoutReportedWorkload;
+        if (complete && NativePrefillStepForecast::prepare(
+                packedWith, withRequests, *node._prefillExecutionPolicy) &&
+            NativePrefillStepForecast::prepare(
+                packedFloor, floorRequests, *node._prefillExecutionPolicy)) {
+            withReportedWorkload = std::move(packedWith);
+            withoutReportedWorkload = std::move(packedFloor);
+            packedSteps = true;
+        }
+    }
+    if (node._nativeStepTokenBudget > 0 && latencyPrediction && _scheduleId % 20 == 0)
+        std::fprintf(stderr, "[navi-master-native-step-packing] schedule_id=%lu node=%lu applied=%d metadata_available=%d old_steps=%ld new_steps=%ld floor_steps=%ld\n",
+                     _scheduleId, nodeIndex, int(packedSteps),
+                     int(node._nativeStepPackingRequests.has_value()), unpackedSteps,
+                     withReportedWorkload.getBatchCount(), withoutReportedWorkload.getBatchCount());
+    const auto withReportedPrediction = node.predictFrozenLatency(withReportedWorkload);
+    const auto withoutReportedPrediction = node.predictFrozenLatency(withoutReportedWorkload);
     const auto prediction =
         node.decayUnifiedLatency(withReportedPrediction, withoutReportedPrediction);
     if (latencyPrediction) {

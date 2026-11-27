@@ -41,6 +41,8 @@ public:
         // Master-only frozen cache-query inputs; not client/Agent wire fields.
         int64_t predictedExternalReadTokens = -1;
         double initialKVPreparationQueueMs = 0.0;
+        // -1 means no frozen Full-prefix observation was available.
+        int64_t predictedSharedPrefixBoundary = -1;
     };
 
     // Request metadata remains needed after accepted-workload handoff. Native

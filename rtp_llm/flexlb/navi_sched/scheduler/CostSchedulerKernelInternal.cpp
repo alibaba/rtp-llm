@@ -1370,7 +1370,7 @@ double CostSchedulerKernelInternal::forwardDiscreteImpl(
         if ((NonLinearPrefillModelR::usesGeometryForVersion(
                  node.getLatencyBinaryVersion()) ||
              NonLinearPrefillModelR::usesNativePP4ForVersion(
-                 node.getLatencyBinaryVersion())))
+                 node.getLatencyBinaryVersion()) || node.getNativeStepTokenBudget() > 0))
             geometryRequests[nodeIndex].emplace_back(requestIndex);
 
         ++workspace.nodeCapacityLoads;
@@ -1387,7 +1387,7 @@ double CostSchedulerKernelInternal::forwardDiscreteImpl(
         if (!(NonLinearPrefillModelR::usesGeometryForVersion(
                   node.getLatencyBinaryVersion()) ||
               NonLinearPrefillModelR::usesNativePP4ForVersion(
-                  node.getLatencyBinaryVersion()))) {
+                  node.getLatencyBinaryVersion()) || node.getNativeStepTokenBudget() > 0)) {
             workspace.requestCostSums[nodeIndex] +=
                 costs[usesRunningCapacity ? costIndex : waitingCostIndex];
             workspace.requestCostSumsWithoutReportedWorkload[nodeIndex] +=
@@ -1421,7 +1421,7 @@ double CostSchedulerKernelInternal::forwardDiscreteImpl(
             const bool geometry = (NonLinearPrefillModelR::usesGeometryForVersion(
                                        node.getLatencyBinaryVersion()) ||
                                    NonLinearPrefillModelR::usesNativePP4ForVersion(
-                                       node.getLatencyBinaryVersion()));
+                                       node.getLatencyBinaryVersion()) || node.getNativeStepTokenBudget() > 0);
             auto &cacheCounts = workspace.cacheCountSnapshots[nodeIndex];
             if (node.usesCacheMemberQueuePrediction() && !cacheCounts) cacheCounts = context.getCacheHitBlockCountsSnapshot(nodeIndex);
             if (node.usesCacheMemberQueuePrediction() && !cacheCounts) return false;
@@ -1518,10 +1518,12 @@ double CostSchedulerKernelInternal::forwardDiscreteImpl(
         if (NonLinearPrefillModelR::usesGeometryForVersion(
                 node.getLatencyBinaryVersion()) ||
             NonLinearPrefillModelR::usesNativePP4ForVersion(
-                node.getLatencyBinaryVersion())) {
+                node.getLatencyBinaryVersion()) || node.getNativeStepTokenBudget() > 0) {
             nodeCost = context.estimateBatchExecutionLatencyMs(
                 nodeIndex, geometryRequests[nodeIndex]);
-            if (!std::isfinite(nodeCost)) {
+            if (node.getNativeStepTokenBudget() > 0)
+                existingNodeCost = node.getExistingDiscreteUnifiedLatencyMs();
+            if (!std::isfinite(nodeCost) || !std::isfinite(existingNodeCost)) {
                 return std::numeric_limits<double>::infinity();
             }
         } else if (baseline.unified) {

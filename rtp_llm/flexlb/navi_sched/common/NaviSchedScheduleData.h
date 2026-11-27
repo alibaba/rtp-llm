@@ -1,6 +1,7 @@
 #pragma once
 
 #include "aios/navi_sched/common/NaviSchedCommon.h"
+#include "aios/navi_sched/common/NativePrefillStepForecast.h"
 #include "aios/navi_sched/data/NaviSchedLatencyPrediction.h"
 #include "aios/navi_sched/data/NaviSchedLatencySample.h"
 #include "aios/navi_sched/data/NaviSchedQueueModel.h"
@@ -155,6 +156,8 @@ struct NaviSchedNodeInfo {
     NaviSchedWorkloadSnapshot workload;
     NaviSchedLatencyFeatures reservedWorkloadFeatures;
     bool workloadFeatureSnapshotValid = false;
+    // Optional Master-local replay metadata. Absence preserves older replays.
+    std::optional<std::vector<NativePrefillStepRequest>> nativeStepPackingRequests;
     NaviSchedLatencyFeatures workloadFeatures;
     int32_t maxRunningRequestCount = 0;
     int32_t workloadRunningCapacitySlotCount = 0;

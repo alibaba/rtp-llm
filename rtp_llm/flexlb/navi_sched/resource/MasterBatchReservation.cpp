@@ -39,6 +39,9 @@ autil::legacy::json::JsonMap MasterBatchReservation::makeReplayState() const
         request["predicted_latency_ms"] = ToJson(entry.request.predictedLatencyMs);
         request["predicted_external_read_tokens"] = ToJson(entry.request.predictedExternalReadTokens);
         request["initial_kv_preparation_queue_ms"] = ToJson(entry.request.initialKVPreparationQueueMs);
+        if (entry.request.predictedSharedPrefixBoundary >= 0)
+            request["predicted_shared_prefix_boundary"] =
+                ToJson(entry.request.predictedSharedPrefixBoundary);
         request["explicit_cache_checkpoint_position"] =
             ToJson(entry.request.explicitCacheCheckpointPosition);
         request["native_prefill_slot_release"] =
@@ -97,6 +100,9 @@ bool MasterBatchReservation::restoreReplayState(const autil::legacy::json::JsonM
             if(read!=record.end()) FromJson(request.predictedExternalReadTokens,read->second);
             const auto queue=record.find("initial_kv_preparation_queue_ms");
             if(queue!=record.end()) FromJson(request.initialKVPreparationQueueMs,queue->second);
+            const auto shared = record.find("predicted_shared_prefix_boundary");
+            if (shared != record.end())
+                FromJson(request.predictedSharedPrefixBoundary, shared->second);
             const auto checkpoint = record.find("explicit_cache_checkpoint_position");
             if (checkpoint != record.end())
                 FromJson(request.explicitCacheCheckpointPosition, checkpoint->second);
@@ -207,6 +213,8 @@ bool MasterBatchReservation::init(int64_t batchId, int64_t scheduleTimeUs,
         if (request.requestId == 0 || request.totalTokenCount < 0 ||
             request.blockSize <= 0 ||
             !validNativePrefillSlotRelease(request.nativePrefillSlotRelease) ||
+            request.predictedSharedPrefixBoundary < -1 ||
+            request.predictedSharedPrefixBoundary > request.totalTokenCount ||
             request.explicitCacheCheckpointPosition < 0 ||
             request.explicitCacheCheckpointPosition > request.totalTokenCount ||
             request.predictedCacheHitTokenCount < 0 ||
@@ -783,6 +791,7 @@ bool MasterBatchReservation::sameDefinition(const MasterBatchReservation &other)
             lhs.blockSize != rhs.blockSize ||
             lhs.predictedCacheHitTokenCount != rhs.predictedCacheHitTokenCount ||
             lhs.executionLoadIncluded != rhs.executionLoadIncluded ||
+            lhs.predictedSharedPrefixBoundary != rhs.predictedSharedPrefixBoundary ||
             lhs.predictedExternalReadTokens != rhs.predictedExternalReadTokens ||
             lhs.initialKVPreparationQueueMs != rhs.initialKVPreparationQueueMs ||
             lhs.predictedLatencyMs != rhs.predictedLatencyMs ||

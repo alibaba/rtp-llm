@@ -205,6 +205,10 @@ public:
     double predictBaseLatency(const NaviSchedLatencyFeatures &features) const;
     bool prepareLatencyPredictionFeatures(NaviSchedLatencyFeatures &features) const;
     int64_t getNativeStepTokenBudget() const { return _nativeStepTokenBudget; }
+    // Use the step count already frozen into a completed scheduling prediction.
+    double predictFrozenBaseLatency(const NaviSchedLatencyFeatures &features) const;
+    double predictFrozenLatency(const NaviSchedLatencyFeatures &features) const;
+    double getExistingDiscreteUnifiedLatencyMs() const;
     bool classifiesNewRequestKVLoad() const {
         // Native model/policy metadata is stable capability. A temporary gap
         // in observed workload coverage must not create more unmarked requests.
@@ -251,6 +255,7 @@ private:
     NaviSchedScheduleNode(NaviSchedNodeConstPtr node, NaviSchedNodeSnapshot snapshot,
                           int64_t scheduleTimeUs, double timeCompression = 1.0);
     void refreshExistingUnifiedLatency();
+    void initializeNativeStepPackingRequests();
 
 private:
     NaviSchedNodeConstPtr _node;
@@ -287,6 +292,7 @@ private:
     bool _unifiedLatencyPrediction = false;
     // Nonzero only when the reported model declares Native positive prefill steps.
     int64_t _nativeStepTokenBudget = 0;
+    std::optional<std::vector<NativePrefillStepRequest>> _nativeStepPackingRequests;
     NaviSchedWorkloadSnapshot _workload;
     std::vector<MasterBatchReservation::UnfinishedRequest> _nativePrefillReservations;
     mutable std::shared_ptr<const TPUPrefillPP4ObservationInput>

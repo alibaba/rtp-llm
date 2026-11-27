@@ -488,8 +488,14 @@ bool MasterStateR::NodeState::getScheduleSnapshot(const std::string &bizName,
         }
         for (const auto &reservationPtr : _pendingBatchReservations) {
             const auto &reservation = *reservationPtr;
-            if (snapshot.latencyModel && NonLinearPrefillModelR::usesNativePP4ForVersion(
-                                             snapshot.latencyModel->binaryVersion)) {
+            if (snapshot.latencyModel &&
+                (NonLinearPrefillModelR::usesNativePP4ForVersion(
+                     snapshot.latencyModel->binaryVersion) ||
+                 (snapshot.info && NativePrefillStepForecast::declaredBy(
+                                       snapshot.info->latencyModelFingerprint) &&
+                  snapshot.latencyModel->binaryVersion == NonLinearPrefillModelR::BINARY_VERSION &&
+                  NonLinearPrefillModelR::usesCapacitySplitParameters(
+                      snapshot.latencyModel->parameters)))) {
                 reservation.batch.appendUnfinishedRequests(
                     snapshot.nativePrefillReservations);
             }
@@ -3811,6 +3817,9 @@ std::shared_ptr<NaviSchedScheduleReplay> MasterStateR::makeScheduleReplay(
         nodeInfo.workload = scheduleNode._workload;
         nodeInfo.reservedWorkloadFeatures = scheduleNode._reservedWorkloadFeatures;
         nodeInfo.workloadFeatureSnapshotValid = true;
+        nodeInfo.nativeStepPackingRequests = scheduleNode._nativeStepPackingRequests;
+        if (scheduleNode._prefillExecutionPolicy)
+            nodeInfo.prefillExecutionPolicy = *scheduleNode._prefillExecutionPolicy;
         nodeInfo.workloadFeatures = scheduleNode._workloadFeatures;
         nodeInfo.maxRunningRequestCount = scheduleNode._maxRunningRequestCount;
         nodeInfo.workloadRunningCapacitySlotCount =
@@ -3994,10 +4003,12 @@ void MasterStateR::reserveScheduleNodeBatch(NaviSchedScheduleContext &context,
             for(size_t i=0;i<requestIndexes.size();++i) {
                 const auto index=requestIndexes[i];const auto &d=context._decisions[index];
                 reservationRequests[i].predictedExternalReadTokens=(*cacheInputs)[index].externalReadTokens;
+                reservationRequests[i].predictedSharedPrefixBoundary =
+                    (*cacheInputs)[index].sharedPrefixBoundary;
                 reservationRequests[i].initialKVPreparationQueueMs=d.predictedQueueLatencyMs;
                 if(d.latencyPrediction && d.latencyPrediction->recomputable && context._scheduleNodes[nodeIndex].usesUnifiedLatencyPrediction())
                     reservationRequests[i].initialKVPreparationQueueMs=std::max(0.0,d.predictedExecutionLatencyMs-
-                        context._scheduleNodes[nodeIndex].predictLatency(d.latencyPrediction->floorFeatures));
+                        context._scheduleNodes[nodeIndex].predictFrozenLatency(d.latencyPrediction->floorFeatures));
             }
         }
     }

@@ -659,6 +659,19 @@ struct ReplayNativePPPolicyJson : public autil::legacy::Jsonizable {
     }
 };
 
+struct ReplayNativeStepRequestJson : public autil::legacy::Jsonizable {
+    NativePrefillStepRequest value;
+    void Jsonize(JsonWrapper &json) override
+    {
+        json.Jsonize("request_id", value.requestId);
+        json.Jsonize("prompt_tokens", value.input.promptTokens);
+        json.Jsonize("computed_tokens", value.input.computedTokens);
+        json.Jsonize("shared_prefix_boundary", value.input.sharedPrefixBoundary);
+        json.Jsonize("executing", value.executing);
+        json.Jsonize("reported", value.reported);
+    }
+};
+
 struct ReplayNodeInfoJson : public autil::legacy::Jsonizable {
     NaviSchedNodeInfo value;
     ReplayNodeInfoJson() = default;
@@ -684,7 +697,27 @@ struct ReplayNodeInfoJson : public autil::legacy::Jsonizable {
         json.Jsonize("unified_latency_prediction", value.unifiedLatencyPrediction);
         json.Jsonize("native_prefill_pipeline_stages", value.nativePrefillPipelineStages,
                      value.nativePrefillPipelineStages);
-        if (value.nativePrefillPipelineStages > 0) {
+        if (json.GetMode() == JsonMode::TO_JSON) {
+            if (value.nativeStepPackingRequests) {
+                std::vector<ReplayNativeStepRequestJson> rows;
+                for (const auto &request : *value.nativeStepPackingRequests) {
+                    ReplayNativeStepRequestJson row;
+                    row.value = request;
+                    rows.push_back(std::move(row));
+                }
+                json.Jsonize("native_step_packing_requests", rows);
+            }
+        } else {
+            const auto &map = json.GetMap();
+            if (map.find("native_step_packing_requests") != map.end()) {
+                std::vector<ReplayNativeStepRequestJson> rows;
+                json.Jsonize("native_step_packing_requests", rows);
+                value.nativeStepPackingRequests.emplace();
+                for (const auto &row : rows)
+                    value.nativeStepPackingRequests->push_back(row.value);
+            }
+        }
+        if (value.nativePrefillPipelineStages > 0 || value.nativeStepPackingRequests) {
             json.Jsonize("pd_unified_capacity_split", value.pdUnifiedCapacitySplit);
             ReplayNativePPPolicyJson policy;
             policy.value = value.prefillExecutionPolicy;

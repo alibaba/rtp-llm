@@ -399,12 +399,12 @@ MasterScheduleResultKernel::getAdmissionPredictionAudit(
             return audit;
         }
 
-        audit.withWorkloadBaseMs = node.predictBaseLatency(prediction.features);
+        audit.withWorkloadBaseMs = node.predictFrozenBaseLatency(prediction.features);
         audit.withWorkloadFinalMs = node.applyLatencyResidual(audit.withWorkloadBaseMs);
         audit.baseExecutionMs = audit.withWorkloadBaseMs;
         audit.finalExecutionMs = audit.withWorkloadFinalMs;
         if (node.usesUnifiedLatencyPrediction() && prediction.hasFloor) {
-            audit.floorBaseMs = node.predictBaseLatency(prediction.floorFeatures);
+            audit.floorBaseMs = node.predictFrozenBaseLatency(prediction.floorFeatures);
             audit.floorFinalMs = node.applyLatencyResidual(audit.floorBaseMs);
             const auto executionFixedLatencyMs =
                 prediction.fixedLatencyMs - decision.predictedQueueLatencyMs;

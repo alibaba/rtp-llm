@@ -60,7 +60,7 @@ struct NaviSchedNodeSnapshot {
     NaviSchedWorkloadSnapshot workload;
     int64_t kvPreparationSnapshotMonoUs = 0;
     std::vector<MasterKVPreparationForecasts::Estimate> kvPreparationEstimates;
-    // Captured under the same runtime lock as workload, only for Native PP4.
+    // Captured under the same runtime lock as workload for Native forecasts.
     std::vector<MasterBatchReservation::UnfinishedRequest> nativePrefillReservations;
     NaviSchedLatencyFeatures workloadFeatures;
     NaviSchedLatencyFeatures reportedWorkloadFeatures;

@@ -19,6 +19,13 @@ cc_proto(
     deps = ["//aios/network/arpc:proto"],
 )
 
+cc_proto(
+    name = "tair_kvcm_meta_proto",
+    deps = [],
+    srcs = ["proto/TairKvcmMetaService.proto"],
+    import_prefix = "aios/navi_sched",
+)
+
 cc_library(
     name = "navi_sched_data_lib",
     srcs = ["common/NaviSchedCommon.cpp"] + glob([
@@ -29,6 +36,7 @@ cc_library(
     hdrs = [
         "common/NaviSchedCommon.h",
         "common/NaviSchedConstants.h",
+        "common/NativePrefillStepForecast.h",
         "common/NaviSchedScheduleData.h",
     ] + glob([
         "data/*.h",
@@ -237,6 +245,7 @@ cc_library(
     ]),
     alwayslink = True,
     deps = [
+        ":tair_kvcm_meta_proto_cc_proto",
         ":tpu_prefill_execution_policy",
         ":tpu_prefill_pp4_observation",
         ":navi_sched_agent_header",
