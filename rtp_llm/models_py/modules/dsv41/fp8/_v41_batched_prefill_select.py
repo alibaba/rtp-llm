@@ -12,7 +12,7 @@ from .._prefill_stream import prefill_stream_is_capturing
 
 
 def _try_publish_with_tokens(
-    shared, logits, visible, rows, bounds, target, block, count
+    shared, logits, visible, rows, bounds, target, block, count, *, reuse_preflight
 ):
     """Return whether publication is handled and any selected token indices."""
     from . import _v41_prefill_candidates as pool
@@ -44,7 +44,12 @@ def _try_publish_with_tokens(
     )
     if selected is None:
         return False, None
-    if (
+    if reuse_preflight:
+        # Raw token selection writes the prechecked target on the same stream.
+        pool._select_candidates_prechecked(
+            logits, visible, block, count, mask_tail=True, **kwargs
+        )
+    elif (
         pool.select_candidates(logits, visible, block, count, mask_tail=True, **kwargs)
         is None
     ):
@@ -345,6 +350,8 @@ def try_select_batched(
     if grouped is None:
         return False
     publishing = candidates is not None and publish_candidates
+    # Grouped rows can be split or compacted by CED; use the request count.
+    small_batch = len(globals_by_req) <= 4
     filtering_candidates = (
         fp8_mode
         and candidates is not None
@@ -359,7 +366,7 @@ def try_select_batched(
         and (attn.layer_id, attn.compress_ratio) in ((2, 2), (8, 2), (14, 2), (20, 1))
         and torch.cuda.get_device_capability(q_payload.device) == (10, 3)
         and not prefill_stream_is_capturing()
-        and balanced_mqa_schedule_builder()
+        and balanced_mqa_schedule_builder(cache_capability=small_batch)
     )
     if (
         schedule_builder
@@ -372,6 +379,8 @@ def try_select_batched(
     ):
         return True
     score_options = {"balance_kv_tiles": True} if schedule_builder else {}
+    if schedule_builder and small_batch:
+        score_options["cache_schedule_capability"] = True
     targets = iter(grouped.split_rows(out))
     # Keep the score generator directly in the loop: zip/enumerate can retain
     # its previous yielded tuple while allocating the next score chunk.
@@ -415,6 +424,7 @@ def try_select_batched(
                 target,
                 candidate_size,
                 candidate_blocks,
+                reuse_preflight=small_batch,
             )
         if selected is None:
             selected = topk.try_select_tokens(

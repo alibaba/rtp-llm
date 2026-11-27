@@ -101,9 +101,21 @@ def _mqa_accepts_logits_dtype(operation) -> bool:
     return "logits_dtype:" in (operation.__doc__ or "")
 
 
-def balanced_mqa_schedule_builder():
+def _mqa_accepts_schedule_meta(operation) -> bool:
+    return "schedule_meta:" in (getattr(operation, "__doc__", None) or "")
+
+
+_cached_mqa_accepts_schedule_meta = lru_cache(maxsize=2)(_mqa_accepts_schedule_meta)
+
+
+def balanced_mqa_schedule_builder(*, cache_capability=False):
     operation = getattr(_deep_gemm, "fp8_fp4_mqa_logits", None)
-    if "schedule_meta:" in (getattr(operation, "__doc__", None) or ""):
+    supports_schedule = (
+        _cached_mqa_accepts_schedule_meta(operation)
+        if cache_capability
+        else _mqa_accepts_schedule_meta(operation)
+    )
+    if supports_schedule:
         return getattr(_deep_gemm, "get_mqa_logits_metadata", None)
     return None
 
@@ -133,6 +145,7 @@ def fp8_fp4_mqa_indexer_score(
     max_seqlen_k: int = 0,
     return_bf16: bool = False,
     balance_kv_tiles: bool = False,
+    cache_schedule_capability: bool = False,
     schedule_cache: dict | None = None,
 ) -> torch.Tensor:
     """MX-mode FP4 prefill indexer logits via DeepGEMM.
@@ -163,7 +176,9 @@ def fp8_fp4_mqa_indexer_score(
     starts = cu_seqlen_ks.contiguous()
     ends = cu_seqlen_ke.contiguous()
     build_schedule = (
-        balanced_mqa_schedule_builder() if balance_kv_tiles and return_bf16 else None
+        balanced_mqa_schedule_builder(cache_capability=cache_schedule_capability)
+        if balance_kv_tiles and return_bf16
+        else None
     )
     if build_schedule is not None:
         options["schedule_meta"] = balanced_mqa_schedule(

@@ -39,6 +39,69 @@ def key_views(widths, slab_counts, device="cpu"):
 
 
 class GroupedCEDDispatchCPU(unittest.TestCase):
+    def test_group_without_retained_rows_skips_candidate_publication(self):
+        from rtp_llm.models_py.modules.dsv41.fp8 import _v41_batched_prefill_select
+
+        actual = _v41_batched_prefill_select._try_publish_with_tokens(
+            {"ced_candidate_rows": ()},
+            None,
+            None,
+            slice(0, 1),
+            None,
+            None,
+            8,
+            2048,
+            reuse_preflight=True,
+        )
+        self.assertEqual(actual, (True, None))
+
+    def test_checked_public_entry_launches_candidate_selection(self):
+        from rtp_llm.models_py.modules.dsv41.fp8 import _v41_prefill_candidates as pool
+
+        logits, visible = object(), object()
+        expected = (object(), None)
+        with ExitStack() as stack:
+            check = stack.enter_context(
+                patch.object(pool, "can_select_candidates", return_value=True)
+            )
+            launch = stack.enter_context(
+                patch.object(
+                    pool,
+                    "_select_candidates_prechecked",
+                    autospec=True,
+                    return_value=expected,
+                )
+            )
+            self.assertIs(pool.select_candidates(logits, visible, 8, 2048), expected)
+        check.assert_called_once()
+        launch.assert_called_once()
+
+    def test_small_batch_caches_capability_but_resolves_builder_each_time(self):
+        from rtp_llm.models_py.modules.dsv41.fp8 import _indexer_score as scorer
+
+        def operation():
+            """schedule_meta: an optional backend parameter"""
+
+        builder = object()
+        backend = SimpleNamespace(
+            fp8_fp4_mqa_logits=operation, get_mqa_logits_metadata=builder
+        )
+        cache = scorer._cached_mqa_accepts_schedule_meta
+        cache.cache_clear()
+        self.addCleanup(cache.cache_clear)
+        with patch.object(scorer, "_deep_gemm", backend):
+            self.assertIs(scorer.balanced_mqa_schedule_builder(), builder)
+            self.assertEqual(cache.cache_info().currsize, 0)
+            self.assertIs(
+                scorer.balanced_mqa_schedule_builder(cache_capability=True), builder
+            )
+            backend.get_mqa_logits_metadata = object()
+            self.assertIs(
+                scorer.balanced_mqa_schedule_builder(cache_capability=True),
+                backend.get_mqa_logits_metadata,
+            )
+            self.assertEqual(cache.cache_info().hits, 1)
+
     def test_balanced_schedule_admission(self):
         from rtp_llm.models_py.modules.dsv41.fp8 import _indexer_score as scorer
         from rtp_llm.models_py.modules.dsv41.fp8 import (
@@ -61,9 +124,10 @@ class GroupedCEDDispatchCPU(unittest.TestCase):
             prefix_lengths=torch.tensor([1024]),
             input_lengths_global=torch.tensor([256]),
         )
-        for layer, ratio, flag, arch, capture, abi, expected in cases:
+        for case, batch in itertools.product(cases, range(1, 6)):
+            layer, ratio, flag, arch, capture, abi, expected = case
             with self.subTest(
-                layer=layer, flag=flag, arch=arch, capture=capture, abi=abi
+                layer=layer, flag=flag, arch=arch, capture=capture, abi=abi, batch=batch
             ):
                 calls = []
 
@@ -115,7 +179,7 @@ class GroupedCEDDispatchCPU(unittest.TestCase):
                             batched, "prefill_stream_is_capturing", return_value=capture
                         )
                     )
-                    stack.enter_context(
+                    builder = stack.enter_context(
                         patch.object(
                             scorer,
                             "balanced_mqa_schedule_builder",
@@ -128,8 +192,8 @@ class GroupedCEDDispatchCPU(unittest.TestCase):
                             SimpleNamespace(is_cuda=True, device="cuda"),
                             None,
                             None,
-                            [None],
-                            [slice(0, 1)],
+                            [None] * batch,
+                            [slice(i, i + 1) for i in range(batch)],
                             None,
                             None,
                             candidate_source=-1,
@@ -144,6 +208,12 @@ class GroupedCEDDispatchCPU(unittest.TestCase):
                 self.assertEqual(
                     bool(native_calls), expected and ratio == 2 and layer != 14
                 )
+                self.assertEqual(
+                    calls[0].get("cache_schedule_capability", False),
+                    expected and batch <= 4,
+                )
+                if builder.called:
+                    builder.assert_called_once_with(cache_capability=batch <= 4)
 
     def test_compact_consumers_reuse_full_key_counts_and_invalidate_replaced_cp(self):
         from rtp_llm.models_py.modules.dsv41.fp8 import (
@@ -256,7 +326,9 @@ class GroupedCEDDispatchCPU(unittest.TestCase):
         )
         from rtp_llm.models_py.modules.dsv41.fp8 import _v41_prefill_topk as topk
 
-        for batch, bf16_ready in itertools.product((2, 32, 64), (False, True)):
+        for batch, bf16_ready in itertools.product(
+            (1, 2, 3, 4, 5, 32, 64), (False, True)
+        ):
             with self.subTest(batch=batch, bf16_ready=bf16_ready):
                 counts = [
                     2 * ((min(n, 128) + 7) // 8)
@@ -292,7 +364,19 @@ class GroupedCEDDispatchCPU(unittest.TestCase):
                     self.assertIs(return_bf16, bf16_ready)
                     yield slice(0, rows), logits, visible, bounds
 
-                def publish(shared_arg, score, ends, span, bound, target, block, count):
+                def publish(
+                    shared_arg,
+                    score,
+                    ends,
+                    span,
+                    bound,
+                    target,
+                    block,
+                    count,
+                    *,
+                    reuse_preflight,
+                ):
+                    self.assertEqual(reuse_preflight, batch <= 4)
                     self.assertIs(shared_arg, shared)
                     self.assertIs(score, logits)
                     target.copy_(torch.arange(512, dtype=torch.int32))
@@ -2182,7 +2266,8 @@ class GroupedTailSelectionTest(unittest.TestCase):
         candidate_blocks=32,
         bitmap=True,
         retained=None,
-        pool_reject=False,
+        preflight_reject=False,
+        batch=2,
     ):
         from rtp_llm.models_py.modules.dsv41.fp8 import (
             _v41_batched_prefill_select as batched,
@@ -2241,12 +2326,12 @@ class GroupedTailSelectionTest(unittest.TestCase):
             return original_apply(*args, mask_tail=mask_tail)
 
         native = topk.try_select_tokens
-        original_pool = pool.select_candidates
+        can_select = pool.can_select_candidates
 
-        def select_pool(*args, **kwargs):
-            if pool_reject and kwargs.get("token_indices") is not None:
-                return None
-            return original_pool(*args, **kwargs)
+        def check_pool(*args, **kwargs):
+            if preflight_reject and kwargs.get("token_indices") is not None:
+                return False
+            return can_select(*args, **kwargs)
 
         with ExitStack() as stack:
             if not fuse:
@@ -2255,8 +2340,8 @@ class GroupedTailSelectionTest(unittest.TestCase):
                         batched, "_try_publish_with_tokens", return_value=(False, None)
                     )
                 )
-            stack.enter_context(
-                patch.object(pool, "select_candidates", side_effect=select_pool)
+            preflight = stack.enter_context(
+                patch.object(pool, "can_select_candidates", side_effect=check_pool)
             )
             finish = stack.enter_context(
                 patch.object(topk, "finish_tokens", wraps=topk.finish_tokens)
@@ -2303,8 +2388,11 @@ class GroupedTailSelectionTest(unittest.TestCase):
                     torch.empty(rows, 1, device="cuda"),
                     None,
                     None,
-                    [None, None],
-                    [slice(0, rows // 2), slice(rows // 2, rows)],
+                    [None] * batch,
+                    [
+                        slice(i * rows // batch, (i + 1) * rows // batch)
+                        for i in range(batch)
+                    ],
                     torch.empty(rows, device="cuda", dtype=torch.int64),
                     output,
                     candidate_source=-1,
@@ -2313,6 +2401,10 @@ class GroupedTailSelectionTest(unittest.TestCase):
                     candidate_blocks=candidate_blocks,
                     req_ids=torch.zeros(rows, device="cuda", dtype=torch.int64),
                 )
+            )
+            self.fused_preflights = sum(
+                c.kwargs.get("token_indices") is not None
+                for c in preflight.call_args_list
             )
             self.last_calls = dict(
                 selector=select.call_count,
@@ -2489,6 +2581,7 @@ class GroupedTailSelectionTest(unittest.TestCase):
                         candidate_blocks=2048,
                         bitmap=bitmap,
                     )
+                    self.assertEqual(self.fused_preflights, 1)
                     self.assertEqual(
                         self.last_calls,
                         dict(
@@ -2525,10 +2618,20 @@ class GroupedTailSelectionTest(unittest.TestCase):
                         torch.equal(logits.contiguous().view(torch.uint8), before)
                     )
 
+    def test_fused_publication_rechecks_only_above_small_batch_limit(self):
+        logits, clean, ends, _ = self._logits(513)
+        for batch in (4, 5):
+            with self.subTest(batch=batch):
+                actual, _ = self._select(
+                    logits, ends, publish=True, candidates=True, fuse=True, batch=batch
+                )
+                self.assertEqual(self.fused_preflights, 1 if batch == 4 else 2)
+                self._assert_contract(actual, clean, ends)
+
     def test_fused_publication_skip_and_rejected_paths_keep_filter(self):
         from rtp_llm.models_py.modules.dsv41.fp8 import attention_v41 as attention
 
-        for case in ("ced_skip", "pool_reject", "out", "bounds", "forced"):
+        for case in ("ced_skip", "preflight_reject", "out", "bounds", "forced"):
             with self.subTest(case=case):
                 logits, clean, ends, _ = self._logits(32769, strided=True)
                 before = logits.contiguous().view(torch.uint8).clone()
@@ -2538,7 +2641,7 @@ class GroupedTailSelectionTest(unittest.TestCase):
                     candidates=True,
                     candidate_blocks=2048,
                     retained=[] if case == "ced_skip" else None,
-                    pool_reject=case == "pool_reject",
+                    preflight_reject=case == "preflight_reject",
                 )
                 if case in ("out", "bounds", "forced"):
                     kwargs["fallback"] = case
@@ -2546,16 +2649,7 @@ class GroupedTailSelectionTest(unittest.TestCase):
                 self.assertEqual(
                     self.last_calls["legacy_publication"], int(case != "ced_skip")
                 )
-                if case == "pool_reject":
-                    self.assertEqual(
-                        (
-                            self.last_calls["raw_attempts"],
-                            self.last_calls["native"],
-                            self.last_calls["finish"],
-                        ),
-                        (1, 1, 1),
-                    )
-                elif case == "ced_skip":
+                if case in ("ced_skip", "preflight_reject"):
                     self.assertEqual(
                         (
                             self.last_calls["raw_attempts"],
@@ -2564,14 +2658,15 @@ class GroupedTailSelectionTest(unittest.TestCase):
                         ),
                         (0, 1),
                     )
-                    self.assertTrue((shared["candidates"] == -99).all().item())
+                    if case == "ced_skip":
+                        self.assertTrue((shared["candidates"] == -99).all().item())
                 elif case in ("out", "bounds"):
                     self.assertEqual(
                         (self.last_calls["raw_attempts"], self.last_calls["native"]),
                         (0, 0),
                     )
                 self._assert_contract(actual, clean, ends)
-                if case in ("ced_skip", "pool_reject"):
+                if case in ("ced_skip", "preflight_reject"):
                     self.assertTrue(
                         torch.equal(logits.contiguous().view(torch.uint8), before)
                     )

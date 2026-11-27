@@ -533,7 +533,7 @@ class V41PrefillCandidatesCUDA(unittest.TestCase):
 
         logits, visible = make_case(3, 8192)
         expected = reference_select(logits, visible, 8, 2048)
-        for capability in ((8, 9), (9, 0)):
+        for capability in ((8, 0), (8, 9)):
             with self.subTest(capability=capability), patch.object(
                 torch.cuda, "get_device_capability", return_value=capability
             ) as capability_query, patch.object(

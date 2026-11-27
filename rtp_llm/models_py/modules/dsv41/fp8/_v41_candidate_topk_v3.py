@@ -17,7 +17,7 @@ def is_available(phase: str, device: torch.device) -> bool:
     return (
         _TOPK_V3_OK
         and device.type == "cuda"
-        and torch.cuda.get_device_capability(device) in ((10, 0), (10, 3))
+        and torch.cuda.get_device_capability(device) in ((9, 0), (10, 0), (10, 3))
         and torch.version.hip is None
         and os.environ.get(f"DSV41_{phase.upper()}_CANDIDATE_TOPK_V3", "1") == "1"
     )

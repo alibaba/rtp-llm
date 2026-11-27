@@ -94,18 +94,19 @@ class IndexPlanCPU(unittest.TestCase):
         for got, ref in zip(actual, expected):
             torch.testing.assert_close(got, ref, rtol=0, atol=0)
 
-    def test_blackwell_family_gate_is_cached_per_device(self):
+    def test_hopper_blackwell_family_gate_is_cached_per_device(self):
         fused._device_supported.cache_clear()
         self.addCleanup(fused._device_supported.cache_clear)
         for index, capability in enumerate(
-            ((9, 0), (10, 0), (10, 1), (10, 3), (12, 0))
+            ((8, 0), (8, 9), (9, 0), (10, 0), (10, 1), (10, 3), (12, 0))
         ):
             with self.subTest(capability=capability), patch.object(
                 torch.cuda, "get_device_capability", return_value=capability
             ) as query:
                 device = torch.device("cuda", index)
-                self.assertEqual(fused._device_supported(device), capability[0] == 10)
-                self.assertEqual(fused._device_supported(device), capability[0] == 10)
+                expected = capability[0] in (9, 10)
+                self.assertEqual(fused._device_supported(device), expected)
+                self.assertEqual(fused._device_supported(device), expected)
                 query.assert_called_once_with(device)
 
     def test_oracle_canonicalizes_order_preserving_duplicates_and_padding(self):

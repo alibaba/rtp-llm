@@ -27,10 +27,10 @@ def build_index_plan_eager(
 ):
     """Bound fallback sort/partition scratch independently of prompt length.
 
-    SM90 uses this path. Only the final int32 plan spans all query rows;
-    eager intermediates are confined to a chunk and released before the
-    caller allocates the combined KV workspace. Preserve the original cast
-    before stable validity partition, including int32 overflow semantics.
+    Only the final int32 plan spans all query rows; eager intermediates are
+    confined to a chunk and released before the caller allocates the combined
+    KV workspace. Preserve the original cast before stable validity
+    partition, including int32 overflow semantics.
     """
     rows, k = selected.shape
     width = k + window_size
@@ -72,7 +72,7 @@ def build_index_plan_eager(
 
 @lru_cache(maxsize=16)
 def _device_supported(device):
-    return torch.cuda.get_device_capability(device)[0] == 10
+    return torch.cuda.get_device_capability(device)[0] in (9, 10)
 
 
 if triton is not None:
