@@ -59,6 +59,30 @@ class _DenseModel(RtpModule):
 
 
 class W8A8Int8Test(unittest.TestCase):
+    def test_resident_rebind_only_resolves_ppu_for_compressed_w8a8(self):
+        # Use non-CPU metadata tensors to exercise device binding even on a
+        # CPU worker. The actual PPU kernel is not executed by this test.
+        path = "rtp_llm.models_py.quant_methods.w8a8_int8._dense_executor_class"
+        with mock.patch(path) as resolve_ppu:
+            for method in ("pertensor_quant", "smooth_quant", "omni_quant", "none"):
+                with self.subTest(method=method):
+                    resolve_ppu.reset_mock()
+                    leaf = ColumnParallelLinear(
+                        8, 16, quant_config=QuantizationConfig(method)
+                    )
+                    NewModelLoader._bind_resident_runtime(leaf.to("meta"))
+                    resolve_ppu.assert_not_called()
+
+            resolve_ppu.reset_mock()
+            leaf = ColumnParallelLinear(
+                8, 16, quant_config=QuantizationConfig(W8A8_METHOD)
+            )
+            NewModelLoader._bind_resident_runtime(leaf.to("meta"))
+            resolve_ppu.assert_called_once_with()
+            self.assertIs(
+                leaf.quant_method._executor, resolve_ppu.return_value.return_value
+            )
+
     @torch.inference_mode()
     def test_complete_weight_scale_update_and_partial_qkv_bias(self):
         from rtp_llm.models_py.runtime_weight_update import RuntimeWeightTransaction

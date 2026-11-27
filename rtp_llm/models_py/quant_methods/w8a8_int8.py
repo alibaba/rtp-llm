@@ -73,16 +73,15 @@ def checked_channel_scale(tensor, rows, label):
     return tensor.reshape(rows, 1)
 
 
-@register_quant_method(W8A8_METHOD)
-class W8A8Int8LinearMethod(QuantizeMethodBase):
+class Int8CheckpointLinearMethod(QuantizeMethodBase):
+    """Shared INT8 parameter layout and TP loading, independent of the executor."""
+
     owns_checkpoint_loading = True
     required_checkpoint_parameters = ("weight", "weight_scale")
 
     def __init__(self, quant_config=None):
         super().__init__(quant_config)
         self._pieces = {}
-        self._executor = None
-        self._storage = None
 
     def create_weights(self, layer, input_size, output_size, params_dtype):
         if params_dtype not in (torch.float16, torch.bfloat16):
@@ -220,6 +219,14 @@ class W8A8Int8LinearMethod(QuantizeMethodBase):
             loaded.update(names)
             if len(loaded) == len(self._layout(layer)):
                 layer._record_parameter_loaded(field)
+
+
+@register_quant_method(W8A8_METHOD)
+class W8A8Int8LinearMethod(Int8CheckpointLinearMethod):
+    def __init__(self, quant_config=None):
+        super().__init__(quant_config)
+        self._executor = None
+        self._storage = None
 
     def validate_runtime_device(self, device):
         if torch.device(device).type == "cpu":

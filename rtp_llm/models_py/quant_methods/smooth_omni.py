@@ -6,7 +6,7 @@ from torch.nn import functional as F
 
 from rtp_llm.models_py.module_base import copy_weight_
 from rtp_llm.models_py.quant_methods.base import register_quant_method
-from rtp_llm.models_py.quant_methods.w8a8_int8 import W8A8Int8LinearMethod
+from rtp_llm.models_py.quant_methods.w8a8_int8 import Int8CheckpointLinearMethod
 from rtp_llm.models_py.read_spec import (
     LoadedCheckpointTensor,
     ReadSpec,
@@ -27,7 +27,7 @@ def quantize_activation(x, smoother=None, shift=None):
 
 
 @register_quant_method("smooth_quant", "omni_quant")
-class SmoothOmniLinearMethod(W8A8Int8LinearMethod):
+class SmoothOmniLinearMethod(Int8CheckpointLinearMethod):
     """Reuse the direct INT8 owner and TP copy logic, not the PPU executor."""
 
     def create_weights(self, layer, input_size, output_size, params_dtype):
