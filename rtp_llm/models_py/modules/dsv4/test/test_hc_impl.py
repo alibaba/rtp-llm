@@ -673,6 +673,66 @@ class TestHCImpl(unittest.TestCase):
                     self.assertTrue(torch.equal(pre_got, pre_1))
                     self.assertTrue(torch.equal(out_got, out_1))
 
+    @unittest.skipUnless(torch.cuda.is_available(), "requires CUDA")
+    def test_tilelang_unit_post_uses_cuda_kernel_and_matches_tk_across_shapes(
+        self,
+    ) -> None:
+        from rtp_llm.models_py.modules.dsv4.hc import tilelang_impl
+        from rtp_llm.models_py.modules.dsv4.hc.mhc_tilelang import tk_mhc_post
+
+        if tilelang_impl._get_cuda_mhc_post_op() is None:
+            self.skipTest("dsv4_mhc_post_fwd CUDA op unavailable")
+
+        self.assertIs(tilelang_impl.tk_mhc_post, tilelang_impl._DEFAULT_TK_MHC_POST)
+        torch.manual_seed(17)
+        for dim in (4096, 7168):
+            fn, base, scale = _weights(4, dim, device="cuda")
+            unit = TileLangHCUnit(
+                fn,
+                base,
+                scale,
+                dim=dim,
+                hc_mult=4,
+                hc_sinkhorn_iters=10,
+                norm_eps=1e-6,
+                hc_eps=1e-6,
+            )
+            for shape in ((1, dim), (16, dim), (4, 1, dim), (1024, dim)):
+                with self.subTest(dim=dim, shape=shape):
+                    lead = shape[:-1]
+                    x = torch.randn(*lead, dim, device="cuda", dtype=torch.bfloat16)
+                    residual = torch.randn(
+                        *lead, 4, dim, device="cuda", dtype=torch.bfloat16
+                    )
+                    post = torch.rand(*lead, 4, 1, device="cuda", dtype=torch.float32)
+                    comb = torch.softmax(
+                        torch.randn(*lead, 4, 4, device="cuda", dtype=torch.float32),
+                        dim=-1,
+                    )
+                    tk_res = residual.clone()
+                    with torch.inference_mode():
+                        ref = tk_mhc_post(
+                            x.unsqueeze(0) if x.dim() == 2 else x,
+                            tk_res.unsqueeze(0) if tk_res.dim() == 3 else tk_res,
+                            post.unsqueeze(0) if post.dim() == 3 else post,
+                            comb.unsqueeze(0) if comb.dim() == 3 else comb,
+                            hc_mult=4,
+                            out=(tk_res.unsqueeze(0) if tk_res.dim() == 3 else tk_res),
+                        )
+                        if x.dim() == 2:
+                            assert ref is not None
+                            ref = ref.squeeze(0)
+                    cu_res = residual.clone()
+                    out = unit.post(x, cu_res, post, comb)
+                    self.assertEqual(out.data_ptr(), cu_res.data_ptr())
+                    self.assertEqual(tuple(out.shape), (*lead, 4, dim))
+                    assert ref is not None
+                    torch.testing.assert_close(out, ref, atol=2e-2, rtol=2e-2)
+                    # Repeat run must be bitwise deterministic.
+                    cu_res_2 = residual.clone()
+                    out_2 = unit.post(x, cu_res_2, post, comb)
+                    self.assertTrue(torch.equal(out, out_2))
+
 
 if __name__ == "__main__":
     unittest.main()

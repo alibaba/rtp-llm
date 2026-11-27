@@ -8,6 +8,7 @@
 #include "rtp_llm/models_py/bindings/cuda/kernels/scaled_fp4_quant.h"
 #endif
 
+#include "rtp_llm/models_py/bindings/cuda/kernels/dsv4_mhc_post.h"
 #include "rtp_llm/models_py/bindings/cuda/kernels/dsv4_prefill_rope_quant.h"
 #include "rtp_llm/models_py/bindings/cuda/kernels/scaled_fp8_quant.h"
 #include "rtp_llm/models_py/bindings/common/kernels/moe/ep_utils.h"
@@ -139,6 +140,15 @@ void registerPyModuleOps(py::module& rtp_ops_m) {
                   py::arg("freq_stride_n"),
                   py::arg("rope_head_dim"),
                   py::arg("fp8_max"));
+
+    rtp_ops_m.def("dsv4_mhc_post_fwd",
+                  &torch_ext::dsv4_mhc_post_fwd,
+                  "Vectorized DeepSeek-V4 mHC post-residual merge",
+                  py::arg("x"),
+                  py::arg("residual"),
+                  py::arg("post"),
+                  py::arg("comb"),
+                  py::arg("out"));
 
     registerBaseCudaBindings(rtp_ops_m);
     registerAttnOpBindings(rtp_ops_m);

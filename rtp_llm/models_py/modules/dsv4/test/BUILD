@@ -257,3 +257,18 @@ dsv4_sm100_py_test(
         "test_fused_inv_rope_fp8_quant",
     ]
 ]
+
+cuda13_sm100_py_test(
+    name = "test_dsv4_mhc_post_perf",
+    srcs = ["test_dsv4_mhc_post_perf.py"],
+    legacy_create_init = 0,
+    main = "test_dsv4_mhc_post_perf.py",
+    tags = [
+        "manual",
+        "perf",
+    ],
+    deps = _MODEL_TEST_DEPS + [
+        ":dsv4_kernel_perf_utils",
+        "//rtp_llm/models_py:tile_kernels_mhc",
+    ],
+)

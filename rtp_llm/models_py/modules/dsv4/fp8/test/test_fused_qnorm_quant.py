@@ -274,6 +274,162 @@ class FusedQNormQuantTest(unittest.TestCase):
         self.assertTrue(torch.equal(got_out, from_norm_out))
         torch.testing.assert_close(got_out, ref_out, atol=4e-2, rtol=2e-2)
 
+    def test_2d_row_strided_and_alignment_gates(self) -> None:
+        eps = 1.0e-6
+        torch.manual_seed(11)
+        width = 4096
+        rows = 19
+        stride_aligned = width + 8  # 16B-aligned padded stride (bf16 * 8 = 16B)
+        backing = torch.randn(
+            (rows, stride_aligned), device="cuda", dtype=torch.bfloat16
+        )
+        x_strided = backing[:, :width]
+        self.assertFalse(x_strided.is_contiguous())
+        w = (torch.rand(width, device="cuda", dtype=torch.bfloat16) + 0.5).contiguous()
+        self.assertTrue(can_fuse_qnorm_fp8_ue8m0_quant(x_strided, w))
+
+        got_norm, (got_q, got_s) = fused_rmsnorm_fp8_ue8m0_quant(
+            x_strided, w, eps=eps, emit_norm=True
+        )
+        assert got_norm is not None
+        self.assertTrue(got_norm.is_contiguous())
+        self.assertTrue(got_q.is_contiguous())
+        ref_norm, (ref_q, ref_s) = fused_rmsnorm_fp8_ue8m0_quant(
+            x_strided.contiguous(), w, eps=eps, emit_norm=True
+        )
+        assert ref_norm is not None
+        self.assertTrue(torch.equal(got_norm, ref_norm))
+        self.assertTrue(torch.equal(got_q.view(torch.uint8), ref_q.view(torch.uint8)))
+        self.assertTrue(torch.equal(got_s, ref_s))
+
+        # Unaligned data_ptr (odd bf16 offset) or unaligned row stride fails gate,
+        # while direct execution still stays safe on masked Triton loads.
+        unaligned_ptr = torch.randn(
+            (rows, width + 1), device="cuda", dtype=torch.bfloat16
+        )[:, 1:]
+        self.assertNotEqual(unaligned_ptr.data_ptr() % 16, 0)
+        self.assertFalse(can_fuse_qnorm_fp8_ue8m0_quant(unaligned_ptr, w))
+
+        unaligned_stride = torch.randn(
+            (rows, width + 2), device="cuda", dtype=torch.bfloat16
+        )[:, :width]
+        self.assertFalse(can_fuse_qnorm_fp8_ue8m0_quant(unaligned_stride, w))
+        n_u, (q_u, s_u) = fused_rmsnorm_fp8_ue8m0_quant(
+            unaligned_stride, w, eps=eps, emit_norm=True
+        )
+        n_c, (q_c, s_c) = fused_rmsnorm_fp8_ue8m0_quant(
+            unaligned_stride.contiguous(), w, eps=eps, emit_norm=True
+        )
+        assert n_u is not None and n_c is not None
+        self.assertTrue(torch.equal(n_u, n_c))
+        self.assertTrue(torch.equal(q_u.view(torch.uint8), q_c.view(torch.uint8)))
+        self.assertTrue(torch.equal(s_u, s_c))
+
+        w_unaligned = torch.randn(width + 1, device="cuda", dtype=torch.bfloat16)[1:]
+        self.assertFalse(
+            can_fuse_qnorm_fp8_ue8m0_quant(backing[:, :width], w_unaligned)
+        )
+
+        # Empty 3D leading batches (M=0) preserve shapes safely without launching.
+        for empty_shape in ((0, 4, width), (2, 0, width)):
+            x0 = torch.empty(empty_shape, device="cuda", dtype=torch.bfloat16)
+            self.assertTrue(can_fuse_qnorm_fp8_ue8m0_quant(x0, w))
+            n0, (q0, s0) = fused_rmsnorm_fp8_ue8m0_quant(x0, w, eps=eps, emit_norm=True)
+            assert n0 is not None
+            self.assertEqual(tuple(n0.shape), empty_shape)
+            self.assertEqual(tuple(q0.shape), empty_shape)
+            self.assertEqual(tuple(s0.shape), (0, (width // 128 + 3) // 4))
+
+    def test_inplace_out_norm_and_overlap_guards(self) -> None:
+        eps = 1.0e-6
+        torch.manual_seed(23)
+        for rows, width in ((65, 4096), (129, 7168)):
+            with self.subTest(rows=rows, width=width):
+                x = torch.randn((rows, width), device="cuda", dtype=torch.bfloat16)
+                w = (
+                    torch.rand(width, device="cuda", dtype=torch.bfloat16) + 0.5
+                ).contiguous()
+                ref_norm, (ref_q, ref_s) = fused_rmsnorm_fp8_ue8m0_quant(
+                    x, w, eps=eps, emit_norm=True
+                )
+                assert ref_norm is not None
+                x_inplace = x.clone()
+                got_norm, (got_q, got_s) = fused_rmsnorm_fp8_ue8m0_quant(
+                    x_inplace, w, eps=eps, emit_norm=True, out_norm=x_inplace
+                )
+                assert got_norm is not None
+                self.assertEqual(got_norm.data_ptr(), x_inplace.data_ptr())
+                self.assertTrue(torch.equal(got_norm, ref_norm))
+                self.assertTrue(
+                    torch.equal(got_q.view(torch.uint8), ref_q.view(torch.uint8))
+                )
+                self.assertTrue(torch.equal(got_s, ref_s))
+
+        # Shifted overlap and cross-buffer aliasing must be rejected cleanly.
+        w = torch.ones(1024, device="cuda", dtype=torch.bfloat16)
+        buf = torch.randn((17, 1024), device="cuda", dtype=torch.bfloat16)
+        with self.assertRaisesRegex(ValueError, "in-place alias"):
+            fused_rmsnorm_fp8_ue8m0_quant(
+                buf[:16], w, eps=eps, emit_norm=True, out_norm=buf[1:]
+            )
+        fp8_view = buf[:16].view(torch.float8_e4m3fn)[:, :1024]
+        with self.assertRaisesRegex(ValueError, "overlap"):
+            fused_rmsnorm_fp8_ue8m0_quant(
+                buf[:16], w, eps=eps, emit_norm=False, out_q=fp8_view
+            )
+
+    def test_non_divisible_block_widths(self) -> None:
+        eps = 1.0e-6
+        torch.manual_seed(37)
+        for rows in (1, 17, 130):
+            for width in (640, 2688, 7168):
+                with self.subTest(rows=rows, width=width):
+                    x = torch.randn((rows, width), device="cuda", dtype=torch.bfloat16)
+                    w = (
+                        torch.rand(width, device="cuda", dtype=torch.bfloat16) + 0.5
+                    ).contiguous()
+                    got_norm, (got_q, got_s) = fused_rmsnorm_fp8_ue8m0_quant(
+                        x, w, eps=eps, emit_norm=True
+                    )
+                    assert got_norm is not None
+                    ref_q, ref_s = sgl_per_token_group_quant_fp8(
+                        got_norm,
+                        group_size=128,
+                        eps=1.0e-4,
+                        column_major_scales=True,
+                        scale_tma_aligned=True,
+                        scale_ue8m0=True,
+                    )
+                    self.assertTrue(
+                        torch.equal(got_q.view(torch.uint8), ref_q.view(torch.uint8))
+                    )
+                    # sgl_per_token_group_quant_fp8 writes only active group bytes via
+                    # uint8_t* into an uninitialized torch.empty int32 pack buffer, so
+                    # compare active group bytes and verify fused zero-pads tail bytes.
+                    active_groups = width // 128
+                    got_bytes = torch.stack(
+                        [(got_s.to(torch.int64) >> (8 * b)) & 0xFF for b in range(4)],
+                        dim=-1,
+                    ).reshape(rows, -1)
+                    ref_bytes = torch.stack(
+                        [(ref_s.to(torch.int64) >> (8 * b)) & 0xFF for b in range(4)],
+                        dim=-1,
+                    ).reshape(rows, -1)
+                    self.assertTrue(
+                        torch.equal(
+                            got_bytes[:, :active_groups], ref_bytes[:, :active_groups]
+                        )
+                    )
+                    if got_bytes.shape[1] > active_groups:
+                        self.assertEqual(
+                            int(got_bytes[:, active_groups:].max().item()), 0
+                        )
+        bad_x = torch.randn((8, 130), device="cuda", dtype=torch.bfloat16)
+        bad_w = torch.ones((130,), device="cuda", dtype=torch.bfloat16)
+        self.assertFalse(can_fuse_qnorm_fp8_ue8m0_quant(bad_x, bad_w))
+        with self.assertRaises(ValueError):
+            fused_rmsnorm_fp8_ue8m0_quant(bad_x, bad_w, eps=eps)
+
 
 if __name__ == "__main__":
     unittest.main()

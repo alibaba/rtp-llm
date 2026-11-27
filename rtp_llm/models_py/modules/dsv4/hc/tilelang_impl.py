@@ -14,6 +14,70 @@ from rtp_llm.models_py.modules.dsv4.hc.mhc_tilelang import (
 )
 from rtp_llm.models_py.modules.dsv4.hc.utils import squeeze_hc_batch, wrap_hc_batch
 
+# Snapshot the default import so tests patching ``tilelang_impl.tk_mhc_post``
+# still intercept ``TileLangHCUnit._post_impl``.
+_DEFAULT_TK_MHC_POST = tk_mhc_post
+_CUDA_MHC_POST_OP = None
+_CUDA_MHC_POST_PROBE_DONE = False
+
+
+def _get_cuda_mhc_post_op():
+    global _CUDA_MHC_POST_OP, _CUDA_MHC_POST_PROBE_DONE
+    if not _CUDA_MHC_POST_PROBE_DONE:
+        if (
+            getattr(torch.version, "cuda", None) is not None
+            and getattr(torch.version, "hip", None) is None
+        ):
+            try:
+                from rtp_llm.ops import rtp_llm_ops
+
+                _CUDA_MHC_POST_OP = getattr(rtp_llm_ops, "dsv4_mhc_post_fwd", None)
+            except Exception:
+                _CUDA_MHC_POST_OP = None
+        else:
+            _CUDA_MHC_POST_OP = None
+        _CUDA_MHC_POST_PROBE_DONE = True
+    return _CUDA_MHC_POST_OP
+
+
+def _can_use_cuda_mhc_post(
+    x: torch.Tensor,
+    residual: torch.Tensor,
+    post: torch.Tensor,
+    comb: torch.Tensor,
+    hc_mult: int,
+) -> bool:
+    if tk_mhc_post is not _DEFAULT_TK_MHC_POST:
+        return False
+    if _get_cuda_mhc_post_op() is None:
+        return False
+    if hc_mult != 4:
+        return False
+    if (
+        x.requires_grad
+        or residual.requires_grad
+        or post.requires_grad
+        or comb.requires_grad
+    ):
+        return False
+    if not (residual.is_cuda and x.is_cuda and post.is_cuda and comb.is_cuda):
+        return False
+    dev = residual.device
+    if x.device != dev or post.device != dev or comb.device != dev:
+        return False
+    if residual.dtype != torch.bfloat16 or x.dtype != torch.bfloat16:
+        return False
+    if post.dtype not in (torch.float32, torch.bfloat16) or comb.dtype not in (
+        torch.float32,
+        torch.bfloat16,
+    ):
+        return False
+    if residual.numel() == 0 or x.numel() == 0:
+        return False
+    if (int(residual.shape[-1]) * int(residual.shape[-2])) % 256 != 0:
+        return False
+    return True
+
 
 def _require_contiguous(t: torch.Tensor, *, name: str) -> torch.Tensor:
     if not t.is_contiguous():
@@ -101,15 +165,23 @@ class TileLangHCUnit(HCUnitBase):
             # at return. Aliasing out=residual saves a per-call empty_like
             # (residual.numel() * 2 bytes, e.g. 7.5 GB at T=128K, hc=4,
             # dim=7168). Kernel-side safety: each block reads residual[pid_n]
-            # into shared memory before writing out[pid_n] at the same slot.
-            out = tk_mhc_post(
-                tk_x,
-                tk_residual,
-                tk_post,
-                tk_comb,
-                hc_mult=self.hc_mult,
-                out=tk_residual,
-            )
+            # into shared/register memory before writing out[pid_n] at the same slot.
+            if _can_use_cuda_mhc_post(
+                tk_x, tk_residual, tk_post, tk_comb, self.hc_mult
+            ):
+                cuda_op = _get_cuda_mhc_post_op()
+                assert cuda_op is not None
+                cuda_op(tk_x, tk_residual, tk_post, tk_comb, tk_residual)
+                out = tk_residual
+            else:
+                out = tk_mhc_post(
+                    tk_x,
+                    tk_residual,
+                    tk_post,
+                    tk_comb,
+                    hc_mult=self.hc_mult,
+                    out=tk_residual,
+                )
         if out is None:
             _raise_unavailable("post", residual, self.hc_mult)
         return squeeze_hc_batch(out, wrapped, name="mhc_post output")

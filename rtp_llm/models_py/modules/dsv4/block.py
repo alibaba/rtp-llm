@@ -6,6 +6,7 @@ twice — once for Attention and once for MoE FFN.
 
 import logging
 import os
+from contextlib import nullcontext
 from typing import Callable, Dict, Optional, Tuple, Union
 
 import torch
@@ -14,6 +15,10 @@ import torch.nn as nn
 from rtp_llm.models_py.modules import RMSNorm
 from rtp_llm.models_py.modules.dsv4 import _profiler
 from rtp_llm.models_py.modules.dsv4.chunk_env import chunked_moe_enabled
+from rtp_llm.models_py.modules.dsv4.fp8._fused_qnorm_quant_triton import (
+    can_fuse_qnorm_fp8_ue8m0_quant,
+    fused_rmsnorm_fp8_ue8m0_quant,
+)
 from rtp_llm.models_py.modules.dsv4.fp8.attention import (
     AttentionFP8,
     CommitOnlyAttentionFP8,
@@ -51,6 +56,15 @@ _MOE_WEIGHT_NAMES = {
     "shared_down": W.v4_shared_w2_w,
     "shared_down_scale": W.v4_shared_w2_s,
 }
+
+
+def _is_unpatched_cuda_rmsnorm(norm: nn.Module) -> bool:
+    return (
+        isinstance(norm, RMSNorm)
+        and norm.__class__.__module__ == "rtp_llm.models_py.modules.base.cuda.norm"
+        and "forward" not in norm.__dict__
+        and type(norm).forward is RMSNorm.forward
+    )
 
 
 def _prefill_fast_norm(norm: nn.Module, x: torch.Tensor) -> torch.Tensor:
@@ -582,6 +596,101 @@ class Block(nn.Module):
             block_tables_by_type=block_tables_by_type,
         )
 
+    def _can_reuse_qkv_quant(self) -> bool:
+        return (
+            isinstance(self.attn, AttentionFP8)
+            and "can_fuse_prefill_attn_norm_input_quant" not in self.attn.__dict__
+            and "prefill_fused_attn_norm_input_quant" not in self.attn.__dict__
+            and "forward_with_shared_input_quant" not in self.attn.__dict__
+            and type(self.attn).can_fuse_prefill_attn_norm_input_quant
+            is AttentionFP8.can_fuse_prefill_attn_norm_input_quant
+            and type(self.attn).prefill_fused_attn_norm_input_quant
+            is AttentionFP8.prefill_fused_attn_norm_input_quant
+            and type(self.attn).forward_with_shared_input_quant
+            is AttentionFP8.forward_with_shared_input_quant
+            and self.attn._can_reuse_qkv_input_quant()
+            and bool(getattr(self.attn.wq_a, "scale_ue8m0", False))
+        )
+
+    def _forward_attn_fp8_with_post_hc_pre(
+        self,
+        x_pre: torch.Tensor,
+        positions: torch.Tensor,
+        *,
+        can_reuse_qkv_quant: bool,
+        kv_cache=None,
+        block_tables_by_type=None,
+        profile_fused: bool = False,
+        use_fast_norm: bool = False,
+    ) -> torch.Tensor:
+        if can_reuse_qkv_quant and _is_unpatched_cuda_rmsnorm(self.attn_norm):
+            weight = self.attn_norm.weight.data
+            if can_fuse_qnorm_fp8_ue8m0_quant(
+                x_pre, weight
+            ) and self.attn.can_fuse_prefill_attn_norm_input_quant(x_pre, weight):
+                range_ctx = (
+                    _profiler.record_function_range(
+                        "dsv4.fp8.attn.qkv.fused_attn_norm_input_quant"
+                    )
+                    if profile_fused
+                    else nullcontext()
+                )
+                with range_ctx:
+                    x_pre, shared_input_quant = fused_rmsnorm_fp8_ue8m0_quant(
+                        x_pre,
+                        weight,
+                        eps=self.attn_norm.variance_epsilon,
+                        emit_norm=True,
+                        out_norm=x_pre,
+                    )
+                attn_out = self.attn.forward_with_shared_input_quant(
+                    x_pre,
+                    positions,
+                    shared_input_quant,
+                    kv_cache=kv_cache,
+                    block_tables_by_type=block_tables_by_type,
+                )
+                del shared_input_quant
+                return attn_out
+        if (
+            isinstance(self.attn, AttentionFP8)
+            and hasattr(self.attn_norm, "weight")
+            and hasattr(self.attn_norm, "variance_epsilon")
+            and "forward" not in self.attn_norm.__dict__
+            and self.attn.can_fuse_prefill_attn_norm_input_quant(
+                x_pre, self.attn_norm.weight.data
+            )
+        ):
+            x_pre, shared_input_quant = self.attn.prefill_fused_attn_norm_input_quant(
+                x_pre,
+                self.attn_norm.weight.data,
+                self.attn_norm.variance_epsilon,
+            )
+            attn_out = self.attn.forward_with_shared_input_quant(
+                x_pre,
+                positions,
+                shared_input_quant,
+                kv_cache=kv_cache,
+                block_tables_by_type=block_tables_by_type,
+            )
+            del shared_input_quant
+            return attn_out
+        if use_fast_norm:
+            x_pre = _prefill_fast_norm(self.attn_norm, x_pre)
+        elif x_pre.dim() > 2:
+            bsz, q_len, dim_ = x_pre.shape
+            x_pre = self.attn_norm(x_pre.reshape(bsz * q_len, dim_)).view(
+                bsz, q_len, dim_
+            )
+        else:
+            x_pre = self.attn_norm(x_pre)
+        return self.attn(
+            x_pre,
+            positions,
+            kv_cache=kv_cache,
+            block_tables_by_type=block_tables_by_type,
+        )
+
     def _forward_prefill_fast_fp8(
         self,
         x: torch.Tensor,
@@ -609,20 +718,7 @@ class Block(nn.Module):
         ) = self._prefill_fast_hc_impls()
 
         residual = x
-        can_reuse_qkv_quant = (
-            isinstance(self.attn, AttentionFP8)
-            and "can_fuse_prefill_attn_norm_input_quant" not in self.attn.__dict__
-            and "prefill_fused_attn_norm_input_quant" not in self.attn.__dict__
-            and "forward_with_shared_input_quant" not in self.attn.__dict__
-            and type(self.attn).can_fuse_prefill_attn_norm_input_quant
-            is AttentionFP8.can_fuse_prefill_attn_norm_input_quant
-            and type(self.attn).prefill_fused_attn_norm_input_quant
-            is AttentionFP8.prefill_fused_attn_norm_input_quant
-            and type(self.attn).forward_with_shared_input_quant
-            is AttentionFP8.forward_with_shared_input_quant
-            and self.attn._can_reuse_qkv_input_quant()
-            and bool(getattr(self.attn.wq_a, "scale_ue8m0", False))
-        )
+        can_reuse_qkv_quant = self._can_reuse_qkv_quant()
         if (
             can_reuse_qkv_quant
             and attn_hc_pre == self.attn_hc._pre_impl
@@ -640,6 +736,7 @@ class Block(nn.Module):
                 kv_cache=kv_cache,
                 block_tables_by_type=block_tables_by_type,
             )
+            del shared_input_quant
         elif (
             not can_reuse_qkv_quant
             and attn_hc_pre == self.attn_hc._pre_impl
@@ -654,31 +751,15 @@ class Block(nn.Module):
             )
         else:
             x_pre, post, comb = attn_hc_pre(x)
-            if self.attn.can_fuse_prefill_attn_norm_input_quant(
-                x_pre, self.attn_norm.weight.data
-            ):
-                x_pre, shared_input_quant = (
-                    self.attn.prefill_fused_attn_norm_input_quant(
-                        x_pre,
-                        self.attn_norm.weight.data,
-                        self.attn_norm.variance_epsilon,
-                    )
-                )
-                attn_out = self.attn.forward_with_shared_input_quant(
-                    x_pre,
-                    positions,
-                    shared_input_quant,
-                    kv_cache=kv_cache,
-                    block_tables_by_type=block_tables_by_type,
-                )
-            else:
-                x_pre = _prefill_fast_norm(self.attn_norm, x_pre)
-                attn_out = self.attn(
-                    x_pre,
-                    positions,
-                    kv_cache=kv_cache,
-                    block_tables_by_type=block_tables_by_type,
-                )
+            attn_out = self._forward_attn_fp8_with_post_hc_pre(
+                x_pre,
+                positions,
+                can_reuse_qkv_quant=can_reuse_qkv_quant,
+                kv_cache=kv_cache,
+                block_tables_by_type=block_tables_by_type,
+                profile_fused=True,
+                use_fast_norm=True,
+            )
         fused = None
         if (
             attn_hc_post == self.attn_hc._post_impl
@@ -723,22 +804,68 @@ class Block(nn.Module):
         """
         # Attention path
         residual = x
-        x_pre, post, comb = self._hc_pre_norm_profiled(
-            x, self.attn_hc, self.attn_norm
-        )  # [T, dim], [T, hc, 1], [T, hc, hc]
-
         # AttentionFP8 is flat-native: takes [T, dim] + per-token positions,
         # no padding / per-request scalars. The runtime kv-cache dtype flag can
         # be false while this branch still constructs AttentionFP8, so dispatch
         # on the module type instead of only the cache config.
         if isinstance(self.attn, AttentionFP8):
-            attn_out = self.attn(
-                x_pre,  # [T, dim]
-                positions,  # [T] int64 absolute positions
-                kv_cache=kv_cache,
-                block_tables_by_type=block_tables_by_type,
-            )  # [T, dim]
+            can_reuse_qkv_quant = self._can_reuse_qkv_quant()
+            hc_pre_unpatched = (
+                "_hc_pre_norm_profiled" not in self.__dict__
+                and type(self)._hc_pre_norm_profiled is Block._hc_pre_norm_profiled
+            )
+            if (
+                can_reuse_qkv_quant
+                and hc_pre_unpatched
+                and can_use_fused_mhc_pre_norm(
+                    x, self.attn_hc, self.attn_norm, quant_ue8m0=True
+                )
+            ):
+                layer = (
+                    f"L{self.attn_hc.layer_id:02d}"
+                    if self.attn_hc.layer_id >= 0
+                    else "Lxx"
+                )
+                name = self.attn_hc.name or "unit"
+                with _profiler.record_function_range(
+                    f"dsv4.hc.{layer}.{name}.pre_norm"
+                ):
+                    x_pre, post, comb, shared_input_quant = fused_mhc_pre_norm_quant(
+                        x, self.attn_hc, self.attn_norm
+                    )
+                attn_out = self.attn.forward_with_shared_input_quant(
+                    x_pre,
+                    positions,
+                    shared_input_quant,
+                    kv_cache=kv_cache,
+                    block_tables_by_type=block_tables_by_type,
+                )
+                del shared_input_quant
+            elif can_reuse_qkv_quant and hc_pre_unpatched:
+                x_pre, post, comb = self.attn_hc.pre(x)
+                attn_out = self._forward_attn_fp8_with_post_hc_pre(
+                    x_pre,
+                    positions,
+                    can_reuse_qkv_quant=True,
+                    kv_cache=kv_cache,
+                    block_tables_by_type=block_tables_by_type,
+                    profile_fused=True,
+                    use_fast_norm=False,
+                )
+            else:
+                x_pre, post, comb = self._hc_pre_norm_profiled(
+                    x, self.attn_hc, self.attn_norm
+                )  # [T, dim], [T, hc, 1], [T, hc, hc]
+                attn_out = self.attn(
+                    x_pre,  # [T, dim]
+                    positions,  # [T] int64 absolute positions
+                    kv_cache=kv_cache,
+                    block_tables_by_type=block_tables_by_type,
+                )  # [T, dim]
         else:
+            x_pre, post, comb = self._hc_pre_norm_profiled(
+                x, self.attn_hc, self.attn_norm
+            )  # [T, dim], [T, hc, 1], [T, hc, hc]
             # Present flat [T, dim] as [B, S, dim] for Attention.  The common
             # prefill layouts (single request, or dense equal-length batch) are
             # already request-major, so a view is enough.  Ragged batches keep

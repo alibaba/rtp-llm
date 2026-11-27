@@ -290,8 +290,60 @@ def _select_chunked_launch(rows: int, chunk_d: int) -> tuple[int, int]:
     return 1, 1 if chunk_d <= 1024 else 2
 
 
+def _is_row_contiguous(t: torch.Tensor) -> bool:
+    if t.dim() == 2:
+        return t.stride(-1) == 1 and (t.shape[0] <= 1 or t.stride(0) >= t.shape[1])
+    return t.is_contiguous()
+
+
+def _row_stride(t: torch.Tensor) -> int:
+    return int(t.stride(0)) if t.dim() == 2 else int(t.shape[-1])
+
+
+def _has_16b_aligned_rows(t: torch.Tensor) -> bool:
+    width = int(t.shape[-1])
+    if width <= 0:
+        return False
+    row_stride = _row_stride(t)
+    if (row_stride * t.element_size()) % 16 != 0:
+        return False
+    rows = int(t.numel() // width)
+    if rows == 0:
+        return True
+    return int(t.data_ptr()) % 16 == 0
+
+
+def _tensor_span_bytes(t: torch.Tensor) -> tuple[int, int]:
+    if t.numel() == 0:
+        return 0, 0
+    if t.dim() == 2:
+        span_elems = (int(t.shape[0]) - 1) * int(t.stride(0)) + int(t.shape[1])
+    else:
+        span_elems = int(t.numel())
+    start = int(t.data_ptr())
+    return start, start + span_elems * t.element_size()
+
+
+def _scale_span_bytes(scale: torch.Tensor) -> tuple[int, int]:
+    rows, packs = int(scale.shape[0]), int(scale.shape[1])
+    if rows == 0 or packs == 0:
+        return 0, 0
+    span_elems = (packs - 1) * int(scale.stride(1)) + rows
+    start = int(scale.data_ptr())
+    return start, start + span_elems * scale.element_size()
+
+
+def _spans_overlap(span_a: tuple[int, int], span_b: tuple[int, int]) -> bool:
+    a_start, a_end = span_a
+    b_start, b_end = span_b
+    if a_start == a_end or b_start == b_end:
+        return False
+    return a_start < b_end and b_start < a_end
+
+
 def _validate_optional_outputs(
     x: torch.Tensor,
+    weight: torch.Tensor,
     rows: int,
     width: int,
     scale_packs: int,
@@ -309,13 +361,13 @@ def _validate_optional_outputs(
             )
         if out_norm.dtype != torch.bfloat16:
             raise ValueError(f"out_norm must be bf16, got {out_norm.dtype}")
-        if out_norm.device != x.device or not out_norm.is_contiguous():
-            raise ValueError("out_norm must be contiguous on the same CUDA device")
+        if out_norm.device != x.device or not _is_row_contiguous(out_norm):
+            raise ValueError("out_norm must be row-contiguous on the same CUDA device")
     elif emit_norm:
-        out_norm = torch.empty_like(x)
+        out_norm = torch.empty(x.shape, device=x.device, dtype=x.dtype)
 
     if out_q is None:
-        out_q = torch.empty_like(x, dtype=_FP8_DTYPE)
+        out_q = torch.empty(x.shape, device=x.device, dtype=_FP8_DTYPE)
     else:
         if out_q.shape != x.shape:
             raise ValueError(
@@ -323,8 +375,8 @@ def _validate_optional_outputs(
             )
         if out_q.dtype != _FP8_DTYPE:
             raise ValueError(f"out_q must be {_FP8_DTYPE}, got {out_q.dtype}")
-        if out_q.device != x.device or not out_q.is_contiguous():
-            raise ValueError("out_q must be contiguous on the same CUDA device")
+        if out_q.device != x.device or not _is_row_contiguous(out_q):
+            raise ValueError("out_q must be row-contiguous on the same CUDA device")
 
     if out_scale is None:
         out_scale = _make_ue8m0_scale_like(
@@ -342,6 +394,32 @@ def _validate_optional_outputs(
             raise ValueError(
                 "out_scale must be column-major TMA-aligned (stride(0)==1, stride(1)%4==0)"
             )
+
+    if rows > 0:
+        x_span = _tensor_span_bytes(x)
+        w_span = _tensor_span_bytes(weight)
+        q_span = _tensor_span_bytes(out_q)
+        s_span = _scale_span_bytes(out_scale)
+        if _spans_overlap(q_span, x_span) or _spans_overlap(q_span, w_span):
+            raise ValueError("out_q must not overlap x or weight")
+        if _spans_overlap(s_span, x_span) or _spans_overlap(s_span, w_span):
+            raise ValueError("out_scale must not overlap x or weight")
+        if _spans_overlap(q_span, s_span):
+            raise ValueError("out_q and out_scale must not overlap")
+        if out_norm is not None:
+            n_span = _tensor_span_bytes(out_norm)
+            if _spans_overlap(n_span, w_span):
+                raise ValueError("out_norm must not overlap weight")
+            if _spans_overlap(n_span, q_span) or _spans_overlap(n_span, s_span):
+                raise ValueError("out_norm must not overlap out_q or out_scale")
+            if _spans_overlap(n_span, x_span):
+                exact_inplace = out_norm.data_ptr() == x.data_ptr() and (
+                    rows <= 1 or _row_stride(out_norm) == _row_stride(x)
+                )
+                if not exact_inplace:
+                    raise ValueError(
+                        "out_norm overlapping x must be an exact in-place alias"
+                    )
     return out_norm, out_q, out_scale
 
 
@@ -364,10 +442,12 @@ def can_fuse_qnorm_fp8_ue8m0_quant(
         return False
     if x.dtype != torch.bfloat16 or weight.dtype != torch.bfloat16:
         return False
-    if x.dim() < 2 or not x.is_contiguous() or not weight.is_contiguous():
+    if x.dim() < 2 or not _is_row_contiguous(x) or not weight.is_contiguous():
         return False
     width = int(x.shape[-1])
     if width <= 0 or width % group_size != 0 or tuple(weight.shape) != (width,):
+        return False
+    if not _has_16b_aligned_rows(x) or int(weight.data_ptr()) % 16 != 0:
         return False
     return True
 
@@ -406,8 +486,8 @@ def fused_rmsnorm_fp8_ue8m0_quant(
         raise RuntimeError(
             "fused_rmsnorm_fp8_ue8m0_quant requires CUDA tensors on one device"
         )
-    if not x.is_contiguous() or not weight.is_contiguous():
-        raise ValueError("x and weight must be contiguous")
+    if not _is_row_contiguous(x) or not weight.is_contiguous():
+        raise ValueError("x must be row-contiguous and weight must be contiguous")
 
     width = int(x.shape[-1])
     if width <= 0 or width % group_size != 0:
@@ -417,13 +497,14 @@ def fused_rmsnorm_fp8_ue8m0_quant(
             f"weight must have shape ({width},), got {tuple(weight.shape)}"
         )
 
-    flat_x = x.view(-1, width)
+    flat_x = x if x.dim() == 2 else x.view(-1, width)
     rows = int(flat_x.shape[0])
     active_groups = width // group_size
     active_scale_packs = (active_groups + 3) // 4
 
     out_norm, out_q, out_scale = _validate_optional_outputs(
         x,
+        weight,
         rows,
         width,
         active_scale_packs,
@@ -432,11 +513,19 @@ def fused_rmsnorm_fp8_ue8m0_quant(
         out_q,
         out_scale,
     )
+    if _block_m is not None and int(_block_m) <= 0:
+        raise ValueError(f"_block_m must be positive, got {_block_m}")
+    if _num_warps is not None and int(_num_warps) <= 0:
+        raise ValueError(f"_num_warps must be positive, got {_num_warps}")
     if rows == 0:
         return out_norm, (out_q, out_scale)
 
-    flat_q = out_q.view(rows, width)
-    flat_norm = out_norm.view(rows, width) if emit_norm else flat_q
+    flat_q = out_q if out_q.dim() == 2 else out_q.view(rows, width)
+    flat_norm = (
+        (out_norm if out_norm.dim() == 2 else out_norm.view(rows, width))
+        if emit_norm
+        else flat_q
+    )
     norm_stride_m = int(flat_norm.stride(0)) if emit_norm else 0
     scale_stride_k = int(out_scale.stride(1))
 

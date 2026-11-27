@@ -196,9 +196,7 @@ class PrefillFastPathCudaTest(_PrefillForwardTestBase):
             )
             return actual[:, None], None, None
 
-        attn._prefill_output_proj_into = lambda o, freqs_cis, *, out: out.copy_(
-            o[:, 0]
-        )
+        attn._prefill_output_proj_into = lambda o, freqs_cis, *, out: out.copy_(o[:, 0])
         with patch.dict(
             "sys.modules",
             {
@@ -1133,6 +1131,225 @@ class PrefillFastPathCudaTest(_PrefillForwardTestBase):
                 torch.testing.assert_close(captured_scales[:live], eager_scales)
                 self.assertTrue(torch.all(captured_keys[live:] == 0))
                 self.assertTrue(torch.all(captured_scales[live:] == 0))
+
+    @torch.inference_mode()
+    def test_block_prefill_fast_and_forward_fuse_qnorm_quant_small_and_large_m(
+        self,
+    ) -> None:
+        from rtp_llm.models_py.kernels.cuda.fp8_kernel import (
+            sgl_per_token_group_quant_fp8,
+        )
+        from rtp_llm.models_py.modules.base.cuda.norm import RMSNorm
+        from rtp_llm.models_py.modules.dsv4.block import Block
+        from rtp_llm.models_py.modules.dsv4.hc import build_hc_unit
+
+        device = torch.device("cuda", torch.cuda.current_device())
+        dim = 4096
+        hc_mult = 4
+        eps = 1.0e-6
+
+        class _MockSharedQuantAttention(AttentionFP8):
+            def __init__(self) -> None:
+                nn.Module.__init__(self)
+                self.layer_id = 0
+                self._kv_cache = None
+                self._block_tables_by_type = None
+                self._cp_ctx = None
+                self.wq_a = SimpleNamespace(
+                    K=dim,
+                    scale_ue8m0=True,
+                    quantize_input=lambda x: sgl_per_token_group_quant_fp8(
+                        x,
+                        group_size=128,
+                        eps=1.0e-4,
+                        column_major_scales=True,
+                        scale_tma_aligned=True,
+                        scale_ue8m0=True,
+                    ),
+                    forward_quantized=lambda *args: None,
+                )
+                self.wkv = SimpleNamespace(
+                    K=dim,
+                    scale_ue8m0=True,
+                    forward_quantized=lambda *args: None,
+                )
+                self.calls: list[tuple[bool, torch.Tensor, tuple | None]] = []
+
+            def _set_compressor_pool_context(self) -> None:
+                return None
+
+            def _clear_compressor_pool_context(self) -> None:
+                return None
+
+            def _forward_prefill(
+                self, x, positions, shared_input_quant=None, **_kwargs
+            ):
+                cloned_quant = (
+                    (shared_input_quant[0].clone(), shared_input_quant[1].clone())
+                    if shared_input_quant is not None
+                    else None
+                )
+                self.calls.append(
+                    (shared_input_quant is not None, x.clone(), cloned_quant)
+                )
+                return x * 0.25
+
+            def forward(self, x, positions, **_kwargs):
+                return self._forward_prefill(x, positions, shared_input_quant=None)
+
+        def _make_hc(name: str):
+            rows = 2 * hc_mult + hc_mult * hc_mult
+            fn = (
+                torch.randn((rows, hc_mult * dim), dtype=torch.float32, device=device)
+                * 0.02
+            )
+            base = torch.randn((rows,), dtype=torch.float32, device=device) * 0.05
+            scale = torch.rand((3,), dtype=torch.float32, device=device) * 0.5 + 0.5
+            return build_hc_unit(
+                fn,
+                base,
+                scale,
+                dim=dim,
+                hc_mult=hc_mult,
+                hc_sinkhorn_iters=10,
+                norm_eps=eps,
+                hc_eps=eps,
+                layer_id=0,
+                name=name,
+            )
+
+        def _make_block():
+            blk = Block.__new__(Block)
+            nn.Module.__init__(blk)
+            blk.layer_id = 0
+            blk.fp8_kv_cache = False
+            blk._cp_sync_after_attn_done = True
+            blk.attn = _MockSharedQuantAttention()
+            blk.attn_norm = RMSNorm(
+                (
+                    torch.rand(dim, dtype=torch.bfloat16, device=device) + 0.5
+                ).contiguous(),
+                eps=eps,
+            )
+            blk.ffn_norm = RMSNorm(
+                (
+                    torch.rand(dim, dtype=torch.bfloat16, device=device) + 0.5
+                ).contiguous(),
+                eps=eps,
+            )
+            blk.attn_hc = _make_hc("attn")
+            blk.ffn_hc = _make_hc("ffn")
+
+            class _StubFFN:
+                strategy_name = "test"
+
+                def __call__(self, x_pre, input_ids, **_kw):
+                    return x_pre * 0.125
+
+            blk.ffn = _StubFFN()
+            blk._prefill_fast_hc_impls_cached = blk._resolve_prefill_fast_hc_impls()
+            blk._mega_csa_adapter = None
+            blk._mega_hca_adapter = None
+            return blk
+
+        torch.manual_seed(123)
+        block = _make_block()
+        for tokens in (16, 1024):
+            with self.subTest(tokens=tokens):
+                x = torch.randn(
+                    (tokens, hc_mult, dim), dtype=torch.bfloat16, device=device
+                )
+                input_ids = torch.arange(tokens, dtype=torch.long, device=device)
+                positions = torch.arange(tokens, dtype=torch.long, device=device)
+                cu_seqlens = torch.tensor([0, tokens], dtype=torch.long)
+
+                # Unfused reference for Attention pre-norm + quant.
+                x_pre_raw, post_ref, comb_ref = block.attn_hc.pre(x)
+                ref_norm = block.attn_norm(x_pre_raw.clone())
+                ref_q, ref_s = sgl_per_token_group_quant_fp8(
+                    ref_norm,
+                    group_size=128,
+                    eps=1.0e-4,
+                    column_major_scales=True,
+                    scale_tma_aligned=True,
+                    scale_ue8m0=True,
+                )
+                res_after_attn = block.attn_hc.post(
+                    ref_norm * 0.25, x.clone(), post_ref, comb_ref
+                )
+                ffn_pre_raw, ffn_post_ref, ffn_comb_ref = block.ffn_hc.pre(
+                    res_after_attn
+                )
+                ffn_norm_ref = block.ffn_norm(ffn_pre_raw.clone())
+                ref_out = block.ffn_hc.post(
+                    ffn_norm_ref * 0.125,
+                    res_after_attn.clone(),
+                    ffn_post_ref,
+                    ffn_comb_ref,
+                )
+
+                block.attn.calls.clear()
+                # Make prefill_fused_attn_norm_input_quant fail if called directly at M<1024.
+                with patch.object(
+                    AttentionFP8,
+                    "prefill_fused_attn_norm_input_quant",
+                    side_effect=AssertionError(
+                        "legacy rmsnorm_fp8_quant_ue8m0 fallback must not run"
+                    ),
+                ):
+                    fast_out = block._forward_prefill_fast_fp8(
+                        x.clone(), input_ids, positions, cu_seqlens
+                    )
+                    fwd_out = block.forward(x.clone(), input_ids, positions, cu_seqlens)
+
+                self.assertEqual(len(block.attn.calls), 2)
+                for path_idx, (used_shared, seen_norm, seen_quant) in enumerate(
+                    block.attn.calls
+                ):
+                    self.assertTrue(used_shared, msg=f"path={path_idx}")
+                    assert seen_quant is not None
+                    seen_q, seen_s = seen_quant
+                    torch.testing.assert_close(
+                        seen_norm, ref_norm, atol=2e-2, rtol=2e-2
+                    )
+                    q_diff = (
+                        seen_q.view(torch.uint8).to(torch.int16)
+                        - ref_q.view(torch.uint8).to(torch.int16)
+                    ).abs()
+                    self.assertLessEqual(int(q_diff.max().item()), 2)
+                    self.assertLessEqual(
+                        int(
+                            (seen_s.to(torch.int64) - ref_s.to(torch.int64))
+                            .abs()
+                            .max()
+                            .item()
+                        ),
+                        1,
+                    )
+
+                torch.testing.assert_close(fast_out, ref_out, atol=3e-2, rtol=3e-2)
+                torch.testing.assert_close(fwd_out, ref_out, atol=3e-2, rtol=3e-2)
+
+        # Fallback guard: patching attn_norm.forward must stay respected on Block.forward.
+        norm_called = [False]
+        orig_norm_fwd = block.attn_norm.forward
+
+        def custom_norm(t):
+            norm_called[0] = True
+            return orig_norm_fwd(t) * 2.0
+
+        block.attn.calls.clear()
+        block.attn_norm.forward = custom_norm
+        x16 = torch.randn((16, hc_mult, dim), dtype=torch.bfloat16, device=device)
+        _ = block.forward(
+            x16,
+            torch.arange(16, dtype=torch.long, device=device),
+            torch.arange(16, dtype=torch.long, device=device),
+            torch.tensor([0, 16], dtype=torch.long),
+        )
+        self.assertTrue(norm_called[0])
+        self.assertEqual(len(block.attn.calls), 1)
+        self.assertFalse(block.attn.calls[0][0])
 
 
 if __name__ == "__main__":

@@ -290,6 +290,18 @@ cc_library(
 )
 
 cc_library(
+    name = "dsv4_mhc_post",
+    srcs = ["dsv4_mhc_post.cu"],
+    hdrs = ["dsv4_mhc_post.h"],
+    deps = [
+        "//rtp_llm/models_py/bindings/cuda:cuda_host_utils",
+        "//rtp_llm/cpp/utils:core_utils",
+    ] + torch_deps(),
+    copts = cuda_copts(),
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
     name = "mtp_target_verify_prepare",
     srcs = ["mtp_target_verify_prepare.cu"],
     hdrs = ["mtp_target_verify_prepare.h"],
