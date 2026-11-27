@@ -10,37 +10,27 @@ that UT is the source of truth for both kernel and wrapper.
 
 from __future__ import annotations
 
-import os
-
 import torch
 import triton
 import triton.language as tl
-
-_BLACKWELL_GROUP_HEADS8_MIN_FREQ = 65536
-
-
-def _is_blackwell_device(device: torch.device | int | None = None) -> bool:
-    try:
-        major, _ = torch.cuda.get_device_capability(device)
-    except Exception:
-        return False
-    return major >= 10
 
 
 # ---------------------------------------------------------------------------
 # Candidate fused kernel — RMSNorm over last D + partial RoPE on last RD dims.
 # ---------------------------------------------------------------------------
-@triton.jit
+@triton.jit(do_not_specialize=["max_pos"])
 def _fused_rmsnorm_rope_kernel(
     x_ptr,
     w_ptr,
     freqs_ri_ptr,
+    pos_ptr,
     out_ptr,
     x_stride_n,
     out_stride_n,
     freq_stride_n: tl.constexpr,
     freqs_stride_b,
     freqs_stride_k,
+    max_pos,
     D: tl.constexpr,
     RD: tl.constexpr,
     RD_HALF: tl.constexpr,
@@ -48,7 +38,10 @@ def _fused_rmsnorm_rope_kernel(
     INVERSE: tl.constexpr,
     EPS: tl.constexpr,
     HAS_WEIGHT: tl.constexpr,
+    HAS_POS: tl.constexpr,
     BLOCK_D: tl.constexpr,
+    BLOCK_RD: tl.constexpr,
+    BLOCK_RD_HALF: tl.constexpr,
 ):
     # Cast pid to int64 BEFORE the row-stride multiply: the prefill Q
     # site flattens [B, S, H, D] to [B*S*H, D], so N can exceed 2^22 and
@@ -80,72 +73,61 @@ def _fused_rmsnorm_rope_kernel(
     if RD == 0:
         tl.store(out_row + d_off, y, mask=d_mask)
     else:
-        EVEN_NOPE: tl.constexpr = (NOPE_OFFSET % 2) == 0
-        if EVEN_NOPE:
-            NUM_PAIRS: tl.constexpr = BLOCK_D // 2
-            NOPE_PAIRS: tl.constexpr = NOPE_OFFSET // 2
-            pair_off = tl.arange(0, NUM_PAIRS)
-            rope_pair_local = pair_off - NOPE_PAIRS
-            is_rope_pair = (rope_pair_local >= 0) & (rope_pair_local < RD_HALF)
-            cs_idx = tl.where(is_rope_pair, rope_pair_local, 0)
-
-            freq_base = (
-                freqs_ri_ptr + freq_idx * freqs_stride_b + cs_idx * freqs_stride_k
-            )
-            cos = tl.load(freq_base, mask=is_rope_pair, other=1.0)
-            sin = tl.load(freq_base + 1, mask=is_rope_pair, other=0.0)
-            if INVERSE:
-                sin = -sin
-
-            y_even, y_odd = tl.split(tl.reshape(y, (NUM_PAIRS, 2)))
-            rot_even = y_even * cos - y_odd * sin
-            rot_odd = y_even * sin + y_odd * cos
-            new_even = tl.where(is_rope_pair, rot_even, y_even)
-            new_odd = tl.where(is_rope_pair, rot_odd, y_odd)
-            out_y = tl.interleave(new_even, new_odd)
-            tl.store(out_row + d_off, out_y, mask=d_mask)
-        else:
+        # Store NoPE prefix directly so the full [BLOCK_D] register live range
+        # ends before RoPE loads/rotates the trailing [NOPE_OFFSET, D) slice.
+        # RoPE columns remain untouched in x_row even when out aliases x.
+        if NOPE_OFFSET > 0:
             nope_mask = d_mask & (d_off < NOPE_OFFSET)
             tl.store(out_row + d_off, y, mask=nope_mask)
 
-            pair_off = tl.arange(0, RD_HALF)
-            real_off = NOPE_OFFSET + 2 * pair_off
-            imag_off = real_off + 1
+        if HAS_POS:
+            pos_val = tl.load(pos_ptr + freq_idx).to(tl.int64)
+            row_idx = tl.maximum(tl.minimum(pos_val, max_pos - 1), 0)
+        else:
+            row_idx = freq_idx
 
-            real = tl.load(x_row + real_off).to(tl.float32) * inv
-            imag = tl.load(x_row + imag_off).to(tl.float32) * inv
-            if HAS_WEIGHT:
-                w_real = tl.load(w_ptr + real_off).to(tl.float32)
-                w_imag = tl.load(w_ptr + imag_off).to(tl.float32)
-                real = real * w_real
-                imag = imag * w_imag
+        rope_off = tl.arange(0, BLOCK_RD)
+        rope_mask = rope_off < RD
+        x_rope = tl.load(
+            x_row + NOPE_OFFSET + rope_off, mask=rope_mask, other=0.0
+        ).to(tl.float32)
+        y_rope = x_rope * inv
+        if HAS_WEIGHT:
+            w_rope = tl.load(
+                w_ptr + NOPE_OFFSET + rope_off, mask=rope_mask, other=0.0
+            ).to(tl.float32)
+            y_rope = y_rope * w_rope
 
-            freq_base = (
-                freqs_ri_ptr + freq_idx * freqs_stride_b + pair_off * freqs_stride_k
-            )
-            cos = tl.load(freq_base)
-            sin = tl.load(freq_base + 1)
-            if INVERSE:
-                sin = -sin
+        pair_off = tl.arange(0, BLOCK_RD_HALF)
+        pair_mask = pair_off < RD_HALF
+        freq_base = (
+            freqs_ri_ptr + row_idx * freqs_stride_b + pair_off * freqs_stride_k
+        )
+        cos = tl.load(freq_base, mask=pair_mask, other=1.0)
+        sin = tl.load(freq_base + 1, mask=pair_mask, other=0.0)
+        if INVERSE:
+            sin = -sin
 
-            new_real = real * cos - imag * sin
-            new_imag = real * sin + imag * cos
+        y_even, y_odd = tl.split(tl.reshape(y_rope, (BLOCK_RD_HALF, 2)))
+        rot_even = y_even * cos - y_odd * sin
+        rot_odd = y_even * sin + y_odd * cos
+        out_rope = tl.interleave(rot_even, rot_odd)
+        tl.store(out_row + NOPE_OFFSET + rope_off, out_rope, mask=rope_mask)
 
-            tl.store(out_row + real_off, new_real)
-            tl.store(out_row + imag_off, new_imag)
 
-
-@triton.jit
+@triton.jit(do_not_specialize=["max_pos"])
 def _fused_rmsnorm_rope_group_heads_kernel(
     x_ptr,
     w_ptr,
     freqs_ri_ptr,
+    pos_ptr,
     out_ptr,
     x_stride_n,
     out_stride_n,
     freq_stride_n: tl.constexpr,
     freqs_stride_b,
     freqs_stride_k,
+    max_pos,
     D: tl.constexpr,
     RD: tl.constexpr,
     RD_HALF: tl.constexpr,
@@ -153,7 +135,10 @@ def _fused_rmsnorm_rope_group_heads_kernel(
     INVERSE: tl.constexpr,
     EPS: tl.constexpr,
     HAS_WEIGHT: tl.constexpr,
+    HAS_POS: tl.constexpr,
     BLOCK_D: tl.constexpr,
+    BLOCK_RD: tl.constexpr,
+    BLOCK_RD_HALF: tl.constexpr,
     GROUP_HEADS: tl.constexpr,
 ):
     freq_idx = tl.program_id(0).to(tl.int64)
@@ -178,26 +163,53 @@ def _fused_rmsnorm_rope_group_heads_kernel(
     if RD == 0:
         tl.store(out_rows + d_off[None, :], y, mask=d_mask[None, :])
     else:
-        NUM_PAIRS: tl.constexpr = BLOCK_D // 2
-        NOPE_PAIRS: tl.constexpr = NOPE_OFFSET // 2
-        pair_off = tl.arange(0, NUM_PAIRS)
-        rope_pair_local = pair_off - NOPE_PAIRS
-        is_rope_pair = (rope_pair_local >= 0) & (rope_pair_local < RD_HALF)
-        cs_idx = tl.where(is_rope_pair, rope_pair_local, 0)
+        # Pure scaled-RMSNorm store for NoPE columns [0, NOPE_OFFSET); skip
+        # tl.split/tl.interleave and cos/sin math on all non-RoPE columns.
+        if NOPE_OFFSET > 0:
+            nope_mask = d_mask & (d_off < NOPE_OFFSET)
+            tl.store(out_rows + d_off[None, :], y, mask=nope_mask[None, :])
 
-        freq_base = freqs_ri_ptr + freq_idx * freqs_stride_b + cs_idx * freqs_stride_k
-        cos = tl.load(freq_base, mask=is_rope_pair, other=1.0)
-        sin = tl.load(freq_base + 1, mask=is_rope_pair, other=0.0)
+        if HAS_POS:
+            pos_val = tl.load(pos_ptr + freq_idx).to(tl.int64)
+            row_idx = tl.maximum(tl.minimum(pos_val, max_pos - 1), 0)
+        else:
+            row_idx = freq_idx
+
+        pair_off = tl.arange(0, BLOCK_RD_HALF)
+        pair_mask = pair_off < RD_HALF
+        freq_base = (
+            freqs_ri_ptr + row_idx * freqs_stride_b + pair_off * freqs_stride_k
+        )
+        cos = tl.load(freq_base, mask=pair_mask, other=1.0)
+        sin = tl.load(freq_base + 1, mask=pair_mask, other=0.0)
         if INVERSE:
             sin = -sin
 
-        y_even, y_odd = tl.split(tl.reshape(y, (GROUP_HEADS, NUM_PAIRS, 2)))
+        rope_off = tl.arange(0, BLOCK_RD)
+        rope_mask = rope_off < RD
+        x_rope = tl.load(
+            x_rows + (NOPE_OFFSET + rope_off)[None, :],
+            mask=rope_mask[None, :],
+            other=0.0,
+        ).to(tl.float32)
+        y_rope = x_rope * inv[:, None]
+        if HAS_WEIGHT:
+            w_rope = tl.load(
+                w_ptr + NOPE_OFFSET + rope_off, mask=rope_mask, other=0.0
+            ).to(tl.float32)
+            y_rope = y_rope * w_rope[None, :]
+
+        y_even, y_odd = tl.split(
+            tl.reshape(y_rope, (GROUP_HEADS, BLOCK_RD_HALF, 2))
+        )
         rot_even = y_even * cos[None, :] - y_odd * sin[None, :]
         rot_odd = y_even * sin[None, :] + y_odd * cos[None, :]
-        new_even = tl.where(is_rope_pair[None, :], rot_even, y_even)
-        new_odd = tl.where(is_rope_pair[None, :], rot_odd, y_odd)
-        out_y = tl.interleave(new_even, new_odd)
-        tl.store(out_rows + d_off[None, :], out_y, mask=d_mask[None, :])
+        out_rope = tl.interleave(rot_even, rot_odd)
+        tl.store(
+            out_rows + (NOPE_OFFSET + rope_off)[None, :],
+            out_rope,
+            mask=rope_mask[None, :],
+        )
 
 
 def fused_rmsnorm_rope(
@@ -211,16 +223,20 @@ def fused_rmsnorm_rope(
     out: torch.Tensor | None = None,
     inplace: bool = False,
     group_heads: int | None = None,
+    position_ids: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Fused RMSNorm-over-last-dim + partial RoPE on the final ``rope_head_dim`` cols.
 
     ``x``          may be ``[B, S, D]`` (single-head, e.g. KV) or
                    ``[B, S, H, D]`` (multi-head, e.g. Q).
     ``freqs_cis``  complex64 with any leading shape whose total element count
-                   N_freq divides the number of tokens in ``x``.  Supports:
+                   N_freq divides the number of tokens in ``x`` (when
+                   ``position_ids is None``), or the full 2D position table
+                   ``[max_pos, RD/2]`` when ``position_ids`` is given. Supports:
                      - decode per-request:  ``[B, RD/2]``
                      - prefill per-position:``[S, RD/2]`` or ``[B, S, RD/2]``
                      - batched decode:      ``[B, 1, RD/2]``
+                     - inline table lookup: ``[max_pos, RD/2]`` + ``position_ids``
                    Mapping: each freq slot covers ``N_tokens // N_freq``
                    consecutive tokens in the ravelled x layout.
 
@@ -265,28 +281,51 @@ def fused_rmsnorm_rope(
         w = torch.empty(1, dtype=torch.float32, device=x.device)
         has_weight = False
 
-    freqs_flat = freqs_cis.view(-1, freqs_cis.shape[-1])
-    N_freq = freqs_flat.shape[0]
-    assert N % N_freq == 0, f"N_tokens={N} not divisible by N_freq={N_freq}"
-    freq_stride_n = N // N_freq
-    freqs_ri = torch.view_as_real(freqs_flat)
-    assert freqs_ri.shape == (N_freq, RD // 2, 2)
+    if position_ids is not None:
+        assert freqs_cis.dim() == 2
+        pos_flat = position_ids.reshape(-1)
+        if pos_flat.device != x.device:
+            pos_flat = pos_flat.to(device=x.device)
+        if pos_flat.dtype not in (torch.int32, torch.int64):
+            pos_flat = pos_flat.to(dtype=torch.int32)
+        if not pos_flat.is_contiguous():
+            pos_flat = pos_flat.contiguous()
+        N_freq = pos_flat.shape[0]
+        assert N % N_freq == 0, f"N_tokens={N} not divisible by pos_len={N_freq}"
+        freq_stride_n = N // N_freq
+        freqs_ri = torch.view_as_real(freqs_cis)
+        max_pos = freqs_ri.shape[0]
+        assert freqs_ri.shape[1:] == (RD // 2, 2)
+        has_pos = True
+    else:
+        pos_flat = None
+        freqs_flat = freqs_cis.view(-1, freqs_cis.shape[-1])
+        N_freq = freqs_flat.shape[0]
+        assert N % N_freq == 0, f"N_tokens={N} not divisible by N_freq={N_freq}"
+        freq_stride_n = N // N_freq
+        freqs_ri = torch.view_as_real(freqs_flat)
+        max_pos = 1
+        assert freqs_ri.shape == (N_freq, RD // 2, 2)
+        has_pos = False
 
     BLOCK_D = triton.next_power_of_2(D)
     assert BLOCK_D <= 4096
+    BLOCK_RD = triton.next_power_of_2(max(RD, 2))
+    BLOCK_RD_HALF = BLOCK_RD // 2
 
     if group_heads is not None:
         selected_group_heads = group_heads
     else:
         selected_group_heads = 1
-        if _is_blackwell_device(x.device):
-            group_heads8_min_freq = int(
-                os.environ.get(
-                    "DSV4_RMSNORM_ROPE_GROUP_HEADS8_MIN_FREQ",
-                    str(_BLACKWELL_GROUP_HEADS8_MIN_FREQ),
-                )
-            )
-            selected_group_heads = 8 if N_freq >= group_heads8_min_freq else 4
+        if D <= 512 and not inplace:
+            for gh in (8, 4, 2):
+                if (
+                    gh * D <= 2048
+                    and freq_stride_n % gh == 0
+                    and (freq_stride_n // gh) <= 65535
+                ):
+                    selected_group_heads = gh
+                    break
     if selected_group_heads not in (1, 2, 4, 8):
         raise ValueError(
             f"invalid group_heads={selected_group_heads}; " "expected 1, 2, 4, or 8"
@@ -297,7 +336,6 @@ def fused_rmsnorm_rope(
         and freq_stride_n % selected_group_heads == 0
         and (freq_stride_n // selected_group_heads) <= 65535
         and D <= 512
-        and (D - RD) % 2 == 0
     )
     if can_group_heads:
         grid = (N_freq, freq_stride_n // selected_group_heads)
@@ -308,12 +346,14 @@ def fused_rmsnorm_rope(
             x_flat,
             w,
             freqs_ri,
+            pos_flat,
             out_flat,
             x_flat.stride(0),
             out_flat.stride(0),
             freq_stride_n=freq_stride_n,
             freqs_stride_b=freqs_ri.stride(0),
             freqs_stride_k=freqs_ri.stride(1),
+            max_pos=max_pos,
             D=D,
             RD=RD,
             RD_HALF=RD // 2,
@@ -321,21 +361,27 @@ def fused_rmsnorm_rope(
             INVERSE=inverse,
             EPS=eps,
             HAS_WEIGHT=has_weight,
+            HAS_POS=has_pos,
             BLOCK_D=BLOCK_D,
+            BLOCK_RD=BLOCK_RD,
+            BLOCK_RD_HALF=BLOCK_RD_HALF,
             GROUP_HEADS=selected_group_heads,
             num_warps=group_num_warps,
+            num_stages=1,
         )
     else:
         _fused_rmsnorm_rope_kernel[(N,)](
             x_flat,
             w,
             freqs_ri,
+            pos_flat,
             out_flat,
             x_flat.stride(0),
             out_flat.stride(0),
             freq_stride_n=freq_stride_n,
             freqs_stride_b=freqs_ri.stride(0),
             freqs_stride_k=freqs_ri.stride(1),
+            max_pos=max_pos,
             D=D,
             RD=RD,
             RD_HALF=RD // 2,
@@ -343,7 +389,11 @@ def fused_rmsnorm_rope(
             INVERSE=inverse,
             EPS=eps,
             HAS_WEIGHT=has_weight,
+            HAS_POS=has_pos,
             BLOCK_D=BLOCK_D,
+            BLOCK_RD=BLOCK_RD,
+            BLOCK_RD_HALF=BLOCK_RD_HALF,
             num_warps=4 if BLOCK_D <= 512 else 8,
+            num_stages=1,
         )
     return out_flat.view(*orig_shape)

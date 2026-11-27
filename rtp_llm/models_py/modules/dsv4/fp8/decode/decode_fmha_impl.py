@@ -108,7 +108,70 @@ class DSv4DecodeFmhaImplFP8:
         self._paged_tokens_per_block: Dict[str, int] = {
             tag: spec[1] for tag, spec in config.paged_pool_specs.items()
         }
+        self._uses_in_graph_prepare: bool = False
+        self._alias_pool_block_tables(attn_inputs, config.max_batch_size)
         self.prepare(attn_inputs, forbid_realloc=True)
+
+    def _alias_pool_block_tables(self, attn_inputs: Any, max_batch_size: int) -> None:
+        """Alias metadata.pool_block_tables directly to framework CUDA block tables."""
+        paged_block_tables = self._extract_paged_block_tables(attn_inputs)
+        if not paged_block_tables:
+            return
+        for tag, src_bt in paged_block_tables.items():
+            dst_bt = self.metadata.pool_block_tables.get(tag)
+            if (
+                dst_bt is not None
+                and src_bt.is_cuda
+                and src_bt.dtype == torch.int32
+                and src_bt.is_contiguous()
+                and src_bt.dim() == 2
+                and int(src_bt.shape[0]) == max_batch_size
+                and int(src_bt.shape[1]) >= int(dst_bt.shape[1])
+            ):
+                self.metadata.pool_block_tables[tag] = src_bt
+
+    def _can_use_in_graph_prepare(self, attn_inputs: Any) -> bool:
+        # Subclasses overriding prepare_cuda_graph (e.g. PPU) manage their own path.
+        if (
+            type(self).prepare_cuda_graph
+            is not DSv4DecodeFmhaImplFP8.prepare_cuda_graph
+        ):
+            return False
+        if self.device.type != "cuda":
+            return False
+        primary = primary_attention_inputs(attn_inputs)
+        if primary is None or isinstance(primary, torch.Tensor):
+            return False
+        is_target_verify = bool(getattr(primary, "is_target_verify", False))
+        is_prefill = bool(getattr(primary, "is_prefill", False))
+        length_field = (
+            "prefix_lengths_device"
+            if (is_target_verify or (is_prefill and self.config.q_len > 1))
+            else "sequence_lengths_plus_1_device"
+        )
+        dev_src = getattr(primary, length_field, None)
+        if (
+            not isinstance(dev_src, torch.Tensor)
+            or not dev_src.is_cuda
+            or dev_src.numel() <= 0
+        ):
+            return False
+        if self._paged_entries_per_block:
+            paged_block_tables = self._extract_paged_block_tables(attn_inputs)
+            if not paged_block_tables:
+                return False
+            if not all(
+                isinstance(bt, torch.Tensor) and bt.is_cuda
+                for bt in paged_block_tables.values()
+            ):
+                return False
+        if any(r not in (4, 128) for r in self.metadata.slot_mapping_compressed):
+            return False
+        return True
+
+    def uses_in_graph_prepare(self) -> bool:
+        """Return whether metadata refresh executes inside the captured CUDA graph."""
+        return self._uses_in_graph_prepare
 
     def support_cuda_graph(self) -> bool:
         # Always True for this impl class — the legacy ``callable(getattr(...))``
@@ -167,6 +230,7 @@ class DSv4DecodeFmhaImplFP8:
         written before each replay by :meth:`prepare_cuda_graph`. See
         ``opt_flash_mla/design/01_cuda_graph_sched_meta_freeze.md``.
         """
+        self._uses_in_graph_prepare = self._can_use_in_graph_prepare(attn_inputs)
         paged_block_tables = self._extract_paged_block_tables(attn_inputs)
         update_decode_metadata_in_place_fp8(
             self.metadata,
@@ -176,6 +240,25 @@ class DSv4DecodeFmhaImplFP8:
             paged_pool_entries_per_block=self._paged_entries_per_block,
             paged_pool_tokens_per_block=self._paged_tokens_per_block,
             capture_full_width_lengths=True,
+        )
+
+    def update_on_device(self, attn_inputs: Any) -> None:
+        """Refresh metadata on device inside CUDA graph warmup/capture/replay."""
+        paged_block_tables = self._extract_paged_block_tables(attn_inputs)
+        if self._paged_entries_per_block and paged_block_tables is None:
+            raise RuntimeError(
+                "update_on_device: paged_pool_specs configured "
+                "but paged_block_tables is empty — "
+                "framework did not provide block tables"
+            )
+        update_decode_metadata_in_place_fp8(
+            self.metadata,
+            primary_attention_inputs(attn_inputs),
+            forbid_realloc=False,
+            paged_block_tables=paged_block_tables,
+            paged_pool_entries_per_block=self._paged_entries_per_block,
+            paged_pool_tokens_per_block=self._paged_tokens_per_block,
+            capture_full_width_lengths=False,
         )
 
     def prepare_cuda_graph(self, attn_inputs: Any) -> None:

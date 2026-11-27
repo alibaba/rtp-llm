@@ -17,7 +17,7 @@ the original per-op path, kept for warmup / unit tests.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Optional
 
 import torch
 
@@ -37,9 +37,10 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
 def decode_output_proj(
     attn: "AttentionFP8",
     o: torch.Tensor,  # [B, q_len, H, D]
-    freqs_cis: torch.Tensor,  # [B, freqs_dim] or flat [B*q_len, freqs_dim]
+    freqs_cis: torch.Tensor,  # [B/M, freqs_dim] or [max_pos, freqs_dim]
     bsz: int,
     q_len: int,
+    position_ids: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     """Inverse-RoPE + grouped ``wo_a`` + ``wo_b`` + (TP) all-reduce.
 
@@ -63,9 +64,17 @@ def decode_output_proj(
             heads_per_group=attn.n_heads // attn.n_groups,
             nope_dim=attn.head_dim - attn.rope_head_dim,
             rope_head_dim=attn.rope_head_dim,
+            position_ids=position_ids,
         )
         o = attn._wo_a_einsum_from_fp8(o_fp8, o_scale, bsz, q_len)
     else:
+        if position_ids is not None:
+            freqs_cis = freqs_cis.index_select(
+                0,
+                position_ids.reshape(-1).to(
+                    device=freqs_cis.device, dtype=torch.long
+                ),
+            ).contiguous()
         if freqs_cis.dim() == 2 and int(freqs_cis.shape[0]) == bsz:
             apply_rotary_emb_batched(o[..., -rd:], freqs_cis, inverse=True)
         else:

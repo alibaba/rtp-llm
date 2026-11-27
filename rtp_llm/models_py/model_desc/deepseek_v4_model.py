@@ -1272,7 +1272,7 @@ class DeepSeekV4Model(GptModelBase):
         impl = _DecodeFmhaImpl(
             cfg,
             device=device,
-            attn_inputs=attn,
+            attn_inputs=inputs.attention_inputs,
         )
         # Phase F: pool views resolved on demand in Attention — no
         # per-layer descriptor cache to stash on metadata.

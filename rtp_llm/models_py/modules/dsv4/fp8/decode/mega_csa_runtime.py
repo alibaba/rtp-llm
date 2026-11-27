@@ -88,6 +88,13 @@ class MegaCSARuntime:
             int,
             Tuple[ReferenceType, Optional[int], Tuple[torch.Tensor, torch.Tensor]],
         ] = {}
+        self._hca_sub16_workspaces: Dict[
+            Tuple[int, int, str, CSAGeometry], MegaHCALayerWorkspace
+        ] = {}
+        self._hca_front_inputs: Dict[
+            Tuple[int, str],
+            Tuple[torch.Tensor, torch.Tensor, Tuple[int, int, int]],
+        ] = {}
 
     def begin_decode(self, metadata: Any) -> None:
         """Mark one Python forward for shared metadata and schedule lifetime."""
@@ -286,11 +293,19 @@ class MegaCSARuntime:
     ) -> MegaHCALayerWorkspace:
         """HCA twin of :meth:`layer_workspace`.
 
-        The HCA front op zeroes rows ``[m, physical_m)`` itself, so the three
-        activation buffers it reads are allocated at the padded row count.
+        When ``m < 16``, caches a persistent workspace with ``physical_m = 16``
+        pre-zeroed once at allocation time so rows ``[m, 16)`` stay zero across
+        all layers and CUDA-graph replays without per-call memset launches.
         """
         g = geometry
-        physical_m = max(m, 16)
+        sub16 = m < 16
+        cache_key = (m, num_split, str(device), g)
+        if sub16:
+            cached = self._hca_sub16_workspaces.get(cache_key)
+            if cached is not None:
+                return cached
+
+        physical_m = 16 if sub16 else m
         o_heads_per_group = g.main_heads // g.o_groups
         o_aligned_m = ((m + 3) // 4) * 4
         o_proj_fp8 = torch.empty(
@@ -312,34 +327,95 @@ class MegaCSARuntime:
             )
             .transpose(0, 1)
         )
-        return MegaHCALayerWorkspace(
-            hc_partial=torch.empty(
-                num_split, m, HC_MIX, dtype=torch.float32, device=device
-            ),
-            hc_sum_sq=torch.empty(num_split, m, dtype=torch.float32, device=device),
-            collapsed=torch.empty(
+        if sub16:
+            collapsed = torch.zeros(
                 physical_m, g.dim, dtype=torch.bfloat16, device=device
-            ),
-            pre=torch.empty(m, HC, dtype=torch.float32, device=device),
-            post=torch.empty(m, HC, dtype=torch.float32, device=device),
-            comb=torch.empty(m, HC, HC, dtype=torch.float32, device=device),
-            mix=torch.empty(m, HC_MIX, dtype=torch.float32, device=device),
-            hidden_fp8=torch.empty(
+            )
+            post = torch.zeros(physical_m, HC, dtype=torch.float32, device=device)
+            comb = torch.zeros(physical_m, HC, HC, dtype=torch.float32, device=device)
+            mix = torch.zeros(physical_m, HC_MIX, dtype=torch.float32, device=device)
+            hidden_fp8 = torch.empty(
                 physical_m, g.dim, dtype=torch.float8_e4m3fn, device=device
-            ),
-            hidden_sf=torch.empty(
+            )
+            hidden_fp8.view(torch.uint8).zero_()
+            hidden_sf = torch.zeros(
                 physical_m, g.dim // 128, dtype=torch.uint8, device=device
-            ),
-            front_out=torch.empty(
+            )
+            front_out = torch.zeros(
                 physical_m,
                 g.front_fp8_rows,
                 dtype=torch.bfloat16,
                 device=device,
+            )
+        else:
+            collapsed = torch.empty(
+                physical_m, g.dim, dtype=torch.bfloat16, device=device
+            )
+            post = torch.empty(m, HC, dtype=torch.float32, device=device)
+            comb = torch.empty(m, HC, HC, dtype=torch.float32, device=device)
+            mix = torch.empty(m, HC_MIX, dtype=torch.float32, device=device)
+            hidden_fp8 = torch.empty(
+                physical_m, g.dim, dtype=torch.float8_e4m3fn, device=device
+            )
+            hidden_sf = torch.empty(
+                physical_m, g.dim // 128, dtype=torch.uint8, device=device
+            )
+            front_out = torch.empty(
+                physical_m,
+                g.front_fp8_rows,
+                dtype=torch.bfloat16,
+                device=device,
+            )
+        workspace = MegaHCALayerWorkspace(
+            hc_partial=torch.empty(
+                num_split, m, HC_MIX, dtype=torch.float32, device=device
             ),
+            hc_sum_sq=torch.empty(num_split, m, dtype=torch.float32, device=device),
+            collapsed=collapsed,
+            pre=torch.empty(m, HC, dtype=torch.float32, device=device),
+            post=post,
+            comb=comb,
+            mix=mix,
+            hidden_fp8=hidden_fp8,
+            hidden_sf=hidden_sf,
+            front_out=front_out,
             q_raw=torch.empty(m, g.n_main, dtype=torch.bfloat16, device=device),
             o_proj_fp8=o_proj_fp8,
             o_proj_scale=o_proj_scale,
         )
+        if sub16:
+            self._hca_sub16_workspaces[cache_key] = workspace
+        return workspace
+
+    def hca_padded_front_inputs(
+        self,
+        positions_i64: torch.Tensor,
+        state_rows: torch.Tensor,
+        m: int,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Return 16-row padded inputs for sub-16 HCA front, copied once/step."""
+        if m >= 16:
+            return positions_i64, state_rows
+        key = (m, str(positions_i64.device))
+        sig = (self._step, int(positions_i64.data_ptr()), int(state_rows.data_ptr()))
+        cached = self._hca_front_inputs.get(key)
+        if cached is None:
+            positions_pad = torch.zeros(
+                16, dtype=torch.int64, device=positions_i64.device
+            )
+            state_rows_pad = torch.full(
+                (16,), -1, dtype=torch.int64, device=state_rows.device
+            )
+            positions_pad[:m].copy_(positions_i64)
+            state_rows_pad[:m].copy_(state_rows[:m])
+            self._hca_front_inputs[key] = (positions_pad, state_rows_pad, sig)
+            return positions_pad, state_rows_pad
+        positions_pad, state_rows_pad, prev_sig = cached
+        if prev_sig != sig:
+            positions_pad[:m].copy_(positions_i64)
+            state_rows_pad[:m].copy_(state_rows[:m])
+            self._hca_front_inputs[key] = (positions_pad, state_rows_pad, sig)
+        return positions_pad, state_rows_pad
 
     def hca_slot_mappings(self, metadata: Any, m: int) -> MegaHCASlotMappings:
         from rtp_llm.models_py.modules.dsv4.kv_cache_utils import (

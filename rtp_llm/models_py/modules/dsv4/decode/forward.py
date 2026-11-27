@@ -394,11 +394,13 @@ def forward_decode(
     # eager path does CPU→GPU copies on ``attn.sequence_lengths`` which are
     # rejected inside a CUDA stream capture.
     _graph_impl_types: Tuple[type, ...] = (DSv4DecodeFmhaImpl,)
+    _fp8_impl_type: Optional[type] = None
     try:
         from rtp_llm.models_py.modules.dsv4.fp8.decode.decode_fmha_impl import (
             DSv4DecodeFmhaImplFP8,
         )
 
+        _fp8_impl_type = DSv4DecodeFmhaImplFP8
         _graph_impl_types = (DSv4DecodeFmhaImpl, DSv4DecodeFmhaImplFP8)
     except ImportError:
         pass
@@ -419,6 +421,12 @@ def forward_decode(
     input_ids = input_ids.reshape(-1)
 
     if isinstance(fmha_impl, _graph_impl_types):
+        if (
+            _fp8_impl_type is not None
+            and isinstance(fmha_impl, _fp8_impl_type)
+            and fmha_impl.uses_in_graph_prepare()
+        ):
+            fmha_impl.update_on_device(attn_inputs)
         meta = fmha_impl.metadata
     else:
         paged_specs = build_paged_pool_specs(

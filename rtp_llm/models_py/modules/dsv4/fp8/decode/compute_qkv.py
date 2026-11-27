@@ -41,6 +41,7 @@ def decode_compute_qkv(
     attn: "AttentionFP8",
     x: torch.Tensor,  # [B, S, dim] bf16
     position_ids: torch.Tensor,  # [T] int32 absolute position per token
+    return_freqs_cis: bool = True,
 ) -> DecodeQKV:
     """Decode Q/KV path — RMSNorm + LoRA Q + KV linear + fused RMSNorm-RoPE.
 
@@ -48,10 +49,11 @@ def decode_compute_qkv(
     normal decode ``S == 1``; target verify passes the full verify span.
     """
     rd = attn.rope_head_dim
-    position_ids = position_ids.reshape(-1).to(
-        device=attn.freqs_cis.device, dtype=torch.long
-    )
-    freqs_cis = attn.freqs_cis.index_select(0, position_ids).contiguous()
+    pos = position_ids.reshape(-1)
+    if pos.device != attn.freqs_cis.device:
+        pos = pos.to(device=attn.freqs_cis.device)
+    if pos.dtype not in (torch.int32, torch.int64):
+        pos = pos.to(dtype=torch.int32)
 
     # Q path
     qr = attn._rmsnorm_weighted(
@@ -60,15 +62,23 @@ def decode_compute_qkv(
     q = attn._lin(attn.wq_b, qr).unflatten(
         -1, (attn.n_heads, attn.head_dim)
     )  # [B, S, H, D]
-    q = fused_rmsnorm_rope(q, None, freqs_cis, rd, eps=attn.eps)
+    q = fused_rmsnorm_rope(
+        q, None, attn.freqs_cis, rd, eps=attn.eps, position_ids=pos
+    )
 
-    # KV path (single MQA head) — per-token RoPE using the same table lookup.
+    # KV path (single MQA head) — per-token RoPE using inline table lookup.
     kv = fused_rmsnorm_rope(
         attn._lin(attn.wkv, x),
         attn.kv_norm,
-        freqs_cis,
+        attn.freqs_cis,
         rd,
         eps=attn.eps,
+        position_ids=pos,
     )
+
+    if return_freqs_cis:
+        freqs_cis = attn.freqs_cis.index_select(0, pos.to(torch.long)).contiguous()
+    else:
+        freqs_cis = attn.freqs_cis
 
     return DecodeQKV(qr=qr, q=q, kv=kv, freqs_cis=freqs_cis)

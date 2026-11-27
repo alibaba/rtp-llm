@@ -1109,6 +1109,8 @@ def update_decode_metadata_in_place_fp8(
             dst_bt = meta.pool_block_tables.get(at)
             if dst_bt is None:
                 continue
+            if dst_bt.data_ptr() == src_bt.data_ptr() and dst_bt.shape == src_bt.shape:
+                continue
             n_rows = min(src_bt.shape[0], dst_bt.shape[0])
             n_cols = min(src_bt.shape[1], dst_bt.shape[1])
             # Zero stale rows beyond current bs to avoid carrying old block

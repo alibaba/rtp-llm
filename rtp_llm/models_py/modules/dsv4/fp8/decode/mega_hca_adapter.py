@@ -311,20 +311,30 @@ class MegaHCAAdapter:
             block.attn_hc.norm_eps,
             workspace.collapsed[:token_count],
             workspace.pre,
-            workspace.post,
-            workspace.comb,
+            workspace.post[:token_count],
+            workspace.comb[:token_count],
             with_post_comb=False,
             attn_norm_w=self.weights.attn_norm,
             attn_norm_eps=block.attn_hc.norm_eps,
-            mix_out=workspace.mix,
+            mix_out=workspace.mix[:token_count],
             xq_out=workspace.hidden_fp8[:token_count].view(torch.uint8),
             xsf_out=workspace.hidden_sf[:token_count],
             pdl=False,
         )
-        # For physical batches there is no padding memset between the fused
-        # reduce producer and front, so front can overlap its launch prologue.
-        # Sub-16 batches retain stream ordering for the padded-tail writes.
-        front_pdl = token_count >= 16
+        # Sub-16 batches use pre-zeroed persistent 16-row front workspaces and
+        # padded inputs (positions=0, state_rows=-1 on [m, 16)) so front skips
+        # the 3-memset tail chain and runs with pdl=True.
+        if token_count < 16:
+            front_logical_m = 16
+            positions_front, state_rows_front = (
+                self.runtime.hca_padded_front_inputs(
+                    positions_i64, pools.slots.state_rows, token_count
+                )
+            )
+        else:
+            front_logical_m = token_count
+            positions_front = positions_i64
+            state_rows_front = pools.slots.state_rows
         dsv4_mega.front_mixed_gemm_hca(
             workspace.collapsed,
             workspace.hidden_fp8,
@@ -337,15 +347,15 @@ class MegaHCAAdapter:
             self.weights.hc_base,
             self.weights.hc_scale,
             workspace.post,
-            workspace.comb.view(token_count, HC * HC),
-            positions_i64,
-            pools.slots.state_rows,
+            workspace.comb.view(front_logical_m, HC * HC),
+            positions_front,
+            state_rows_front,
             self.weights.compressor_ape,
             pools.state_kv,
             pools.state_gate,
-            token_count,
+            front_logical_m,
             hc_eps=block.attn_hc.hc_eps,
-            pdl=front_pdl,
+            pdl=True,
         )
         q_raw = dsv4_mega.wq_b_proj_gemm_merged_hca(
             workspace.front_out,
@@ -404,8 +414,8 @@ class MegaHCAAdapter:
         return block.attn_hc.post(
             projected,
             hidden,
-            workspace.post.view(batch_size, q_len, HC, 1),
-            workspace.comb.view(batch_size, q_len, HC, HC),
+            workspace.post[:token_count].view(batch_size, q_len, HC, 1),
+            workspace.comb[:token_count].view(batch_size, q_len, HC, HC),
         )
 
 

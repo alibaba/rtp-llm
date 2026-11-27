@@ -462,6 +462,7 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
         gathered_req_ids: Optional[torch.Tensor] = None,
         gathered_positions: Optional[torch.Tensor] = None,
         cp_ctx: Any = None,
+        precomputed_slots: Optional[Tuple[int, torch.Tensor]] = None,
     ) -> None:
         """Insert committed target features through one layer's own
         wkv/kv_norm/RoPE pipeline. Rows superseded by newer SWA ring
@@ -479,17 +480,27 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
             entries_per_block,
             pool,
         ):
-            safe_context_pos = context_positions.to(torch.long).clamp_min(0)
-            context_freqs = attn.freqs_cis.index_select(
-                0, safe_context_pos
-            ).contiguous()
-            context_kv = fused_rmsnorm_rope(
-                attn._lin(attn.wkv, main_x).contiguous(),
-                attn.kv_norm,
-                context_freqs,
-                int(attn.rope_head_dim),
-                eps=float(attn.eps),
-            )
+            if main_x.is_cuda:
+                context_kv = fused_rmsnorm_rope(
+                    attn._lin(attn.wkv, main_x).contiguous(),
+                    attn.kv_norm,
+                    attn.freqs_cis,
+                    int(attn.rope_head_dim),
+                    eps=float(attn.eps),
+                    position_ids=context_positions,
+                )
+            else:
+                safe_context_pos = context_positions.to(torch.long).clamp_min(0)
+                context_freqs = attn.freqs_cis.index_select(
+                    0, safe_context_pos
+                ).contiguous()
+                context_kv = fused_rmsnorm_rope(
+                    attn._lin(attn.wkv, main_x).contiguous(),
+                    attn.kv_norm,
+                    context_freqs,
+                    int(attn.rope_head_dim),
+                    eps=float(attn.eps),
+                )
             if gathered_positions is not None:
                 from rtp_llm.models_py.distributed.collective_torch import (
                     Group,
@@ -500,18 +511,24 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
                 context_req_ids = gathered_req_ids
                 context_positions = gathered_positions
             context_rows = int(context_positions.numel())
-            context_slots = compute_swa_slot_mapping_from_positions(
-                block_table=block_table[:batch_size]
-                .to(device=main_x.device, dtype=torch.int32)
-                .contiguous(),
-                req_id_per_token=context_req_ids,
-                positions=context_positions,
-                seq_lens=committed_ends,
-                num_tokens=context_rows,
-                pool_entries_per_block=entries_per_block,
-                tokens_per_block_for_block_table=tokens_per_block,
-                ring_entries=entries_per_block,
-            )
+            if (
+                precomputed_slots is not None
+                and precomputed_slots[0] == entries_per_block
+            ):
+                context_slots = precomputed_slots[1]
+            else:
+                context_slots = compute_swa_slot_mapping_from_positions(
+                    block_table=block_table[:batch_size]
+                    .to(device=main_x.device, dtype=torch.int32)
+                    .contiguous(),
+                    req_id_per_token=context_req_ids,
+                    positions=context_positions,
+                    seq_lens=committed_ends,
+                    num_tokens=context_rows,
+                    pool_entries_per_block=entries_per_block,
+                    tokens_per_block_for_block_table=tokens_per_block,
+                    ring_entries=entries_per_block,
+                )
             if attn._swa_cp_byte_sliced():
                 # Sharded prefill: same full-domain slots, but each rank owns
                 # only its byte slice of every block — route through the
@@ -646,6 +663,38 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
             gathered_positions = all_gather(
                 context_positions.contiguous(), group=Group.TP
             )
+        precomputed_slots: Optional[Tuple[int, torch.Tensor]] = None
+        if self.v4.layers and hasattr(self.v4.layers[0], "attn"):
+            slot_req_ids = (
+                gathered_req_ids
+                if gathered_positions is not None
+                else context_req_ids
+            )
+            slot_positions = (
+                gathered_positions
+                if gathered_positions is not None
+                else context_positions
+            )
+            with self._swa_cache_bound(0, block_table, cp_ctx=commit_ctx) as (
+                _attn0,
+                epb0,
+                _pool0,
+            ):
+                precomputed_slots = (
+                    epb0,
+                    compute_swa_slot_mapping_from_positions(
+                        block_table=block_table[:batch_size]
+                        .to(device=main_x.device, dtype=torch.int32)
+                        .contiguous(),
+                        req_id_per_token=slot_req_ids,
+                        positions=slot_positions,
+                        seq_lens=committed_ends,
+                        num_tokens=int(slot_positions.numel()),
+                        pool_entries_per_block=epb0,
+                        tokens_per_block_for_block_table=tokens_per_block,
+                        ring_entries=epb0,
+                    ),
+                )
         layer_forward_range = _profiler.make_layer_forward_range()
         for layer_idx in range(len(self.v4.layers)):
             with layer_forward_range(layer_idx):
@@ -661,6 +710,7 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
                     gathered_req_ids=gathered_req_ids,
                     gathered_positions=gathered_positions,
                     cp_ctx=commit_ctx,
+                    precomputed_slots=precomputed_slots,
                 )
                 # PD-separated prefill publishes each committed draft-layer
                 # cache from the commit call: the published range is exactly
@@ -698,7 +748,8 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
         ):
             # Project and insert all query KVs before attention so each query
             # can read every other query position, including future noise.
-            qkv = decode_compute_qkv(attn, x, query_positions.reshape(-1))
+            pos_flat = query_positions.reshape(-1)
+            qkv = decode_compute_qkv(attn, x, pos_flat, return_freqs_cis=False)
             fused_meta = None
             if (
                 precomputed_meta is not None
@@ -766,7 +817,14 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
                 sched_meta=sched_meta,
                 topk_length=topk_length,
             )
-            return decode_output_proj(attn, output, qkv.freqs_cis, batch_size, gamma)
+            return decode_output_proj(
+                attn,
+                output,
+                attn.freqs_cis,
+                batch_size,
+                gamma,
+                position_ids=pos_flat,
+            )
 
     def _forward_layers(
         self,
