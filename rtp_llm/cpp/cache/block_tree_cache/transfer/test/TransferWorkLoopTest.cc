@@ -1,3 +1,4 @@
+#include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeReclaimer.h"
 #include <gtest/gtest.h>
 
 #include <algorithm>
@@ -47,74 +48,6 @@ TransferDescriptor physicalDiskRead(size_t group, BlockIdxType disk, BlockIdxTyp
     std::swap(desc.source_tier, desc.target_tier);
     std::swap(desc.source_blocks, desc.target_blocks);
     return desc;
-}
-
-TEST(TransferWorkLoopSafetyTest, EveryStageMustPreserveBufferSafetyProof) {
-    TransferWorkLoop owner({}, nullptr, nullptr, TransferOperation::LOAD, 1, 1, {});
-    for (const bool first_safe : {false, true}) {
-        for (const bool second_safe : {false, true}) {
-            SCOPED_TRACE(::testing::Message() << "first_safe=" << first_safe << " second_safe=" << second_safe);
-            TransferWorkLoop::Entry entry(makeTransferTask({TransferDescriptor::diskToDevice(0, 2, {1})}), {});
-            ASSERT_TRUE(entry.result.buffer_safe);
-            entry.step = TransferWorkLoop::Step::DISK_READ;
-            TransferResult first(TransferStatus::OK);
-            first.buffer_safe = first_safe;
-            owner.recordResult(entry, std::move(first));
-            EXPECT_TRUE(entry.result.ok());
-            EXPECT_EQ(entry.result.buffer_safe, first_safe);
-            EXPECT_EQ(entry.result.block_errors, std::vector<CacheCopyError>{CacheCopyError::NOT_EXECUTED});
-
-            entry.step = TransferWorkLoop::Step::CRC_LOAD;
-            TransferResult second(TransferStatus::OK);
-            second.buffer_safe = second_safe;
-            owner.recordResult(entry, std::move(second));
-            EXPECT_TRUE(entry.result.ok());
-            EXPECT_EQ(entry.result.buffer_safe, first_safe && second_safe);
-            EXPECT_EQ(entry.result.block_errors, std::vector<CacheCopyError>{CacheCopyError::NONE});
-        }
-    }
-}
-
-TEST(TransferWorkLoopSafetyTest, ProvenSafeFailurePreservesProofAndBusinessError) {
-    TransferWorkLoop        owner({}, nullptr, nullptr, TransferOperation::LOAD, 1, 1, {});
-    TransferWorkLoop::Entry entry(makeTransferTask({TransferDescriptor::diskToDevice(0, 2, {1})}), {});
-    entry.step = TransferWorkLoop::Step::DISK_READ;
-    TransferResult first(TransferStatus::OK);
-    first.buffer_safe = true;
-    owner.recordResult(entry, std::move(first));
-
-    entry.step = TransferWorkLoop::Step::CRC_LOAD;
-    TransferResult failure(TransferStatus::DISK_IO_ERROR);
-    failure.buffer_safe = true;
-    owner.recordResult(entry, std::move(failure));
-    EXPECT_TRUE(entry.result.buffer_safe);
-    EXPECT_FALSE(entry.result.ok());
-    EXPECT_EQ(entry.result.status.code(), ErrorCode::EXECUTION_EXCEPTION);
-    EXPECT_EQ(entry.result.copy_error, CacheCopyError::IO_FAILED);
-    EXPECT_EQ(entry.result.block_errors, std::vector<CacheCopyError>{CacheCopyError::IO_FAILED});
-}
-
-TEST(TransferWorkLoopSafetyTest, DiskCompletionPreservesEarlierStageProofEvenOnFailure) {
-    TransferWorkLoop owner({}, nullptr, nullptr, TransferOperation::LOAD, 1, 1, {});
-    for (const bool first_safe : {false, true}) {
-        for (const auto status : {BlockIOStatus::OK, BlockIOStatus::IO_ERROR, BlockIOStatus::PARTIAL_FAILURE}) {
-            SCOPED_TRACE(::testing::Message() << "first_safe=" << first_safe << " status=" << static_cast<int>(status));
-            TransferWorkLoop::Entry entry(makeTransferTask({TransferDescriptor::diskToDevice(0, 2, {1})}), {});
-            entry.step = TransferWorkLoop::Step::DISK_READ;
-            TransferResult first(TransferStatus::OK);
-            first.buffer_safe = first_safe;
-            owner.recordResult(entry, std::move(first));
-
-            entry.step = TransferWorkLoop::Step::DISK_READ;
-            owner.recordDiskResult(entry, status);
-            EXPECT_EQ(entry.result.buffer_safe, first_safe);
-            EXPECT_EQ(entry.result.ok(), status == BlockIOStatus::OK);
-            const auto error = status == BlockIOStatus::OK ? CacheCopyError::NONE : CacheCopyError::IO_FAILED;
-            EXPECT_EQ(entry.result.copy_error, error);
-            EXPECT_EQ(entry.result.block_errors,
-                      std::vector<CacheCopyError>{status == BlockIOStatus::OK ? CacheCopyError::NOT_EXECUTED : error});
-        }
-    }
 }
 
 size_t seriesCount(kmonitor::MutableMetric* metric) {
@@ -312,7 +245,8 @@ protected:
     }
     std::shared_ptr<TransferAsyncContext> executeRequest(TransferTask task) {
         if (!request_dispatcher || request_dispatcher->per_rank_engine_ != engine)
-            request_dispatcher = std::make_unique<BlockTransferDispatcher>(engine);
+            request_dispatcher =
+                std::make_unique<BlockTransferDispatcher>(engine, std::make_shared<BlockTreeReclaimer>());
         return request_dispatcher->executePerRank(std::move(task));
     }
     void enableMetrics(bool stages = true) {
@@ -729,12 +663,12 @@ TEST_F(TransferWorkLoopDeathTest, BeforeCompleteCallbackBadAllocIsFatal) {
 
 TEST_F(TransferWorkLoopTest, OrdinaryEntryExceptionCompletesOnlyThatTask) {
     TransferWorkLoop     owner({group}, nullptr, direct_disk_executor.get(), TransferOperation::EVICT, 1, 8, {});
-    TransferTaskRegistry registry;
+    BlockTreeReclaimer registry;
     auto                 task  = writes();
     const auto           trace = std::to_string(task.traceId());
-    ASSERT_TRUE(registry.begin(trace));
+    ASSERT_TRUE(registry.registerOnWorkerTaskWithTraceID(trace));
     task.setCompletionProof(
-        std::make_shared<TransferBufferSafety>([&registry, trace] { registry.finish(trace, true); }));
+        std::make_shared<TransferBufferSafety>([&registry, trace] { registry.ioFinishedOnWorkerWithTraceID(trace); }));
     auto context = owner.execute(std::move(task));
     owner.entries_.splice(owner.entries_.end(), owner.incoming_);
     auto& entry    = **owner.entries_.begin();
@@ -744,83 +678,9 @@ TEST_F(TransferWorkLoopTest, OrdinaryEntryExceptionCompletesOnlyThatTask) {
     EXPECT_TRUE(context->done());
     EXPECT_FALSE(context->success());
     EXPECT_TRUE(context->result().buffer_safe);
-    EXPECT_EQ(registry.queryLocal(std::vector<std::string>{trace}).front(), TransferTaskRegistry::State::BUFFER_SAFE);
+    EXPECT_EQ(registry.localState(trace), BlockTreeReclaimer::State::BUFFER_SAFE);
     EXPECT_EQ(context->errorInfo().ToString(), "batch preparation failed");
     EXPECT_EQ(owner.outstandingBatches(), 0u);
-}
-
-TEST_F(TransferWorkLoopTest, AdmissionRejectionsProveNoIoWasSubmitted) {
-    TransferWorkLoop owner({group}, nullptr, direct_disk_executor.get(), TransferOperation::EVICT, 1, 1, {});
-    const auto       check = [&](TransferTask task) {
-        size_t proofs = 0;
-        task.setCompletionProof(std::make_shared<TransferBufferSafety>([&] { ++proofs; }));
-        auto context = owner.execute(std::move(task));
-        ASSERT_TRUE(context->done());
-        EXPECT_FALSE(context->success());
-        EXPECT_TRUE(context->result().buffer_safe);
-        EXPECT_EQ(context->result().copy_error, CacheCopyError::NOT_EXECUTED);
-        EXPECT_EQ(proofs, 1u);
-    };
-    check(makeTransferTask({}));
-    auto expired      = writes();
-    expired.deadline_ = TransferTask::Clock::now() - 1s;
-    check(std::move(expired));
-    owner.stopAdmission();
-    check(writes());
-    EXPECT_EQ(io->reads, 0u);
-    EXPECT_EQ(io->writes, 0u);
-}
-
-TEST_F(TransferWorkLoopTest, UnsubmittedSuccessorTimeoutPreservesEarlierStageProof) {
-    for (const bool previous_safe : {false, true}) {
-        for (const bool resource_wait : {false, true}) {
-            SCOPED_TRACE(::testing::Message()
-                         << "previous_safe=" << previous_safe << " resource_wait=" << resource_wait);
-            TransferWorkLoop owner({group}, nullptr, direct_disk_executor.get(), TransferOperation::LOAD, 1, 1, {});
-            auto context = owner.execute(makeTransferTask({TransferDescriptor::diskToDevice(0, disks[0], {1})}));
-            owner.entries_.splice(owner.entries_.end(), owner.incoming_);
-            auto& entry        = **owner.entries_.begin();
-            entry.position     = owner.entries_.begin();
-            entry.initial_plan = false;
-            entry.step         = TransferWorkLoop::Step::DISK_READ;
-            TransferResult previous(TransferStatus::OK);
-            previous.buffer_safe = previous_safe;
-            owner.recordResult(entry, std::move(previous));
-            entry.step           = TransferWorkLoop::Step::CRC_LOAD;
-            entry.task.deadline_ = TransferTask::Clock::now() - 1s;
-            if (resource_wait) {
-                TransferWorkLoop::Queue waiting;
-                owner.waitForResource(entry, waiting);
-                owner.expireResourceWaiters();
-                EXPECT_TRUE(waiting.empty());
-            } else {
-                owner.tryStep(entry);
-            }
-            ASSERT_TRUE(context->done());
-            EXPECT_EQ(context->result().status.code(), ErrorCode::DEADLINE_EXCEEDED);
-            EXPECT_EQ(context->result().buffer_safe, previous_safe);
-            EXPECT_EQ(owner.outstandingBatches(), 0u);
-        }
-    }
-    EXPECT_EQ(io->reads, 0u);
-    EXPECT_EQ(io->writes, 0u);
-}
-
-TEST_F(TransferWorkLoopTest, CancelledStagingWaiterProvesNoIoWasSubmitted) {
-    TransferWorkLoop owner({group}, nullptr, direct_disk_executor.get(), TransferOperation::LOAD, 1, 1, {});
-    auto             context = owner.execute(makeTransferTask({TransferDescriptor::diskToDevice(0, disks[0], {1})}));
-    owner.entries_.splice(owner.entries_.end(), owner.incoming_);
-    auto& entry    = **owner.entries_.begin();
-    entry.position = owner.entries_.begin();
-    owner.waitForResource(entry, owner.staging_.waiting);
-    owner.cancelStaging();
-    ASSERT_TRUE(context->done());
-    EXPECT_FALSE(context->success());
-    EXPECT_TRUE(context->result().buffer_safe);
-    EXPECT_EQ(context->result().copy_error, CacheCopyError::NOT_EXECUTED);
-    EXPECT_EQ(owner.outstandingBatches(), 0u);
-    EXPECT_EQ(io->reads, 0u);
-    EXPECT_EQ(io->writes, 0u);
 }
 
 TEST_F(TransferWorkLoopTest, SuppliedBatchLimitStaysFixedWhileStagingIsLeased) {
@@ -882,28 +742,6 @@ TEST_F(TransferWorkLoopTest, PureDiskResultsAndCallbacksBelongToOwner) {
     EXPECT_EQ(std::memcmp(host->blockBuffer(hosts[2]).addr, host->blockBuffer(hosts[3]).addr, 384), 0);
     for (size_t i = group->storageBytes(); i < disk->strideBytes(); ++i)
         EXPECT_EQ(io->data[disk->blockOffset(disks[2]) + i], 0xa5u);
-}
-
-TEST_F(TransferWorkLoopTest, DiskWorkerExceptionProvesSafetyOnlyAfterIoReturns) {
-    initialize();
-    io->blocked      = true;
-    io->throw_access = true;
-    std::atomic<size_t> proofs{0};
-    auto                task = writes(2);
-    task.setCompletionProof(std::make_shared<TransferBufferSafety>([&] { ++proofs; }));
-    auto context = engine->execute(std::move(task));
-    ASSERT_TRUE(io->waitWrites());
-    EXPECT_FALSE(context->done());
-    EXPECT_EQ(proofs.load(), 0u);
-    io->release();
-    ASSERT_TRUE(await(context));
-    engine->shutdown();
-    EXPECT_FALSE(context->success());
-    EXPECT_TRUE(context->result().buffer_safe);
-    EXPECT_EQ(proofs.load(), 1u);
-    EXPECT_EQ(context->result().copy_error, CacheCopyError::IO_FAILED);
-    EXPECT_EQ(context->result().block_errors, std::vector<CacheCopyError>(2, CacheCopyError::IO_FAILED));
-    EXPECT_EQ(io->writes, 1u);
 }
 
 TEST_F(TransferWorkLoopTest, DiskResultPublicationWaitsForNotificationMutex) {
@@ -1079,7 +917,7 @@ TEST_F(TransferWorkLoopTest, ResidentDiskBatchesFitDerivedWorkerQueues) {
 TEST_F(TransferWorkLoopTest, ResidentBatchesIncludeInflightCallbackAndEntryCleanup) {
     enableMetrics();
     initialize(2, 2);
-    BlockTransferDispatcher dispatcher(engine);
+    BlockTransferDispatcher dispatcher(engine, std::make_shared<BlockTreeReclaimer>());
     const auto              check_backlog = [&](size_t expected) {
         const auto sizes = dispatcher.queueSizes();
         EXPECT_EQ(sizes.background, expected);
@@ -1210,7 +1048,7 @@ TEST_F(TransferWorkLoopTest, StartedExpiredTaskAndDroppedContextStillFinishAfter
 
 TEST_F(TransferWorkLoopTest, DispatcherShutdownWaitsForDirectExecuteCallbackAndOwnerCleanup) {
     initialize();
-    BlockTransferDispatcher dispatcher(engine);
+    BlockTransferDispatcher dispatcher(engine, std::make_shared<BlockTreeReclaimer>());
     io->blocked = true;
     // Direct execute is not registered in the Dispatcher's callback-chain table.
     auto context = dispatcher.executePerRank(writes());

@@ -5,6 +5,7 @@
 #include <atomic>
 #include <chrono>
 #include <cstddef>
+#include <cstdint>
 #include <condition_variable>
 #include <deque>
 #include <memory>
@@ -134,12 +135,20 @@ private:
     std::atomic<size_t>              submit_count_{0};
 };
 
+struct RecoveryTestOptions {
+    int     rank{0};
+    int64_t interval_ms{0};
+    int64_t query_timeout_ms{1000};
+    int64_t force_release_timeout_ms{60000};
+};
+
 std::unique_ptr<BlockTreeCache>
 makeBlockTreeCacheForTest(std::vector<GroupSetPtr>                   group_sets,
                           BlockTreeCacheConfig                       config            = {},
                           std::shared_ptr<StorageBackend>            storage_backend   = nullptr,
                           std::shared_ptr<BroadcastManager>          broadcast_manager = nullptr,
-                          std::shared_ptr<kmonitor::MetricsReporter> metrics_reporter  = nullptr);
+                          std::shared_ptr<kmonitor::MetricsReporter> metrics_reporter  = nullptr,
+                          RecoveryTestOptions                        recovery          = {});
 
 bool insertGroupSetResources(BlockTreeCache&                                   cache,
                              const CacheKeysType&                              cache_keys,

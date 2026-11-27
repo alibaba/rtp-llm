@@ -1,3 +1,4 @@
+#include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeReclaimer.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeCacheFactory.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeCacheLayout.h"
 
@@ -686,6 +687,9 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                       
     config.full_prefix_scan_interval_ms = owns_mutable_block_tree ? configured_scan_interval_ms : 0;
 
     auto cache_metrics_reporter = std::make_shared<BlockTreeCacheMetricsReporter>(std::move(metrics_reporter));
+    auto reclaimer = std::make_shared<BlockTreeReclaimer>(cache_metrics_reporter);
+    reclaimer->configure(parallelism_config.pp_rank * parallelism_config.tp_size + parallelism_config.tp_rank,
+                         1000, 1000, kv_cache_config.block_tree_frozen_force_release_timeout_ms, broadcast_manager);
     auto per_rank_engine        = std::make_shared<PerRankBlockTransferEngine>(group_sets,
                                                                         has_local_disk_backing,
                                                                         config.device_disk_staging_block_count,
@@ -698,10 +702,10 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                       
     std::shared_ptr<MultiRankBlockTransferEngine> multi_rank_engine;
     if (broadcast_manager != nullptr) {
         multi_rank_engine = std::make_shared<MultiRankBlockTransferEngine>(
-            group_sets, std::move(broadcast_manager), cache_metrics_reporter);
+            group_sets, broadcast_manager, cache_metrics_reporter);
     }
     auto transfer_dispatcher =
-        std::make_unique<BlockTransferDispatcher>(std::move(per_rank_engine), std::move(multi_rank_engine));
+        std::make_unique<BlockTransferDispatcher>(std::move(per_rank_engine), reclaimer, std::move(multi_rank_engine));
     const size_t business_queue_size = config.business_queue_max_size == 0 ?
                                            0 :
                                            config.business_queue_max_size + BlockTreeTaskPool::kLoadReservedSlots;
@@ -715,7 +719,8 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                       
                                                    std::move(storage_backend),
                                                    std::move(transfer_dispatcher),
                                                    std::move(task_pool),
-                                                   std::move(cache_metrics_reporter));
+                                                   std::move(cache_metrics_reporter),
+                                                   reclaimer);
     if (result->isRemoteCacheEnabled()) {
         const std::shared_ptr<const CacheTopology> storage_topology = cache_topology;
         const CacheConfig                          storage_config   = cache_config;
@@ -727,6 +732,7 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                       
                                     "duplicate storage pool tag=%s",
                                     tags[i].c_str());
         }
+        result->storageBackend()->setReclaimer(reclaimer);
         RTP_LLM_CHECK_WITH_INFO(
             result->storageBackend()->init(
                 storage_topology,

@@ -5,6 +5,7 @@
 #include <unordered_set>
 #include <utility>
 
+#include "rtp_llm/cpp/cache/block_tree_cache/block_pool/IBlockPool.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTree.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/metrics/CacheStageMetrics.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeTaskPool.h"
@@ -77,8 +78,7 @@ BlockTreeCacheMetricsReporter::BlockTreeCacheMetricsReporter(
 }
 BlockTreeCacheMetricsReporter::~BlockTreeCacheMetricsReporter() = default;
 
-void BlockTreeCacheMetricsReporter::reportUnfreezeMetrics(const FrozenTask::ExecutionInfo& execution,
-                                                          bool                             forced) const {
+void BlockTreeCacheMetricsReporter::reportUnfreezeMetrics(const std::vector<TransferTargetBlock>& blocks, const std::string& backend, bool forced) const {
     if (!metrics_reporter_) {
         return;
     }
@@ -87,14 +87,15 @@ void BlockTreeCacheMetricsReporter::reportUnfreezeMetrics(const FrozenTask::Exec
         std::unordered_set<BlockIdxType> blocks;
     };
     std::unordered_map<const IBlockPool*, PoolTargets> targets;
-    for (const auto& descriptor : execution.descriptors) {
-        for (const auto& target : descriptor.targets) {
-            auto& pool_targets = targets[target.pool.get()];
-            pool_targets.tier  = descriptor.target_tier;
-            pool_targets.blocks.insert(target.block);
+    for (const auto& target : blocks) {
+        auto& pool_targets = targets[target.pool.get()];
+        switch (target.pool->poolType()) {
+            case BlockPoolType::DEVICE: pool_targets.tier = Tier::DEVICE; break;
+            case BlockPoolType::HOST: pool_targets.tier = Tier::HOST; break;
+            case BlockPoolType::DISK: pool_targets.tier = Tier::DISK; break;
         }
+        pool_targets.blocks.insert(target.block);
     }
-    const char* backend = std::holds_alternative<std::string>(execution.trace_id) ? "kvcm" : "local";
     for (const auto& [pool, pool_targets] : targets) {
         RtpLLMCacheUnfreezeMetricsCollector collector;
         collector.blocks = static_cast<int64_t>(pool_targets.blocks.size());
@@ -103,25 +104,6 @@ void BlockTreeCacheMetricsReporter::reportUnfreezeMetrics(const FrozenTask::Exec
         tags.AddTag("backend", backend);
         tags.AddTag("forced", forced ? "true" : "false");
         metrics_reporter_->report<RtpLLMCachePoolMetrics, RtpLLMCacheUnfreezeMetricsCollector>(&tags, &collector);
-    }
-}
-
-void BlockTreeCacheMetricsReporter::reportUnfreezeZeroMetrics(const std::vector<CachePoolMetrics>& pools) const {
-    if (!metrics_reporter_) {
-        return;
-    }
-    RtpLLMCacheUnfreezeMetricsCollector collector;
-    for (const auto& pool : pools) {
-        for (const char* backend : {"local", "kvcm"}) {
-            kmonitor::MetricsTags tags("pool_name", pool.pool_name);
-            tags.AddTag("tier", tierName(pool.tier));
-            tags.AddTag("backend", backend);
-            for (const char* forced : {"false", "true"}) {
-                tags.AddTag("forced", forced);
-                metrics_reporter_->report<RtpLLMCachePoolMetrics, RtpLLMCacheUnfreezeMetricsCollector>(&tags,
-                                                                                                       &collector);
-            }
-        }
     }
 }
 

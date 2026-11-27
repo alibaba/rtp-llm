@@ -21,6 +21,7 @@
 
 #include "autil/EnvUtil.h"
 #include "autil/legacy/jsonizable.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeReclaimer.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm/ClientWrapper.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm/KVCMStorageBackend.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm/test/MockKVCMClient.h"
@@ -339,9 +340,13 @@ struct BackendEnvironment {
 
 struct BackendHandle {
     std::unique_ptr<KVCMStorageBackend> backend;
+    std::shared_ptr<BlockTreeReclaimer> reclaimer;
 
     BackendHandle() = default;
-    explicit BackendHandle(std::unique_ptr<KVCMStorageBackend> value): backend(std::move(value)) {}
+    explicit BackendHandle(std::unique_ptr<KVCMStorageBackend> value):
+        backend(std::move(value)), reclaimer(std::make_shared<BlockTreeReclaimer>()) {
+        backend->setReclaimer(reclaimer);
+    }
     BackendHandle(BackendHandle&&) noexcept            = default;
     BackendHandle& operator=(BackendHandle&&) noexcept = default;
     BackendHandle(const BackendHandle&)                = delete;

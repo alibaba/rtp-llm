@@ -43,7 +43,8 @@ public:
             if (released_) {
                 return PerRankBlockTransferEngine::executeBatch(std::move(task));
             }
-            auto context = std::make_shared<TransferBatchAsyncContext>();
+            auto context =
+                std::make_shared<TransferBatchAsyncContext>(task.descriptors().size(), nullptr, task.completionProof());
             entered_     = true;
             pending_.push_back({std::move(task), context});
             cv_.notify_all();
@@ -66,7 +67,9 @@ public:
         }
         for (auto& submit : pending) {
             if (!error.ok()) {
-                submit.context->complete(error);
+                TransferResult result(error);
+                result.buffer_safe = true;
+                submit.context->complete(std::move(result));
                 continue;
             }
             auto context = PerRankBlockTransferEngine::executeBatch(std::move(submit.task));
