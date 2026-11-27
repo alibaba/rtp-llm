@@ -200,6 +200,14 @@ class JinaEncoder(RtpModule):
             raise NotImplementedError(
                 "Jina direct encoder has no PP stage ownership contract"
             )
+        cp = getattr(load.parallelism_config, "prefill_cp_config", None)
+        if load.tp_size > 1 and cp is not None and cp.is_enabled():
+            # Jina's bidirectional SDPA sees only this worker's tokens. It
+            # has no cross-rank K/V exchange for a split prefill sequence.
+            raise ValueError(
+                "Jina bidirectional attention requires a complete sequence; "
+                "context parallel prefill is unsupported"
+            )
         for role, source, *_ in load.custom_weight_mappings:
             check_encoder_handler_alias(
                 role, source, self.WEIGHTS_MAPPER.map_name(source)

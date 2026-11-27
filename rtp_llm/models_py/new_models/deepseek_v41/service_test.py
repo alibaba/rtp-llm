@@ -93,6 +93,20 @@ def config_and_load(folder, rank=0, *, engram=False, method="scratch"):
 
 
 class V41ServiceOwnerTest(unittest.TestCase):
+    def test_packed_experts_reject_unrepresentable_placement_before_reading(self):
+        with tempfile.TemporaryDirectory() as root:
+            config, load = config_and_load(root)
+            cls = get_model_class(config.model_type)
+            config.eplb_config.redundant_expert = 2
+            with self.assertRaisesRegex(ValueError, "redundant experts"):
+                cls(config, load)
+            config.eplb_config.redundant_expert = 0
+            config.phy2log_path = os.path.join(root, "placement.json")
+            with open(config.phy2log_path, "w") as stream:
+                json.dump([[0, 1, 2, 3], [1, 0, 2, 3], [0, 1, 2, 3]], stream)
+            with self.assertRaisesRegex(ValueError, "layer 1 requires identity"):
+                cls(config, load)
+
     def test_reader_cannot_replace_the_service_attention_or_expert_rank(self):
         with tempfile.TemporaryDirectory() as root:
             for group in ("attention", "expert"):

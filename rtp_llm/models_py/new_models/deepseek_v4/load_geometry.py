@@ -40,7 +40,12 @@ def validate_v4_static_placement(args, model_config, load_config):
     # No routed FFN exists on a commit-only DSpARK worker.
     if args.commit_only:
         return
-    if args.n_physical_experts not in (None, args.n_routed_experts):
+    # V4.1's runtime args carry only the logical count; read the requested
+    # physical count from the service config, not from an executor default.
+    physical = getattr(args, "n_physical_experts", None)
+    if physical is None:
+        physical = model_config.eplb_config.phy_exp_num(args.n_routed_experts)
+    if physical != args.n_routed_experts:
         # Matches _CudaFp8Fp4Strategy.check_conditions. Reject before any
         # attention/expert parameter is allocated or checkpoint file staged.
         raise ValueError("V4 FP8_FP4 executor does not support redundant experts")

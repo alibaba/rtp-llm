@@ -153,6 +153,15 @@ def tp_worker(rank, directory):
 
 
 class JinaCheckpointTest(unittest.TestCase):
+    def test_split_prefill_cannot_silently_run_local_bidirectional_attention(self):
+        parallel = SimpleNamespace(prefill_cp_config=SimpleNamespace(is_enabled=lambda: True))
+        load = NewLoaderConfig(
+            device="cpu", compute_dtype=torch.float32, tp_size=2,
+            parallelism_config=parallel,
+        )
+        with self.assertRaisesRegex(ValueError, "complete sequence"):
+            _CpuEncoder(config(heads=2, inter=18), load)
+
     def test_tp2_gloo(self):
         with tempfile.TemporaryDirectory() as d:
             save_file(checkpoint(18), os.path.join(d, "model.safetensors"))

@@ -10,6 +10,7 @@ from rtp_llm.models_py.module_base import RtpModule
 from rtp_llm.models_py.new_models.deepseek_v4.load_geometry import (
     configure_lm_head,
     validate_load_groups,
+    validate_v4_static_placement,
 )
 from rtp_llm.models_py.new_models.deepseek_v41.backbone import runtime_backbone_class
 
@@ -123,6 +124,7 @@ class OwnedV41Mixin:
         if not args.v41_config:
             raise ValueError("V4.1 cannot substitute V4 config or cache geometry")
         validate_load_groups(args, load_config)
+        validate_v4_static_placement(args, model_config, load_config)
         configure_lm_head(args, model_config, load_config)
         args.embedding_tp_size, args.embedding_tp_rank = args.tp_size, args.tp_rank
         args.n_shared_experts = int(model_config.n_shared_experts)

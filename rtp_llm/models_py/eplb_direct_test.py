@@ -573,6 +573,34 @@ class GraphBucketStatsTest(unittest.TestCase):
 
 
 class DistributedEplbReloadTest(unittest.TestCase):
+    def test_pure_tp_pipeline_plans_over_one_expert_partition(self):
+        cfg = types.SimpleNamespace(
+            activation_type="SiGLU", num_layers=2, is_mtp=False,
+            eplb_config=types.SimpleNamespace(
+                balance_method="round", eplb_force_repack=1, eplb_stats_window_size=2,
+            ),
+        )
+        for world_rank in range(4):
+            stage, rank = divmod(world_rank, 2)
+            pc = types.SimpleNamespace(
+                world_rank=world_rank, world_size=4, local_world_size=2,
+                pp_size=2, pp_rank=stage, pp_stage_layer_counts=[1, 1],
+                tp_size=2, tp_rank=rank, dp_size=1, dp_rank=0, ep_size=1, ep_rank=0,
+            )
+            experts = BaseMoEExperts(
+                num_experts=4, top_k=2, hidden_size=32, moe_intermediate_size=32,
+                tp_size=2, tp_rank=rank, ep_size=1, ep_rank=0, params_dtype=torch.float32,
+                model_config=cfg, parallelism_config=pc, moe_config=types.SimpleNamespace(),
+                quant_config=None, layer_idx=stage,
+            )
+            loader = types.SimpleNamespace(load_config=types.SimpleNamespace(parallelism_config=pc))
+            balancer = NewLoaderExpertBalancer(loader, _OneLayerModel(experts), cfg)
+            layer, _, _, mapping = balancer.create_balance_plan(
+                torch.ones(2, 4, dtype=torch.int32), torch.ones(2, 1, dtype=torch.int32),
+            )
+            self.assertEqual(layer.item(), stage)
+            self.assertEqual(sorted(mapping.tolist()), list(range(4)))
+
     def _run(self, use_gpu, auxiliary=False, stages=1):
         with tempfile.TemporaryDirectory() as folder:
             if auxiliary:

@@ -164,7 +164,10 @@ class NewLoaderExpertBalancer:
             layout = RankLayout.from_parallelism_config(parallelism)
             coord = layout.coord_of(parallelism.world_rank)
             if (
-                self.num_gpu != layout.lane_stride()
+                # Pure TP owns every logical expert on each TP rank; its
+                # expert count/stats axis is 1, not the stage collective size.
+                (self.num_gpu != layout.lane_stride()
+                 and not (self.num_gpu == 1 and parallelism.dp_size == 1))
                 or parallelism.pp_rank != coord.pp
                 or parallelism.dp_rank != coord.dp
                 or parallelism.tp_rank != coord.tp
