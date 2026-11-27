@@ -505,6 +505,10 @@ def build_moe_executor(layer):
                 multiply_weights=apply_router_weight_on_input,
             )
             up, gate = first.chunk(2, dim=-1)
+            limit = self.config.swiglu_limit
+            if limit > 0:
+                up = up.clamp(min=-limit, max=limit)
+                gate = gate.clamp(max=limit)
             activated = (torch.nn.functional.silu(gate) * up).reshape(
                 -1, w2.layout.input_size
             )

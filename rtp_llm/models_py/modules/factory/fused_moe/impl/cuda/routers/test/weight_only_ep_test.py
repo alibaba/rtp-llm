@@ -89,7 +89,12 @@ def run_worker(rank, use_fp8, token_counts, parallelism, port, topk_ids_dtype):
         rank, False, parallelism, port, all_gather_only=tp_mode, top_k=2
     )
     try:
-        for dtype in (torch.float16, torch.bfloat16):
+        for dtype, limit in (
+            (torch.float16, 0.0),
+            (torch.bfloat16, 0.0),
+            (torch.bfloat16, 0.25),
+        ):
+            config.model_config.swiglu_limit = limit
             for method in ("awq", "gptq", "INT8"):
                 config.model_config.eplb_config.eplb_mode = "STATS"
                 layer = make_layer(config, method, dtype)
@@ -114,6 +119,10 @@ def run_worker(rank, use_fp8, token_counts, parallelism, port, topk_ids_dtype):
                 # Different DP origins submit different batch sizes and values.
                 n = 3 if tp_mode else 3 + rank
                 t = ((torch.arange(n) + 1 + config.dp_rank) / 8 + 0.00037).to(dtype)
+                if limit > 0:
+                    # Exercise both up bounds, a negative gate below -limit
+                    # (must NOT be clipped), and an in-range activation.
+                    t = torch.tensor([-1.0, 1.0, 0.03125, 0.125], dtype=dtype)[:n]
                 x = t[:, None].expand(n, config.hidden_size).contiguous()
                 last = layer.num_experts - 1
                 for pair in ((0, last), (last - 1, last), (0, 1)):
@@ -141,6 +150,9 @@ def run_worker(rank, use_fp8, token_counts, parallelism, port, topk_ids_dtype):
                     coefficient = {"awq": 3, "gptq": 2, "INT8": 127 / 128}[method]
                     up = (t.float() * coefficient).to(dtype)
                     gate = (t.float() * (2 * coefficient)).to(dtype)
+                    if limit > 0:
+                        up = torch.clamp(up, -limit, limit)
+                        gate = torch.clamp(gate, max=limit)
                     act = torch.nn.functional.silu(gate) * up
                     partial = (
                         act.float()[:, None] * (ids + 1).float() * coefficient * wei
