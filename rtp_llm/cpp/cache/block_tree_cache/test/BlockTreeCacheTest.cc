@@ -1,4 +1,5 @@
 #include <gtest/gtest.h>
+#include "rtp_llm/cpp/cache/block_tree_cache/load/LoadOperation.h"
 
 #include <algorithm>
 #include <array>
@@ -24,7 +25,7 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/BlockTransferDispatcher.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferStageTimer.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/CompletionStage.h"
-#include "rtp_llm/cpp/cache/block_tree_cache/load/LoadTaskRunner.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/load/LoadTask.h"
 #include "rtp_llm/cpp/cache/FullCacheManager.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/test/BlockTreeCacheTestUtils.h"
 #include "rtp_llm/cpp/cache/MHAKVCacheSpec.h"
@@ -950,7 +951,7 @@ TEST_F(BlockTreeCacheTest, InsertReplacesIdleLowerTierFullRefillsSwaAndRefreshes
         const auto seeded = cache->tree()->insertNode({100, 200}, original, true, false);
         ASSERT_EQ(seeded.path.size(), 2u);
         cache->evictor_.onInserted(seeded);
-        full->releaseBlocks(tier, *old_blocks, BlockTreeRefType::EVICT);
+        full->unreferenceBlocks(tier, *old_blocks, BlockTreeRefType::EVICT);
         EXPECT_EQ(cache->evictor_.candidateCount(0, tier), 1u);
         auto before = cache->match({100, 200});
         EXPECT_EQ(before.matched_device_blocks, 0u);
@@ -1023,9 +1024,9 @@ TEST_F(BlockTreeCacheTest, InsertClearsOnlyReplacedFullSourceTierCandidates) {
     sibling_resource.host_block = (*full_host)[1];
     const auto sibling          = cache->tree()->insertNode({300}, {{sibling_resource, {}}}, true, false);
     cache->evictor_.onInserted(sibling);
-    full->releaseBlocks(Tier::HOST, *full_host, BlockTreeRefType::EVICT);
-    full->releaseBlocks(Tier::DISK, *full_disk, BlockTreeRefType::EVICT);
-    swa->releaseBlocks(Tier::HOST, *swa_host, BlockTreeRefType::EVICT);
+    full->unreferenceBlocks(Tier::HOST, *full_host, BlockTreeRefType::EVICT);
+    full->unreferenceBlocks(Tier::DISK, *full_disk, BlockTreeRefType::EVICT);
+    swa->unreferenceBlocks(Tier::HOST, *swa_host, BlockTreeRefType::EVICT);
     ASSERT_EQ(seeded.path.size(), 2u);
     ASSERT_EQ(sibling.path.size(), 1u);
     EXPECT_FALSE(seeded.path[0]->children.empty());
@@ -1418,16 +1419,10 @@ TEST_F(BlockTreeCacheMetricsTest, StageScopeReportsUnwindingAsFailureAndMixedSou
     const std::vector<TransferDescriptor> descriptors{TransferDescriptor::hostToDevice(0, 1, {2}),
                                                       TransferDescriptor::diskToDevice(0, 3, {4})};
     TransferTask                          task(descriptors, std::chrono::seconds(1), 123);
-    auto         stage_context = CacheStageContext::forTask(reporter, task, "load");
+    auto                                  stage_context = CacheStageContext::forTask(reporter, task, "load");
     EXPECT_STREQ(stage_context.source, "MIXED");
     EXPECT_STREQ(stage_context.target, "DEVICE");
     EXPECT_STREQ(stage_context.path, "mixed_to_device");
-    LoadTaskRunner::Task workflow(descriptors,
-                                  TransferTask({descriptors[0]}, std::chrono::seconds(1), 123),
-                                  TransferTask({descriptors[1]}, std::chrono::seconds(1), 123));
-    EXPECT_EQ(workflow.completionTransfer().traceId(), workflow.host_to_device_task.traceId());
-    workflow.disk_result = TransferResult(1);
-    EXPECT_EQ(workflow.completionTransfer().traceId(), workflow.disk_to_device_task.traceId());
     try {
         auto scope = TransferStageTimer::scope(stage_context, "completion_execute", "business_completion");
         throw std::runtime_error("settlement failure");
@@ -1653,19 +1648,52 @@ TEST_F(BlockTreeCacheMetricsTest, ConnectFailureQpsUsesOnlyDirectionAndPreserves
 }
 
 TEST_F(BlockTreeCacheMetricsTest, LoadJoinMetricsKeepRequestAndDependencyGranularity) {
-    kmonitor::MetricsTags                       tags;
-    std::shared_ptr<kmonitor::MetricsReporter>  metrics_reporter =
-        std::make_shared<kmonitor::MetricsReporter>("", "", tags);
-    BlockTreeCacheMetricsReporter reporter(metrics_reporter);
-
-    reporter.reportLoadJoin(2);
-    reporter.reportLoadJoinWait(123);
-
-    RtpLLMCacheReuseMetrics* reuse_metrics = metrics_reporter->getMetricsGroup<RtpLLMCacheReuseMetrics>();
-    ASSERT_NE(reuse_metrics, nullptr);
-    EXPECT_DOUBLE_EQ(snapshotQps(reuse_metrics->load_joined_request_qps_metric, tags), 1);
-    EXPECT_DOUBLE_EQ(snapshotQps(reuse_metrics->load_join_dependency_count_metric, tags), 2);
-    EXPECT_DOUBLE_EQ(snapshotQps(reuse_metrics->load_join_wait_latency_us_metric, tags), 123);
+    for (const bool already_completed : {false, true}) {
+        for (const bool abort_joiner : {false, true}) {
+            SCOPED_TRACE(already_completed);
+            SCOPED_TRACE(abort_joiner);
+            kmonitor::MetricsTags         tags;
+            auto                          metrics_reporter = std::make_shared<kmonitor::MetricsReporter>("", "", tags);
+            BlockTreeCacheMetricsReporter reporter(metrics_reporter);
+            auto coordinator = std::make_shared<LoadContextCoordinator>([](const auto&) { return true; },
+                                                                        [](auto&) {},
+                                                                        std::function<bool(std::function<void()>)>{},
+                                                                        &reporter);
+            auto host        = TransferDescriptor::hostToDevice(0, 1, {2});
+            auto disk        = TransferDescriptor::diskToDevice(0, 3, {4});
+            auto host_load   = makeLoadOperationForTest(host.source_tier, 1);
+            auto disk_load   = makeLoadOperationForTest(disk.source_tier, 2);
+            if (already_completed) {
+                host_load->complete(true);
+                disk_load->complete(false);
+            }
+            auto context = coordinator->create({host, disk}, {true, true}, {host_load, disk_load}, 3, 1, 2);
+            ASSERT_NE(context, nullptr);
+            auto* reuse_metrics = metrics_reporter->getMetricsGroup<RtpLLMCacheReuseMetrics>();
+            ASSERT_NE(reuse_metrics, nullptr);
+            EXPECT_DOUBLE_EQ(snapshotQps(reuse_metrics->load_joined_request_qps_metric, tags), 1);
+            EXPECT_DOUBLE_EQ(snapshotQps(reuse_metrics->load_join_dependency_count_metric, tags), 2);
+            expectCountSamples(reuse_metrics->load_join_wait_latency_us_metric, tags, already_completed ? 1 : 0);
+            EXPECT_EQ(context->deviceReadyBlocks(), 1u);
+            if (abort_joiner) {
+                ASSERT_TRUE(context->abortPending());
+            } else {
+                ASSERT_TRUE(context->commit());
+            }
+            host_load->complete(true);
+            if (!already_completed) {
+                expectCountSamples(reuse_metrics->load_join_wait_latency_us_metric, tags, 0);
+            }
+            disk_load->complete(false);
+            disk_load->complete(false);
+            expectCountSamples(
+                reuse_metrics->load_join_wait_latency_us_metric, tags, already_completed || !abort_joiner ? 1 : 0);
+            EXPECT_TRUE(context->done());
+            EXPECT_FALSE(context->success());
+            EXPECT_EQ(context->deviceReadyBlocks(), abort_joiner ? 1u : 2u);
+            coordinator->shutdown();
+        }
+    }
 }
 
 TEST_F(BlockTreeCacheMetricsTest, FailureMetricsPublishExpectedValues) {
@@ -3956,15 +3984,13 @@ static std::unique_ptr<BlockTreeCache> makeHostOnlyLoadCache(std::vector<DeviceB
     return cache;
 }
 
-TEST_F(BlockTreeCacheTest, QueryContextSurvivesMatchAndLocalLoadTaskCreation) {
+TEST_F(BlockTreeCacheTest, QueryContextSurvivesMatchAndLocalLoadTaskConstruction) {
     auto cache  = makeHostOnlyLoadCache();
     auto result = cache->match({200}, {}, false, 73);
     auto load   = takeLoadContext(result);
     ASSERT_NE(load, nullptr);
     EXPECT_EQ(load->requestId(), 73);
-    LoadTaskRunner runner(cache->groupSets(), 1000, 1000);
-    auto           task = runner.createTask(load);
-    ASSERT_NE(task, nullptr);
+    auto task = LoadTask::create(load, 1000, 1000);
     EXPECT_EQ(task->host_to_device_task.requestId(), 73);
     EXPECT_EQ(task->disk_to_device_task.requestId(), 73);
     EXPECT_TRUE(load->abortPending());
@@ -4055,12 +4081,9 @@ TEST_F(BlockTreeCacheTest, LoadPreparedPrefixFailureRollsBackAllSourceAndTargetH
     EXPECT_EQ(first_host_pool->treeRefCount(first_source), 2u);
     EXPECT_EQ(second_host_pool->treeRefCount(second_source), 2u);
 
-    // Duplicate the first descriptor immediately after itself. The complete batch passes
-    // preflight while both resources are IDLE. Preparation then transitions the first descriptor
-    // to LOADING, registers it, and takes its target holder; the duplicate observes the same
-    // resource already LOADING and fails with one prepared descriptor and one
-    // untouched trailing descriptor. Add the matching source planning hold explicitly
-    // so every descriptor in the synthetic context owns exactly one source hold.
+    // The duplicate constructs an operation but cannot publish it because the first
+    // descriptor already moved the resource to LOADING. Rollback must release both
+    // operations and the untouched trailing descriptor's source hold.
     TransferDescriptor                        duplicate_first_desc = load_descs.front();
     std::vector<TransferDescriptor>::iterator inserted_desc =
         load_context->load_descs_.insert(load_context->load_descs_.begin() + 1, std::move(duplicate_first_desc));
@@ -4068,6 +4091,8 @@ TEST_F(BlockTreeCacheTest, LoadPreparedPrefixFailureRollsBackAllSourceAndTargetH
     std::vector<bool>::iterator inserted_joined =
         load_context->joined_load_.insert(load_context->joined_load_.begin() + 1, false);
     ASSERT_EQ(inserted_joined, load_context->joined_load_.begin() + 1);
+    load_context->load_operations_.insert(load_context->load_operations_.begin() + 1, nullptr);
+    load_context->new_load_indices_ = {0, 1, 2};
     first_group->referenceBlocks(MultiNodeResource{0, Tier::HOST, {{load_descs.front().node, {first_source}}}},
                                  BlockTreeRefType::LOAD);
     ASSERT_EQ(load_descs.size(), 3u);
@@ -4095,8 +4120,15 @@ TEST_F(BlockTreeCacheTest, LoadPreparedPrefixFailureRollsBackAllSourceAndTargetH
 
     EXPECT_FALSE(load_context->commit());
     EXPECT_EQ(per_rank_transfer_engine->submittedBatchCount(), 0u);
+    ASSERT_NE(load_context->loadOperations()[0], nullptr);
+    EXPECT_TRUE(load_context->loadOperations()[0]->done_);
+    EXPECT_FALSE(load_context->loadOperations()[0]->error_.ok());
+    ASSERT_NE(load_context->loadOperations()[1], nullptr);
+    EXPECT_TRUE(load_context->loadOperations()[1]->done_);
+    EXPECT_FALSE(load_context->loadOperations()[1]->error_.ok());
+    EXPECT_EQ(load_context->loadOperations()[2], nullptr);
 
-    // The first descriptor's acquired target holder and both of its source planning
+    // Both acquired target holders and the first descriptor's source planning
     // holds are gone; the unprepared trailing descriptor's source hold is also gone.
     // Request ownership remains untouched for both target blocks.
     EXPECT_EQ(first_host_pool->treeRefCount(first_source), 1u);

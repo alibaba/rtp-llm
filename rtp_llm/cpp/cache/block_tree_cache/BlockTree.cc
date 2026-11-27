@@ -92,12 +92,18 @@ void BlockTree::releaseNode(TreeNode* node) {
     }
 }
 
-TreeNode* BlockTree::createNode(CacheKeyType key, TreeNode* parent) {
+TreeNode* BlockTree::createNode(CacheKeyType key, TreeNode* parent, const std::vector<GroupSetResource>& resources) {
     auto node       = std::make_unique<TreeNode>();
     node->cache_key = key;
     node->parent    = parent;
     node->index     = node_pool_.size();
     node->group_set_resources.resize(group_sets_.size());
+    for (size_t group_set_id = 0; group_set_id < group_sets_.size(); ++group_set_id) {
+        auto& resource         = node->group_set_resources[group_set_id];
+        resource.device_blocks = resources[group_set_id].device_blocks;
+        resource.host_block    = resources[group_set_id].host_block;
+        resource.disk_block    = resources[group_set_id].disk_block;
+    }
     auto* raw = node.get();
     node_pool_.push_back(std::move(node));
     cache_keys_.push_back(key);
@@ -203,7 +209,7 @@ BlockTreeInsertResult BlockTree::insertNodeImpl(const CacheKeysType&            
             for (size_t tier_index = 0; tier_index < 2; ++tier_index) {
                 const auto& blocks = replaced_blocks[group_set_id][tier_index];
                 if (!blocks.empty()) {
-                    group_sets_[group_set_id]->releaseBlocks(
+                    group_sets_[group_set_id]->unreferenceBlocks(
                         tier_index == 0 ? Tier::HOST : Tier::DISK, blocks, BlockTreeRefType::CACHE);
                 }
             }
@@ -262,6 +268,7 @@ BlockTreeInsertResult BlockTree::insertNodeImpl(const CacheKeysType&            
                                                               existing.getBlocks(previous_tier),
                                                               /*initial_owner=*/true);
                     }
+                    existing.load_operation.reset();
                     ++existing.generation;
                     existing.transfer_state = GroupSetTransferState::IDLE;
                     if (previous_tier == Tier::DEVICE) {
@@ -302,10 +309,9 @@ BlockTreeInsertResult BlockTree::insertNodeImpl(const CacheKeysType&            
                 result.adopted_nodes.emplace_back(current, std::move(adopted_group_set_ids));
             }
         } else {
-            TreeNode* child              = createNode(key, current);
+            TreeNode* child              = createNode(key, current, resources[i]);
             current->children[key]       = child;
             current                      = child;
-            current->group_set_resources = resources[i];
             for (size_t group_set_id = 0; group_set_id < group_sets_.size(); ++group_set_id) {
                 const GroupSetResource& resource = current->group_set_resources[group_set_id];
                 const Tier              tier     = resource.getTopTier();

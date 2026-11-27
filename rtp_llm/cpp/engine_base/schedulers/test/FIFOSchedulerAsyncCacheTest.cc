@@ -43,9 +43,9 @@ std::shared_ptr<LoadAsyncContext> makeControlledAllocatorContext() {
                                                                    Tier::DEVICE,
                                                                    BlockIndicesType{1},
                                                                    /*initial_owner=*/false}};
-    auto context = coordinator->create(std::move(descriptors), {false}, /*matched_blocks=*/1);
-    if (!coordinator->registerContext(context)) {
-        throw std::runtime_error("failed to register controlled allocator context");
+    auto                            context = coordinator->create(std::move(descriptors), {false}, {}, 1);
+    if (!context) {
+        throw std::runtime_error("failed to create controlled allocator context");
     }
     return context;
 }
@@ -202,11 +202,11 @@ namespace {
 std::shared_ptr<LoadAsyncContext> makePendingBatchDecodeLoad() {
     auto coordinator = std::make_shared<LoadContextCoordinator>(
         [](const std::shared_ptr<LoadAsyncContext>&) { return true; }, [](LoadAsyncContext&) {});
-    auto context = coordinator->create({}, {}, /*matched_blocks=*/0);
-    context->setSettlementReadyCallback([](const std::shared_ptr<LoadAsyncContext>&) {});
-    if (!coordinator->registerContext(context)) {
-        throw std::runtime_error("failed to register batch decode load");
+    auto context = coordinator->create({}, {}, {}, /*local_matched_blocks=*/0);
+    if (!context) {
+        throw std::runtime_error("failed to create batch decode load");
     }
+    context->setSettlementReadyCallback([](const std::shared_ptr<LoadAsyncContext>&) {});
     return context;
 }
 

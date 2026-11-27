@@ -158,6 +158,82 @@ TEST(GroupSetTest, ForwardsTreeReferencesToDevicePools) {
     EXPECT_FALSE(pool_b->isAllocated(*block_b));
 }
 
+TEST(GroupSetTest, BatchTreeReferencesGroupResourcesAndNotifyEachPoolOnce) {
+    using namespace block_transfer_engine_test;
+    const auto                               topology = makeTestTopology({makeGroupBase({0}), makeGroupBase({1})});
+    std::vector<GroupSetPtr>                 groups;
+    std::vector<std::shared_ptr<IBlockPool>> pools;
+    std::vector<MultiNodeResource>           resources;
+    for (size_t group_id = 0; group_id < 2; ++group_id) {
+        auto first  = makeTestDevicePool({{64, 16}}, 3, "batch_first");
+        auto second = makeTestDevicePool({{64, 16}}, 3, "batch_second");
+        auto host   = makeHostPool(160, 3);
+        auto disk   = makeDiskPool(160, 3, "/tmp", std::make_unique<StatusDiskBlockIO>(DiskBlockIOStatus::OK));
+        groups.push_back(makeTestGroupSet(group_id, topology, {"group0", "group1"}, {first, second}, host, disk));
+        pools.insert(pools.end(), {first, second, host, disk});
+        const auto first_blocks  = first->malloc(3).value();
+        const auto second_blocks = second->malloc(3).value();
+        const auto host_blocks   = host->malloc(3).value();
+        const auto disk_blocks   = disk->malloc(3).value();
+        for (size_t i = 0; i < 3; ++i) {
+            appendBlocks(resources, group_id, Tier::HOST, {host_blocks[i]});
+            appendBlocks(resources, group_id, Tier::DEVICE, {first_blocks[i], second_blocks[i]});
+            appendBlocks(resources, group_id, Tier::DISK, {disk_blocks[i]});
+        }
+    }
+    referenceBlocks(groups, resources, BlockTreeRefType::LOAD);
+    std::vector<size_t> notifications(pools.size(), 0);
+    for (size_t i = 0; i < pools.size(); ++i) {
+        EXPECT_EQ(pools[i]->referencedBlocksNum(BlockTreeRefType::LOAD), 3u);
+        pools[i]->setCapacityChangeCallback([&, i] { ++notifications[i]; });
+    }
+    unreferenceBlocks(groups, resources, BlockTreeRefType::LOAD);
+    for (size_t i = 0; i < pools.size(); ++i) {
+        EXPECT_EQ(pools[i]->referencedBlocksNum(BlockTreeRefType::LOAD), 0u);
+        EXPECT_EQ(notifications[i], 1u);
+        pools[i]->setCapacityChangeCallback({});
+    }
+}
+
+TEST(GroupSetTest, BatchReferencesPreserveRepeatedBlocksInEachPool) {
+    for (bool tree_refs : {false, true}) {
+        const auto topology = makeTestTopology({makeGroupBase({0}), makeGroupBase({1})});
+        auto       first    = makeTestDevicePool({{64, 16}}, 2, "repeated_first");
+        auto       second   = makeTestDevicePool({{64, 16}}, 3, "repeated_second");
+        auto       host     = makeHostPool(160, 2);
+        auto       group    = makeTestGroupSet(0, topology, {"group0", "group1"}, {first, second}, host);
+        const auto a        = first->malloc(2).value();
+        const auto b        = second->malloc(3).value();
+        const auto h        = tree_refs ? host->malloc(2).value() : BlockIdList{};
+        std::vector<MultiNodeResource> resources;
+        appendBlocks(resources, 0, Tier::DEVICE, {a[0], b[0]});
+        appendBlocks(resources, 0, Tier::DEVICE, {a[1], b[1]});
+        appendBlocks(resources, 0, Tier::DEVICE, {a[0], b[2]});
+        if (tree_refs) {
+            appendBlocks(resources, 0, Tier::HOST, {h[0]});
+            appendBlocks(resources, 0, Tier::HOST, {h[1]});
+            appendBlocks(resources, 0, Tier::HOST, {h[0]});
+            referenceBlocks({group}, resources, BlockTreeRefType::LOAD);
+            EXPECT_EQ(first->treeRefCount(a[0]), 2u);
+            EXPECT_EQ(first->treeRefCount(a[1]), 1u);
+            EXPECT_EQ(host->treeRefCount(h[0]), 2u);
+            EXPECT_EQ(host->treeRefCount(h[1]), 1u);
+            unreferenceBlocks({group}, resources, BlockTreeRefType::LOAD);
+            EXPECT_FALSE(host->isAllocated(h[0]));
+            EXPECT_FALSE(host->isAllocated(h[1]));
+        } else {
+            referenceBlocks({group}, resources);
+            EXPECT_EQ(first->refCount(a[0]), 2u);
+            EXPECT_EQ(first->refCount(a[1]), 1u);
+            unreferenceBlocks({group}, resources);
+        }
+        for (auto block : a)
+            EXPECT_FALSE(first->isAllocated(block));
+        for (auto block : b)
+            EXPECT_FALSE(second->isAllocated(block));
+    }
+}
+
 TEST(GroupSetTest, RejectsUnknownDuplicateAndMisalignedTagsBeforeInitialization) {
     const auto topology = makeTestTopology({makeGroupBase({0}), makeGroupBase({1})});
     const auto pool_a   = makeTestDevicePool({{64, 16}}, 4, "group_set_validate_a");
@@ -181,7 +257,7 @@ TEST(GroupSetTest, ReleasesLowerTierTreeReferencesInBatch) {
     ASSERT_EQ(blocks->size(), 2u);
     ASSERT_EQ(host_pool->referencedBlocksNum(BlockTreeRefType::EVICT), 2u);
 
-    group->releaseBlocks(Tier::HOST, *blocks, BlockTreeRefType::EVICT);
+    group->unreferenceBlocks(Tier::HOST, *blocks, BlockTreeRefType::EVICT);
 
     EXPECT_EQ(host_pool->freeBlocksNum(), 2u);
     EXPECT_EQ(host_pool->referencedBlocksNum(BlockTreeRefType::EVICT), 0u);

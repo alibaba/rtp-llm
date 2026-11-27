@@ -6,25 +6,28 @@
 
 #include "rtp_llm/cpp/cache/block_tree_cache/evict/EvictionTask.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/group_set/GroupSet.h"
-#include "rtp_llm/cpp/utils/ErrorCode.h"
 
 namespace rtp_llm {
 
 class BlockTransferDispatcher;
 class BlockTreeCacheMetricsReporter;
+class BlockTreeTaskPool;
 class EvictionTaskRunner {
 public:
-    using EvictionDoneCallback = std::function<void(ErrorInfo)>;
+    EvictionTaskRunner(const std::vector<GroupSetPtr>& group_sets,
+                       const BlockTransferDispatcher*  transfer_dispatcher,
+                       BlockTreeTaskPool*              task_pool,
+                       BlockTreeCacheMetricsReporter&  metrics_reporter);
 
-    EvictionTaskRunner(const std::vector<GroupSetPtr>& group_sets, const BlockTransferDispatcher* transfer_dispatcher);
-
-    void runTransfer(std::shared_ptr<const EvictionTransferTask> task,
-                     BlockTreeCacheMetricsReporter&              metrics_reporter,
-                     EvictionDoneCallback                        on_done) const;
+    bool submit(std::shared_ptr<const EvictionTransferTask> task, std::function<void(bool)> on_done) const;
 
 private:
+    void run(std::shared_ptr<const EvictionTransferTask> task, std::function<void(bool)> on_done) const;
+
     const std::vector<GroupSetPtr>& group_sets_;
     const BlockTransferDispatcher*  transfer_dispatcher_{nullptr};
+    BlockTreeTaskPool*              task_pool_;
+    BlockTreeCacheMetricsReporter&  metrics_reporter_;
 };
 
 }  // namespace rtp_llm
