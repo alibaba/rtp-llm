@@ -13,7 +13,24 @@ MODULE = "rtp_llm.models_py.triton_kernels.gated_residual.prefill_inject_norm"
 
 class ResidualPrefillInjectNormTest(unittest.TestCase):
     def test_complete_consumer_matches_unfused_reference(self):
-        for rows in (1, 4, 4093, 4096, 5003, 8192, 12288, 16384):
+        for rows in (
+            1,
+            4,
+            257,
+            1024,
+            1025,
+            2048,
+            4093,
+            4096,
+            5003,
+            6144,
+            8192,
+            12288,
+            16384,
+            24576,
+            32768,
+            49152,
+        ):
             model = oracle.ResidualFp8Fixture().module(True)
             x = torch.randn(rows, 10240, device="cuda", dtype=torch.bfloat16)
             sub = torch.randn(rows, 2560, device="cuda", dtype=torch.bfloat16)
@@ -61,7 +78,7 @@ class ResidualPrefillInjectNormTest(unittest.TestCase):
             graph.reset()
 
     def test_graph_reads_input_sublayer_gates_gamma_and_scale(self):
-        for rows in (4096, 5003, 12288, 16384):
+        for rows in (32, 64, 1024, 1025, 4096):
             model = oracle.ResidualFp8Fixture().module(True)
             x = torch.randn(rows, 10240, device="cuda", dtype=torch.bfloat16)
             sub = torch.randn(rows, 2560, device="cuda", dtype=torch.bfloat16)

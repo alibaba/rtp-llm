@@ -28,6 +28,7 @@ def ple_eos_token_id(config):
 class Qwen4ModelConfig(ModelConfig):
     _python_fields = ModelConfig._python_fields | {
         "qwen4_ple_prefetch_mb",
+        "qwen4_decode_communication_mode",
         "linear_attn_norm_activation",
     }
 
@@ -53,9 +54,27 @@ class Qwen4ModelConfig(ModelConfig):
         self._qwen4_ple_prefetch_mb = value
 
     def _validate_ple_budget(self, value: int) -> None:
-        options = Qwen4Options(value)
+        Qwen4Options(value)
         snapshot = getattr(self, "_qwen4_runtime_snapshot", None)
-        if snapshot is not None and options != snapshot.options:
+        if snapshot is not None and value != snapshot.options.ple_prefetch_mb:
+            raise RuntimeError(
+                "qwen4_exp resource options are frozen after model loading"
+            )
+
+    @property
+    def qwen4_decode_communication_mode(self) -> str:
+        """Decode layout policy; BF16 vocabulary updates require all TP engines paused."""
+        return resolve_decode_communication_mode(self)
+
+    @qwen4_decode_communication_mode.setter
+    def qwen4_decode_communication_mode(self, value: str) -> None:
+        self._validate_decode_communication_mode(value)
+        self._qwen4_decode_communication_mode = value
+
+    def _validate_decode_communication_mode(self, value):
+        Qwen4Options(decode_communication_mode=value)
+        snapshot = getattr(self, "_qwen4_runtime_snapshot", None)
+        if snapshot is not None and value != snapshot.options.decode_communication_mode:
             raise RuntimeError(
                 "qwen4_exp resource options are frozen after model loading"
             )
@@ -64,18 +83,55 @@ class Qwen4ModelConfig(ModelConfig):
         model_override_args = json.loads(json_model_override_args)
         if "qwen4_ple_prefetch_mb" in model_override_args:
             self._validate_ple_budget(model_override_args["qwen4_ple_prefetch_mb"])
+        if "qwen4_decode_communication_mode" in model_override_args:
+            self._validate_decode_communication_mode(
+                model_override_args["qwen4_decode_communication_mode"]
+            )
         super().apply_override_args(json_model_override_args)
         if "qwen4_ple_prefetch_mb" in model_override_args:
             self.qwen4_ple_prefetch_mb = model_override_args["qwen4_ple_prefetch_mb"]
+        if "qwen4_decode_communication_mode" in model_override_args:
+            self.qwen4_decode_communication_mode = model_override_args[
+                "qwen4_decode_communication_mode"
+            ]
 
 
 @dataclass(frozen=True)
 class Qwen4Options:
     ple_prefetch_mb: int = 256
+    decode_communication_mode: str = "vocab_parallel_ipc"
 
     def __post_init__(self):
+        if self.decode_communication_mode not in ("default", "vocab_parallel_ipc"):
+            raise ValueError(
+                "qwen4_decode_communication_mode must be default or vocab_parallel_ipc"
+            )
         if type(self.ple_prefetch_mb) is not int or self.ple_prefetch_mb <= 0:
             raise ValueError("qwen4_ple_prefetch_mb must be a positive integer")
+
+
+def resolve_decode_communication_mode(config):
+    snapshot = getattr(config, "_qwen4_runtime_snapshot", None)
+    if snapshot is not None:
+        return snapshot.options.decode_communication_mode
+    mode = getattr(
+        config,
+        "_qwen4_decode_communication_mode",
+        Qwen4Options.decode_communication_mode,
+    )
+    return Qwen4Options(decode_communication_mode=mode).decode_communication_mode
+
+
+def uses_decode_vocab_shard(config, parallelism):
+    """Loading and runtime must agree on vocabulary layout, independently of IPC."""
+    return (
+        str(getattr(parallelism, "role_type", "")).rsplit(".", 1)[-1] == "DECODE"
+        and parallelism.tp_size == 2
+        and parallelism.dp_size == 1
+        and parallelism.local_world_size == 2
+        and config.hidden_size == 2560
+        and resolve_decode_communication_mode(config) == "vocab_parallel_ipc"
+    )
 
 
 @dataclass(frozen=True)
@@ -150,11 +206,14 @@ class Qwen4RuntimeSnapshot:
     dense_storage: str
     vocab_storage: str
     mtp_dense_storage: str
+    gr_storage: str
 
 
 def freeze_runtime_config(config, parallelism):
     snapshot = Qwen4RuntimeSnapshot(
-        Qwen4Options(config.qwen4_ple_prefetch_mb),
+        Qwen4Options(
+            config.qwen4_ple_prefetch_mb, resolve_decode_communication_mode(config)
+        ),
         CheckpointGeometry.from_config(config),
         (
             "NVFP4"
@@ -186,6 +245,7 @@ def freeze_runtime_config(config, parallelism):
             getattr(config, "_qwen4_dense_storage", "fp8"),
         ),
         getattr(config, "_qwen4_mtp_dense_storage_mode", "inherit"),
+        getattr(config.quant_config, "gr_storage", "inherit"),
     )
     previous = getattr(config, "_qwen4_runtime_snapshot", None)
     if previous is not None and previous != snapshot:
@@ -263,6 +323,7 @@ def build_qwen4_quant_config(quantization, source_fp8):
             )
         return ModelOptFp4Config(
             dense_storage=dense_storage,
+            gr_storage=getattr(requested, "gr_storage", "inherit"),
             mtp_dense_storage=mtp_dense_storage,
             bits=4,
             group_size=16,

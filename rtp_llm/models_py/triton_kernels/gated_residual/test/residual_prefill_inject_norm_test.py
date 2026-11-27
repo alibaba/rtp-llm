@@ -15,16 +15,35 @@ MODULE = "rtp_llm.models_py.triton_kernels.gated_residual.prefill_inject_norm"
 
 
 class ResidualPrefillInjectNormTest(unittest.TestCase):
+    def test_inject_norm_row_boundary_matches_reference(self):
+        torch.manual_seed(20261105)
+        for rows in (1, 32, 33, 64, 257, 1023, 1024):
+            with self.subTest(rows=rows):
+                x = torch.randn(rows, 10240, device="cuda", dtype=torch.bfloat16)
+                sub = torch.randn(rows, 2560, device="cuda", dtype=torch.bfloat16)
+                gates = torch.randn(rows, 4, device="cuda", dtype=torch.bfloat16)
+                gamma = torch.randn(10240, device="cuda", dtype=torch.bfloat16)
+                fused = try_inject_grouped_norm(x, sub, gates, gamma, 1e-6)
+                self.assertIsNotNone(fused)
+                residual, norm, scale = fused
+                expected = inject_into_residual(x, sub, gates)
+                torch.testing.assert_close(residual, expected, atol=0, rtol=0)
+                torch.testing.assert_close(
+                    norm, grouped_rms_norm(expected, gamma, 2560, 1e-6), atol=0, rtol=0
+                )
+                self.assertEqual(scale is not None, 7 <= rows <= 32)
+
     def test_unsupported_prefill_uses_original(self):
-        for rows in (0, 33, 257, 2048, 16385):
+        for rows in (0, 1025, 2048, 4093, 4096, 16384, 49152, 49153):
             x = torch.empty(rows, 10240, device="cuda", dtype=torch.bfloat16)
             sub = torch.empty(rows, 2560, device="cuda", dtype=torch.bfloat16)
             gates = torch.empty(rows, 4, device="cuda", dtype=torch.bfloat16)
             gamma = torch.empty(10240, device="cuda", dtype=torch.bfloat16)
-            self.assertIsNone(try_inject_grouped_norm(x, sub, gates, gamma, 1e-6))
+            with self.subTest(rows=rows):
+                self.assertIsNone(try_inject_grouped_norm(x, sub, gates, gamma, 1e-6))
 
     def test_bytes_scale_zero_and_nonfinite_values(self):
-        for rows in (1, 4, 7, 24, 28, 32, 4096, 5003, 12288, 16384):
+        for rows in (1, 4, 7, 24, 28, 32, 64, 1023, 1024):
             for kind in ("random", "zero", "subnormal", "wide", "nonfinite"):
                 x = torch.randn(rows, 10240, device="cuda", dtype=torch.bfloat16)
                 sub = torch.randn(rows, 2560, device="cuda", dtype=torch.bfloat16)

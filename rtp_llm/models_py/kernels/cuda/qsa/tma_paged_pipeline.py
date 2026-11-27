@@ -290,7 +290,6 @@ def _attention_step(
     if not initial:
         alpha = gl.exp2(maximum - safe_max)
     p = gl.exp2(scores - safe_max[:, None])
-    # Retain the BF16 rounding residual while using warp MMA for both PV terms.
     if SCALED:
         vs_value = gl.load(
             Scales + physical.to(gl.int64) * SCALE_PAGE + SCALE_KV + page_offset + c,
@@ -301,14 +300,11 @@ def _attention_step(
             ),
             other=0.0,
         )
-        # Fold per-key V scales into P while preserving its BF16 residual.
+        # Fold per-key V scales into P before its BF16 conversion.
         weights = p * vs_value[None, :]
     else:
         weights = p
-    hi = weights.to(gl.bfloat16)
-    lo = (weights - hi.to(gl.float32)).to(gl.bfloat16)
-    hi = gl.convert_layout(hi, lhs)
-    lo = gl.convert_layout(lo, lhs)
+    probability = gl.convert_layout(weights.to(gl.bfloat16), lhs)
     if not initial:
         acc = acc * alpha[:, None]
     if EARLY:
@@ -324,8 +320,7 @@ def _attention_step(
             v = gl.where((page_valid & (kt * KN + vr < Prefix + S))[:, None], v, 0.0)
         else:
             v = gl.where(page_valid, v, 0.0)
-    acc = mma_v2(hi, v, acc)
-    acc = mma_v2(lo, v, acc)
+    acc = mma_v2(probability, v, acc)
     gl.thread_barrier()
     fence_async_shared()
     if PIPE:

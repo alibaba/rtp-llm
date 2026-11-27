@@ -13,6 +13,14 @@ from rtp_llm.models_py.modules.qwen4_exp.qsa.sparse_gqa_impl import SparseGqaFmh
 class Fp8MainKvTest(Fp8MainKvTestFixture, unittest.TestCase):
 
     def test_native_prefill_and_decode_writers_with_graph_replay(self):
+        self._check_native_writers((0, 0))
+
+    def test_native_mixed_prefix_writer_preserves_old_scales(self):
+        # The cold row may skip scales even though its peer enables count_length.
+        # Reused prefixes retain their original non-unit scales.
+        self._check_native_writers((0, 5))
+
+    def _check_native_writers(self, prefix_lengths):
         from rtp_llm.ops.fused_rope_kvcache_op import _get_fused_rope_kvcache
 
         op = _get_fused_rope_kvcache()
@@ -22,6 +30,8 @@ class Fp8MainKvTest(Fp8MainKvTestFixture, unittest.TestCase):
             torch.float8_e4m3fn
         )
         scales = torch.full((5, 2, kv_heads, page_size), float("nan"), device="cuda")
+        for page, prefix in zip((2, 4), prefix_lengths):
+            scales[page, :, :, :prefix].fill_(2.0)
         table = torch.tensor([[2], [4]], device="cuda", dtype=torch.int32)
         offsets = op.convert_offset_to_block_array(table)
         qkv = torch.randn(5, width, device="cuda", dtype=torch.bfloat16)
@@ -44,9 +54,21 @@ class Fp8MainKvTest(Fp8MainKvTestFixture, unittest.TestCase):
             padding_offset=padding,
             rope_style=0,
             rope_dim=0,
+            prefix_prompt_lengths=torch.tensor(
+                prefix_lengths, dtype=torch.int32, pin_memory=True
+            ),
+            max_prefix_length=max(prefix_lengths),
+            count_length=max(prefix_lengths) > 0,
         )
         for batch, start, length, page in ((0, 0, 3, 2), (1, 3, 2, 4)):
+            prefix = prefix_lengths[batch]
             for which in (0, 1):
+                torch.testing.assert_close(
+                    scales[page, which, :, :prefix],
+                    torch.full_like(scales[page, which, :, :prefix], 2.0),
+                    atol=0,
+                    rtol=0,
+                )
                 expected = (
                     qkv[
                         start : start + length,
@@ -58,19 +80,23 @@ class Fp8MainKvTest(Fp8MainKvTestFixture, unittest.TestCase):
                     .transpose(0, 1)
                 )
                 torch.testing.assert_close(
-                    cache[page, which, :, :length].float(),
+                    cache[page, which, :, prefix : prefix + length].float(),
                     expected.to(cache.dtype).float(),
                     atol=0,
                     rtol=0,
                 )
                 torch.testing.assert_close(
-                    scales[page, which, :, :length],
-                    torch.ones_like(scales[page, which, :, :length]),
+                    scales[page, which, :, prefix : prefix + length],
+                    torch.ones_like(scales[page, which, :, prefix : prefix + length]),
                     atol=0,
                     rtol=0,
                 )
         decode_qkv = torch.randn(2, width, device="cuda", dtype=torch.bfloat16)
-        lengths = torch.tensor([3, 2], device="cuda", dtype=torch.int32)
+        lengths = torch.tensor(
+            [3 + prefix_lengths[0], 2 + prefix_lengths[1]],
+            device="cuda",
+            dtype=torch.int32,
+        )
 
         def decode():
             return op.decode_fused_rope_kvcache(

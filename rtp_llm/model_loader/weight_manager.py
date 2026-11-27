@@ -216,32 +216,19 @@ class WeightManager:
                     raise PermissionError(
                         f"shared projection {internal_name!r} requires a service restart to update"
                     )
+        else:
+            internal_name = rename_function(req["name"])
+            destination = self._weights.global_weights.get(internal_name)
+            if getattr(destination, "_rtp_requires_restart_for_update", False):
+                raise PermissionError(
+                    f"global weight {internal_name!r} requires a service restart to update"
+                )
         method: str = req["method"]
         desc: str = req["desc"]
         name: str = req["name"]
         stored_name: str = name
 
-        if method not in {"cuda_ipc", "shm"}:
-            raise ValueError(
-                f"Invalid IPC method '{method}' provided. Only 'cuda_ipc' and 'shm' are allowed."
-            )
-        tensor: torch.Tensor | None = None
-
-        if method == "cuda_ipc":
-            helper = CudaIpcHelper()
-            tensor = helper.build_from_meta(bytes.fromhex(desc))
-        else:  # method == "shm"
-            sm_meta: SharedMemIpcMeta = SharedMemIpcMeta.decode(desc)
-            tensor = self._s_helper.build_from_meta(sm_meta)
-
-        if tensor is None:
-            logging.error(
-                f"Fail to build tensor from ipc description {desc}, method: {method}"
-            )
-            # This should ideally not be reached if build_from_meta consistently returns a tensor or raises an error.
-            raise Exception(
-                f"Failed to build tensor from IPC description '{desc}' using method '{method}'. Tensor is None."
-            )
+        tensor = self._load_update_tensor(method, desc)
 
         logging.info(
             f"update weight request: {name}, shape: {tensor.shape}, device: {tensor.device}, dtype: {tensor.dtype}"
@@ -322,3 +309,16 @@ class WeightManager:
                     )
 
             self._working_stream.synchronize()
+
+    def _load_update_tensor(self, method, desc):
+        if method == "cuda_ipc":
+            tensor = CudaIpcHelper().build_from_meta(bytes.fromhex(desc))
+        elif method == "shm":
+            tensor = self._s_helper.build_from_meta(SharedMemIpcMeta.decode(desc))
+        else:
+            raise ValueError(
+                f"Invalid IPC method '{method}' provided. Only 'cuda_ipc' and 'shm' are allowed."
+            )
+        if tensor is None:
+            raise ValueError("IPC weight update produced no tensor")
+        return tensor

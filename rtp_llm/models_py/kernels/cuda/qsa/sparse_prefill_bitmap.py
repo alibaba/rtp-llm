@@ -92,9 +92,7 @@ def _bitmap_gqa(
             t[:, None] < T,
             other=0,
         )
-        acc = acc * rescale[:, None] + tl.dot(
-            prob, vv.to(tl.float32), input_precision="tf32x3"
-        )
+        acc = tl.dot(prob.to(tl.bfloat16), vv, acc * rescale[:, None])
         z = z * rescale + tl.sum(prob, 1)
         mx = nxt
     result = tl.where(z[:, None] > 0, acc / z[:, None], 0.0)

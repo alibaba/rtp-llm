@@ -1,5 +1,7 @@
 """Complete official-FP8 to dense-FP8/routed-NVFP4 weight recipe."""
 
+import copy
+
 from rtp_llm.config.quant_config import Fp8BlockWiseQuantConfig
 from rtp_llm.config.qwen4_exp_config import is_qwen4_precision_recipe
 from rtp_llm.model_loader.ffn_weight import MoeWeight
@@ -8,6 +10,18 @@ from rtp_llm.utils.model_weight import W
 
 
 class Qwen4MoeFp4WeightInfo(ModelWeightInfo):
+    _gr_projection_weights = frozenset(
+        {
+            W.qwen4_hc_attn_mix_down,
+            W.qwen4_hc_attn_mix_up,
+            W.qwen4_hc_attn_inject,
+            W.qwen4_hc_mlp_mix_down,
+            W.qwen4_hc_mlp_mix_up,
+            W.qwen4_hc_mlp_inject,
+            W.qwen4_hc_mixer_mix_down,
+            W.qwen4_hc_mixer_mix_up,
+        }
+    )
     _fp8_attention_weights = frozenset(
         {W.attn_qkv_w, W.attn_o_w, W.linear_attn_qkvz_w, W.linear_attn_out_w}
     )
@@ -25,6 +39,7 @@ class Qwen4MoeFp4WeightInfo(ModelWeightInfo):
                 "Qwen4 requires the complete FP8/NVFP4 recipe from official FP8 source"
             )
         from rtp_llm.model_loader.fp8_weight import Fp8StorageWeight
+        from rtp_llm.models.qwen4_exp.qwen4_exp_weight import Qwen4VocabWeight
 
         storage = (
             self._dense_storage
@@ -39,6 +54,7 @@ class Qwen4MoeFp4WeightInfo(ModelWeightInfo):
         if vocab_storage not in ("fp8", "source_bf16"):
             raise ValueError("Qwen4 vocabulary storage must be fp8 or source_bf16")
         source_bf16 = storage == "source_bf16"
+        gr_source_bf16 = getattr(quant_config, "gr_storage", "inherit") == "source_bf16"
         layers = []
         for weights in self.layer_weights:
             layer = []
@@ -53,18 +69,28 @@ class Qwen4MoeFp4WeightInfo(ModelWeightInfo):
                         for child in weight.sub_weights.values()
                     ]
                     weight = MoeWeight(sub_weights=children, config=weight.config)
-                elif not source_bf16 and weight.name in self._fp8_attention_weights:
-                    weight = weight.create(
-                        weight, Fp8BlockWiseQuantConfig(is_quanted=False)
-                    )
-                elif not source_bf16 and weight.name != W.qwen4_ple_ngram_shards:
-                    weight = Fp8StorageWeight(weight)
+                elif not source_bf16 and not (
+                    gr_source_bf16 and weight.name in self._gr_projection_weights
+                ):
+                    if weight.name in self._fp8_attention_weights:
+                        weight = weight.create(
+                            weight, Fp8BlockWiseQuantConfig(is_quanted=False)
+                        )
+                    elif weight.name != W.qwen4_ple_ngram_shards:
+                        weight = Fp8StorageWeight(weight)
                 layer.append(weight)
             layers.append(layer)
         globals_ = []
         for weight in self.weights:
-            preserve_source = source_bf16
+            preserve_source = source_bf16 or (
+                gr_source_bf16 and weight.name in self._gr_projection_weights
+            )
             if weight.name in (W.embedding, W.lm_head):
                 preserve_source = vocab_storage == "source_bf16"
-            globals_.append(weight if preserve_source else Fp8StorageWeight(weight))
+            if isinstance(weight, Qwen4VocabWeight):
+                weight = copy.copy(weight)
+                weight.fp8_storage = not preserve_source
+                globals_.append(weight)
+            else:
+                globals_.append(weight if preserve_source else Fp8StorageWeight(weight))
         return ModelWeightInfo(globals_, layers)
