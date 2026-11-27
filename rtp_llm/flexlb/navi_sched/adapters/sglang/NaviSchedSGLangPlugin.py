@@ -26,7 +26,7 @@ def _server_args(original, args):
             config["publisher"] = "navi_sched"
     args.kv_events_config = json.dumps(config)
     value = original(args)
-    for name in ("dp_size", "attn_dp_size", "pp_size", "tokenizer_worker_num"):
+    for name in ("dp_size", "pp_size"):
         if getattr(args, name, 1) != 1:
             raise ValueError("SGLang NaviSched currently requires " + name + "=1")
     if args.disaggregation_mode != "null":
@@ -53,13 +53,65 @@ def _manager_init(original, manager, *args, **kwargs):
     from .SGLangObserver import SGLangState
     from .SGLangRuntime import SGLangRuntime
 
-    runtime = SGLangRuntime(manager, _original_generate[0])
+    if manager.server_args.tokenizer_worker_num > 1:
+        from .SGLangMultiTokenizer import SGLangTokenizerRuntime
+
+        runtime = SGLangTokenizerRuntime(
+            manager, _original_generate[0], _original_abort[0]
+        )
+    else:
+        runtime = SGLangRuntime(manager, _original_generate[0])
     manager.navi_sched = runtime
     manager._result_dispatcher += TypeBasedDispatcher([(SGLangState, runtime.receive)])
     atexit.register(runtime.close)
 
 
 _original_generate = None
+_original_abort = None
+
+
+def _router_init(original, router, server_args, port_args):
+    from .SGLangMultiTokenizer import RouterSocket, SGLangRouterRuntime
+
+    router.navi_sched = SGLangRouterRuntime(router, server_args)
+    original(router, server_args, port_args)
+    router.receive_from_worker = RouterSocket(
+        router.receive_from_worker, router.navi_sched.receive_worker
+    )
+    atexit.register(router.navi_sched.close)
+
+
+async def _router_receive(original, socket, *args, **kwargs):
+    from .SGLangObserver import SGLangState
+
+    handler = getattr(socket, "navi_sched_receive", None)
+    while True:
+        message = await original(socket, *args, **kwargs)
+        if handler is not None and isinstance(message, SGLangState):
+            handler(message)
+        else:
+            return message
+
+
+async def _router_distribute(original, router, message):
+    from .SGLangObserver import SGLangState
+
+    if isinstance(message, SGLangState):
+        router.navi_sched.receive_scheduler(message)
+        return
+    return await original(router, message)
+
+
+async def _internal_state(original, manager):
+    states = await original(manager)
+    runtime = getattr(manager, "navi_sched", None)
+    if runtime is not None and states:
+        try:
+            snapshot = await runtime.get_snapshot()
+        except (TimeoutError, RuntimeError) as error:
+            snapshot = {"snapshot_error": str(error)}
+        states = [dict(states[0], navi_sched_node=snapshot), *states[1:]]
+    return states
 
 
 @asynccontextmanager
@@ -206,7 +258,7 @@ def _release(original, scheduler, *args, **kwargs):
 
 
 def _register():
-    global _registered, _original_generate
+    global _registered, _original_generate, _original_abort
     if _registered or os.environ.get("SGLANG_NAVI_SCHED_ENABLED", "0") != "1":
         return
     from sglang.srt.disaggregation.kv_events import EventPublisherFactory
@@ -227,6 +279,7 @@ def _register():
     # HookRegistry rewrites module-level references to patched functions. Keep
     # the native entry in a container so destination execution bypasses routing.
     _original_generate = (TokenizerManager.generate_request,)
+    _original_abort = (TokenizerManager.abort_request,)
     targets = {
         "sglang.srt.server_args.ServerArgs.resolve_once": _server_args,
         "sglang.srt.managers.tokenizer_manager.TokenizerManager.__init__": _manager_init,
@@ -234,6 +287,10 @@ def _register():
         "sglang.srt.managers.tokenizer_manager.TokenizerManager.abort_request": _abort,
         "sglang.srt.managers.tokenizer_manager.TokenizerManager.create_abort_task": _create_abort_task,
         "sglang.srt.managers.tokenizer_manager.TokenizerManager.sigterm_watchdog": _sigterm_watchdog,
+        "sglang.srt.managers.tokenizer_manager.TokenizerManager.get_internal_state": _internal_state,
+        "sglang.srt.managers.multi_tokenizer_mixin.MultiTokenizerRouter.__init__": _router_init,
+        "sglang.srt.managers.multi_tokenizer_mixin.MultiTokenizerRouter._distribute_result_to_workers": _router_distribute,
+        "sglang.srt.managers.io_struct.async_sock_recv": _router_receive,
         "sglang.srt.entrypoints.engine.Engine.shutdown": _engine_shutdown,
         "sglang.srt.managers.scheduler.Scheduler.__init__": _scheduler_init,
         "sglang.srt.managers.scheduler.Scheduler.run_batch": _run_batch,

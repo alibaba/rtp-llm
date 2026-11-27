@@ -140,6 +140,7 @@ class SGLangObserver:
 
         self.scheduler = scheduler
         parallel = get_parallel()
+        self.dp_rank = getattr(parallel, "attn_dp_rank", 0)
         self.enabled = (
             parallel.pp_rank == 0
             and parallel.attn_tp_rank == 0
@@ -237,6 +238,7 @@ class SGLangObserver:
             "quantization",
             "kv_cache_dtype",
             "tp_size",
+            "attn_dp_size",
             "attn_cp_size",
             "ep_size",
             "attention_backend",
@@ -305,6 +307,7 @@ class SGLangObserver:
         )
 
     def send(self, data):
+        data = dict(data, dp_rank=self.dp_rank)
         message = SGLangState(data=msgspec.msgpack.encode(data))
         self.scheduler.ipc_channels.send_to_tokenizer.send_output(message)
 

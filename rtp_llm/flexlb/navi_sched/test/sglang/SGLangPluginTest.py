@@ -100,7 +100,7 @@ class SGLangLifespanTest(unittest.IsolatedAsyncioTestCase):
 
 
 class SGLangPluginTest(unittest.TestCase):
-    def test_dspark_uses_native_resolution_and_dp_remains_rejected(self):
+    def test_dspark_parallel_resolution_keeps_pipeline_parallelism_rejected(self):
         from navi_sched.adapters.sglang.NaviSchedSGLangPlugin import _server_args
 
         args = SimpleNamespace(
@@ -123,7 +123,11 @@ class SGLangPluginTest(unittest.TestCase):
             self.assertEqual(_server_args(resolve, args), "native result")
             self.assertEqual(resolved, [args])
             args.attn_dp_size = 8
-            with self.assertRaisesRegex(ValueError, "requires attn_dp_size=1"):
+            args.tokenizer_worker_num = 8
+            self.assertEqual(_server_args(resolve, args), "native result")
+            self.assertEqual(resolved, [args, args])
+            args.pp_size = 2
+            with self.assertRaisesRegex(ValueError, "requires pp_size=1"):
                 _server_args(resolve, args)
 
     def test_real_hook_registry_preserves_native_destination_entry(self):
@@ -161,10 +165,19 @@ from navi_sched.adapters.sglang import NaviSchedSGLangPlugin as plugin
 from navi_sched.adapters.sglang.SGLangRuntime import SGLangRuntime
 from sglang.utils import TypeBasedDispatcher
 from types import SimpleNamespace
+from unittest.mock import patch
+from sglang.srt.runtime_context import get_platform
 assert TokenizerManager.create_abort_task is not inspect.unwrap(TokenizerManager.create_abort_task)
 manager = SimpleNamespace(_result_dispatcher=TypeBasedDispatcher([]))
-args = ServerArgs(model_path="none")
-args.resolve_once()
+args = ServerArgs(model_path="none", device="cuda")
+manager.server_args = args
+platform = get_platform()
+class CudaPlatform:
+    is_cuda = True
+    def __getattr__(self, name):
+        return getattr(platform, name)
+with patch("sglang.srt.runtime_context.get_platform", return_value=CudaPlatform()):
+    args.resolve_once()
 assert json.loads(args.kv_events_config) == {"publisher": "navi_sched", "format": "dynamo"}
 plugin._manager_init(lambda manager: None, manager)
 try:
@@ -172,7 +185,9 @@ try:
     assert manager.navi_sched.original_generate is not TokenizerManager.generate_request
 finally:
     manager.navi_sched.close()
-""".replace("ADAPTERS", repr(adapters)).replace(
+""".replace(
+            "ADAPTERS", repr(adapters)
+        ).replace(
             "NAVI_PACKAGE", repr(str(Path(adapters).parent / "navi_sched"))
         )
         return subprocess.run(

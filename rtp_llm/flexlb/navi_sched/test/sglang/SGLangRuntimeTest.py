@@ -155,5 +155,42 @@ class SGLangRuntimeTest(unittest.IsolatedAsyncioTestCase):
         await asyncio.gather(task, return_exceptions=True)
 
 
+class SGLangNativeWorkloadTest(unittest.TestCase):
+    def test_attention_dp_workload_is_accepted_by_native_bridge(self):
+        from navi_sched.adapters.sglang.SGLangObserver import workload_snapshot
+        from navi_sched.adapters.sglang.SGLangParallelState import SGLangParallelState
+        from navi_sched.util import naviSchedModule
+
+        from navi_sched import NaviSchedAgent
+
+        agent = NaviSchedAgent(
+            "sglang_native_workload_contract",
+            total_blocks=128,
+            block_size=64,
+            linear_step=64,
+            hybrid_tail_required=True,
+            pd_separated=False,
+            latency_prediction_mode="unified",
+            enable_kmon=False,
+            wait_no_query=False,
+            gig={"grpc_port": 0},
+        )
+        try:
+            agent.init()
+            bridge = naviSchedModule()._VLLMAgentBridge(agent)
+            scheduler = SimpleNamespace(
+                running_batch=SimpleNamespace(reqs=[]),
+                waiting_queue=[],
+                chunked_req=None,
+                max_running_requests=64,
+            )
+            parallel = SGLangParallelState(4)
+            for rank in range(4):
+                combined, _ = parallel.workload(rank, workload_snapshot(scheduler), [])
+            self.assertTrue(bridge.report_workload(**combined))
+        finally:
+            agent.stop()
+
+
 if __name__ == "__main__":
     unittest.main()

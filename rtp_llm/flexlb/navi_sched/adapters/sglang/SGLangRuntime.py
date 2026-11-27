@@ -30,6 +30,10 @@ class SGLangRuntime:
         self.original_generate = original_generate
         self.config = SGLangConfig.from_env()
         self.codec = SGLangForwardCodec(self.config.max_payload_bytes)
+        from .SGLangParallelState import SGLangParallelState
+
+        dp_size = getattr(getattr(manager, "server_args", None), "attn_dp_size", 1)
+        self.parallel = SGLangParallelState(dp_size) if dp_size > 1 else None
         self.agent = None
         self.bridge = None
         self.transport = None
@@ -49,14 +53,21 @@ class SGLangRuntime:
 
     def receive(self, message):
         values = msgspec.msgpack.decode(message.data)
+        for reduced in (
+            self.parallel.reduce(values) if self.parallel is not None else [values]
+        ):
+            self._receive_values(reduced)
+
+    def _receive_values(self, values):
         kind = values["kind"]
         if kind == "ready":
             if self.agent is not None:
                 raise RuntimeError(
                     "multiple SGLang schedulers cannot share one NaviSched Agent"
                 )
-            from navi_sched import NaviSchedAgent
             from navi_sched.util import naviSchedModule
+
+            from navi_sched import NaviSchedAgent
 
             self.agent = NaviSchedAgent(
                 self.config.target_biz,
@@ -202,6 +213,23 @@ class SGLangRuntime:
             source_rid = obj.rid
             obj.rid = "navi_sched_" + str(request_id)
             obj.stream = True
+            if self.parallel is not None:
+                from .SGLangCache import prompt_block_hashes
+
+                ids = obj.input_ids or []
+                hashes = (
+                    []
+                    if obj.contains_mm_input() or obj.lora_path or obj.session_params
+                    else prompt_block_hashes(
+                        ids,
+                        self.snapshot["cache_policy"]["page_size"],
+                        extra_key=obj.extra_key,
+                        cache_salt=obj.cache_salt,
+                    )
+                )
+                obj.routed_dp_rank = self.parallel.reserve_rank(
+                    obj.rid, hashes, max(1, len(ids)), obj.routed_dp_rank
+                )
             # A single destination executes every item of a NaviSched batch. The
             # shared original method bypasses source routing but retains SGLang's
             # native validation, media processing, LoRA loading and detokenization.
@@ -235,6 +263,8 @@ class SGLangRuntime:
         finally:
             if obj is not None:
                 self.manager.abort_request(obj.rid)
+                if self.parallel is not None:
+                    self.parallel.release_rank(obj.rid)
             self._execution_tasks.pop(int(request_id), None)
             state.remaining.discard(request_id)
             if not completed and state.handle is not None:
@@ -279,6 +309,15 @@ class SGLangRuntime:
             raise RuntimeError("SGLang NaviSched runtime is closed")
         self.manager.auto_create_handle_loop()
         await asyncio.wait_for(self.ready.wait(), self.config.request_timeout_ms / 1000)
+
+    def snapshot_state(self):
+        result = dict(self.snapshot)
+        if self.parallel is not None:
+            result["attention_dp"] = self.parallel.snapshot()
+        return result
+
+    async def get_snapshot(self):
+        return self.snapshot_state()
 
     async def generate(self, obj, request):
         from .SGLangTransport import SGLangTransport
