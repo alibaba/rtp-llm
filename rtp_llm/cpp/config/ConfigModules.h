@@ -431,6 +431,7 @@ struct VitConfig {
 };
 
 struct CacheStoreConfig {
+    static constexpr int kDefaultP2PKvForceReleaseTimeoutMs = 5 * 60 * 1000;
     bool    cache_store_rdma_mode               = false;
     int     thread_count                        = 32;
     int     rdma_connect_timeout_ms             = 250;
@@ -443,6 +444,7 @@ struct CacheStoreConfig {
     int64_t p2p_transfer_not_done_resource_hold_ms =
         10 * 1000;  // D 后等待 RDMA 物理完成的时间；到期后 close 相关 connection
     int64_t p2p_lease_query_timeout_ms = 500;  // 单轮 lease 查询的超时上限，内部最多等待 500ms
+    int     p2p_kv_force_release_timeout_ms = kDefaultP2PKvForceReleaseTimeoutMs;
 
     int64_t p2p_cancel_broadcast_timeout_ms              = 1000;
     // TTL for cancelled_keys_ tombstones; should cover the longest expected

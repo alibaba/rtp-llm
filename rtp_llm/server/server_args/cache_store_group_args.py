@@ -94,7 +94,6 @@ def init_cache_store_group_args(parser, cache_store_config):
         default=10000,
         help=(
             "RDMA 传输超时后，若物理传输仍未完成，等待该时长再尝试关闭相关连接（毫秒，默认 10000）。"
-            "Decode 确认所有 rank 停止写入后才释放目标 KV。"
         ),
     )
     cache_store_group.add_argument(
@@ -106,6 +105,15 @@ def init_cache_store_group_args(parser, cache_store_config):
         help="Decode：单轮 lease 查询的超时上限（毫秒），内部最多等待 500ms；未确认停止则继续持有 KV 并重试。",
     )
 
+    cache_store_group.add_argument(
+        "--p2p_kv_force_release_timeout_ms",
+        env_name="P2P_KV_FORCE_RELEASE_TIMEOUT_MS",
+        bind_to=(cache_store_config, "p2p_kv_force_release_timeout_ms"),
+        type=int,
+        default=cache_store_config.p2p_kv_force_release_timeout_ms,
+        help="Decode 隔离目标 KV 后强制释放的期限（正整数毫秒，默认 300000）。"
+        "RDMA 模式下低于断连宽限期时按宽限期生效并告警，且释放不早于传输 deadline 加断连宽限期。",
+    )
     cache_store_group.add_argument(
         "--p2p_cancel_broadcast_timeout_ms",
         env_name="P2P_CANCEL_BROADCAST_TIMEOUT_MS",

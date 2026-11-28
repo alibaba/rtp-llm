@@ -425,6 +425,27 @@ TEST(P2PConnectorConfigTest, LoadTimeoutComesFromSharedPDSepConfig) {
     EXPECT_EQ(config.load_cache_timeout_ms, 900000);
 }
 
+TEST(P2PConnectorConfigTest, DecodeRdmaForceReleaseTimeoutUsesDisconnectGraceAsFloor) {
+    RuntimeConfig runtime;
+    CacheStoreConfig cache_store;
+    ParallelismConfig parallelism;
+    PDSepConfig pd_sep;
+    pd_sep.role_type = RoleType::DECODE;
+    cache_store.cache_store_rdma_mode = true;
+    cache_store.p2p_transfer_not_done_resource_hold_ms = 10000;
+
+    for (const int configured_ms : {1, 10000, 300000}) {
+        cache_store.p2p_kv_force_release_timeout_ms = configured_ms;
+        const auto config = P2PConnectorSchedulerConfig::create(runtime, cache_store, parallelism, pd_sep);
+        EXPECT_EQ(config.p2p_kv_force_release_timeout_ms, std::max(configured_ms, 10000));
+    }
+    cache_store.cache_store_rdma_mode = false;
+    cache_store.p2p_kv_force_release_timeout_ms = 1;
+    EXPECT_EQ(P2PConnectorSchedulerConfig::create(runtime, cache_store, parallelism, pd_sep)
+                  .p2p_kv_force_release_timeout_ms,
+              1);
+}
+
 // ==================== sendKVCache 测试 (Prefill 端功能) ====================
 
 // 测试：broadcast 成功
@@ -1760,7 +1781,7 @@ TEST_F(P2PConnectorSchedulerTest, LeaseQueriesForDistinctRequestsCanOverlap) {
     ASSERT_TRUE(waitUntil([&] { return !first->resourceHoldPending() && !second->resourceHoldPending(); }));
 }
 
-TEST(P2PRetainedKvTest, OldLeaseStillRequiresPhysicalStopConfirmation) {
+TEST(P2PRetainedKvTest, ReleasesExpiredLeaseWithoutPhysicalStopConfirmation) {
     const auto deadline = currentTimeMs() - 1;
     auto make_context = [&](const std::string& key) {
         auto context = std::make_shared<P2PConnectorAsyncReadContext>(
@@ -1770,12 +1791,34 @@ TEST(P2PRetainedKvTest, OldLeaseStillRequiresPhysicalStopConfirmation) {
         return context;
     };
     auto expired = make_context("expired-hold");
-    expired->lease_hold_start_us_.store(P2PNotification::nowUs() - 10 * 60 * 1000 * 1000LL);
     expired->markKickoffUnconfirmed({ErrorCode::GENERATE_TIMEOUT, "late kickoff error"});
+    const auto hold_start_us = expired->lease_hold_start_us_.load();
+    constexpr int64_t timeout_us = 5 * 60 * 1000 * 1000LL;
+    const auto release_at_ms = (hold_start_us + timeout_us + 999) / 1000;
+    EXPECT_EQ(expired->nextWakeupMs(false), release_at_ms);
+    EXPECT_FALSE(expired->expireLeaseHoldIfNeeded(release_at_ms * 1000 - 1));
     EXPECT_TRUE(expired->resourceHoldPending());
     EXPECT_TRUE(expired->resource_);
+    EXPECT_TRUE(expired->expireLeaseHoldIfNeeded(release_at_ms * 1000));
+    EXPECT_FALSE(expired->resourceHoldPending());
+    EXPECT_FALSE(expired->resource_);
     EXPECT_FALSE(expired->lease_all_ranks_stopped_.load());
     EXPECT_EQ(expired->nextWakeupMs(false), std::numeric_limits<int64_t>::max());
+    EXPECT_FALSE(expired->expireLeaseHoldIfNeeded(release_at_ms * 1000 + 1));
+}
+
+TEST(P2PRetainedKvTest, EarlyQuarantineWaitsForRdmaDisconnectDeadline) {
+    const auto deadline = currentTimeMs() + 60000;
+    constexpr int64_t grace_ms = 10000;
+    P2PConnectorAsyncReadContext context(
+        std::make_shared<KVCacheResource>(), "early-hold", nullptr, 1, false, deadline, deadline, 10000, 1, grace_ms);
+    context.markKickoffUnconfirmed({ErrorCode::GENERATE_TIMEOUT, "test lease hold"});
+    const auto release_at_ms = context.transfer_stop_at_ms_ + grace_ms;
+    EXPECT_EQ(context.nextWakeupMs(false), release_at_ms);
+    EXPECT_FALSE(context.expireLeaseHoldIfNeeded(release_at_ms * 1000 - 1));
+    EXPECT_TRUE(context.resourceHoldPending());
+    EXPECT_TRUE(context.expireLeaseHoldIfNeeded(release_at_ms * 1000));
+    EXPECT_FALSE(context.resourceHoldPending());
 }
 
 TEST(P2PRetainedKvTest, CapacityIncludesAllDecodePipelineStages) {

@@ -216,6 +216,7 @@ class CacheStoreConfig:
     rdma_max_block_pairs_per_connection: int
     p2p_transfer_not_done_resource_hold_ms: int
     p2p_lease_query_timeout_ms: int
+    p2p_kv_force_release_timeout_ms: int
     p2p_cancel_broadcast_timeout_ms: int
     p2p_cancelled_keys_ttl_ms: int
     cache_store_tcp_anet_rpc_thread_num: int

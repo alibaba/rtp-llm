@@ -168,18 +168,19 @@ class EngineConfigTest(TestCase):
         self.assertEqual(config.p2p_prefill_sender_queue_size, 10000)
         config.p2p_prefill_sender_thread_count = 8
         config.p2p_prefill_sender_queue_size = 20000
+        config.p2p_kv_force_release_timeout_ms = 120000
         state = config.__getstate__()
-        self.assertEqual(len(state), 22)
+        self.assertEqual(len(state), 23)
         restored = pickle.loads(pickle.dumps(config))
         self.assertEqual(restored.__getstate__(), state)
         self.assertEqual(restored.p2p_prefill_sender_thread_count, 8)
         self.assertEqual(restored.p2p_prefill_sender_queue_size, 20000)
         previous = CacheStoreConfig.__new__(CacheStoreConfig)
-        previous.__setstate__(state + (180000, 250, 100, 100, 100000, 300000))
-        self.assertEqual(previous.__getstate__(), state)
+        previous.__setstate__(state[:22] + (180000, 250, 100, 100, 100000, 300000))
+        self.assertEqual(previous.__getstate__(), state[:22] + (300000,))
         legacy = CacheStoreConfig.__new__(CacheStoreConfig)
-        legacy.__setstate__(state + (40, 45, 180000, 250, 100, 100, 100000))
-        self.assertEqual(legacy.__getstate__(), state)
+        legacy.__setstate__(state[:22] + (40, 45, 180000, 250, 100, 100, 100000))
+        self.assertEqual(legacy.__getstate__(), state[:22] + (300000,))
 
     def test_cache_store_config_preserves_rdma_h2d_staging_total_bytes(self):
         config = CacheStoreConfig()

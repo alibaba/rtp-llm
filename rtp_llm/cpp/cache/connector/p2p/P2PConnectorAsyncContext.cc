@@ -191,6 +191,43 @@ void P2PConnectorAsyncReadContext::releaseLeaseHoldLocked(bool all_ranks_stopped
     lease_hold_pending_.store(false, std::memory_order_release);
 }
 
+int64_t P2PConnectorAsyncReadContext::forceReleaseAtMs(int64_t hold_start_us) const {
+    const auto add_duration = [](int64_t start, int64_t duration) {
+        return start + std::min(duration, std::numeric_limits<int64_t>::max() - start);
+    };
+    const auto hold_start_ms = hold_start_us / 1000 + (hold_start_us % 1000 != 0);
+    const auto quarantine_end_ms = add_duration(hold_start_ms, kv_force_release_timeout_ms_);
+    if (rdma_disconnect_grace_ms_ < 0 || transfer_stop_at_ms_ <= 0) {
+        return quarantine_end_ms;
+    }
+    return std::max(quarantine_end_ms, add_duration(transfer_stop_at_ms_, rdma_disconnect_grace_ms_));
+}
+
+bool P2PConnectorAsyncReadContext::expireLeaseHoldIfNeeded(int64_t now_us) {
+    DoneNotifier                done_notifier{*this};
+    std::lock_guard<std::mutex> lock(state_mutex_);
+    const auto                  hold_start_us = lease_hold_start_us_.load();
+    if (!resourceHoldPending() || hold_start_us <= 0 || now_us / 1000 < forceReleaseAtMs(hold_start_us)) {
+        return false;
+    }
+    const auto released_blocks = resource_ ? resource_->debugString() : std::string{};
+    const auto request_id = tp_sync_result_ ? tp_sync_result_->requestId().value_or(request_id_) : request_id_;
+    const auto lease_query_state = lease_query_state_.load(std::memory_order_relaxed);
+    releaseLeaseHoldLocked(/*all_ranks_stopped=*/false, now_us);
+    RTP_LLM_LOG_WARNING("P2P KV event=forced_quarantine_release request_id=%ld "
+                        "unique_key=%s event_time_us=%ld hold_ms=%ld timeout_ms=%ld cancel_confirmed=%d "
+                        "lease_query_state=%d released_target_blocks=%s",
+                        request_id,
+                        uniqueKey().c_str(),
+                        currentTimeUs(),
+                        (now_us - hold_start_us) / 1000,
+                        kv_force_release_timeout_ms_,
+                        cancel_confirmed_.load(std::memory_order_acquire),
+                        static_cast<int>(lease_query_state),
+                        released_blocks.c_str());
+    return true;
+}
+
 bool P2PConnectorAsyncReadContext::expireTransferDeadlineIfNeeded() {
     DoneNotifier done_notifier{*this};
     if (transfer_stop_at_ms_ <= 0) {
@@ -663,6 +700,10 @@ int64_t P2PConnectorAsyncReadContext::nextWakeupMs(bool allow_control) const {
         next = transfer_stop_at_ms_;
     }
     if (resourceHoldPending()) {
+        const auto hold_start_us = lease_hold_start_us_.load();
+        if (hold_start_us > 0) {
+            next = std::min(next, forceReleaseAtMs(hold_start_us));
+        }
         if (lease_query_timeout_ms_ > 0 && allow_control && calls_ready_.load(std::memory_order_acquire)
             && cancel_confirmed_.load()) {
             next = std::min(next, lease_poll_next_ms_.load());
@@ -701,6 +742,10 @@ bool P2PConnectorAsyncReadContextChecker::init(const kmonitor::MetricsReporterPt
                                                const std::shared_ptr<P2PBroadcastClient>&        tp_broadcast_client,
                                                const std::shared_ptr<autil::LockFreeThreadPool>& control_pool,
                                                const P2PConnectorSchedulerConfig&                config) {
+    if (config.p2p_kv_force_release_timeout_ms <= 0) {
+        RTP_LLM_LOG_ERROR("p2p_kv_force_release_timeout_ms must be positive");
+        return false;
+    }
     if (!control_pool || !config.topology) {
         RTP_LLM_LOG_ERROR("P2P lease checker requires a control pool and topology");
         return false;
@@ -925,6 +970,11 @@ void P2PConnectorAsyncReadContextChecker::advanceRead(const P2PConnectorAsyncRea
     }
     try {
         context->expireTransferDeadlineIfNeeded();
+        if (context->expireLeaseHoldIfNeeded(P2PNotification::nowUs()) && metrics_reporter_) {
+            P2PConnectorMetricsCollector collector;
+            collector.decode_scheduler_forced_kv_release = true;
+            metrics_reporter_->report<P2PConnectorMetrics, P2PConnectorMetricsCollector>(nullptr, &collector);
+        }
         context->checkCancelDone();
     } catch (const std::exception& error) {
         RTP_LLM_LOG_ERROR("P2P read deadline or cancellation processing failed, key=%s error=%s",

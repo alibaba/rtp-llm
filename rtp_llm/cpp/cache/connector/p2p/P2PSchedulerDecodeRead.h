@@ -91,7 +91,8 @@ private:
                           KVCacheResource&                 resource,
                           const std::pair<int, int>&       block_range,
                           size_t                           worker_num,
-                          std::vector<PrefillRouteKeysPB>& prefill_route_keys) const;
+                          std::vector<PrefillRouteKeysPB>& prefill_route_keys,
+                          const Meta::P2PRoutingContext* routing = nullptr) const;
 
 private:
     const P2PConnectorSchedulerConfig                    config_;

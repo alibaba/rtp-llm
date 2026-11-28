@@ -10,6 +10,7 @@ cc_library(
         "//rtp_llm/cpp/cache:cache_config",
         "//rtp_llm/cpp/cache/connector/p2p/transfer:transfer_backend_config",
         "//rtp_llm/cpp/config:config_modules",
+        "//rtp_llm/cpp/utils:core_utils",
     ],
     visibility = ["//visibility:public"],
 )

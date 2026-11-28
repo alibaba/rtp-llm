@@ -1,6 +1,7 @@
 #include "rtp_llm/cpp/engine_base/stream/StreamCacheResource.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateStream.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
+#include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
 #include "rtp_llm/cpp/utils/TimeUtil.h"
 #include "rtp_llm/cpp/cache/AsyncContext.h"
@@ -459,7 +460,17 @@ int StreamCacheResource::tryReleaseKVBlock(size_t nums) {
         FreeInfo free_info{batch_kv_cache_resource_, stream_->completeTokenIdsPtr()};
         free_info.request_id = stream_->streamId();
 
+        const bool log_release = resource_context_.role_type == RoleType::DECODE && stream_->queryPdSep()
+                                 && Logger::getEngineLogger().isLevelEnabled(alog::LOG_LEVEL_INFO);
+        const auto released_blocks = log_release ? batch_kv_cache_resource_->debugString() : std::string{};
         resource_context_.cache_manager->free(free_info);
+        if (log_release) {
+            RTP_LLM_LOG_INFO("P2P KV event=stream_release request_id=%ld unique_key=%s event_time_us=%ld blocks=%s",
+                             stream_->streamId(),
+                             stream_->uniqueKey().c_str(),
+                             currentTimeUs(),
+                             released_blocks.c_str());
+        }
     }
 
     return total_blocks;
@@ -1013,6 +1024,14 @@ bool StreamCacheResource::asyncLoadCache() {
                                                stream_->traceId());
         meta->generate_stream_ = stream_;
         meta->fillRoutingContext(stream_);
+        if (resource_context_.role_type == RoleType::DECODE && stream_->needsDecodeAfterPrefill()
+            && Logger::getEngineLogger().isLevelEnabled(alog::LOG_LEVEL_INFO)) {
+            RTP_LLM_LOG_INFO("P2P KV event=target_bound request_id=%ld unique_key=%s event_time_us=%ld blocks=%s",
+                             stream_->streamId(),
+                             stream_->uniqueKey().c_str(),
+                             currentTimeUs(),
+                             batch_kv_cache_resource_->cacheResource(0).debugString().c_str());
+        }
         p2p_load_context_ = resource_context_.cache_manager->asyncLoadCache(
             batch_kv_cache_resource_->cacheResource(0), meta, treeCoveredBlockNum());
     }

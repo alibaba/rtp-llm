@@ -38,11 +38,17 @@ public:
                                  int64_t                                              lease_query_timeout_ms,
                                  bool                                                 no_transfer          = false,
                                  int64_t                                              request_deadline_ms  = 0,
-                                 int64_t                                              transfer_deadline_ms = 0):
+                                 int64_t                                              transfer_deadline_ms = 0,
+                                 int64_t kv_force_release_timeout_ms = CacheStoreConfig::kDefaultP2PKvForceReleaseTimeoutMs,
+                                 int64_t request_id = 0,
+                                 int64_t rdma_disconnect_grace_ms = -1):
         resource_(resource),
         unique_key_(std::move(unique_key)),
         collector_(collector),
         lease_query_timeout_ms_(std::max<int64_t>(1, lease_query_timeout_ms)),
+        kv_force_release_timeout_ms_(kv_force_release_timeout_ms),
+        request_id_(request_id),
+        rdma_disconnect_grace_ms_(rdma_disconnect_grace_ms),
         no_transfer_(no_transfer),
         request_deadline_ms_(request_deadline_ms),
         transfer_deadline_ms_(transfer_deadline_ms),
@@ -86,6 +92,7 @@ public:
     void checkDone();
     void checkCancelDone();
     bool expireTransferDeadlineIfNeeded();
+    bool expireLeaseHoldIfNeeded(int64_t now_us);
     bool needCancel() const;
     void cancel(const std::shared_ptr<P2PBroadcastClient>& tp_broadcast_client);
 
@@ -203,6 +210,10 @@ private:
     const std::shared_ptr<P2PConnectorMetricsCollector>    collector_;
 
     const int64_t lease_query_timeout_ms_;
+    const int64_t kv_force_release_timeout_ms_ = CacheStoreConfig::kDefaultP2PKvForceReleaseTimeoutMs;
+    const int64_t request_id_ = 0;
+    const int64_t rdma_disconnect_grace_ms_ = -1;
+    int64_t forceReleaseAtMs(int64_t hold_start_us) const;
     const bool    no_transfer_;
     const int64_t request_deadline_ms_;
     const int64_t transfer_deadline_ms_;  // original wire deadline/identity

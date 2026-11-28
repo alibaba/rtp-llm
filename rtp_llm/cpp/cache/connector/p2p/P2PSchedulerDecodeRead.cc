@@ -13,6 +13,8 @@
 #include <limits>
 #include <optional>
 #include <set>
+#include <sstream>
+#include <unordered_set>
 
 namespace rtp_llm {
 namespace {
@@ -146,7 +148,8 @@ P2PSchedulerDecodeRead::buildDecodeRankRoutes(const TransferPlan&              p
                                               KVCacheResource&                 resource,
                                               const std::pair<int, int>&       block_range,
                                               size_t                           worker_num,
-                                              std::vector<PrefillRouteKeysPB>& prefill_route_keys) const {
+                                              std::vector<PrefillRouteKeysPB>& prefill_route_keys,
+                                              const Meta::P2PRoutingContext* routing) const {
     P2PBroadcastClient::RankRoutes rank_routes(worker_num);
 
     // Validate the complete identity/row pair before projecting a route or submitting any RPC.
@@ -192,7 +195,11 @@ P2PSchedulerDecodeRead::buildDecodeRankRoutes(const TransferPlan&              p
                              "Decode route has no destination worker or shared cache tag=" + route.cache_tag);
         }
     }
+    const bool log_targets = routing && Logger::getEngineLogger().isLevelEnabled(alog::LOG_LEVEL_INFO);
+    std::ostringstream target_summary;
+    bool has_targets = false;
     for (size_t worker_rank = 0; worker_rank < worker_num; ++worker_rank) {
+        std::map<std::string, std::unordered_set<int>> worker_targets;
         for (const auto* route : plan.forDecodeRank(static_cast<int>(worker_rank))) {
             auto positions = KVCacheTransferPlanner::resolveKeys(route->src_keys, logical_count);
             // block_range 窗口只在 decode 侧叠加在 resolveKeys 结果之上。
@@ -213,6 +220,7 @@ P2PSchedulerDecodeRead::buildDecodeRankRoutes(const TransferPlan&              p
                     0;
             TransferRoutePB pb;
             RouteCodec::encodeForDecode(*route, &pb);
+            auto* target_ids = log_targets ? &worker_targets[route->cache_tag] : nullptr;
             const auto append_buffer = [&](const std::shared_ptr<LayerCacheBuffer>& buffer) {
                 auto* layer_block = pb.add_layer_blocks();
                 layer_block->set_layer_id(buffer->getLayerId());
@@ -220,6 +228,9 @@ P2PSchedulerDecodeRead::buildDecodeRankRoutes(const TransferPlan&              p
                 for (const auto& [key, block_id] : buffer->blockIdMap()) {
                     layer_block->add_cache_keys(key);
                     layer_block->add_block_ids(block_id);
+                    if (target_ids) {
+                        target_ids->insert(block_id);
+                    }
                 }
             };
             if (route->layers.empty()) {
@@ -264,6 +275,28 @@ P2PSchedulerDecodeRead::buildDecodeRankRoutes(const TransferPlan&              p
                 rank_routes[worker_rank].push_back(std::move(pb));
             }
         }
+        for (const auto& [tag, blocks] : worker_targets) {
+            if (blocks.empty()) {
+                continue;
+            }
+            has_targets = true;
+            std::vector<int> sorted_blocks(blocks.begin(), blocks.end());
+            std::sort(sorted_blocks.begin(), sorted_blocks.end());
+            target_summary << " rank=" << worker_rank << " group=" << tag << " blocks=[";
+            const char* separator = "";
+            for (const auto block : sorted_blocks) {
+                target_summary << separator << block;
+                separator = ",";
+            }
+            target_summary << "]";
+        }
+    }
+    if (has_targets) {
+        RTP_LLM_LOG_INFO("P2P KV event=transfer_plan request_id=%ld unique_key=%s event_time_us=%ld targets=%s",
+                         routing->request_id,
+                         routing->unique_key.c_str(),
+                         currentTimeUs(),
+                         target_summary.str().c_str());
     }
     return std::move(rank_routes);
 }
@@ -382,7 +415,7 @@ P2PSchedulerDecodeRead::AsyncReadResult P2PSchedulerDecodeRead::asyncRead(
             return report_early_failure(plan->error);
         }
         plan_digest = plan->plan.digest();
-        auto routes = buildDecodeRankRoutes(plan->plan, *resource, block_range, worker_num, prefill_route_keys);
+        auto routes = buildDecodeRankRoutes(plan->plan, *resource, block_range, worker_num, prefill_route_keys, &*routing);
         collector->decode_schedule_plan_cost_time_us = currentTimeUs() - plan_start_us;
         if (!routes.ok()) {
             RTP_LLM_LOG_WARNING("asyncRead: route projection failed, unique_key=%s, error=%s",
@@ -416,7 +449,10 @@ P2PSchedulerDecodeRead::AsyncReadResult P2PSchedulerDecodeRead::asyncRead(
                                                                         config_.p2p_lease_query_timeout_ms,
                                                                         no_transfer,
                                                                         request_deadline_ms,
-                                                                        transfer_deadline_ms);
+                                                                        transfer_deadline_ms,
+                                                                        config_.p2p_kv_force_release_timeout_ms,
+                                                                        request_id,
+                                                                        config_.rdma_disconnect_grace_ms);
 
     const auto enqueue_time_us = currentTimeUs();
     auto       submit_result   = async_read_pool_->pushTask(
