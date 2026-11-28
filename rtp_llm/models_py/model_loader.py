@@ -869,6 +869,7 @@ class NewModelLoader:
             weights = weight_mapper.get_all_weights(
                 selected_files,
                 catalog=self._checkpoint_catalog(),
+                advise_scratch_cache=True,
                 device="cpu",
                 name_filter=base_filter,
                 safetensor_slice_expander=base_expander,

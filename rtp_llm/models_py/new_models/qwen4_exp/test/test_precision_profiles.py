@@ -103,11 +103,18 @@ class PrecisionPlanTest(unittest.TestCase):
                 leaf = owner.layers[0].mlp.experts
                 self.assertTrue(leaf.has_shared_expert_gate)
                 remap = list(reversed(range(leaf.num_experts)))
-                staged = loader.load_moe_layer_weights(
-                    owner, layer_id=0, physical_to_logical=remap, ep_size=1, ep_rank=0
-                )
-                torch.testing.assert_close(staged[W.moe_w1], leaf.w13[remap])
-                torch.testing.assert_close(staged[W.moe_w2], leaf.w2[remap])
+                from rtp_llm.utils import ckpt_file_info
+
+                for enabled in (False, True):
+                    with self.subTest(drop_cache=enabled), patch.object(
+                        ckpt_file_info, "_DROP_PAGE_CACHE", enabled
+                    ), patch.object(ckpt_file_info.ShardPageCache, "_drop_page_cache") as drop:
+                        staged = loader.load_moe_layer_weights(
+                            owner, layer_id=0, physical_to_logical=remap, ep_size=1, ep_rank=0
+                        )
+                        self.assertEqual(drop.called, enabled)
+                        torch.testing.assert_close(staged[W.moe_w1], leaf.w13[remap])
+                        torch.testing.assert_close(staged[W.moe_w2], leaf.w2[remap])
             finally:
                 owner.close()
 
