@@ -382,14 +382,22 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
         direct_eplb_stats_ = py::hasattr(py_model_, "_newloader_eplb_bind_stats");
         auto stats_layers =
             direct_eplb_stats_ ? py_model_.attr("_newloader_eplb_num_layers").cast<size_t>() : layer_num_;
-        auto moe_conf         = params.description.ffn_conf.moe_configs.value();
-        overall_expert_stats_ = execCreateMoeExpertStates(
-            {stats_layers, moe_conf.ep_size, moe_conf.expert_num, moe_conf.expert_num + moe_conf.extra_expert_num});
+        auto moe_conf = params.description.ffn_conf.moe_configs.value();
+        {
+            // Direct counters are shared with Python and updated in place, even by
+            // forward callers outside inference mode. Only their allocation opts out.
+            c10::InferenceMode stats_guard(!direct_eplb_stats_);
+            overall_expert_stats_ = execCreateMoeExpertStates(
+                {stats_layers, moe_conf.ep_size, moe_conf.expert_num, moe_conf.expert_num + moe_conf.extra_expert_num});
+            if (direct_eplb_stats_ && enable_cuda_graph_) {
+                // All captured bucket graphs read this same scalar at replay.
+                eplb_live_rows_ = torch::full(
+                    {}, std::numeric_limits<int>::max(), overall_expert_stats_.stats_buf.log_stats_buf.options());
+            }
+        }
         if (direct_eplb_stats_) {
             auto& stats = overall_expert_stats_.stats_buf;
             if (enable_cuda_graph_) {
-                // All captured bucket graphs read this same scalar at replay.
-                eplb_live_rows_ = torch::full({}, std::numeric_limits<int>::max(), stats.log_stats_buf.options());
                 py_model_.attr("_newloader_eplb_bind_stats")(stats.log_stats_buf, stats.gpu_loads_buf, eplb_live_rows_);
             } else {
                 py_model_.attr("_newloader_eplb_bind_stats")(stats.log_stats_buf, stats.gpu_loads_buf);

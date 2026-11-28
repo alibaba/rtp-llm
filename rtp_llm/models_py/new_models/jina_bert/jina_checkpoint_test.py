@@ -5,6 +5,7 @@ import tempfile
 import unittest
 from itertools import product
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import torch
 from safetensors.torch import save_file
@@ -12,7 +13,11 @@ from torch.nn import functional as F
 
 from rtp_llm.models_py.checkpoint_reader_test_support import checkpoint_readers
 from rtp_llm.models_py.model_loader import NewLoaderConfig, NewModelLoader
-from rtp_llm.models_py.new_models.jina_bert.encoder import JinaEncoder
+from rtp_llm.models_py.new_models.jina_bert.encoder import (
+    JinaEncoder,
+    JinaEncoderLayer,
+    _packed_attention,
+)
 from rtp_llm.models_py.registry import register_model
 
 
@@ -153,6 +158,108 @@ def tp_worker(rank, directory):
 
 
 class JinaCheckpointTest(unittest.TestCase):
+    def test_alibi_matches_oldloader_tp_partition(self):
+        from rtp_llm.utils.model_weight import slopes, split_slopes_tp
+
+        heads, tp = 12, 2
+        for rank in range(tp):
+            layer = JinaEncoderLayer(config(heads), torch.float32, tp, rank)
+            expected = split_slopes_tp(slopes([], heads), heads, tp, rank)
+            torch.testing.assert_close(torch.tensor(layer.slopes), expected, rtol=0, atol=0)
+
+    @unittest.skipUnless(torch.cuda.is_available(), "requires a GPU")
+    def test_fused_packed_alibi_replays_live_boundaries(self):
+        from rtp_llm.utils.flash_attn_utils import can_use_flash_attn
+
+        if not can_use_flash_attn():
+            self.skipTest("requires packed FlashAttention-2")
+        import flash_attn
+
+        total, heads, width = 8192, 3, 64
+        ids = torch.zeros(total, dtype=torch.int32, device="cuda")
+        q, k, v = torch.randn(
+            3, 1, heads, total, width, device="cuda", dtype=torch.float16
+        )
+        slopes = torch.tensor([1 / 16, 1 / 256, 1 / 4], device="cuda")
+        ends = torch.tensor([0, 512, 512, 7680, 7936], device="cuda", dtype=torch.int32)
+
+        def forward():
+            attention = _packed_attention(ids, ends, None, True, q.dtype, width)
+            return attention(q, k, v, slopes)
+
+        with patch.object(
+            flash_attn, "flash_attn_varlen_func", wraps=flash_attn.flash_attn_varlen_func
+        ) as calls:
+            forward()
+            self.assertEqual(calls.call_count, 1)
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            actual = forward()
+        for offsets in ([0, 512, 512, 7680, 7936], [0, total, total, total, total]):
+            ends.copy_(torch.tensor(offsets, device="cuda", dtype=torch.int32))
+            graph.replay()
+            for a, b in zip(offsets, offsets[1:] + [total]):
+                if a == b:
+                    continue
+                pos = torch.arange(b - a, device="cuda")
+                # Check every short request/padding row and sample the long
+                # request at both ends and in the middle, without a dense 8K² mask.
+                rows = pos if b - a <= 512 else pos[[0, 1, (b - a) // 2, -2, -1]]
+                bias = -slopes[:, None, None] * (rows[:, None] - pos).abs()
+                expected = F.scaled_dot_product_attention(
+                    q[:, :, a + rows].float(),
+                    k[:, :, a:b].float(),
+                    v[:, :, a:b].float(),
+                    attn_mask=bias,
+                )
+                torch.testing.assert_close(
+                    actual[:, :, a + rows].float(), expected, atol=1e-3, rtol=1e-2
+                )
+
+    def test_long_packed_attention_respects_boundaries_and_tile_budget(self):
+        # Includes an empty graph slot and physical padding after the last end.
+        lengths = [512, 768, 256, 512]
+        ids = torch.arange(sum(lengths), dtype=torch.int32) % 29
+        types = torch.arange(ids.numel(), dtype=torch.int32) % 2
+        ends = torch.tensor([0, 512, 512, 1280, 1536], dtype=torch.int32)
+        data = checkpoint()
+        model = self._load(data, "scratch")
+        with patch.object(
+            F, "scaled_dot_product_attention", wraps=F.scaled_dot_product_attention
+        ) as calls:
+            actual = model.encode_cumulative(ids, types, ends)
+        expected = torch.cat(
+            [
+                exact_forward(data, seq, kind)
+                for seq, kind in zip(ids.split(lengths), types.split(lengths))
+            ]
+        )
+        torch.testing.assert_close(actual, expected)
+        for call in calls.call_args_list:
+            self.assertLessEqual(call.args[1].size(2), max(lengths))
+            self.assertLessEqual(call.kwargs["attn_mask"].numel(), 1 << 20)
+        # Five real SDPA tiles/layer, versus 13 dense packed tiles/layer.
+        self.assertEqual(calls.call_count, 5 * len(model.encoder.layer))
+
+    def test_graph_attention_uses_live_ends_not_host_fixture(self):
+        data = checkpoint()
+        model = self._load(data, "scratch")
+        ids = torch.tensor([1, 4, 8, 2, 6, 3, 7])
+        types = torch.zeros_like(ids)
+        stale = torch.tensor([0, 7, 7], dtype=torch.int32)
+        for boundary in (1, 4):
+            ends = torch.tensor([0, boundary, 6], dtype=torch.int32)
+            result = model.encode_cumulative(
+                ids, types, ends, host_ends=stale, is_graph=True
+            )
+            expected = torch.cat(
+                [
+                    exact_forward(data, ids[a:b], types[a:b])
+                    for a, b in ((0, boundary), (boundary, 6), (6, 7))
+                ]
+            )
+            torch.testing.assert_close(result, expected)
+
     def test_split_prefill_cannot_silently_run_local_bidirectional_attention(self):
         parallel = SimpleNamespace(prefill_cp_config=SimpleNamespace(is_enabled=lambda: True))
         load = NewLoaderConfig(

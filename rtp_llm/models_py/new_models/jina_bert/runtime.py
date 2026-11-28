@@ -57,8 +57,7 @@ class JinaBertForEmbedding(ResidentDecoderOwner, JinaEncoder, GptModelBase):
         }
 
     def prepare_fmha_impl(self, *args, **kwargs):
-        # PyTorch SDPA consumes the checkpoint's symmetric ALiBi bias. A
-        # generic paged self-attention backend cannot supply it.
+        # This owner supplies its own packed bidirectional ALiBi attention.
         return None
 
     def forward(self, inputs, fmha_impl=None):
@@ -67,24 +66,20 @@ class JinaBertForEmbedding(ResidentDecoderOwner, JinaEncoder, GptModelBase):
         types = inputs.bert_embedding_inputs.combo_tokens_type_ids
         if types is not None and types.numel() == 0:
             types = None
-        # GPU tensor cumulative lengths remain live across graph replays; no
-        # .tolist()/host-dependent iteration captured for packed requests.
+        host_ends = metadata.cu_seqlens
         ends = metadata.cu_seqlens_device
         if ends is None or ends.numel() == 0:
-            ends = metadata.cu_seqlens
+            ends = host_ends
         if ends is None or ends.numel() < 2:
             raise ValueError("Jina packed prefill requires cumulative query lengths")
-        seq_ids = torch.bucketize(
-            torch.arange(ids.numel(), device=ids.device),
-            ends[1:].to(ids.device),
-            right=True,
-        )
-        hidden = self.encode(
-            ids.unsqueeze(0),
-            None if types is None else types.unsqueeze(0),
+        hidden = self.encode_cumulative(
+            ids,
+            types,
+            ends,
             inputs.bert_embedding_inputs.input_embedding_scalar,
-            sequence_ids=seq_ids,
+            host_ends=host_ends if host_ends is not None and host_ends.numel() else None,
+            is_graph=metadata.is_cuda_graph,
         )
         from rtp_llm.ops.compute_ops import PyModelOutputs
 
-        return PyModelOutputs(hidden.squeeze(0))
+        return PyModelOutputs(hidden)

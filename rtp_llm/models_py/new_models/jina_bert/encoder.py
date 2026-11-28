@@ -4,6 +4,9 @@ Jina is an encoder, not a causal GPT block: Q/K normalization spans the
 hidden dimension before the head split and the position bias is symmetric.
 """
 
+from functools import partial
+from itertools import accumulate
+
 import torch
 from torch import nn
 from torch.nn import functional as F
@@ -53,6 +56,86 @@ def _sum_tp(value, size, pg):
         raise RuntimeError("Jina TP group size differs from the checkpoint partition")
     torch.distributed.all_reduce(value, group=pg)
     return value
+
+
+def _sdpa(q, k, v, slopes, sequence_ids=None):
+    # Portable fallback. Bound both the bias and the score tile even if SDPA
+    # selects its math implementation; never raise this budget for long inputs.
+    batch, heads, seq, _ = q.shape
+    chunk = max(1, (1 << 20) // (batch * heads * seq))
+    pos = torch.arange(seq, device=q.device)
+    slopes = slopes.to(q.dtype)[:, None, None]
+    parts = []
+    for start in range(0, seq, chunk):
+        section = slice(start, start + chunk)
+        distance = (pos[section, None] - pos).abs()
+        bias = -slopes * distance
+        if sequence_ids is not None:
+            bias.masked_fill_(sequence_ids[section, None] != sequence_ids, float("-inf"))
+        parts.append(
+            F.scaled_dot_product_attention(q[:, :, section], k, v, attn_mask=bias)
+        )
+    return torch.cat(parts, dim=2) if len(parts) > 1 else parts[0]
+
+
+def _packed_sdpa(q, k, v, slopes, *, ranges):
+    # Keep projections and TP collectives batched; only attention needs splits.
+    parts = [
+        _sdpa(q[:, :, lo:hi], k[:, :, lo:hi], v[:, :, lo:hi], slopes)
+        for lo, hi in ranges
+    ]
+    return torch.cat(parts, dim=2) if len(parts) > 1 else parts[0]
+
+
+def _packed_flash(q, k, v, slopes, *, ends, max_len):
+    from flash_attn import flash_attn_varlen_func
+
+    # FlashAttention applies -slope * abs(i-j) within each sequence, without
+    # materializing any score/bias matrix. Q/K/V are [total, local_heads, dim].
+    out = flash_attn_varlen_func(
+        *(x.squeeze(0).transpose(0, 1) for x in (q, k, v)),
+        ends,
+        ends,
+        max_len,
+        max_len,
+        causal=False,
+        alibi_slopes=slopes,
+    )
+    return out.transpose(0, 1).unsqueeze(0)
+
+
+def _packed_attention(ids, ends, host_ends, is_graph, dtype, head_width):
+    total = ids.numel()
+    if not total:
+        raise ValueError("expected non-empty Jina tokens")
+    use_flash = False
+    if ids.is_cuda and dtype in (torch.float16, torch.bfloat16) and head_width <= 256:
+        from rtp_llm.utils.flash_attn_utils import can_use_flash_attn
+
+        use_flash = can_use_flash_attn(ids.device)
+    # On replay only the device boundaries are live. Never bake lengths from
+    # the capture fixture into a Python loop or a kernel's launch bound.
+    ranges = None
+    if not is_graph and (host_ends is not None or not use_flash):
+        offsets = host_ends.tolist() if host_ends is not None else ends.tolist()
+        offsets.append(total)  # any trailing graph padding is an isolated sequence
+        if offsets[0] != 0 or any(b < a for a, b in zip(offsets, offsets[1:])):
+            raise ValueError("invalid Jina cumulative query lengths")
+        ranges = [(a, b) for a, b in zip(offsets, offsets[1:]) if a < b]
+
+    if use_flash:
+        ends = ends.to(device=ids.device, dtype=torch.int32, non_blocking=True)
+        ends = torch.cat((ends, ends.new_full((1,), total)))
+        max_len = total if ranges is None else max(b - a for a, b in ranges)
+        return partial(_packed_flash, ends=ends, max_len=max_len)
+
+    if ranges is not None:
+        return partial(_packed_sdpa, ranges=ranges)
+    ends = ends.to(device=ids.device, dtype=torch.int32, non_blocking=True)
+    sequence_ids = torch.bucketize(
+        torch.arange(total, device=ids.device, dtype=ends.dtype), ends[1:], right=True
+    )
+    return partial(_sdpa, sequence_ids=sequence_ids)
 
 
 class JinaEncoderLayer(RtpModule):
@@ -134,7 +217,7 @@ class JinaEncoderLayer(RtpModule):
     def _row(self, x, proj, pg, size):
         return _sum_tp(F.linear(x, proj.weight), size, pg) + proj.bias
 
-    def forward(self, hidden, pg=None, sequence_ids=None):
+    def forward(self, hidden, pg, attention, slopes):
         batch, seq, width = hidden.shape
         attn = self.attention.self
 
@@ -144,27 +227,7 @@ class JinaEncoderLayer(RtpModule):
         q = split(self._normalize(attn.query(hidden), attn.layer_norm_q, pg))
         k = split(self._normalize(attn.key(hidden), attn.layer_norm_k, pg))
         v = split(attn.value(hidden))
-        # Cap the temporary bias allocation even for long code inputs.
-        pos = torch.arange(seq, device=hidden.device)
-        slopes = torch.tensor(self.slopes, device=hidden.device, dtype=hidden.dtype)[
-            :, None, None
-        ]
-        chunk = max(1, min(seq, (1 << 20) // max(1, seq * self.heads)))
-        parts = []
-        for start in range(0, seq, chunk):
-            distance = (pos[start : start + chunk, None] - pos[None, :]).abs()
-            bias = -slopes * distance
-            if sequence_ids is not None:
-                same_sequence = (
-                    sequence_ids[start : start + chunk, None] == sequence_ids[None, :]
-                )
-                bias = bias.masked_fill(~same_sequence, float("-inf"))
-            parts.append(
-                F.scaled_dot_product_attention(
-                    q[:, :, start : start + chunk], k, v, attn_mask=bias
-                )
-            )
-        output = torch.cat(parts, dim=2) if len(parts) > 1 else parts[0]
+        output = attention(q, k, v, slopes)
         output = self._row(
             output.transpose(1, 2).reshape(batch, seq, width // self.tp_size),
             self.attention.output.dense,
@@ -295,7 +358,9 @@ class JinaEncoder(RtpModule):
 
         return should_load
 
-    def encode(self, ids, token_types=None, scale=1.0, pg=None, sequence_ids=None):
+    def encode(
+        self, ids, token_types=None, scale=1.0, pg=None, sequence_ids=None, *, attention=None
+    ):
         if ids.ndim != 2 or ids.shape[1] == 0:
             raise ValueError("expected non-empty rectangular Jina token sequences")
         if token_types is None:
@@ -306,18 +371,42 @@ class JinaEncoder(RtpModule):
             self.embeddings.word_embeddings(ids) * scale
             + self.embeddings.token_type_embeddings(token_types)
         )
-        for layer in self.encoder.layer:
-            h = layer(h, pg, sequence_ids)
+        if self.encoder.layer:
+            slopes = torch.tensor(
+                self.encoder.layer[0].slopes, device=h.device, dtype=torch.float32
+            )
+            if attention is None:
+                attention = partial(_sdpa, sequence_ids=sequence_ids)
+            for layer in self.encoder.layer:
+                h = layer(h, pg, attention, slopes)
         return h
+
+    def encode_cumulative(
+        self, ids, token_types, ends, scale=1.0, *, host_ends=None, is_graph=False
+    ):
+        attention = None
+        if self.encoder.layer:
+            attention = _packed_attention(
+                ids,
+                ends,
+                host_ends,
+                is_graph,
+                self.embeddings.word_embeddings.weight.dtype,
+                self.encoder.layer[0].head_width,
+            )
+        return self.encode(
+            ids.unsqueeze(0),
+            None if token_types is None else token_types.unsqueeze(0),
+            scale,
+            attention=attention,
+        ).squeeze(0)
 
     def encode_packed(self, ids, token_types, lengths, scale=1.0):
         if ids.ndim != 1 or any(n <= 0 for n in lengths) or sum(lengths) != ids.numel():
             raise ValueError("inconsistent Jina packed input lengths")
         if token_types is not None and token_types.shape != ids.shape:
             raise ValueError("inconsistent Jina packed token type ids")
-        parts = []
-        type_chunks = None if token_types is None else token_types.split(lengths)
-        for i, piece in enumerate(ids.split(lengths)):
-            types = None if type_chunks is None else type_chunks[i].unsqueeze(0)
-            parts.append(self.encode(piece.unsqueeze(0), types, scale).squeeze(0))
-        return torch.cat(parts, dim=0)
+        ends = torch.tensor(
+            list(accumulate(lengths, initial=0)), dtype=torch.int32, device="cpu"
+        )
+        return self.encode_cumulative(ids, token_types, ends, scale, host_ends=ends)

@@ -747,7 +747,7 @@ Scenario makeScenario(const std::string& name) {
         }
         return scenario;
     }
-    if (name == "multi_tag") {
+    if (name == "multi_tag" || name == "direct_eplb") {
         return makeMultiTagScenario();
     }
     if (name == "cp_actual_lengths_rank0") {
@@ -1093,6 +1093,11 @@ py::dict runPyWrappedModelCacheStoreScenario(py::object         py_model,
     description.attention_conf.head_num      = 1;
     description.attention_conf.kv_head_num   = 1;
     description.attention_conf.size_per_head = scenario.hidden_size;
+    if (scenario_name == "direct_eplb") {
+        auto& moe      = description.ffn_conf.moe_configs.emplace();
+        moe.expert_num = 2;
+        moe.top_k      = 1;
+    }
 
     GptModelInitParams params{weights,
                               description,
