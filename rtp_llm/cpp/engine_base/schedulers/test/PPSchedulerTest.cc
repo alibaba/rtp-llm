@@ -841,6 +841,36 @@ TEST_F(PPSchedulerTest, RejectsUnsupportedRequestsBeforeKvAdmissionEvenAtCapacit
     }
 }
 
+TEST_F(PPSchedulerTest, DecodeWaitsForRemotePrefillBeforeDecidingWhetherContextCanRun) {
+    for (const bool received_first_token : {false, true}) {
+        SCOPED_TRACE(received_first_token);
+        auto scheduler = createScheduler(1, RoleType::DECODE);
+        auto stream = createStream({1, 2, 3}, false, false, 8, {}, RoleType::DECODE);
+        stream->generateConfig()->pd_separation = true;
+        stream->setPrefillTpSize(1);
+        ASSERT_TRUE(scheduler->enqueue(stream).ok());
+        const auto before = scheduler->schedule();
+        ASSERT_TRUE(before.ok());
+        EXPECT_TRUE(before->streams.empty());
+        ASSERT_FALSE(stream->hasError());
+        ASSERT_TRUE(stream->hasEvent(StreamEvents::LoadInitiated));
+        ASSERT_TRUE(stream->isContextStream());
+
+        if (received_first_token) {
+            stream->update({torch::tensor({{4}}, torch::kInt32), 1});
+        }
+        const auto after = scheduler->schedule();
+        ASSERT_TRUE(after.ok());
+        if (received_first_token) {
+            EXPECT_EQ(after->streams, (std::list<GenerateStreamPtr>{stream}));
+            EXPECT_FALSE(stream->isContextStream());
+        } else {
+            EXPECT_TRUE(after->streams.empty());
+            EXPECT_EQ(stream->statusInfo().code(), ErrorCode::INVALID_PARAMS);
+        }
+    }
+}
+
 TEST_F(PPSchedulerTest, DecodeRejectsContextStreams) {
     for (const bool fake : {false, true}) {
         for (const bool perf : {false, true}) {

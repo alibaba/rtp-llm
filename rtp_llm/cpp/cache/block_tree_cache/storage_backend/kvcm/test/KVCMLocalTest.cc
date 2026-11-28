@@ -10,12 +10,14 @@
 #include "rtp_llm/cpp/cache/DeviceBlockPoolConfigHelper.h"
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/group_set/FullGroupSet.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/group_set/LinearGroupSet.h"
 #include "rtp_llm/cpp/cache/events/KVCacheEventPublisher.h"
 #include "rtp_llm/cpp/cache/events/KVCacheEventReporter.h"
 #include "rtp_llm/cpp/cache/test/BlockPoolTestHelper.h"
 #include "rtp_llm/cpp/utils/AsyncProfilingScope.h"
 #include "rtp_llm/cpp/utils/AsyncProfileTrace.h"
 #include "rtp_llm/cpp/utils/Logger.h"
+#include "rtp_llm/cpp/utils/TimeUtil.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/ScopeRollback.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/test/BoundedThreadTestUtils.h"
 
@@ -570,6 +572,94 @@ TEST(KVCMLocalTest, ExecuteFunctionPropagatesMetadataErrorsAndPreservesTransferS
                       ec == kv_cache_manager::ClientErrorCode::ER_SDK_TIMEOUT ? REMOTE_TRANSFER_STATUS_TIMEOUT :
                                                                                 REMOTE_TRANSFER_STATUS_FAILED);
         }
+    }
+}
+
+TEST(KVCMLocalTest, ExternalWritebackPersistsDevicePrefixMissingFromRemote) {
+    for (const bool hybrid : {false, true}) {
+        SCOPED_TRACE(hybrid);
+        auto env = hybrid ? makeHybridBackendEnvironment("external_hybrid") : makeBackendEnvironment("external_full");
+        auto client = std::make_shared<MockClientWrapper>();
+        EXPECT_CALL(*client, initForPools(_, _, _, _)).WillOnce(Return(true));
+        EXPECT_CALL(*client, shutdown()).Times(1);
+        KVCacheConfig kv_config;
+        kv_config.kvcm_server_address = "unused-test-address";
+        RuntimeConfig runtime;
+        runtime.model_name = "kvcm_test_model";
+        auto backend       = std::make_shared<KVCMStorageBackend>(env.cache_config,
+                                                            kv_config,
+                                                            runtime,
+                                                            singleRankConfig(),
+                                                            SpeculativeExecutionConfig{},
+                                                            nullptr,
+                                                            /*gdr_enabled=*/false,
+                                                            nullptr,
+                                                            client);
+
+        ScopedReferencedBlocks          blocks(env, 2);
+        std::vector<GroupSetPtr>        groups;
+        std::vector<GroupSetResource>   prefix, suffix;
+        kv_cache_manager::WriteLocation location;
+        location.write_session_id = "external";
+        location.block_mask       = kv_cache_manager::BlockMaskOffset{0};
+        location.locations.resize(2);
+        for (const auto& tag : env.cache_config.groupTags()) {
+            const bool linear = env.cache_config.topology().group(tag).policy.group_type == CacheGroupType::LINEAR;
+            std::vector<DeviceBlockPoolPtr> pools{env.pools_by_tag.at(tag)};
+            GroupSetPtr                     group;
+            if (linear) {
+                group = std::make_shared<LinearGroupSet>(pools, nullptr, nullptr);
+            } else {
+                group = std::make_shared<FullGroupSet>(pools, nullptr, nullptr);
+            }
+            group->initialize(groups.size(), env.cache_config.topologyPtr(), {tag});
+            groups.push_back(group);
+            prefix.emplace_back().device_blocks = {blocks.get()[0]};
+            suffix.emplace_back().device_blocks = {blocks.get()[1]};
+            const auto                  spec    = (linear ? "tp0_L" : "tp0_F") + tag;
+            kv_cache_manager::UriStrVec uris{tag + "_prefix", tag + "_suffix"};
+            for (size_t i = 0; i < uris.size(); ++i) {
+                location.locations[i].push_back({spec, uris[i]});
+            }
+            auto check_buffers = [&env, &blocks, tag](const kv_cache_manager::BlockBuffers& buffers) {
+                ASSERT_EQ(buffers.size(), blocks.get().size());
+                for (size_t i = 0; i < buffers.size(); ++i) {
+                    const auto& iovs  = buffers[i].iovs;
+                    size_t      index = 0;
+                    for (const auto layer : env.cache_config.layerIdsForGroup(tag)) {
+                        for (const auto& part : environmentBuffers(env, layer, tag, blocks.get()[i])) {
+                            ASSERT_LT(index, iovs.size());
+                            EXPECT_EQ(iovs[index].base, part.addr);
+                            EXPECT_EQ(iovs[index].size, part.size_bytes);
+                            ++index;
+                        }
+                    }
+                    EXPECT_EQ(index, iovs.size());
+                }
+            };
+            EXPECT_CALL(*client, saveKvCachesForTag(tag, uris, _, _))
+                .WillOnce(::testing::DoAll(::testing::WithArg<2>(check_buffers), Return(std::make_pair(true, uris))));
+        }
+        // KVCM infers a single FULL group. Hybrid requests specify the groups for each key.
+        const auto expected_groups =
+            hybrid ? std::vector<std::string>{"Ffull1Llinear", "Ffull1Llinear"} : std::vector<std::string>{};
+        EXPECT_CALL(*client, getWriteLocation(_, _, CacheKeysType({101, 102}), _, expected_groups, _, 0))
+            .WillOnce(Return(std::make_pair(true, location)));
+        EXPECT_CALL(*client, abortWrite(_, _, _)).Times(0);
+        EXPECT_CALL(
+            *client,
+            finishWrite(
+                _, _, "external", ::testing::VariantWith<kv_cache_manager::BlockMaskOffset>(::testing::Eq(2u)), _))
+            .WillOnce(Return(true));
+        BlockTreeCacheConfig config;
+        config.enable_device_cache = true;
+        config.enable_remote_cache = true;
+        auto cache                 = block_tree_cache_test::makeBlockTreeCacheForTest(groups, config, backend);
+        ASSERT_NE(cache, nullptr);
+        ASSERT_TRUE(block_tree_cache_test::insertGroupSetResources(*cache, {101}, {prefix}));
+        std::vector<GroupSetResource> empty_prefix(groups.size());
+        ASSERT_TRUE(cache->insertExternalBlocks({101, 102}, 1, {empty_prefix, suffix}, currentTimeMs() + 10000).ok());
+        ASSERT_TRUE(waitForBackendOperationsForTest(*backend));
     }
 }
 

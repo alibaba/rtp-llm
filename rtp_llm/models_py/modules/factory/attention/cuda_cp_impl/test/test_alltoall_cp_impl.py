@@ -82,10 +82,11 @@ class TestPCPAll2AllAttnOp(unittest.TestCase):
     # ---- mock builders ----
 
     @staticmethod
-    def _make_mocks(all_shuffle, all_kv_buffers):
+    def _make_mocks(all_shuffle, all_kv_buffers, local_rank):
         """Return (mock_all_gather, mock_send, mock_recv) with μs delays."""
 
         def mock_all_gather(tensor, group=None):
+            torch.testing.assert_close(tensor.cpu(), all_shuffle[local_rank].cpu())
             _sleep_us()
             return torch.cat(all_shuffle, dim=0)
 
@@ -107,6 +108,7 @@ class TestPCPAll2AllAttnOp(unittest.TestCase):
         mock_ag, mock_send, mock_recv = self._make_mocks(
             all_shuffle,
             {peer_base + rank: buffer for rank, buffer in all_kv_buffers.items()},
+            par_cfg.tp_rank,
         )
         with contextlib.ExitStack() as stack:
             stack.enter_context(patch(f"{_A2A_MODULE}.all_gather", side_effect=mock_ag))
@@ -415,6 +417,10 @@ class TestPCPAll2AllAttnOp(unittest.TestCase):
             tokens_per_block,
         )
 
+        original_indices = (
+            attn_inputs.context_parallel_info.prefill_shuffle_indices.clone()
+        )
+
         output = self._run_with_mocks(
             attn_cfg,
             par_cfg,
@@ -423,6 +429,12 @@ class TestPCPAll2AllAttnOp(unittest.TestCase):
             kv_cache,
             all_shuffle,
             all_kv_buffers,
+        )
+        self.assertTrue(
+            torch.equal(
+                attn_inputs.context_parallel_info.prefill_shuffle_indices,
+                original_indices,
+            )
         )
         self._assert_close(output, ref_output[rank_idx])
 
@@ -565,6 +577,18 @@ class TestPCPAll2AllAttnOp(unittest.TestCase):
             cp_rank=1,
             tokens_per_block=16,
         )
+
+    def test_mixed_prefix_cp2_all_ranks(self):
+        for rank in range(2):
+            with self.subTest(rank=rank):
+                self.run_with_prefix(
+                    batch_size=3,
+                    new_lengths=[16, 32, 24],
+                    prefix_lengths=[0, 16, 48],
+                    cp_size=2,
+                    cp_rank=rank,
+                    tokens_per_block=16,
+                )
 
     # ==================================================================
     # Case 3: Irregular seq_len (non-power-of-2, partial pages)

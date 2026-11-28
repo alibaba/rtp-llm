@@ -1,4 +1,5 @@
 #pragma once
+#include "rtp_llm/cpp/cache/connector/Meta.h"
 
 #include <atomic>
 #include <cassert>
@@ -33,6 +34,8 @@ using BlockTreeCacheLayoutConstPtr = std::shared_ptr<const BlockTreeCacheLayout>
 class PrefillCacheHitMetricsReporter;
 class KVCacheAllocationWaitState;
 class P2PConnector;
+class WritebackSourceBudget;
+class WritebackStepTracker;
 class Meta;
 class KVCacheEventReporter;
 
@@ -222,6 +225,27 @@ public:
         return cp_slot_mapper_;
     }
 
+    bool writebackEnabled() const;
+    // Call once per non-skipped Decode model step, from the executor on each TP/PP rank.
+    uint64_t beginWritebackStep();
+    void     publishWritebackStep(uint64_t step, const std::shared_ptr<torch::Event>& event = {});
+
+    std::shared_ptr<AsyncContext> asyncWriteBack(const BatchKVCacheResourcePtr& resource,
+                                                 const CompleteTokenIdsPtr&     tokens,
+                                                 int                            input_length,
+                                                 int                            kv_ready_token_count,
+                                                 const Meta&                    meta) noexcept;
+
+    void handleWrite(const P2PConnectorStartWriteBackRequestPB& request,
+                     P2PConnectorStartWriteBackResponsePB&      response,
+                     std::function<bool()>                      is_cancelled = nullptr);
+
+    void cancelP2PWrite(const P2PConnectorCancelWriteBackRequestPB& request,
+                        P2PConnectorStartWriteBackResponsePB&       response);
+
+    bool hasP2PWriteback() const;
+    void stopWriteback(int64_t steady_deadline_ms = 0);
+
 private:
     void                              initLinearReplayPool();
     std::function<void()>             allocationChangeCallback() const;
@@ -243,6 +267,8 @@ private:
     const SpeculativeExecutionConfig   sp_config_;
     const PDSepConfig                  pd_sep_config_;
     const CacheStoreConfig             cache_store_config_;
+    uint64_t                                            writeback_step_ = 0;
+    std::shared_ptr<WritebackStepTracker> writeback_step_tracker_;
     const bool                         use_device_malloc_block_pool_;
     const bool                         warmup_;
     const BlockTreeCacheLayoutConstPtr block_tree_layout_;
@@ -263,6 +289,7 @@ private:
     mutable std::mutex                 cache_status_snapshot_mutex_;
     std::shared_ptr<const KVCacheInfo> cache_status_snapshot_;
     std::shared_ptr<P2PConnector>      p2p_connector_;
+    std::shared_ptr<WritebackSourceBudget> writeback_source_budget_;
     std::string                        p2p_pipeline_layout_;
 
     mutable std::mutex          cache_store_mutex_;

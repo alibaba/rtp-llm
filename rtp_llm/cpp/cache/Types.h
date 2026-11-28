@@ -1,5 +1,6 @@
 #pragma once
 
+#include <algorithm>
 #include <cstddef>
 #include <memory>
 #include <optional>
@@ -122,13 +123,24 @@ enum class MallocStatus : uint8_t {
     INTERNAL_ERROR,
 };
 
+struct ReuseAccounting {
+    struct Match {
+        size_t  index;
+        int64_t publication_version;
+    };
+    std::vector<Match> unaccounted_blocks;
+
+    size_t unaccountedBlocks(size_t reused_blocks) const {
+        auto end = std::lower_bound(unaccounted_blocks.begin(), unaccounted_blocks.end(), reused_blocks,
+                                    [](const Match& match, size_t limit) { return match.index < limit; });
+        return end - unaccounted_blocks.begin();
+    }
+};
+
 struct MallocResult {
     MallocResult() = default;
 
-    constexpr MallocResult(bool         success,
-                           int          reuse_len,
-                           int64_t      match_cost_time_us = 0,
-                           MallocStatus status             = MallocStatus::NONE):
+    MallocResult(bool success, int reuse_len, int64_t match_cost_time_us = 0, MallocStatus status = MallocStatus::NONE):
         success(success),
         reuse_len(reuse_len),
         match_cost_time_us(match_cost_time_us),
@@ -151,6 +163,7 @@ struct MallocResult {
     MallocStatus status             = MallocStatus::INTERNAL_ERROR;
 
     std::shared_ptr<AsyncContext> async_context = nullptr;
+    ReuseAccounting               reuse_accounting;
 
     // Lower-tier reuse is published only after async_context completes.
 
@@ -177,6 +190,7 @@ struct InsertInfo {
     // Keep FULL insertion while excluding LINEAR blocks for a PD decode
     // handoff whose linear state is supplied by the prefill side.
     bool pd_decode_linear_tail_only = false;
+    ReuseAccounting reuse_accounting{};
 };
 
 }  // namespace rtp_llm

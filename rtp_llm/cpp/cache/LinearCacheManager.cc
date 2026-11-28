@@ -48,7 +48,7 @@ int estimatePeakFromSlotCosts(std::vector<int> block_costs,
 
 }  // namespace
 
-void LinearCacheManager::releaseRequestStateToDecodeTail(BlockIds& block_ids, int reserve_step) {
+void LinearCacheManager::releaseRequestStateToDecodeTail(BlockIds& block_ids, int reserve_step, int extra_tail_blocks) {
     const auto& block_indices = block_ids.blocks();
     if (block_indices.empty()) {
         return;
@@ -57,7 +57,8 @@ void LinearCacheManager::releaseRequestStateToDecodeTail(BlockIds& block_ids, in
 
     BlockIndicesType    blocks_to_free;
     std::vector<size_t> pos_to_remove;
-    for (int i = block_size - std::min(retainedDecodeBlocks(reserve_step), block_size) - 1; i >= 0; i--) {
+    for (int i = block_size - std::min(retainedDecodeBlocks(reserve_step, extra_tail_blocks), block_size) - 1; i >= 0;
+         i--) {
         if (isNullBlockIdx(block_indices[static_cast<size_t>(i)])) {
             continue;
         }
@@ -70,8 +71,8 @@ void LinearCacheManager::releaseRequestStateToDecodeTail(BlockIds& block_ids, in
     }
 }
 
-int LinearCacheManager::retainedDecodeBlocks(int reserve_step) const {
-    return std::max(2, static_cast<int>(activeTailBlocks())) + reserve_step;
+int LinearCacheManager::retainedDecodeBlocks(int reserve_step, int extra_tail_blocks) const {
+    return std::max(2, static_cast<int>(activeTailBlocks())) + reserve_step + std::max(extra_tail_blocks, 0);
 }
 
 void LinearCacheManager::filterValidBlocks(const BlockIndicesType& in, BlockIndicesType& out) const {
@@ -120,7 +121,8 @@ int LinearCacheManager::estimatePeakNeedBlocks(int                     seq_len,
                                                int                     remaining_tokens,
                                                int                     reserve_step,
                                                bool                    enable_reuse_cache,
-                                               bool                    reclaim_history) const {
+                                               bool                    reclaim_history,
+                                               int                     extra_tail_blocks) const {
     const int current_seq_slots = (seq_len + seqSizePerBlock() - 1) / seqSizePerBlock();
     const int final_seq_slots   = (seq_len + remaining_tokens + seqSizePerBlock() - 1) / seqSizePerBlock();
     const int extra_blocks      = reserve_step ? reserve_step - 1 : 0;
@@ -172,7 +174,7 @@ int LinearCacheManager::estimatePeakNeedBlocks(int                     seq_len,
                                                       first_decode_tail_start,
                                                       total_slots,
                                                       1,
-                                                      retainedDecodeBlocks(reserve_step));
+                                                      retainedDecodeBlocks(reserve_step, extra_tail_blocks));
     return std::max(peak_blocks - current_physical_blocks, 0);
 }
 
@@ -182,7 +184,8 @@ int LinearCacheManager::estimateInitialBatchPeakNeedBlocks(int  seq_len,
                                                            int  reserve_step,
                                                            bool enable_reuse_cache,
                                                            int  target_batch_size,
-                                                           bool reclaim_history) const {
+                                                           bool reclaim_history,
+                                                           int  extra_tail_blocks) const {
     const int  batch_size = std::max(target_batch_size, 1);
     const auto seq_slots  = [&](int length) { return (length + seqSizePerBlock() - 1) / seqSizePerBlock(); };
 
@@ -222,7 +225,7 @@ int LinearCacheManager::estimateInitialBatchPeakNeedBlocks(int  seq_len,
         std::max(needBlocksNum(seq_len + 1, 0) - static_cast<int>(std::max<size_t>(1, activeTailBlocks())), 0),
         final_total,
         batch_size,
-        retainedDecodeBlocks(reserve_step));
+        retainedDecodeBlocks(reserve_step, extra_tail_blocks));
 }
 
 int LinearCacheManager::estimateHistoryReclaimPeak(std::vector<int> block_costs,
@@ -431,7 +434,10 @@ bool LinearCacheManager::mallocImpl(BlockIds&                block_ids,
     return true;
 }
 
-void LinearCacheManager::removeSkippedBlocks(BlockIds& block_ids, bool enable_reuse_cache, int reserve_step) {
+void LinearCacheManager::removeSkippedBlocks(BlockIds& block_ids,
+                                             bool      enable_reuse_cache,
+                                             int       reserve_step,
+                                             int       extra_tail_blocks) {
     const auto& block_indices = block_ids.blocks();
     if (block_indices.empty()) {
         return;
@@ -441,7 +447,8 @@ void LinearCacheManager::removeSkippedBlocks(BlockIds& block_ids, bool enable_re
 
     BlockIndicesType    blocks_to_free;
     std::vector<size_t> pos_to_remove;
-    for (int i = block_size - std::min(retainedDecodeBlocks(reserve_step), block_size) - 1; i >= 0; i--) {
+    for (int i = block_size - std::min(retainedDecodeBlocks(reserve_step, extra_tail_blocks), block_size) - 1; i >= 0;
+         i--) {
         if (isNullBlockIdx(block_indices[static_cast<size_t>(i)])) {
             continue;
         }

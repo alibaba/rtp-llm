@@ -2,6 +2,8 @@
 #include <memory>
 #include <tuple>
 #include <vector>
+#include <algorithm>
+#include <chrono>
 #include "autil/EnvUtil.h"
 #include "autil/Log.h"
 #include "c10/util/intrusive_ptr.h"
@@ -28,6 +30,8 @@ namespace th = torch;
 namespace rtp_llm {
 
 namespace {
+
+using ShutdownClock = std::chrono::steady_clock;
 
 int64_t getGrpcStopTimeoutMs() {
     constexpr int64_t kDefaultStopTimeoutMs = 600 * 1000;
@@ -456,6 +460,12 @@ void RtpLLMOp::stop() {
     setKmonServiceServing(false);
     const int64_t stop_timeout_ms = getGrpcStopTimeoutMs();
     if (!is_server_shutdown_) {
+        auto cache_manager = model_rpc_service_ ? model_rpc_service_->getCacheManager() : nullptr;
+        const bool writeback_enabled = cache_manager && cache_manager->hasP2PWriteback();
+        const auto now = ShutdownClock::now();
+        const auto max_timeout = std::chrono::duration_cast<std::chrono::milliseconds>(
+            ShutdownClock::time_point::max() - now);
+        const auto deadline = now + std::min(std::chrono::milliseconds(stop_timeout_ms), max_timeout);
         if (model_rpc_service_) {
             model_rpc_service_->beginShutdown();
         }
@@ -472,9 +482,19 @@ void RtpLLMOp::stop() {
                     break;
                 }
             }
-            RTP_LLM_LOG_INFO("Server shutdowning");
-            grpc_server_->Shutdown();
-            pybind11::gil_scoped_acquire acquire;
+        }
+        if (writeback_enabled) {
+            pybind11::gil_scoped_release release;
+            cache_manager->stopWriteback(
+                std::chrono::duration_cast<std::chrono::milliseconds>(deadline.time_since_epoch()).count());
+        }
+        cache_manager.reset();
+        if (grpc_server_) {
+            RTP_LLM_LOG_INFO("Shutting down gRPC server");
+            {
+                pybind11::gil_scoped_release release;
+                grpc_server_->Shutdown();
+            }
             grpc_server_.reset();
         }
         if (model_rpc_service_) {

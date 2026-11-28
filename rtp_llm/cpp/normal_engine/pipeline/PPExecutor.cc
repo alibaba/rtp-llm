@@ -1339,6 +1339,20 @@ absl::Status PPExecutor::processImpl(const ScheduleOutput& schedule_output, int6
         }
 
         last_compute_done_.record(cuda_graph::graphGetCurrentStream());
+        // Every stage consumes the same non-skipped plans in order, regardless of slot reuse.
+        const uint64_t writeback_step = cache_manager_ ? cache_manager_->beginWritebackStep() : 0;
+        if (writeback_step != 0) {
+            // last_compute_done_ is reused by the next plan. Give this step its own event.
+            auto ready = std::make_shared<torch::Event>(cuda_graph::makeGraphEvent());
+            ready->record(cuda_graph::graphGetCurrentStream());
+            if (isFirstStage() && isStageRoot()) {
+                for (const auto& stream : streams) {
+                    stream->setKVCacheWriteProgress(writeback_step, ready);
+                }
+            } else {
+                cache_manager_->publishWritebackStep(writeback_step, ready);
+            }
+        }
         if (!isFirstStage() && !isLastStage() && isStageRoot()) {
             reportStageMetrics(executor_collector);
         }

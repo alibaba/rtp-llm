@@ -1533,9 +1533,8 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
     auto                       spec_logits_result     = std::make_shared<SpecLogitsVerifyRunner::LaunchResult>();
     int64_t                    model_forward_us       = 0;
 
-    // Stream-async events are recorded on the main stream as soon as tensors
-    // become valid. rejection_event guards accept_len/tokens D2H; draft_event
-    // guards all_probs cloning. They stay null when stream-async is off.
+    // rejection_event guards accept_len/tokens D2H. draft_event guards the worker's
+    // sampler reads and also covers block-draft KV writes on the compute stream.
     std::shared_ptr<torch::Event> rejection_event;
     std::shared_ptr<torch::Event> draft_event;
     bool                          prev_bookkeeping_synced_for_spec_logits = false;
@@ -1691,6 +1690,7 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
         }
     }
 
+    const uint64_t writeback_step = cache_manager_ ? cache_manager_->beginWritebackStep() : 0;
     spec_logits_processor_present =
         isTpRank0() && !warm_up_ && !model_input.is_fake_stream && hasSpecLogitsProcessor(streams);
 
@@ -2049,6 +2049,9 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
 
     if (!isTpRank0() || warm_up_ || streams.size() == 0 || model_input.is_fake_stream) {
         cudaSyncAndCheck();
+        if (writeback_step != 0) {
+            cache_manager_->publishWritebackStep(writeback_step);
+        }
         releaseAllModelBuffers();
         return absl::OkStatus();
     }
@@ -2067,11 +2070,15 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
         }
     }
 
-    // Record after draft_model_sample so worker all_probs/token_ids reads wait
-    // on the earliest valid point, not metrics or dispatch slicing.
-    if (useStreamAsync()) {
+    // Record after the draft forward and sampling, before output dispatch can finish the request.
+    if (useStreamAsync() || is_block_draft_ || writeback_step != 0) {
         draft_event = std::make_shared<torch::Event>(cuda_graph::makeGraphEvent());
         draft_event->record(cuda_graph::graphGetCurrentStream());
+    }
+    if (is_block_draft_ || writeback_step != 0) {
+        for (const auto& stream : streams) {
+            stream->setKVCacheWriteProgress(writeback_step, draft_event);
+        }
     }
 
     metrics_collector.frontend_decode_step = std::make_unique<FrontendMetricsStep<GenerateStreamPtr>>(

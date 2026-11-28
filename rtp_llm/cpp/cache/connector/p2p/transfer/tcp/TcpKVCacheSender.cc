@@ -5,6 +5,7 @@
 #include "aios/network/arpc/arpc/ANetRPCController.h"
 #include <algorithm>
 #include <limits>
+#include <memory>
 
 namespace rtp_llm {
 namespace transfer {

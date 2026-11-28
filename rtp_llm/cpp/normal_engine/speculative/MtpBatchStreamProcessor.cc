@@ -1886,6 +1886,7 @@ void MtpBatchStreamProcessor::preparePrefillSpecUpdateInfo(const StreamGroups&  
         update.top_logprob_token_ids = std::move(compact.top_logprob_token_ids);
         update.top_logprobs          = std::move(compact.top_logprobs);
         update.logprobs_offset       = offset;
+        update.kv_ready_token_count  = stream->seqLength();
         spec_update_infos.push_back(std::move(update));
         if (stream->generateConfig()->return_logprobs)
             target_row_offset += next_batch_size * count;
@@ -1966,6 +1967,7 @@ void MtpBatchStreamProcessor::prepareDecodeSpecUpdateInfo(
         spec_update_info.top_logprob_token_ids = std::move(compact.top_logprob_token_ids);
         spec_update_info.top_logprobs          = std::move(compact.top_logprobs);
         spec_update_info.logprobs_offset       = offset;
+        spec_update_info.kv_ready_token_count  = stream->seqLength() + cur_accept_len - 1;
         spec_update_infos.push_back(std::move(spec_update_info));
         if (stream->generateConfig()->return_logprobs)
             target_row_offset += next_batch_size * count;

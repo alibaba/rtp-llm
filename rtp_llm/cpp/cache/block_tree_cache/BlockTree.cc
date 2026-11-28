@@ -151,7 +151,8 @@ bool BlockTree::isLeafAtTier(const TreeNode* node, size_t group_set_id, Tier tie
 BlockTreeInsertResult BlockTree::insertNode(const CacheKeysType&                              cache_keys,
                                             const std::vector<std::vector<GroupSetResource>>& resources,
                                             bool                                              collect_path,
-                                            bool                                              is_resident) {
+                                            bool                                              is_resident,
+                                            bool                                              is_writeback) {
     BlockTreeInsertResult result;
     if (resources.size() != cache_keys.size()) {
         RTP_LLM_LOG_WARNING("key/resource size mismatch, keys=%zu resources=%zu", cache_keys.size(), resources.size());
@@ -178,13 +179,21 @@ BlockTreeInsertResult BlockTree::insertNode(const CacheKeysType&                
         }
     }
 
-    return insertNodeImpl(cache_keys, resources, collect_path, is_resident);
+    // Writeback must leave the prefix untouched when a pending transfer blocks the suffix.
+    if (is_writeback && std::any_of(cache_keys.begin(), cache_keys.end(), [&](CacheKeyType key) {
+            return pending_node_pool_.count(key) != 0;
+        })) {
+        result.hard_stop = true;
+        return result;
+    }
+    return insertNodeImpl(cache_keys, resources, collect_path, is_resident, is_writeback);
 }
 
 BlockTreeInsertResult BlockTree::insertNodeImpl(const CacheKeysType&                              cache_keys,
                                                 const std::vector<std::vector<GroupSetResource>>& resources,
                                                 bool                                              collect_path,
-                                                bool                                              is_resident) {
+                                                bool                                              is_resident,
+                                                bool                                              is_writeback) {
     BlockTreeInsertResult result;
     if (collect_path) {
         result.path.reserve(cache_keys.size());
@@ -309,9 +318,10 @@ BlockTreeInsertResult BlockTree::insertNodeImpl(const CacheKeysType&            
                 result.adopted_nodes.emplace_back(current, std::move(adopted_group_set_ids));
             }
         } else {
-            TreeNode* child              = createNode(key, current, resources[i]);
-            current->children[key]       = child;
-            current                      = child;
+            TreeNode* child                        = createNode(key, current, resources[i]);
+            current->children[key]                 = child;
+            current                                = child;
+            current->unaccounted_writeback_version = is_writeback ? key_version_ : -1;
             for (size_t group_set_id = 0; group_set_id < group_sets_.size(); ++group_set_id) {
                 const GroupSetResource& resource = current->group_set_resources[group_set_id];
                 const Tier              tier     = resource.getTopTier();

@@ -147,6 +147,13 @@ public:
         return failureSummaryNoLock();
     }
 
+    grpc::StatusCode rpcStatusCode(size_t rank) const {
+        std::lock_guard<std::mutex> lock(wait_done_mutex_);
+        return done() && rank < worker_contexts_.size() && worker_contexts_[rank] ?
+                   worker_contexts_[rank]->status.error_code() :
+                   grpc::StatusCode::UNKNOWN;
+    }
+
     void onDone(DoneCallback callback) {
         if (!callback) {
             return;
@@ -256,6 +263,12 @@ public:
     std::vector<int64_t> completionWallTimesUs() const {
         std::lock_guard<std::mutex> lock(wait_done_mutex_);
         return completion_wall_times_us_;
+    }
+
+    bool rpcSuccess() const {
+        std::lock_guard<std::mutex> lock(wait_done_mutex_);
+        return already_done_.load(std::memory_order_acquire)
+               && std::all_of(rpc_succeeded_.begin(), rpc_succeeded_.end(), [](bool ok) { return ok; });
     }
 
     void finishRank(size_t rank, bool cq_event_ok) {
@@ -379,6 +392,13 @@ private:
                         } else if (ctx->response.p2p_response().error_code() != ErrorCodePB::NONE_ERROR) {
                             error.setErrorCode(ErrorCode::UNKNOWN_ERROR);
                         }
+                    }
+                } else if constexpr (std::is_same_v<RequestPB, P2PConnectorStartWriteBackRequestPB>
+                                     && std::is_same_v<ResponsePB, P2PConnectorStartWriteBackResponsePB>) {
+                    if (ctx->response.error_code() != ErrorCodePB::NONE_ERROR) {
+                        error = ErrorInfo(transRPCErrorCode(static_cast<ErrorCodePB>(ctx->response.error_code())),
+                                          "StartWriteBack peer=" + ctx->server_addr + " key="
+                                              + ctx->request.unique_key() + ": " + ctx->response.error_message());
                     }
                 }
                 grpc_status_failure_seen_ = grpc_status_failure_seen_ || !error.ok();

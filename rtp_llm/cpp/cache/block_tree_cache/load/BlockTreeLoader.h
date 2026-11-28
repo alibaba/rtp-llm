@@ -7,6 +7,7 @@
 #include <vector>
 
 #include "rtp_llm/cpp/cache/AsyncContext.h"
+#include "rtp_llm/cpp/cache/Types.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTree.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/metrics/BlockTreeCacheMetricsReporter.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/evict/BlockTreeEvictor.h"
@@ -21,6 +22,7 @@ class BlockTreeTaskPool;
 struct CacheStageContext;
 
 struct BlockTreeMatchResult {
+    ReuseAccounting                                     reuse_accounting;
     size_t                                              matched_device_blocks{0};
     size_t                                              matched_device_host_blocks{0};
     std::vector<MultiNodeResource>                      matched_device_resources;

@@ -1,0 +1,78 @@
+{
+    "tokenizer_path": "/mnt/nas1/hf/Qwen2.5-0.5B-Instruct",
+    "model_type": "qwen_2",
+    "model_path": "/mnt/nas1/hf/Qwen2.5-0.5B-Instruct",
+    "query_result": [
+        {
+            "query": {
+                "prompt": "Write a detailed explanation of database transactions. In your explanation, include the different types of transactions, their purpose, and the conditions under which they can be",
+                "generate_config": {
+                    "max_new_tokens": 5,
+                    "top_k": 1,
+                    "top_p": 0,
+                    "enable_device_cache": true,
+                    "enable_host_cache": false,
+                    "return_input_ids": true,
+                    "return_output_ids": true
+                }
+            },
+            "result": {
+                "response": " used. Additionally, provide",
+                "input_ids": [[7985, 264, 11682, 16148, 315, 4625, 14131, 13, 758, 697, 16148, 11, 2924, 279, 2155, 4494, 315, 14131, 11, 862, 7428, 11, 323, 279, 4682, 1212, 892, 807, 646, 387]],
+                "output_ids": [[1483, 13, 22406, 11, 3410]],
+                "aux_info": {
+                    "input_len": 30,
+                    "reuse_len": 0,
+                    "actual_reuse_len": 0,
+                    "writeback_first_use_len": 0,
+                    "local_reuse_len": 0,
+                    "prefill_total_reuse_len": 0,
+                    "prefill_local_reuse_len": 0,
+                    "decode_total_reuse_len": 0,
+                    "decode_local_reuse_len": 0,
+                    "output_len": 5,
+                    "iter_count": 5
+                }
+            }
+        },
+        {
+            "server_role": "prefill",
+            "endpoint": "/rtp_llm/cache_status",
+            "query": {"latest_cache_version": -1},
+            "wait_for_cache": {"min_cached_blocks": 2, "timeout_seconds": 35},
+            "result": {"block_size": 16}
+        },
+        {
+            "query": {
+                "prompt": "Write a detailed explanation of database transactions. In your explanation, include the different types of transactions, their purpose, and the conditions under which they can be used. Additionally",
+                "generate_config": {
+                    "max_new_tokens": 2,
+                    "top_k": 1,
+                    "top_p": 0,
+                    "enable_device_cache": true,
+                    "enable_host_cache": false,
+                    "return_input_ids": true,
+                    "return_output_ids": true
+                }
+            },
+            "result": {
+                "response": ", provide",
+                "input_ids": [[7985, 264, 11682, 16148, 315, 4625, 14131, 13, 758, 697, 16148, 11, 2924, 279, 2155, 4494, 315, 14131, 11, 862, 7428, 11, 323, 279, 4682, 1212, 892, 807, 646, 387, 1483, 13, 22406]],
+                "output_ids": [[11, 3410]],
+                "aux_info": {
+                    "input_len": 33,
+                    "reuse_len": 16,
+                    "actual_reuse_len": 32,
+                    "writeback_first_use_len": 16,
+                    "local_reuse_len": 32,
+                    "prefill_total_reuse_len": 32,
+                    "prefill_local_reuse_len": 32,
+                    "decode_total_reuse_len": 32,
+                    "decode_local_reuse_len": 32,
+                    "output_len": 2,
+                    "iter_count": 2
+                }
+            }
+        }
+    ]
+}

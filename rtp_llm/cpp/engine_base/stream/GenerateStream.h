@@ -63,6 +63,7 @@ struct StreamUpdateInfo {
     const torch::Tensor top_logprob_token_ids{};
     const torch::Tensor top_logprobs{};
     int32_t             logprobs_offset = 0;
+    int                 kv_ready_token_count = -1;
 };
 
 struct StreamSpecUpdateInfo {
@@ -91,6 +92,7 @@ struct StreamSpecUpdateInfo {
     torch::Tensor top_logprob_token_ids;
     torch::Tensor top_logprobs;
     int32_t       logprobs_offset = 0;
+    int           kv_ready_token_count = -1;
 };
 
 struct SpeculativeExecutorStreamOutput {
@@ -212,8 +214,11 @@ public:
     bool updateKvCacheBlocks(const torch::Tensor& src_batch_indices);
     void updateWithoutLock(const StreamUpdateInfo& update_info,
                            bool                    update_processor = true,
-                           RecordedTokenTiming*    timings          = nullptr,
-                           size_t                  timing_count     = 0);
+                           RecordedTokenTiming*    timings = nullptr,
+                           size_t                  timing_count = 0);
+    int  writebackKVReadyTokenCount() const {
+        return writeback_kv_ready_token_count_;
+    }
 
     virtual size_t scoreLen() const {
         return score_len_ == 0 ? 1 : score_len_;
@@ -229,6 +234,7 @@ public:
     virtual absl::Status initKVBlock();
     virtual absl::Status incrKVBlock();
     virtual void         releaseResource();
+    void                 setKVCacheWriteProgress(uint64_t step, const std::shared_ptr<torch::Event>& event = {});
     // Observe Engine release and Connector lease completion during cancellation.
     bool hasPendingLocalCleanup() const;
     // Callbacks may run on the Engine or transport thread and should only enqueue work.
@@ -295,21 +301,29 @@ public:
         return maxTokenNum() > static_cast<size_t>(inputLength()) + 1;
     }
 
-    void setReuseLength(int reuse_length);
-    void setLocalReuseLength(int length);
-    void setDeviceReuseLength(int length);
-    void setRemoteReuseLength(int length);
-    int  localReuseLength() const;
-    int  deviceReuseLength() const;
-    int  remoteReuseLength() const;
-    void setHostReuseLength(int length);
-    int  hostReuseLength() const;
-    void setDiskReuseLength(int length);
-    int  diskReuseLength() const;
-    void setInitialReuseLength(int initial_reuse_length);
-    void incLastOutputPos();
-    void setPrefillReuseLength(
-        int64_t total, int64_t local, int64_t remote, int64_t memory, int64_t disk, bool independent_pools);
+    void    setReuseLength(int reuse_length);
+    void    setLocalReuseLength(int length);
+    void    setDeviceReuseLength(int length);
+    void    setRemoteReuseLength(int length);
+    int     localReuseLength() const;
+    int     deviceReuseLength() const;
+    int     remoteReuseLength() const;
+    void    setHostReuseLength(int length);
+    int     hostReuseLength() const;
+    void    setDiskReuseLength(int length);
+    int     diskReuseLength() const;
+    void    setInitialReuseLength(int initial_reuse_length);
+    void    setWritebackFirstUseLength(int length);
+    int     writebackFirstUseLength() const;
+    void    incLastOutputPos();
+    void    setPrefillReuseLength(int64_t total,
+                                  int64_t local,
+                                  int64_t remote,
+                                  int64_t memory,
+                                  int64_t disk,
+                                  bool    independent_pools,
+                                  int     writeback_first_use_len = 0);
+    int     prefillWritebackFirstUseLength() const;
     int64_t prefillTotalReuseLen() const;
     int64_t prefillLocalReuseLen() const;
     int64_t prefillRemoteReuseLen() const;
@@ -1118,6 +1132,7 @@ protected:
     std::vector<int32_t>               speculative_accepted_tokens_per_pos_;
     size_t                             last_output_pos_      = 0;
     int                                initial_reuse_length_ = 0;
+    int                                writeback_first_use_length_ = 0;
     int                                reuse_length_         = 0;
     int                                local_reuse_length_   = 0;
     int                                device_reuse_length_  = 0;
@@ -1132,11 +1147,12 @@ protected:
     bool warmup_chunk_window_ = false;
     // prefill reuse info (PD-sep); read/write only under output_mutex_
     bool    prefill_independent_block_pools_ = false;
-    int64_t prefill_total_reuse_len_         = 0;
-    int64_t prefill_local_reuse_len_         = 0;
-    int64_t prefill_remote_reuse_len_        = 0;
-    int64_t prefill_memory_reuse_len_        = 0;
-    int64_t prefill_disk_reuse_len_          = 0;
+    int     prefill_writeback_first_use_length_ = 0;
+    int64_t prefill_total_reuse_len_  = 0;
+    int64_t prefill_local_reuse_len_  = 0;
+    int64_t prefill_remote_reuse_len_ = 0;
+    int64_t prefill_memory_reuse_len_ = 0;
+    int64_t prefill_disk_reuse_len_   = 0;
     // TOOD(xinfei.sxf) fix state
     bool done_                  = false;
     bool released_              = false;
@@ -1225,6 +1241,7 @@ protected:
 
     // prefill TP size queried from prefill server (used for asymmetric TP)
     int prefill_tp_size_ = -1;
+    int writeback_kv_ready_token_count_ = 0;
     // Effective Prefill KV-cache CP size; independent from TP size.
     int         prefill_cp_size_ = -1;
     std::string prefill_pipeline_layout_;

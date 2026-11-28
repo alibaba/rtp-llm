@@ -6,11 +6,25 @@ from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import (  # type: ignore
     ErrorCodePB,
     GenerateConfigPB,
     GenerateInputPB,
+    P2PConnectorBroadcastTpRequestPB,
     RpcErrorPB,
+    SideChannelPayloadPB,
 )
 
 
 class RpcErrorCodeProtoTest(unittest.TestCase):
+    def test_writeback_worker_rank_preserves_forward_transport_budget_field(self):
+        fields = P2PConnectorBroadcastTpRequestPB.DESCRIPTOR.fields_by_name
+        self.assertEqual(fields["communication_timeout_ms"].number, 15)
+        self.assertEqual(fields["lease_operation"].number, 16)
+        self.assertEqual(fields["worker_rank"].number, 17)
+        request = P2PConnectorBroadcastTpRequestPB(
+            communication_timeout_ms=5000, worker_rank=3
+        )
+        parsed = P2PConnectorBroadcastTpRequestPB.FromString(request.SerializeToString())
+        self.assertEqual(parsed.communication_timeout_ms, 5000)
+        self.assertEqual(parsed.worker_rank, 3)
+
     def test_master_enqueue_flag_uses_independent_wire_field_13(self):
         fields = GenerateInputPB.DESCRIPTOR.fields_by_name
         self.assertEqual(fields["multimodal_token_layout"].number, 11)
@@ -20,6 +34,35 @@ class RpcErrorCodeProtoTest(unittest.TestCase):
         parsed = GenerateInputPB.FromString(bytes((0x68, 0x01)))
         self.assertTrue(parsed.enqueued_by_master)
         self.assertEqual(parsed.SerializeToString(), bytes((0x68, 0x01)))
+
+    def test_request_level_p2p_writeback_uses_presence_aware_wire_field(self):
+        fields = GenerateConfigPB.DESCRIPTOR.fields_by_name
+        self.assertEqual(fields["top_logprobs"].number, 79)
+        self.assertEqual(fields["return_logprobs"].number, 80)
+        field = fields["enable_p2p_writeback"]
+        self.assertEqual(field.number, 81)
+        self.assertEqual(field.message_type.full_name, "google.protobuf.BoolValue")
+
+        for enabled in (False, True):
+            with self.subTest(enabled=enabled):
+                config = GenerateConfigPB()
+                config.enable_p2p_writeback.value = enabled
+                parsed = GenerateConfigPB.FromString(config.SerializeToString())
+                self.assertTrue(parsed.HasField("enable_p2p_writeback"))
+                self.assertEqual(parsed.enable_p2p_writeback.value, enabled)
+
+    def test_prompt_logits_and_writeback_accounting_keep_independent_wire_fields(self):
+        fields = SideChannelPayloadPB.DESCRIPTOR.fields_by_name
+        self.assertEqual(fields["prompt_logits"].number, 14)
+        self.assertEqual(fields["frontend_context_token_num"].number, 15)
+        self.assertEqual(fields["first_token_time_us"].number, 19)
+        self.assertEqual(fields["writeback_first_use_len"].number, 20)
+        payload = SideChannelPayloadPB(frontend_context_token_num=17, writeback_first_use_len=256)
+        payload.prompt_logits.SetInParent()
+        parsed = SideChannelPayloadPB.FromString(payload.SerializeToString())
+        self.assertTrue(parsed.HasField("prompt_logits"))
+        self.assertEqual(parsed.frontend_context_token_num, 17)
+        self.assertEqual(parsed.writeback_first_use_len, 256)
 
     def test_invalid_params_is_declared_and_round_trips(self):
         self.assertEqual(ErrorCodePB.Value("INVALID_PARAMS"), 26)

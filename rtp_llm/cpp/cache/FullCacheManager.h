@@ -25,21 +25,26 @@ public:
                 int                      reserve_step         = 0,
                 std::vector<size_t>*     backfilled_positions = nullptr,
                 const RequiredPositions& required_positions   = {}) override;
-    void removeSkippedBlocks(BlockIds& block_ids, bool enable_reuse_cache = false, int reserve_step = 0) override;
+    void           removeSkippedBlocks(BlockIds& block_ids,
+                                       bool      enable_reuse_cache = false,
+                                       int       reserve_step       = 0,
+                                       int       extra_tail_blocks  = 0) override;
     int  needBlocksNum(int seq_len, int current_blocks = 0, int reserve_step = 0) const override;
     int            estimatePeakNeedBlocks(int                     seq_len,
                                           const BlockIndicesType& current_block_indices,
                                           int                     remaining_tokens,
                                           int                     reserve_step,
                                           bool                    enable_reuse_cache,
-                                          bool                    reclaim_history = false) const override;
+                                          bool                    reclaim_history   = false,
+                                          int                     extra_tail_blocks = 0) const override;
     int            estimateInitialBatchPeakNeedBlocks(int  seq_len,
                                                       int  common_seq_len,
                                                       int  remaining_tokens,
                                                       int  reserve_step,
                                                       bool enable_reuse_cache,
                                                       int  target_batch_size,
-                                                      bool reclaim_history = false) const override;
+                                                      bool reclaim_history   = false,
+                                                      int  extra_tail_blocks = 0) const override;
     NeedBlocksInfo getNeedBlocks(int                      common_seq_len,
                                  int                      seq_len,
                                  int                      reserve_step,

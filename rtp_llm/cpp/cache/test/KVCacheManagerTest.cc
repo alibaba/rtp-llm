@@ -1040,8 +1040,20 @@ TEST_F(KVCacheManagerTest, CandidateConfigAllocatesMergedDraftSegmentsWithinBudg
     candidate_config.finalizeBlockNums(candidate, RuntimeConfig{});
     const auto     child    = candidate_config.mtp_sub_configs[0];
     const auto     topology = candidate_config.topologyPtr();
-    KVCacheManager manager(candidate_config, false, nullptr, options, {}, {}, sp);
+    ParallelismConfig parallelism;
+    parallelism.role_type = RoleType::PREFILL;
+    RuntimeConfig runtime;
+    runtime.worker_grpc_addrs = {"127.0.0.1:12345"};
+    runtime.worker_addrs      = {"127.0.0.1:12346:12345"};
+    PDSepConfig pd;
+    pd.role_type               = RoleType::PREFILL;
+    pd.cache_store_rdma_mode   = false;
+    pd.cache_store_listen_port = 0;
+    CacheStoreConfig store;
+    store.p2p_writeback_enable = true;
+    KVCacheManager manager(candidate_config, false, nullptr, options, parallelism, runtime, sp, pd, store);
     ASSERT_TRUE(manager.init());
+    ASSERT_TRUE(manager.hasP2PWriteback());
     const auto& config = manager.cacheConfig();
     EXPECT_EQ(config.group("default").block_num, candidate);
     ASSERT_EQ(config.mtp_sub_configs.size(), 2u);
@@ -1052,7 +1064,11 @@ TEST_F(KVCacheManagerTest, CandidateConfigAllocatesMergedDraftSegmentsWithinBudg
     ASSERT_EQ(pool_config->memory_layouts.size(), 3u);
     // FP16 K+V: 4 tokens/block * 2 bytes/element * (2 target + 2*4 draft elements/token).
     constexpr size_t bytes_per_block = 4 * 2 * 2 * (2 + 2 * 4);
-    constexpr size_t budget_bytes    = 1024 * 1024;
+    const auto&      writeback_bytes = manager.p2p_connector_->config_.scheduler_config.physical_block_bytes_by_group;
+    const auto       entry           = writeback_bytes.find("default");
+    ASSERT_NE(entry, writeback_bytes.end());
+    EXPECT_EQ(entry->second, bytes_per_block);
+    constexpr size_t budget_bytes = 1024 * 1024;
     EXPECT_EQ(config.group("default").block_num, budget_bytes / bytes_per_block);
     EXPECT_EQ(pool->getTotalSizeBytes(), static_cast<size_t>(config.group("default").block_num) * bytes_per_block);
     EXPECT_LE(pool->getTotalSizeBytes(), budget_bytes);
@@ -1064,6 +1080,42 @@ TEST_F(KVCacheManagerTest, CandidateConfigAllocatesMergedDraftSegmentsWithinBudg
     EXPECT_EQ(manager.cacheConfig().mtp_sub_configs[0], child);
     EXPECT_EQ(manager.cacheConfig().topologyPtr(), topology);
     EXPECT_EQ(candidate_config.mtp_sub_configs[0]->group("default").block_num, candidate);
+}
+
+TEST_F(KVCacheManagerTest, DecodeWritebackRejectsLocalShardedKvCache) {
+    auto cache_config = makeSimpleMhaCacheConfig(
+        /*layer_num=*/2, /*block_num=*/8, /*tokens_per_block=*/4, rtp_llm::DataType::TYPE_FP16);
+    cache_config.local_kv_cache_sharded = true;
+
+    KVCacheConfig options;
+    options.reuse_cache         = true;
+    options.enable_device_cache = true;
+    ParallelismConfig parallelism;
+    parallelism.role_type  = RoleType::DECODE;
+    parallelism.tp_size                            = 2;
+    parallelism.tp_rank                            = 0;
+    parallelism.world_size                         = 2;
+    parallelism.prefill_cp_config.method           = CPRotateMethod::PREFILL_CP;
+    parallelism.prefill_cp_config.kv_cache_sharded = true;
+    parallelism.prefill_cp_config.prefill_cp_size  = 2;
+    RuntimeConfig runtime;
+    runtime.worker_grpc_addrs = {"127.0.0.1:12345", "127.0.0.1:12347"};
+    runtime.worker_addrs      = {"127.0.0.1:12346:12345", "127.0.0.1:12348:12347"};
+    PDSepConfig pd;
+    pd.role_type               = RoleType::DECODE;
+    pd.cache_store_rdma_mode   = false;
+    pd.cache_store_listen_port = 0;
+    CacheStoreConfig store;
+    store.p2p_writeback_enable = true;
+
+    KVCacheManager rejected(cache_config, false, nullptr, options, parallelism, runtime, {}, pd, store);
+    EXPECT_FALSE(rejected.init());
+
+    // Prefill CP>1 / Decode CP=1 (local_kv_cache_sharded=false on Decode) remains supported.
+    cache_config.local_kv_cache_sharded = false;
+    KVCacheManager allowed(cache_config, false, nullptr, options, parallelism, runtime, {}, pd, store);
+    EXPECT_TRUE(allowed.init());
+    EXPECT_TRUE(allowed.hasP2PWriteback());
 }
 
 TEST_F(KVCacheManagerTest, UnresolvedNormalConfigCannotBeUsedForWarmup) {
@@ -1540,7 +1592,7 @@ TEST_F(KVCacheManagerTest, FailedPrefillPublicationTerminatesRequestAndWakesPayl
     ASSERT_TRUE(worker->init());
     auto connector                     = std::make_shared<P2PConnector>(config, nullptr, nullptr);
     connector->prefill_                = std::make_unique<P2PConnectorPrefill>(config, nullptr, nullptr);
-    connector->prefill_->worker_       = worker;
+    connector->prefill_->read_worker_  = worker;
     connector->prefill_->stream_store_ = std::make_shared<P2PConnectorResourceStore>(nullptr);
     manager->p2p_connector_            = connector;
     auto              store            = connector->streamStore();
@@ -1590,10 +1642,10 @@ TEST_F(KVCacheManagerTest, WriteP2PLayer_HoldsAllocatorReferenceUntilLayerCleanu
     connector_config.worker_config.topology      = cache_config.topologyPtr();
     auto worker = std::make_shared<P2PWorkerPrefillRead>(connector_config.worker_config, nullptr, nullptr, nullptr);
     ASSERT_TRUE(worker->init());
-    auto connector               = std::make_shared<P2PConnector>(connector_config, nullptr, nullptr);
-    connector->prefill_          = std::make_unique<P2PConnectorPrefill>(connector_config, nullptr, nullptr);
-    connector->prefill_->worker_ = worker;
-    manager->p2p_connector_      = connector;
+    auto connector = std::make_shared<P2PConnector>(connector_config, nullptr, nullptr);
+    connector->prefill_ = std::make_unique<P2PConnectorPrefill>(connector_config, nullptr, nullptr);
+    connector->prefill_->read_worker_ = worker;
+    manager->p2p_connector_ = connector;
 
     const auto free_before = manager->freeBlocksNum();
     auto       resource    = makeDSV4BatchResource(cache_config);

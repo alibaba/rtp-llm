@@ -118,10 +118,11 @@ int SWACacheManager::estimatePeakNeedBlocks(int                     seq_len,
                                             int                     remaining_tokens,
                                             int                     reserve_step,
                                             bool                    enable_reuse_cache,
-                                            bool /*reclaim_history*/) const {
+                                            bool /*reclaim_history*/,
+                                            int extra_tail_blocks) const {
     // SWA pools never adopt committed-history reclaim; the parameter exists
     // to match the SingleTypeCacheManager virtual signature.
-    const int        active_tail_blocks  = activeTailBlockCount();
+    const int        active_tail_blocks  = activeTailBlockCount() + std::max(extra_tail_blocks, 0);
     const int        prefill_tail_blocks = prefillTailBlocks(tail_blocks_, enable_reuse_cache);
     std::vector<int> block_costs;
     int              allocated_blocks = 0;
@@ -162,12 +163,13 @@ int SWACacheManager::estimateInitialBatchPeakNeedBlocks(int  seq_len,
                                                         int  reserve_step,
                                                         bool enable_reuse_cache,
                                                         int  target_batch_size,
-                                                        bool /*reclaim_history*/) const {
+                                                        bool /*reclaim_history*/,
+                                                        int extra_tail_blocks) const {
     // SWA pools never adopt committed-history reclaim; the parameter exists
     // to match the SingleTypeCacheManager virtual signature.
     const int        prefill_tail_blocks = prefillTailBlocks(tail_blocks_, enable_reuse_cache);
     const int        batch_size          = std::max(target_batch_size, 1);
-    const int        active_tail_blocks  = activeTailBlockCount();
+    const int        active_tail_blocks  = activeTailBlockCount() + std::max(extra_tail_blocks, 0);
     const int        common_slots        = needBlocksNum(std::clamp(common_seq_len, 0, seq_len), 0);
     const int        seq_slots           = needBlocksNum(seq_len, 0);
     const int        total_slots         = seq_slots;
@@ -340,14 +342,17 @@ bool SWACacheManager::mallocImpl(BlockIds&                block_ids,
     return true;
 }
 
-void SWACacheManager::removeSkippedBlocks(BlockIds& block_ids, bool enable_reuse_cache, int reserve_step) {
+void SWACacheManager::removeSkippedBlocks(BlockIds& block_ids,
+                                          bool      enable_reuse_cache,
+                                          int       reserve_step,
+                                          int       extra_tail_blocks) {
     const auto& block_indices = block_ids.blocks();
     if (block_indices.empty()) {
         checkSWATailBlockIds(block_ids, "SWACacheManager::removeSkippedBlocks");
         return;
     }
     (void)enable_reuse_cache;
-    const int active_tail_blocks = activeTailBlockCount();
+    const int active_tail_blocks = activeTailBlockCount() + std::max(extra_tail_blocks, 0);
     const int block_size         = static_cast<int>(block_indices.size());
 
     BlockIndicesType    blocks_to_free;

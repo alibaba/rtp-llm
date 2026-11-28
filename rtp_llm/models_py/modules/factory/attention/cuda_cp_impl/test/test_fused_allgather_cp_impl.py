@@ -326,6 +326,12 @@ class TestPCPFusedPagedAttnOp(CPAttnTestBase):
         cases = []
 
         attn_cfg, par_cfg, attn_inputs = self._make_dispatch_case()
+        par_cfg.prefill_cp_config.kv_cache_sharded = True
+        cases.append(
+            ("sharded KV", "replicated KV cache", attn_cfg, par_cfg, attn_inputs)
+        )
+
+        attn_cfg, par_cfg, attn_inputs = self._make_dispatch_case()
         attn_cfg.kv_cache_dtype = KvCacheDataType.FP8
         cases.append(("FP8 KV cache", "KV cache dtype", attn_cfg, par_cfg, attn_inputs))
 
@@ -433,6 +439,18 @@ class TestPCPFusedPagedAttnOp(CPAttnTestBase):
                     select_prefill_cp_impl(case_cfg, case_inputs, case_par_cfg),
                     PCPAllGatherAttnOp,
                 )
+
+    def test_sharded_kv_cache_rejects_unsupported_cp_mha_methods(self):
+        for method in (
+            CPRotateMethod.ALLTOALL,
+            CPRotateMethod.ALL_GATHER_WITH_OVERLAP,
+        ):
+            with self.subTest(method=method):
+                attn_cfg, par_cfg, attn_inputs = self._make_dispatch_case()
+                par_cfg.prefill_cp_config.method = method
+                par_cfg.prefill_cp_config.kv_cache_sharded = True
+                with self.assertRaisesRegex(ValueError, "only supports ALL_GATHER"):
+                    select_prefill_cp_impl(attn_cfg, attn_inputs, par_cfg)
 
     def _make_dispatch_case(self):
         cp_size = 2

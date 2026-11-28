@@ -257,7 +257,8 @@ AuxInfo NormalGenerateStream::prepareAuxInfo(size_t output_len) const {
     aux.prefix_len                          = generate_input_->prefix_length;
     aux.output_len                          = seqLength() - generate_input_->inputLength();
     aux.step_output_len                     = output_len;
-    aux.reuse_len                           = initialReuseLength();
+    aux.writeback_first_use_len             = std::min(initialReuseLength(), writeback_first_use_length_);
+    aux.reuse_len                           = initialReuseLength() - aux.writeback_first_use_len;
     aux.pd_sep                              = queryPdSep();
     aux.local_reuse_len                     = local_reuse_length_;
     aux.remote_reuse_len                    = remote_reuse_length_;
@@ -609,6 +610,7 @@ void NormalGenerateStream::updateOutput(const StreamUpdateInfo& update_info) {
             side_data.prefill_use_independent_block_pools = rc.cache_manager->cacheConfig().groupNums() > 1;
             // Chunk advancement changes the execution cursor, not the cache hit.
             side_data.total_reuse_len  = initialReuseLength();
+            side_data.writeback_first_use_len = writebackFirstUseLength();
             side_data.local_reuse_len  = localReuseLength();
             side_data.remote_reuse_len = remoteReuseLength();
             side_data.memory_reuse_len = hostReuseLength();

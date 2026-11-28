@@ -137,6 +137,26 @@ class OpenaiComparerGraphStatusTest(unittest.TestCase):
                     self.assertTrue(any("step_output_len" in diff for diff in diffs))
                     self.assertTrue(any("role_addrs" in diff for diff in diffs))
 
+    def test_actual_reuse_len_in_legacy_and_explicit_goldens(self):
+        for golden_aux, reported, should_pass in (
+            ({"reuse_len": 128}, 128, True),
+            ({"reuse_len": 128}, 0, False),
+            ({"reuse_len": 96, "writeback_first_use_len": 32}, 128, True),
+            ({"reuse_len": 128, "actual_reuse_len": 0}, 128, False),
+        ):
+            with self.subTest(golden_aux=golden_aux, reported=reported):
+                golden = self._response(golden_aux)
+                self.comparer.qr_info["result"] = golden
+                self.comparer.qr_info.pop("compare_config", None)
+                expected = self._parse(golden)
+                actual = self._parse(self._response({**golden_aux, "actual_reuse_len": reported}))
+                if should_pass:
+                    self.comparer.compare_result(expected, actual)
+                else:
+                    with self.assertRaises(SmokeException) as raised:
+                        self.comparer.compare_result(expected, actual)
+                    self.assertIn("aux_info.actual_reuse_len", raised.exception.message)
+
     def test_query_aux_exceptions_do_not_hide_cache_reuse_differences(self):
         self.comparer.qr_info["compare_config"] = {
             "ignore_aux_info_fields": ["step_output_len", "role_addrs.ip"]

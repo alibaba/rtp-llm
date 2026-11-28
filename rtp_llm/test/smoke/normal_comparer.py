@@ -51,6 +51,8 @@ class AuxInfo(BaseModel):
     input_len: Optional[int] = None
     prefix_len: Optional[int] = None
     reuse_len: Optional[int] = None
+    actual_reuse_len: Optional[int] = None
+    writeback_first_use_len: Optional[int] = None
     local_reuse_len: Optional[int] = None
     remote_reuse_len: Optional[int] = None
     memory_reuse_len: Optional[int] = None
@@ -404,6 +406,8 @@ class NormalComparer(BaseComparer):
             "input_len",
             "prefix_len",
             "reuse_len",
+            "actual_reuse_len",
+            "writeback_first_use_len",
             "output_len",
             "step_output_len",
             "pd_sep",

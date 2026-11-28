@@ -86,6 +86,11 @@ public:
     void                        drainLinearHistory();
     void                        fakeInitKVBlock(size_t reserved_blocks = 0);
     int                         tryReleaseKVBlock(size_t nums);
+    // Called under the stream lock. Each new event covers prior writes on the same compute stream.
+    void setKVCacheWriteProgress(uint64_t step, const std::shared_ptr<torch::Event>& event) {
+        writeback_kv_step_ = step;
+        kv_cache_write_event_ = event;
+    }
     void                        freeBatchBlocks(size_t batch_id, std::vector<int>& blocks);
     void                        releaseResource();
     void                        failPrefillPublication(const ErrorInfo& error);
@@ -177,6 +182,9 @@ public:
     bool reuseCache() const;
     bool enableMemoryCache() const;
     bool enableDeviceCache() const;
+    bool writebackEligible() const;
+    // A missing request value preserves legacy service-level behavior.
+    static bool resolveWritebackEnabled(bool deployment_enabled, const std::optional<bool>& request_enabled) noexcept;
     bool enableDiskCache() const;
     bool enableCacheLookup() const;
     Tier insertTarget() const;
@@ -196,7 +204,10 @@ public:
 private:
     void         trackReleasedP2PLoad();
     LinearCachePolicy linearCachePolicy(int target_batch_size) const;
+    // P peer metadata is set after stream construction; refresh before estimation or first allocation.
+    void         configureWritebackRetention() const;
     void         clearCacheReuseState();
+    void         finalizeReuseAccounting();
     void         recordCacheReuseMallocResult(const MallocResult& result);
     void         publishReuseLengths(int total_length, int host_length, int disk_length, int backend_length);
     absl::Status finalizeAllocatorLoad();
@@ -220,7 +231,11 @@ private:
     // while the request keeps streaming; released once the prefix is marked.
     int                              pending_linear_history_committed_tokens_ = 0;
     bool                             pd_decode_linear_tail_only_              = false;
+    uint64_t                         writeback_kv_step_ = 0;
+    std::shared_ptr<torch::Event>     kv_cache_write_event_;
     std::shared_ptr<AsyncContext>    allocator_load_context_;
+    ReuseAccounting                  reuse_accounting_;
+    bool                             reuse_accounting_done_ = false;
     RtpLLMCacheReuseMetricsCollector cache_reuse_metrics_;
     int64_t                          malloc_begin_time_us_    = 0;
     int64_t                          load_wait_begin_time_us_ = 0;

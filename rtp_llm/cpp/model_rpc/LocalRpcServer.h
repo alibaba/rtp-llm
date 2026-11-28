@@ -92,6 +92,10 @@ public:
         return maga_init_params_.parallelism_config.tp_size;
     }
 
+    std::shared_ptr<KVCacheManager> getCacheManager() const {
+        return engine_ ? engine_->getCacheManager() : nullptr;
+    }
+
     virtual size_t onflightRequestNum();
 
     virtual void stop() {

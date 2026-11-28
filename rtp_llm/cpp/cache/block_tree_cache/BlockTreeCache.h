@@ -144,6 +144,14 @@ public:
                                bool                               enable_storage_backend = true,
                                std::optional<int64_t>             request_id             = {},
                                bool                               skip_linear            = false);
+    ErrorInfo            matchForExternalInsert(const CacheKeysType&  cache_keys,
+                                                size_t                required_prefix_blocks,
+                                                BlockTreeMatchResult& match_result,
+                                                bool                  require_device_prefix = true);
+    ErrorInfo            insertExternalBlocks(const CacheKeysType&                              cache_keys,
+                                              size_t                                            start_block,
+                                              const std::vector<std::vector<GroupSetResource>>& resources,
+                                              int64_t                                           deadline_ms);
     void                 insert(const CacheKeysType&                              cache_keys,
                                 const std::vector<std::vector<GroupSetResource>>& resources,
                                 Tier                                              target_tier);
@@ -154,7 +162,8 @@ public:
                   bool                                              is_resident,
                   std::optional<int64_t>                            request_id         = {},
                   size_t                                            remote_reuse_begin = 0,
-                  size_t                                            remote_reuse_end   = 0);
+                  size_t                                            remote_reuse_end   = 0,
+                  const ReuseAccounting&                            accounting = {});
     // Directly reclaim up to num_blocks device blocks belonging to one group set
     // (target_tier = NONE, content dropped). Returns the number actually freed.
     // Skips plans containing device blocks that would remain referenced after dropping.
@@ -211,7 +220,11 @@ public:
 private:
     struct CapacityCallbackState;
 
-    void checkWatermark();
+    ErrorInfo validateWritebackPrefixLocked(const CacheKeysType&          cache_keys,
+                                            const std::vector<TreeNode*>& path,
+                                            size_t                        required_prefix_blocks,
+                                            bool                          require_device_prefix = true) const;
+    void      checkWatermark();
     // Caller holds mutex_.
     void onWorkflowSettledLocked(bool check_watermark);
 

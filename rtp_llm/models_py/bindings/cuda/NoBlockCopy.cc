@@ -607,8 +607,8 @@ bool execStagedMemoryCopy(const StagedMemoryCopyParams& params, StagedMemoryCopy
         return true;
     }
 
-    check_cuda_value(cudaSetDevice(params.device_index));
-    auto stream = getNoBlockCopyStream(params.device_index).stream();
+    c10::cuda::CUDAGuard device_guard(params.device_index);
+    auto                 stream = getNoBlockCopyStream(params.device_index).stream();
 
     StagedMemoryCopyScratch local_scratch;
     auto*                   work_scratch          = scratch != nullptr ? scratch : &local_scratch;
