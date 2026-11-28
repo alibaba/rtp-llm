@@ -530,6 +530,7 @@ py_library(
         "navi_sched/client.py",
         "navi_sched/asyncio.py",
         "navi_sched/master.py",
+        "navi_sched/tair_kvcm_config.py",
         "navi_sched/master_process.py",
         "navi_sched/spectrum_prefill_master.py",
         "navi_sched/spectrum_kmon.py",
