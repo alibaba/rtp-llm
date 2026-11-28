@@ -78,11 +78,13 @@ def _export_ft(source, output, config, wrapper, tp=1, *, handler=None):
 
 class HybridFTRoundTrip(unittest.TestCase):
     def _check_decoder_handler(self, source, ft, cfg, wrapper, weights):
-        hidden = torch.tensor([[1.0, 2.0, -1.0, 0.0], [0.0, 1.0, 2.0, -1.0]])
-        weight = torch.tensor([[1.0, -3.0, 2.0, 5.0], [-2.0, 1.0, 4.0, 3.0]])
+        hidden = torch.arange(2 * cfg.hidden_size, dtype=torch.float32).view(2, -1) - 3
+        weight = hidden.flip((0, 1)) + 1
         bias = torch.tensor([3.0, -2.0])
         scores = hidden @ weight.T + bias
-        (source / "config.json").write_text(json.dumps({"num_labels": 2}))
+        config_path = source / "config.json"
+        raw = json.loads(config_path.read_text()) if config_path.exists() else {}
+        config_path.write_text(json.dumps({**raw, "num_labels": 2}))
         save_file(
             {**weights, "classifier.weight": weight, "classifier.bias": bias},
             str(source / "model.safetensors"),
@@ -245,7 +247,7 @@ class HybridFTRoundTrip(unittest.TestCase):
             with self.subTest(name=name):
                 torch.testing.assert_close(actual[name], expected[name], rtol=0, atol=0)
         if not stage_only and config.model_type in (
-            "qwen3_next", "qwen35_dense", "qwen35_moe"
+            "qwen3_next", "qwen35_dense", "qwen35_moe", "kimi_linear"
         ):
             self._check_decoder_handler(source, ft, config, wrapper, weights)
 

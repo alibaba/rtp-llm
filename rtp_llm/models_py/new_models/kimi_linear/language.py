@@ -585,6 +585,8 @@ class _KimiMlaKernelWeightLayout:
 class KimiLinearForCausalLM(ResidentDecoderOwner, DecoderHandlerOwner, KimiLinearModel, RtpModule):
     """Clean prefix-streamed Kimi Linear NewLoader implementation."""
 
+    supports_ft_handler_heads = True
+
     # Kimi names routed-expert projections w1/w3/w2 while the shared
     # NewLoader MoE leaf owns the semantic gate/up/down projection names.
     # Keep this as a name-only checkpoint mapping; no tensor layout is
