@@ -178,6 +178,9 @@ struct KVCacheConfig {
     int64_t disk_cache_evict_timeout_ms                     = 3000;
     int64_t disk_cache_evict_max_pending_bytes              = 100 * 1024 * 1024;
     int64_t disk_cache_staging_block_count                  = 128;
+    std::optional<int64_t> disk_cache_full_staging_block_count;
+    std::optional<int64_t> disk_cache_swa_staging_block_count;
+    std::optional<int64_t> disk_cache_linear_staging_block_count;
     int64_t memory_cache_max_descriptors_per_transfer_batch = 32;
     int     block_tree_task_pool_size          = 4;
     int64_t block_tree_transfer_worker_count   = 2;

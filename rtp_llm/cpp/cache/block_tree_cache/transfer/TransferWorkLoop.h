@@ -1,6 +1,5 @@
 #pragma once
 
-#include <array>
 #include <condition_variable>
 #include <cstdlib>
 #include <exception>
@@ -16,6 +15,7 @@
 #include <utility>
 #include <vector>
 
+#include "rtp_llm/cpp/cache/CacheGroupType.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/block_pool/HostStagingBlockPool.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/CrcCopyExecutor.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferBatchAsyncContext.h"
@@ -32,6 +32,7 @@ class DiskIOExecutor;
 // outlives this owner's shutdown/join; pass nullptr only for routes without Disk.
 class TransferWorkLoop {
 public:
+    using StagingPools = std::map<CacheGroupType, std::shared_ptr<HostStagingBlockPool>>;
     using BeforeCompleteCallback = std::function<void(const TransferResult&)>;
 
     TransferWorkLoop(std::vector<GroupSetPtr>                       groups,
@@ -40,11 +41,10 @@ public:
                      TransferOperation                              operation,
                      size_t                                         batch_limit,
                      size_t                                         queue_capacity,
-                     std::shared_ptr<HostStagingBlockPool>          staging,
+                     StagingPools                                   staging,
                      std::shared_ptr<BlockTreeCacheMetricsReporter> metrics_reporter = nullptr,
                      int64_t                                        world_rank       = 0,
-                     size_t                                         worker_index     = 0,
-                     std::shared_ptr<HostStagingBlockPool>          swa_staging      = nullptr);
+                     size_t                                         worker_index     = 0);
     ~TransferWorkLoop();
     TransferWorkLoop(const TransferWorkLoop&)            = delete;
     TransferWorkLoop& operator=(const TransferWorkLoop&) = delete;
@@ -122,8 +122,8 @@ private:
         CrcCopyExecutor::Timing crc_timing;
     };
     struct StagingResource {
-        std::array<std::shared_ptr<HostStagingBlockPool>, 2> pools;  // FULL/default, SWA.
-        Queue                                                waiting;
+        StagingPools pools;
+        Queue        waiting;
     };
     void run();
     // false means the Entry is waiting for staging or has finished.
@@ -131,7 +131,6 @@ private:
     bool               acquireStaging(Entry& entry, bool waiting = false);
     void               releaseStaging(Entry& entry);
     void               retryStaging();
-    size_t             stagingIndex(const Entry& entry) const;
     void               tryStep(Entry& entry);
     void               submitCrc(Entry& entry);
     void               submitPlainDeviceCopy(Entry& entry);

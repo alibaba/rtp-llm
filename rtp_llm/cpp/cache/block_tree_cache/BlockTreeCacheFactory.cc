@@ -471,11 +471,6 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                       
     if (disk_enabled) {
         for (const std::vector<std::string>& members : group_members) {
             RTP_LLM_CHECK_WITH_INFO(!members.empty(), "BlockTreeCache aggregation plan contains an empty group set");
-            if (cache_config.topology().group(members.front()).policy.group_type == CacheGroupType::LINEAR) {
-                RTP_LLM_LOG_ERROR("disk cache does not support reusable LINEAR group sets, tag=%s",
-                                  members.front().c_str());
-                return nullptr;
-            }
         }
     }
 
@@ -661,6 +656,7 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                       
         checkedQueueSize(kv_cache_config.block_tree_business_queue_max_size, "block_tree_business_queue_max_size");
     config.transfer_queue_max_size = transfer_queue_size;
 
+    DiskLoadStagingBlockCounts staging_counts(config.device_disk_staging_block_count);
     if (disk_enabled) {
         const int64_t staging_block_count = kv_cache_config.disk_cache_staging_block_count;
         if (staging_block_count < 2 || staging_block_count % 2 != 0
@@ -669,6 +665,21 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                       
             return nullptr;
         }
         config.device_disk_staging_block_count = static_cast<size_t>(staging_block_count);
+        staging_counts.default_count = config.device_disk_staging_block_count;
+        const std::pair<CacheGroupType, std::optional<int64_t>> overrides[] = {
+            {CacheGroupType::FULL, kv_cache_config.disk_cache_full_staging_block_count},
+            {CacheGroupType::SWA, kv_cache_config.disk_cache_swa_staging_block_count},
+            {CacheGroupType::LINEAR, kv_cache_config.disk_cache_linear_staging_block_count}};
+        for (const auto& [type, count] : overrides) {
+            if (!count)
+                continue;
+            if (*count <= 0 || static_cast<uint64_t>(*count) > std::numeric_limits<size_t>::max()) {
+                RTP_LLM_LOG_ERROR("disk cache staging block count for %s must be positive, got %ld",
+                                  metricCacheGroupTypeName(type), *count);
+                return nullptr;
+            }
+            staging_counts.overrides.emplace(type, static_cast<size_t>(*count));
+        }
     }
 
     config.max_descriptors_per_transfer_batch = max_blocks_per_batch;
@@ -692,7 +703,7 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                       
                          1000, 1000, kv_cache_config.block_tree_frozen_force_release_timeout_ms, broadcast_manager);
     auto per_rank_engine        = std::make_shared<PerRankBlockTransferEngine>(group_sets,
                                                                         has_local_disk_backing,
-                                                                        config.device_disk_staging_block_count,
+                                                                        staging_counts,
                                                                         config.max_descriptors_per_transfer_batch,
                                                                         config.transfer_worker_count,
                                                                         config.transfer_queue_max_size,

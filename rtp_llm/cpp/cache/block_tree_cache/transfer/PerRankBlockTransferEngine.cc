@@ -9,7 +9,6 @@
 #include <numeric>
 #include <limits>
 #include <stdexcept>
-#include <array>
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/CrcCopyExecutor.h"
 #include <utility>
 #include <vector>
@@ -36,69 +35,42 @@ std::shared_ptr<TransferAsyncContext> invalidTransferContext(const TransferTask&
         std::move(result), task.descriptors().size(), task.completionProof());
 }
 
-// Each load owner has private FULL/default and SWA pools with equal byte budgets.
-// Its reference block count is a share of the rank-wide SWA block budget.
-std::array<std::shared_ptr<HostStagingBlockPool>, 2> makeLoadStaging(const std::vector<GroupSetPtr>& groups,
-                                                                     size_t                          block_count,
-                                                                     size_t                          batch_limit,
-                                                                     bool                            enabled,
-                                                                     int64_t                         world_rank,
-                                                                     size_t                          worker_index) {
-    std::array<std::shared_ptr<HostStagingBlockPool>, 2> result;
+TransferWorkLoop::StagingPools makeLoadStaging(const std::vector<GroupSetPtr>& groups,
+                                               const DiskLoadStagingBlockCounts& counts,
+                                               size_t worker_count,
+                                               size_t worker_index,
+                                               size_t batch_limit,
+                                               bool enabled,
+                                               int64_t world_rank) {
+    TransferWorkLoop::StagingPools pools{};
     if (!enabled)
-        return result;
-    size_t                max_stride = 0;
-    std::array<size_t, 2> strides{};
+        return pools;
+    std::map<CacheGroupType, size_t> strides;
     for (const auto& group : groups) {
         if (!group || !group->diskPool() || group->devicePools().empty()
             || (!group->crcEnabled() && !isPlainDeviceTransferGroup(*group)))
             continue;
         const auto required = std::max(group->storageBytes(), group->diskPool()->strideBytes());
-        if (required > std::numeric_limits<size_t>::max() - 4095)
+        constexpr size_t alignment = HostStagingBlockPool::kAlignment;
+        if (required > std::numeric_limits<size_t>::max() - (alignment - 1))
             throw std::overflow_error("async disk staging stride overflow");
-        const size_t stride = ((required + 4095) / 4096) * 4096;
-        const size_t lane   = group->groupType() == CacheGroupType::SWA ? 1 : 0;
-        strides[lane]       = std::max(strides[lane], stride);
-        max_stride          = std::max(max_stride, stride);
+        auto& stride = strides[group->groupType()];
+        stride = std::max(stride, ((required + alignment - 1) / alignment) * alignment);
     }
-    if (!max_stride)
-        return result;
-    const size_t reference_stride = strides[1] ? strides[1] : max_stride;
-    if (!block_count)
-        throw std::invalid_argument("async staging block count must be >= load worker count");
-    if (block_count > std::numeric_limits<size_t>::max() / reference_stride / 2)
-        throw std::overflow_error("async disk staging size overflow");
-    const size_t lane_bytes = block_count * reference_stride;
-    for (size_t lane = 0; lane < result.size(); ++lane) {
-        if (!strides[lane])
-            strides[lane] = reference_stride;
-        const size_t capacity = lane_bytes / strides[lane];
+    for (const auto& [type, stride] : strides) {
+        const size_t blocks = counts.forType(type);
+        const size_t capacity = blocks / worker_count + (worker_index < blocks % worker_count ? 1 : 0);
         if (capacity < batch_limit) {
             RTP_LLM_LOG_ERROR("async staging pool too small: rank=%ld worker=%zu class=%s capacity=%zu batch_limit=%zu",
-                              world_rank,
-                              worker_index,
-                              lane == 0 ? "FULL" : "SWA",
-                              capacity,
-                              batch_limit);
+                              world_rank, worker_index, metricCacheGroupTypeName(type), capacity, batch_limit);
             throw std::invalid_argument("async staging pool capacity must be >= max_descriptors_per_batch");
         }
-        result[lane] = std::make_shared<HostStagingBlockPool>(capacity, strides[lane]);
+        auto pool = std::make_shared<HostStagingBlockPool>(capacity, stride);
+        RTP_LLM_LOG_INFO("async disk load staging: rank=%ld worker=%zu class=%s blocks=%zu stride=%zu backing_bytes=%zu",
+                         world_rank, worker_index, metricCacheGroupTypeName(type), capacity, stride, pool->backingBytes());
+        pools.emplace(type, std::move(pool));
     }
-    RTP_LLM_LOG_INFO(
-        "async staging private per load owner: rank=%ld worker=%zu swa_reference_blocks=%zu reference_stride=%zu "
-        "full_blocks=%zu full_stride=%zu swa_blocks=%zu swa_stride=%zu "
-        "data_bytes=%zu allocated_bytes=%zu",
-        world_rank,
-        worker_index,
-        block_count,
-        reference_stride,
-        result[0]->capacity(),
-        strides[0],
-        result[1]->capacity(),
-        strides[1],
-        result[0]->capacity() * strides[0] + result[1]->capacity() * strides[1],
-        result[0]->backingBytes() + result[1]->backingBytes());
-    return result;
+    return pools;
 }
 
 bool validDescriptor(const TransferDescriptor& descriptor, const GroupSet& group) {
@@ -126,7 +98,7 @@ bool validDescriptor(const TransferDescriptor& descriptor, const GroupSet& group
 
 PerRankBlockTransferEngine::PerRankBlockTransferEngine(std::vector<GroupSetPtr> group_sets,
                                                        bool                     enable_disk_cache,
-                                                       size_t                   device_disk_staging_block_count,
+                                                       DiskLoadStagingBlockCounts staging_block_counts,
                                                        size_t                   max_descriptors_per_batch,
                                                        size_t                   transfer_worker_count,
                                                        size_t                   transfer_queue_max_size,
@@ -188,28 +160,25 @@ PerRankBlockTransferEngine::PerRankBlockTransferEngine(std::vector<GroupSetPtr> 
     for (size_t worker = 0; worker < transfer_worker_count; ++worker) {
         const auto queue_capacity = transfer_queue_max_size / transfer_worker_count
                                     + (worker < transfer_queue_max_size % transfer_worker_count ? 1 : 0);
-        const size_t staging_blocks = device_disk_staging_block_count / transfer_worker_count
-                                      + (worker < device_disk_staging_block_count % transfer_worker_count ? 1 : 0);
-        auto staging = makeLoadStaging(
-            group_sets_, staging_blocks, max_descriptors_per_batch_, enable_disk_cache, world_rank, worker);
+        auto staging = makeLoadStaging(group_sets_, staging_block_counts, transfer_worker_count, worker,
+                                       max_descriptors_per_batch_, enable_disk_cache, world_rank);
         load_loops_.push_back(std::make_unique<TransferWorkLoop>(group_sets_,
                                                                  make_crc(CrcCopyDirection::LOAD),
                                                                  disk_io_executor_.get(),
                                                                  TransferOperation::LOAD,
                                                                  max_descriptors_per_batch_,
                                                                  queue_capacity,
-                                                                 std::move(staging[0]),
+                                                                 std::move(staging),
                                                                  metrics_reporter,
                                                                  world_rank,
-                                                                 worker,
-                                                                 std::move(staging[1])));
+                                                                 worker));
         evict_loops_.push_back(std::make_unique<TransferWorkLoop>(group_sets_,
                                                                   make_crc(CrcCopyDirection::EVICT),
                                                                   disk_io_executor_.get(),
                                                                   TransferOperation::EVICT,
                                                                   max_descriptors_per_batch_,
                                                                   queue_capacity,
-                                                                  nullptr,
+                                                                  TransferWorkLoop::StagingPools{},
                                                                   metrics_reporter,
                                                                   world_rank,
                                                                   worker));
@@ -222,14 +191,13 @@ PerRankBlockTransferEngine::PerRankBlockTransferEngine(std::vector<GroupSetPtr> 
     for (auto& loop : evict_loops_)
         loop->start();
     RTP_LLM_LOG_INFO("BlockTree WorkLoop transfer: owners_per_direction=%zu C=%zu total_crc_slots_per_device=%zu M=%zu "
-                     "resident_batch_budget_per_direction=%zu staging_swa_reference_blocks_per_rank=%zu "
+                     "resident_batch_budget_per_direction=%zu "
                      "staging_private_to_load_owners=1",
                      transfer_worker_count,
                      btc_crc_slot_count,
                      needs_crc ? crcTransferWorkspaceCount(transfer_worker_count, btc_crc_slot_count) : 0,
                      max_descriptors_per_batch_,
-                     transfer_queue_max_size,
-                     device_disk_staging_block_count);
+                     transfer_queue_max_size);
 }
 
 PerRankBlockTransferEngine::~PerRankBlockTransferEngine() {

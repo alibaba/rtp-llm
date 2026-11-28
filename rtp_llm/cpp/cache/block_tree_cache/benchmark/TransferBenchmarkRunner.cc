@@ -340,21 +340,22 @@ TransferBenchmarkRunner::buildTransferSetup(const GroupSetInfo&            gs_in
         writer_.addResolvedConfigInt("disk_write_queue_size", io.write_queue_size);
     }
     {
-        const size_t lane = is_swa ? 1 : 0;
-        const auto&  pool = setup.engine->load_loops_.front()->staging_.pools[lane];
-        if (pool) {
-            size_t full_blocks = 0, swa_blocks = 0, staging_bytes = 0;
+        const auto type = is_swa ? rtp_llm::CacheGroupType::SWA : rtp_llm::CacheGroupType::FULL;
+        const auto& pools = setup.engine->load_loops_.front()->staging_.pools;
+        if (auto it = pools.find(type); it != pools.end()) {
+            std::map<rtp_llm::CacheGroupType, size_t> blocks;
+            size_t staging_bytes = 0;
             for (const auto& loop : setup.engine->load_loops_) {
-                full_blocks += loop->staging_.pools[0]->capacity();
-                swa_blocks += loop->staging_.pools[1]->capacity();
-                for (const auto& staging : loop->staging_.pools)
-                    staging_bytes += staging->capacity() * staging->strideBytes();
+                for (const auto& [group_type, pool] : loop->staging_.pools) {
+                    blocks[group_type] += pool->capacity();
+                    staging_bytes += pool->capacity() * pool->strideBytes();
+                }
             }
-            writer_.addResolvedConfigInt("staging_load_blocks", is_swa ? swa_blocks : full_blocks);
+            writer_.addResolvedConfigInt("staging_load_blocks", blocks[type]);
             writer_.addResolvedConfigInt("staging_evict_blocks", 0);
-            writer_.addResolvedConfigInt("staging_full_blocks", full_blocks);
-            writer_.addResolvedConfigInt("staging_swa_blocks", swa_blocks);
-            writer_.addResolvedConfigInt("staging_stride_bytes", pool->strideBytes());
+            writer_.addResolvedConfigInt("staging_full_blocks", blocks[rtp_llm::CacheGroupType::FULL]);
+            writer_.addResolvedConfigInt("staging_swa_blocks", blocks[rtp_llm::CacheGroupType::SWA]);
+            writer_.addResolvedConfigInt("staging_stride_bytes", it->second->strideBytes());
             writer_.addResolvedConfigInt("staging_data_bytes", staging_bytes);
             writer_.addResolvedConfigInt("disk_to_device_batch_capacity", max_descriptors_per_task);
         }

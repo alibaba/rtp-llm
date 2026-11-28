@@ -8,6 +8,7 @@
 #include <cstdint>
 #include <limits>
 #include <pthread.h>
+#include <set>
 #include <stdexcept>
 #include <utility>
 
@@ -91,11 +92,10 @@ TransferWorkLoop::TransferWorkLoop(std::vector<GroupSetPtr>                     
                                    TransferOperation                              operation,
                                    size_t                                         batch_limit,
                                    size_t                                         queue_capacity,
-                                   std::shared_ptr<HostStagingBlockPool>          staging,
+                                   StagingPools                                   staging,
                                    std::shared_ptr<BlockTreeCacheMetricsReporter> metrics_reporter,
                                    int64_t                                        world_rank,
-                                   size_t                                         worker_index,
-                                   std::shared_ptr<HostStagingBlockPool>          swa_staging):
+                                   size_t                                         worker_index):
     groups_(std::move(groups)),
     crc_(std::move(crc)),
     disk_io_executor_(disk_io_executor),
@@ -110,10 +110,9 @@ TransferWorkLoop::TransferWorkLoop(std::vector<GroupSetPtr>                     
             throw std::invalid_argument("async transfer requires positive M/Q");
         if (capacity_ > std::numeric_limits<size_t>::max() / batch_limit_)
             throw std::overflow_error("async transfer descriptor capacity overflow");
-        if (operation_ == TransferOperation::EVICT && (staging || swa_staging))
+        if (operation_ == TransferOperation::EVICT && !staging.empty())
             throw std::invalid_argument("evict WorkLoop must not own staging pools");
-        // A single supplied pool remains useful for standalone load owners.
-        staging_.pools = {staging, swa_staging ? std::move(swa_staging) : std::move(staging)};
+        staging_.pools = std::move(staging);
         for (const auto& group : groups_) {
             if (group->crcEnabled())
                 crc_waiting_.try_emplace(getLocalDeviceIndex(*group));
@@ -306,7 +305,7 @@ bool TransferWorkLoop::plan(Entry& entry) {
         entry.step = Step::PLAIN_DEVICE_COPY;
     }
     if (combined) {
-        if (!staging_.pools[stagingIndex(entry)])
+        if (!staging_.pools.count(group(entry)->groupType()))
             throw std::invalid_argument("async disk staging is unavailable");
         entry.batch_timer   = timer(entry.task,
                                   "worker_batch_total",
@@ -334,10 +333,6 @@ bool TransferWorkLoop::plan(Entry& entry) {
     return true;
 }
 
-size_t TransferWorkLoop::stagingIndex(const Entry& entry) const {
-    return group(entry)->groupType() == CacheGroupType::SWA ? 1 : 0;
-}
-
 bool TransferWorkLoop::acquireStaging(Entry& entry, bool waiting) {
     if (!waiting && entry.task.expired()) {
         fail(entry,
@@ -350,7 +345,7 @@ bool TransferWorkLoop::acquireStaging(Entry& entry, bool waiting) {
         retryStaging();
         return false;
     }
-    auto leases = staging_.pools[stagingIndex(entry)]->tryMallocBatch(entry.task.descriptors().size());
+    auto leases = staging_.pools.at(group(entry)->groupType())->tryMallocBatch(entry.task.descriptors().size());
     if (!leases) {
         if (!waiting)
             waitForResource(entry, staging_.waiting);
@@ -371,9 +366,7 @@ void TransferWorkLoop::releaseStaging(Entry& entry) {
 }
 
 void TransferWorkLoop::retryStaging() {
-    // Preserve FIFO within each pool, while a blocked FULL waiter must not
-    // prevent SWA from using its independent capacity (and vice versa).
-    std::array<bool, 2> blocked{};
+    std::set<CacheGroupType> blocked;
     for (auto* waiting = staging_.waiting.head; waiting;) {
         auto* next = waiting->next;
         withEntry(*waiting, [&] {
@@ -387,10 +380,10 @@ void TransferWorkLoop::retryStaging() {
                                         CacheCopyError::NOT_EXECUTED)));
                 return;
             }
-            const auto lane = stagingIndex(*waiting);
-            if (blocked[lane] || !acquireStaging(*waiting, true)) {
+            const auto type = group(*waiting)->groupType();
+            if (blocked.count(type) || !acquireStaging(*waiting, true)) {
                 unqueue.dismiss();
-                blocked[lane] = true;
+                blocked.insert(type);
                 return;
             }
             unqueue.run();

@@ -494,6 +494,9 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("disk_cache_evict_timeout_ms", &KVCacheConfig::disk_cache_evict_timeout_ms)
         .def_readwrite("disk_cache_evict_max_pending_bytes", &KVCacheConfig::disk_cache_evict_max_pending_bytes)
         .def_readwrite("disk_cache_staging_block_count", &KVCacheConfig::disk_cache_staging_block_count)
+        .def_readwrite("disk_cache_full_staging_block_count", &KVCacheConfig::disk_cache_full_staging_block_count)
+        .def_readwrite("disk_cache_swa_staging_block_count", &KVCacheConfig::disk_cache_swa_staging_block_count)
+        .def_readwrite("disk_cache_linear_staging_block_count", &KVCacheConfig::disk_cache_linear_staging_block_count)
         .def_readwrite("memory_cache_max_descriptors_per_transfer_batch",
                        &KVCacheConfig::memory_cache_max_descriptors_per_transfer_batch)
         .def_readwrite("block_tree_task_pool_size", &KVCacheConfig::block_tree_task_pool_size)
@@ -589,7 +592,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def(py::pickle(
             [](const KVCacheConfig& self) {
                 return py::make_tuple(std::string("KVCacheConfig"),
-                                      25,
+                                      26,
                                       self.reuse_cache,
                                       self.multi_task_prompt,
                                       self.multi_task_prompt_str,
@@ -671,7 +674,10 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       // the per-pool block weights at the tail so indices 0-78
                                       // stay identical to main's v23.
                                       self.enable_linear_cache_reclaim,
-                                      self.kv_cache_pool_block_weights);
+                                      self.kv_cache_pool_block_weights,
+                                      self.disk_cache_full_staging_block_count,
+                                      self.disk_cache_swa_staging_block_count,
+                                      self.disk_cache_linear_staging_block_count);
             },
             [](py::tuple t) {
                 // Pickle version ladder after merging main #1643 (dsv41 btc):
@@ -685,6 +691,13 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                 //       (size 81).
                 // Each step strips its tail fields and steps the version down so
                 // both families' older states keep decoding through main's ladder.
+                const py::tuple staging_state = t;
+                const bool has_staging_counts =
+                    t.size() == 84 && py::isinstance<py::int_>(t[1]) && t[1].cast<int>() == 26;
+                if (has_staging_counts) {
+                    t    = t[py::slice(0, 81, 1)].cast<py::tuple>();
+                    t[1] = py::int_(25);
+                }
                 const py::tuple pool_weights_v25_state = t;
                 const bool      has_v25_pool_weights_field =
                     t.size() == 81 && py::isinstance<py::int_>(t[1]) && t[1].cast<int>() == 25;
@@ -762,6 +775,11 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                 }
 
                 KVCacheConfig c;
+                if (has_staging_counts) {
+                    c.disk_cache_full_staging_block_count = staging_state[81].cast<std::optional<int64_t>>();
+                    c.disk_cache_swa_staging_block_count = staging_state[82].cast<std::optional<int64_t>>();
+                    c.disk_cache_linear_staging_block_count = staging_state[83].cast<std::optional<int64_t>>();
+                }
                 // The compact layout starts at version 21. Version 22 drops the abort ratios.
                 const bool   compact_state       = version >= 21;
                 const size_t retired_abort_slots = version == 21 ? 2 : 0;

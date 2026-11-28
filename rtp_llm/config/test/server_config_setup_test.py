@@ -419,6 +419,9 @@ class GenerateConfigTest(TestCase):
             "DISK_CACHE_SYNC_TIMEOUT_MS": "12345",
             "DISK_CACHE_EVICT_TIMEOUT_MS": "45000",
             "DISK_CACHE_STAGING_BLOCK_COUNT": "8",
+            "DISK_CACHE_LINEAR_STAGING_BLOCK_COUNT": "11",
+            "DISK_CACHE_SWA_STAGING_BLOCK_COUNT": "7",
+            "DISK_CACHE_FULL_STAGING_BLOCK_COUNT": "3",
             "ENABLE_MEMORY_CACHE": "1",
             "MEMORY_CACHE_SIZE_MB": "2048",
             "MEMORY_CACHE_SYNC_TIMEOUT_MS": "6789",
@@ -448,6 +451,9 @@ class GenerateConfigTest(TestCase):
         self.assertEqual(config.disk_cache_sync_timeout_ms, 12345)
         self.assertEqual(config.disk_cache_evict_timeout_ms, 45000)
         self.assertEqual(config.disk_cache_staging_block_count, 8)
+        self.assertEqual(config.disk_cache_linear_staging_block_count, 11)
+        self.assertEqual(config.disk_cache_swa_staging_block_count, 7)
+        self.assertEqual(config.disk_cache_full_staging_block_count, 3)
         self.assertTrue(config.enable_memory_cache)
         self.assertEqual(config.memory_cache_size_mb, 2048)
         self.assertEqual(config.memory_cache_sync_timeout_ms, 6789)
@@ -472,6 +478,9 @@ class GenerateConfigTest(TestCase):
         self.assertEqual(config.block_tree_transfer_worker_count, 2)
         self.assertFalse(config.enable_memory_cache)
         self.assertEqual(config.disk_cache_staging_block_count, 128)
+        self.assertIsNone(config.disk_cache_linear_staging_block_count)
+        self.assertIsNone(config.disk_cache_swa_staging_block_count)
+        self.assertIsNone(config.disk_cache_full_staging_block_count)
         self.assertEqual(config.device_eviction_policy, "lru")
         self.assertEqual(config.memory_eviction_policy, "lru")
         self.assertEqual(config.disk_eviction_policy, "lru")
@@ -716,8 +725,8 @@ class GenerateConfigTest(TestCase):
         config.block_tree_disk_evict_high_watermark_ratio = 0.83
 
         state = config.__getstate__()
-        self.assertEqual(len(state), 81)
-        self.assertEqual(state[:2], ("KVCacheConfig", 25))
+        self.assertEqual(len(state), 84)
+        self.assertEqual(state[:2], ("KVCacheConfig", 26))
 
         restored = pickle.loads(pickle.dumps(config))
         self.assertEqual(restored.disk_cache_staging_block_count, 8)
@@ -758,9 +767,7 @@ class GenerateConfigTest(TestCase):
         # their defaults after a legacy v6 state round-trips.
         event_state = (
             *state[:63],
-            *legacy_defaults.__getstate__()[:79][63:],
-            legacy_defaults.__getstate__()[79],
-            legacy_defaults.__getstate__()[80],
+            *legacy_defaults.__getstate__()[63:],
         )
         # Version 6 carried the retired host-placement flag at index 53.
         state = (state[0], 6, *state[2:53], True, *state[53:63])
