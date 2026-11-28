@@ -88,7 +88,6 @@ if _TRITON_AVAILABLE:
         CP_SIZE,
         CP_RANK,
         KV_OWNER_TOKENS_PER_BLOCK,
-        SINGLE_REQ: tl.constexpr,
         BLOCK_SIZE: tl.constexpr,
     ):
         pid = tl.program_id(0)
@@ -118,14 +117,9 @@ if _TRITON_AVAILABLE:
         state_valid = state_bid > 0
         if CP_SHARDED:
             state_valid = state_valid & (state_owner == CP_RANK)
-        if SINGLE_REQ:
-            seq_start = tl.load(seq_start_ptr).to(tl.int64)
-            seq_begin = tl.load(cu_seq_ptr).to(tl.int64)
-            seq_finish = tl.load(cu_seq_ptr + 1).to(tl.int64)
-        else:
-            seq_start = tl.load(seq_start_ptr + b, mask=mask, other=0).to(tl.int64)
-            seq_begin = tl.load(cu_seq_ptr + b, mask=mask, other=0).to(tl.int64)
-            seq_finish = tl.load(cu_seq_ptr + b + 1, mask=mask, other=0).to(tl.int64)
+        seq_start = tl.load(seq_start_ptr + b, mask=mask, other=0).to(tl.int64)
+        seq_begin = tl.load(cu_seq_ptr + b, mask=mask, other=0).to(tl.int64)
+        seq_finish = tl.load(cu_seq_ptr + b + 1, mask=mask, other=0).to(tl.int64)
         seq_end = seq_start + seq_finish - seq_begin
         block_end = (state_bis_raw + 1) * STATE_TOKENS_PER_BLOCK
         effective_end = tl.minimum(block_end, seq_end)
@@ -289,7 +283,6 @@ def fused_compressor_slot_mapping(
         CP_SIZE=int(cp_size),
         CP_RANK=int(cp_rank),
         KV_OWNER_TOKENS_PER_BLOCK=owner_tokens_per_block,
-        SINGLE_REQ=int(seq_start_per_req.numel()) == 1,
         BLOCK_SIZE=BLOCK,
     )
     return state_slots, kv_slots, token_to_req

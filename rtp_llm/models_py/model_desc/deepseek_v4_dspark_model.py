@@ -847,7 +847,7 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
         if (
             batch_size > 0
             and block_table is not None
-            and gamma == int(self._gen_num_per_cycle)
+            and gamma == int(getattr(self, "_gen_num_per_cycle", 0))
             and self.v4.layers
         ):
             with self._swa_cache_bound(0, block_table) as (
