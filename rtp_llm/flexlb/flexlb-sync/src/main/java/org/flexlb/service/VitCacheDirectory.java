@@ -3,7 +3,6 @@ package org.flexlb.service;
 import org.apache.commons.lang3.StringUtils;
 import org.flexlb.consistency.LBStatusConsistencyService;
 import org.flexlb.dao.master.WorkerStatus;
-import org.flexlb.dao.route.RoleType;
 import org.flexlb.engine.grpc.EngineRpcService.CacheVersionPB;
 import org.flexlb.engine.grpc.EngineRpcService.MultimodalCacheStatusPB;
 import org.flexlb.engine.grpc.client.EngineGrpcClient;
@@ -28,7 +27,7 @@ import java.util.concurrent.TimeUnit;
 
 /**
  * Refreshes multimodal cache residency for live worker generations and provides group-scoped
- * candidates. Worker replacement invalidates the old generation's placements.
+ * candidates from immutable views. Background refresh removes expired residency snapshots.
  */
 @Component
 public class VitCacheDirectory {
@@ -38,8 +37,6 @@ public class VitCacheDirectory {
     private final WorkerDirectory workers;
     private final EngineGrpcClient grpc;
     private final LBStatusConsistencyService consistency;
-    private final Map<String, Snapshot> snapshots = new HashMap<>();
-    private final Map<String, Set<String>> owners = new HashMap<>();
     private final Map<String, Long> attempts = new HashMap<>();
     private final ScheduledExecutorService sync =
             Executors.newSingleThreadScheduledExecutor(
@@ -48,6 +45,8 @@ public class VitCacheDirectory {
                         thread.setDaemon(true);
                         return thread;
                     });
+
+    private volatile Map<String, Snapshot> snapshots = Map.of();
 
     private boolean wasMaster;
 
@@ -71,25 +70,29 @@ public class VitCacheDirectory {
     }
 
     /** Cache matches share immutable key sets from one directory view. */
-    public synchronized Map<String, Candidate> candidates(String group, List<String> keys) {
-        Map<String, WorkerStatus> live = liveWorkers();
-        prune(live, System.currentTimeMillis());
+    public Map<String, Candidate> candidates(String group, List<String> keys) {
+        var live = workers.vitRoutingSnapshot();
+        var publishedSnapshots = snapshots;
+        long now = System.currentTimeMillis();
+        long nowUs = System.nanoTime() / 1000;
         Map<String, Candidate> matches = new HashMap<>();
         for (WorkerStatus worker : live.values()) {
-            if (!isRoutable(worker)) {
+            if (!isRoutableForGroup(worker, group, nowUs)) {
                 continue;
             }
-            Snapshot snapshot = snapshots.get(worker.routingAddress());
+            String address = worker.routingAddress();
+            Snapshot snapshot = publishedSnapshots.get(address);
+            if (snapshot != null && !snapshot.isCurrent(worker, now)) {
+                snapshot = null;
+            }
             int hashHits = 0;
             int gpuHits = 0;
             int cpuHits = 0;
-            List<String> matchingKeys =
-                    group == null || Objects.equals(group, worker.getGroup()) ? keys : List.of();
-            for (String key : matchingKeys) {
-                if (owners.getOrDefault(key, Set.of()).contains(worker.routingAddress())) {
-                    hashHits++;
-                }
-                if (snapshot != null) {
+            if (snapshot != null) {
+                for (String key : keys) {
+                    if (snapshot.keys().contains(key)) {
+                        hashHits++;
+                    }
                     if (snapshot.gpuEmbeddingKeys().contains(key)) {
                         gpuHits++;
                     } else if (snapshot.cpuEmbeddingKeys().contains(key)) {
@@ -98,11 +101,13 @@ public class VitCacheDirectory {
                 }
             }
             matches.put(
-                    worker.routingAddress(),
+                    address,
                     new Candidate(
                             worker,
                             snapshot == null ? null : snapshot.instance(),
                             snapshot == null ? Set.of() : snapshot.keys(),
+                            snapshot == null ? Set.of() : snapshot.gpuEmbeddingKeys(),
+                            snapshot == null ? Set.of() : snapshot.cpuEmbeddingKeys(),
                             hashHits,
                             gpuHits + cpuHits,
                             gpuHits));
@@ -112,20 +117,22 @@ public class VitCacheDirectory {
 
     void refresh() {
         try {
-            if (consistency.isNeedConsistency() && !consistency.isMaster()) {
-                wasMaster = false;
-                return;
-            }
-            Map<String, WorkerStatus> live = liveWorkers();
+            boolean leader = !consistency.isNeedConsistency() || consistency.isMaster();
+            Map<String, WorkerStatus> live = workers.vitRoutingSnapshot();
             List<WorkerStatus> due = new ArrayList<>();
             long now = System.currentTimeMillis();
+            long nowUs = System.nanoTime() / 1000;
             synchronized (this) {
                 prune(live, now);
+                if (!leader) {
+                    wasMaster = false;
+                    return;
+                }
                 if (!wasMaster) {
                     attempts.clear();
                 }
                 for (WorkerStatus worker : live.values()) {
-                    if (isRoutable(worker)
+                    if (isRoutable(worker, nowUs)
                             && now - attempts.getOrDefault(worker.routingAddress(), 0L)
                                     >= SYNC_INTERVAL_MS) {
                         attempts.put(worker.routingAddress(), now);
@@ -171,9 +178,9 @@ public class VitCacheDirectory {
     }
 
     synchronized boolean replace(WorkerStatus worker, MultimodalCacheStatusPB response) {
-        Map<String, WorkerStatus> live = liveWorkers();
+        Map<String, WorkerStatus> live = workers.vitRoutingSnapshot();
         if (live.get(worker.routingAddress()) != worker
-                || !isRoutable(worker)
+                || !isRoutable(worker, System.nanoTime() / 1000)
                 || StringUtils.isBlank(response.getWorkerInstance())
                 || !validKeys(response.getKeysList())
                 || !validKeys(response.getGpuEmbeddingKeysList())
@@ -190,8 +197,8 @@ public class VitCacheDirectory {
             return false;
         }
         String address = worker.routingAddress();
-        removeSnapshot(address);
-        snapshots.put(
+        var updated = new HashMap<>(snapshots);
+        updated.put(
                 address,
                 new Snapshot(
                         worker,
@@ -200,10 +207,13 @@ public class VitCacheDirectory {
                         gpuKeys,
                         cpuKeys,
                         System.currentTimeMillis()));
-        for (String key : keys) {
-            owners.computeIfAbsent(key, ignored -> new HashSet<>()).add(address);
-        }
+        snapshots = Map.copyOf(updated);
         return true;
+    }
+
+    static boolean isRoutableForGroup(WorkerStatus worker, String group, long nowUs) {
+        return isRoutable(worker, nowUs)
+                && (group == null || Objects.equals(group, worker.getGroup()));
     }
 
     private boolean validKeys(List<String> keys) {
@@ -214,67 +224,60 @@ public class VitCacheDirectory {
     }
 
     private void prune(Map<String, WorkerStatus> live, long now) {
-        for (var entry : new ArrayList<>(snapshots.entrySet())) {
+        long nowUs = System.nanoTime() / 1000;
+        var updated = new HashMap<>(snapshots);
+        for (var entry : snapshots.entrySet()) {
             WorkerStatus worker = live.get(entry.getKey());
-            if (worker == null || !isRoutable(worker) || worker != entry.getValue().worker()) {
-                removeSnapshot(entry.getKey());
+            if (worker != entry.getValue().worker() || !isRoutable(worker, nowUs)) {
+                updated.remove(entry.getKey());
                 attempts.remove(entry.getKey());
-            } else if (now - entry.getValue().time() > 2 * SYNC_INTERVAL_MS) {
-                removeSnapshot(entry.getKey());
+            } else if (!entry.getValue().isCurrent(worker, now)) {
+                updated.remove(entry.getKey());
             }
         }
-        attempts.keySet()
-                .removeIf(address -> !live.containsKey(address) || !isRoutable(live.get(address)));
+        if (updated.size() != snapshots.size()) {
+            snapshots = Map.copyOf(updated);
+        }
+        attempts.keySet().removeIf(address -> !isRoutable(live.get(address), nowUs));
     }
 
-    private boolean isRoutable(WorkerStatus worker) {
-        if (worker == null) {
-            return false;
-        }
-        try (var pin = workers.captureEndpoint(RoleType.VIT, worker.routingAddress())) {
-            return pin != null && pin.endpoint().getStatus() == worker;
-        }
+    private static boolean isRoutable(WorkerStatus worker, long nowUs) {
+        return worker != null
+                && worker.isActiveGeneration()
+                && worker.hasFreshSchedulingStatus(nowUs);
     }
 
-    private void removeSnapshot(String address) {
-        Snapshot old = snapshots.remove(address);
-        if (old == null) {
-            return;
-        }
-        for (String key : old.keys()) {
-            Set<String> locations = owners.get(key);
-            locations.remove(address);
-            if (locations.isEmpty()) {
-                owners.remove(key);
-            }
-        }
-    }
-
-    private Map<String, WorkerStatus> liveWorkers() {
-        var statuses = workers.statusSnapshot(RoleType.VIT);
-        Map<String, WorkerStatus> live = new HashMap<>();
-        for (String address : workers.endpointAddressSnapshot(RoleType.VIT)) {
-            WorkerStatus status = statuses.get(address);
-            if (status != null) {
-                live.put(address, status);
-            }
-        }
-        return live;
-    }
-
+    /**
+     * Cache residency reported by one worker generation and valid for two refresh intervals.
+     */
     private record Snapshot(
             WorkerStatus worker,
             String instance,
             Set<String> keys,
             Set<String> gpuEmbeddingKeys,
             Set<String> cpuEmbeddingKeys,
-            long time) {}
+            long time) {
+        boolean isCurrent(WorkerStatus currentWorker, long now) {
+            return worker == currentWorker && now - time <= 2 * SYNC_INTERVAL_MS;
+        }
+    }
 
+    /**
+     * Cache residency and match scores for one routable ViT generation.
+     */
     public record Candidate(
             WorkerStatus worker,
             String instance,
             Set<String> hashKeys,
+            Set<String> gpuEmbeddingKeys,
+            Set<String> cpuEmbeddingKeys,
             int hashHits,
             int embeddingHits,
-            int gpuHits) {}
+            int gpuHits) {
+        boolean hasCachedImage(String key) {
+            return hashKeys.contains(key)
+                    || gpuEmbeddingKeys.contains(key)
+                    || cpuEmbeddingKeys.contains(key);
+        }
+    }
 }

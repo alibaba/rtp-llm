@@ -4,7 +4,10 @@ import com.google.common.util.concurrent.FutureCallback;
 import com.google.common.util.concurrent.Futures;
 import com.google.common.util.concurrent.ListenableFuture;
 import com.google.protobuf.MessageLite;
+import io.grpc.Context;
+import io.grpc.Deadline;
 import io.grpc.ManagedChannel;
+import io.grpc.Status;
 import io.grpc.StatusRuntimeException;
 import io.netty.channel.EventLoopGroup;
 import org.flexlb.config.CacheMatchConfiguration;
@@ -64,7 +67,12 @@ public class EngineGrpcClient implements EngineAddressResolver.Listener {
             CacheMatchConfiguration cacheMatchConfiguration,
             @Value("${flexlb.engine-grpc.enqueue-timeout-ms:5000}") long enqueueTimeoutMillis) {
         this.channelFactory = channelFactory;
-        this.channelPool = new GrpcChannelPool<>(key -> channelFactory.create(key.target()));
+        this.channelPool =
+                new GrpcChannelPool<>(
+                        key ->
+                                key.serviceType() == ServiceType.CACHE_STATUS
+                                        ? channelFactory.createKvCacheStatus(key.target())
+                                        : channelFactory.create(key.target()));
         this.grpcReporter = grpcReporter;
         this.kvcmEnabled = cacheMatchConfiguration.isKvcmEnabled();
         if (enqueueTimeoutMillis <= 0L) {
@@ -226,7 +234,10 @@ public class EngineGrpcClient implements EngineAddressResolver.Listener {
             long requestTimeoutMs,
             ServiceType serviceType) {
         CompletableFuture<R> result = new CompletableFuture<>();
+        Context.CancellableContext callContext = Context.current().withCancellation();
+        result.whenComplete((value, failure) -> callContext.cancel(failure));
         EngineChannelKey channelKey = new EngineChannelKey(ip, port, serviceType);
+        Deadline deadline = Deadline.after(requestTimeoutMs, TimeUnit.MILLISECONDS);
         long startTime = System.nanoTime();
         try {
             GrpcChannelPool.PooledChannel pooledChannel = channelPool.getOrCreate(channelKey);
@@ -234,7 +245,8 @@ public class EngineGrpcClient implements EngineAddressResolver.Listener {
                     channelKey,
                     pooledChannel,
                     grpcCall,
-                    requestTimeoutMs,
+                    callContext,
+                    deadline,
                     serviceType,
                     retriesBrokenConnections(serviceType),
                     false,
@@ -250,29 +262,49 @@ public class EngineGrpcClient implements EngineAddressResolver.Listener {
             EngineChannelKey channelKey,
             GrpcChannelPool.PooledChannel pooledChannel,
             Function<GrpcFutureStubWrapper, ListenableFuture<R>> grpcCall,
-            long requestTimeoutMs,
+            Context callContext,
+            Deadline deadline,
             ServiceType serviceType,
             boolean retryOnBrokenConnection,
             boolean retry,
             long startTime,
             CompletableFuture<R> result) {
         try {
+            if (result.isDone()) {
+                return;
+            }
+            if (deadline.isExpired()) {
+                result.completeExceptionally(Status.DEADLINE_EXCEEDED.asRuntimeException());
+                return;
+            }
             pooledChannel.markUsed();
             GrpcFutureStubWrapper stub =
-                    createFutureStub(pooledChannel.getChannel())
-                            .withDeadlineAfter(requestTimeoutMs, TimeUnit.MILLISECONDS);
-            ListenableFuture<R> response = grpcCall.apply(stub);
+                    createFutureStub(pooledChannel.getChannel()).withDeadline(deadline);
+            ListenableFuture<R> response;
+            // One cancellation context covers both attempts.
+            Context previous = callContext.attach();
+            try {
+                response = grpcCall.apply(stub);
+            } finally {
+                callContext.detach(previous);
+            }
             Futures.addCallback(
                     response,
                     new FutureCallback<>() {
                         @Override
                         public void onSuccess(R value) {
+                            if (result.isDone()) {
+                                return;
+                            }
                             reportCall(serviceType, value, startTime, retry);
                             result.complete(value);
                         }
 
                         @Override
                         public void onFailure(Throwable error) {
+                            if (result.isDone()) {
+                                return;
+                            }
                             if (retryOnBrokenConnection
                                     && error instanceof StatusRuntimeException statusError
                                     && isConnectionBrokenError(statusError)) {
@@ -287,7 +319,8 @@ public class EngineGrpcClient implements EngineAddressResolver.Listener {
                                             channelKey,
                                             replacement,
                                             grpcCall,
-                                            requestTimeoutMs,
+                                            callContext,
+                                            deadline,
                                             serviceType,
                                             false,
                                             true,
@@ -355,10 +388,10 @@ public class EngineGrpcClient implements EngineAddressResolver.Listener {
             RpcServiceGrpc.RpcServiceFutureStub rpcServiceStub,
             MultimodalRpcServiceGrpc.MultimodalRpcServiceFutureStub multimodalRpcServiceStub) {
 
-        GrpcFutureStubWrapper withDeadlineAfter(long timeout, TimeUnit unit) {
+        GrpcFutureStubWrapper withDeadline(Deadline deadline) {
             return new GrpcFutureStubWrapper(
-                    rpcServiceStub.withDeadlineAfter(timeout, unit),
-                    multimodalRpcServiceStub.withDeadlineAfter(timeout, unit));
+                    rpcServiceStub.withDeadline(deadline),
+                    multimodalRpcServiceStub.withDeadline(deadline));
         }
     }
 

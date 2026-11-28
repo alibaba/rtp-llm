@@ -119,10 +119,17 @@ public class PrefillEndpoint extends WorkerEndpoint {
     /** Publish one exact route after validating its generation pin. */
     public boolean offerPinned(GenerationPin exactPin, ScheduledRequest exactItem) {
         requirePinnedGeneration(exactPin);
-        return runtime.offer(exactItem);
+        return hasFreshSchedulingStatus() && runtime.offer(exactItem);
+    }
+
+    @Override
+    public void signalSchedulingStatusRecovered() {
+        runtime.signalSchedulingInputsChanged();
+        signalPlacementCapacityChanged();
     }
 
     /** Publish a role/group-scoped edge after real queue or status progress. */
+    @Override
     public void signalPlacementCapacityChanged() {
         WorkerStatus.TopologySnapshot topology = getStatus().topologySnapshot();
         placementAvailability.capacityChanged(getStatus().getRole(), topology.group(), ipPort());
@@ -164,23 +171,20 @@ public class PrefillEndpoint extends WorkerEndpoint {
         return result;
     }
 
-    /**
-     * Bind exact NON_BATCH ownership inside the caller's pinned placement
-     * transaction.
-     */
-    public PrefillState.ReservationResult<PrefillState.RouteReservation> reserveRouteOwnership(
-            ScheduledRequest exactItem, long predictedMs) {
-        if (isGenerationRetiringOrRetired()) {
+    /** Acquire the generation capability only when the final route commit can use fresh status. */
+    public PrefillState.ReservationResult<RouteCommitAdmission> tryBeginRouteCommitAdmission() {
+        EndpointGenerationLifecycle.HandoffPermit handoffPermit = tryAcquireGenerationHandoff();
+        if (handoffPermit == null) {
             return new PrefillState.ReservationResult<>(
                     PrefillState.CapacityStatus.ENDPOINT_RETIRED, null);
         }
-        return prefillState.reserveRoute(exactItem, predictedMs);
-    }
-
-    /** Acquire the generation capability only for the final route commit. */
-    public RouteCommitAdmission tryBeginRouteCommitAdmission() {
-        EndpointGenerationLifecycle.HandoffPermit handoffPermit = tryAcquireGenerationHandoff();
-        return handoffPermit == null ? null : new RouteCommitAdmission(handoffPermit);
+        if (!hasFreshSchedulingStatus()) {
+            handoffPermit.close();
+            return new PrefillState.ReservationResult<>(
+                    PrefillState.CapacityStatus.STATUS_STALE, null);
+        }
+        return new PrefillState.ReservationResult<>(
+                PrefillState.CapacityStatus.ACQUIRED, new RouteCommitAdmission(handoffPermit));
     }
 
     /** Exact wake source for this generation's batch admission capacity. */
@@ -193,13 +197,13 @@ public class PrefillEndpoint extends WorkerEndpoint {
         return prefillState.admissionRejectReason(priority, inflightRequestLimit);
     }
 
-    /** Advisory capacity; publication repeats the count check under the ownership lock. */
     public boolean canAcceptRequest() {
-        return inflightRequestLimit == 0L || prefillState.canAcceptRequest(inflightRequestLimit);
+        return prefillState.canDispatchRoute(inflightRequestLimit);
     }
 
-    public boolean canPreemptQueuedRequest(int priority) {
-        return prefillState.canPreemptQueuedRequest(priority, inflightRequestLimit);
+    /** Wake delivery when this worker has fresh scheduling status and a free execution slot. */
+    public CapacityBoundary.Availability routeAdmissionAvailability() {
+        return prefillState.routeAvailability(inflightRequestLimit, this::hasFreshSchedulingStatus);
     }
 
     /** Advisory endpoint ownership revision captured by queue placement. */
@@ -215,6 +219,10 @@ public class PrefillEndpoint extends WorkerEndpoint {
     public PrefillState.ReservationResult<PrefillState.RouteReservation> reserveUnqueuedRoute(
             GenerationPin pin, ScheduledRequest item, long predictedMs) {
         requirePinnedGeneration(pin);
+        if (!hasFreshSchedulingStatus()) {
+            return new PrefillState.ReservationResult<>(
+                    PrefillState.CapacityStatus.CAPACITY_FULL, null);
+        }
         return prefillState.reserveUnqueuedRoute(item, predictedMs, inflightRequestLimit);
     }
 
@@ -609,6 +617,14 @@ public class PrefillEndpoint extends WorkerEndpoint {
 
         private RouteCommitAdmission(EndpointGenerationLifecycle.HandoffPermit generationHandoff) {
             this.generationHandoff = generationHandoff;
+        }
+
+        public PrefillState.ReservationResult<PrefillState.RouteReservation> reserve(
+                ScheduledRequest item, long predictedMs) {
+            if (generationHandoff == null) {
+                throw new IllegalStateException("route admission no longer pins the generation");
+            }
+            return prefillState.reserveRoute(item, predictedMs, inflightRequestLimit);
         }
 
         public PrefillState.CommittedHandoff commit(

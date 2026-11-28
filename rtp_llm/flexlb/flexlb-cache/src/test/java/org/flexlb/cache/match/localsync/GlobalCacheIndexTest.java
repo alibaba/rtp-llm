@@ -9,6 +9,12 @@ import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
+import java.util.stream.Collectors;
+import java.util.stream.LongStream;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -38,7 +44,7 @@ class GlobalCacheIndexTest {
         globalCacheIndex.removeCacheBlock("engine1", 1L);
         assertEquals(2L, globalCacheIndex.totalBlocks());
         assertEquals(2L, globalCacheIndex.totalMappings());
-        globalCacheIndex.removeAllCacheBlockOfEngine("engine2");
+        globalCacheIndex.removeAllCacheBlockOfEngine("engine2", Set.of(1L));
         assertEquals(1L, globalCacheIndex.totalBlocks());
         assertEquals(1L, globalCacheIndex.totalMappings());
         globalCacheIndex.removeCacheBlock("missing", 2L);
@@ -54,6 +60,71 @@ class GlobalCacheIndexTest {
         globalCacheIndex.addCacheBlock(3L, "engine1");
         assertEquals(1L, globalCacheIndex.totalBlocks());
         assertEquals(1L, globalCacheIndex.totalMappings());
+    }
+
+    @Test
+    void retiringOneOwnerWhileAnotherAddsTheSameBlocksPreservesTheNewOwner() throws Exception {
+        Set<Long> keys = LongStream.range(-2048, 2048).boxed().collect(Collectors.toSet());
+        keys.add(Long.MIN_VALUE);
+        keys.add(Long.MAX_VALUE);
+        keys.forEach(key -> globalCacheIndex.addCacheBlock(key, "retiring"));
+        var start = new CountDownLatch(1);
+        try (var pool = Executors.newFixedThreadPool(2)) {
+            var retirement =
+                    pool.submit(
+                            () -> {
+                                start.await();
+                                globalCacheIndex.removeAllCacheBlockOfEngine("retiring", keys);
+                                return null;
+                            });
+            var refresh =
+                    pool.submit(
+                            () -> {
+                                start.await();
+                                keys.forEach(key -> globalCacheIndex.addCacheBlock(key, "live"));
+                                return null;
+                            });
+            start.countDown();
+            retirement.get(5, TimeUnit.SECONDS);
+            refresh.get(5, TimeUnit.SECONDS);
+        }
+
+        assertEquals(keys.size(), globalCacheIndex.totalBlocks());
+        assertEquals(keys.size(), globalCacheIndex.totalMappings());
+        assertEquals(
+                Map.of("live", keys.size()),
+                globalCacheIndex.batchCalculatePrefixMatchLength(
+                        List.of("retiring", "live"), List.copyOf(keys)));
+    }
+
+    @Test
+    void stableOwnerRemainsVisibleWhileOtherOwnerChanges() throws Exception {
+        var keys = List.of(Long.MIN_VALUE, 0L, Long.MAX_VALUE);
+        keys.forEach(key -> globalCacheIndex.addCacheBlock(key, "stable"));
+        var start = new CountDownLatch(1);
+        try (var pool = Executors.newSingleThreadExecutor()) {
+            var writer =
+                    pool.submit(
+                            () -> {
+                                start.await();
+                                for (int i = 0; i < 1_000; i++) {
+                                    keys.forEach(
+                                            key -> globalCacheIndex.addCacheBlock(key, "other"));
+                                    globalCacheIndex.removeAllCacheBlockOfEngine(
+                                            "other", Set.copyOf(keys));
+                                }
+                                return null;
+                            });
+            start.countDown();
+            for (int i = 0; i < 1_000; i++) {
+                assertEquals(
+                        Map.of("stable", keys.size()),
+                        globalCacheIndex.batchCalculatePrefixMatchLength(List.of("stable"), keys));
+            }
+            writer.get(5, TimeUnit.SECONDS);
+        }
+        assertEquals(keys.size(), globalCacheIndex.totalBlocks());
+        assertEquals(keys.size(), globalCacheIndex.totalMappings());
     }
 
     @Test

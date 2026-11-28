@@ -90,8 +90,27 @@ class EndpointRegistryRoleTest {
                 new RoleType[] {
                     RoleType.PREFILL, RoleType.DECODE, RoleType.PDFUSION, RoleType.VIT
                 }) {
-            assertEquals(1, registry.getEndpointCount(roleType));
+            assertEquals(1, registry.endpointAddressSnapshot(roleType).size());
         }
+    }
+
+    @Test
+    void vitRoutingSnapshotKeepsExactGenerationsAcrossReplacement() {
+        WorkerStatus original = status(RoleType.VIT, 8021);
+        String address = original.routingAddress();
+        EndpointTestSupport.publishEndpoint(registry, RoleType.VIT, address, original);
+        var before = registry.vitRoutingSnapshot();
+        assertSame(original, before.get(address));
+        assertThrows(UnsupportedOperationException.class, before::clear);
+
+        retire(RoleType.VIT, address, original);
+        assertTrue(registry.vitRoutingSnapshot().isEmpty());
+        assertNull(registry.capture(RoleType.VIT, address));
+
+        WorkerStatus replacement = status(RoleType.VIT, 8021);
+        EndpointTestSupport.publishEndpoint(registry, RoleType.VIT, address, replacement);
+        assertSame(original, before.get(address));
+        assertSame(replacement, registry.vitRoutingSnapshot().get(address));
     }
 
     @Test

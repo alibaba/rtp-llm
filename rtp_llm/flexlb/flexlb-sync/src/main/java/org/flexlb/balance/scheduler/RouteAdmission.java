@@ -368,12 +368,13 @@ public final class RouteAdmission implements AutoCloseable {
             RequestRegistry lifecycle,
             ScheduledRequest item,
             PrefillAdmissionResources.Member member) {
+        var commitAdmission = prefillEndpoint().tryBeginRouteCommitAdmission();
+        if (commitAdmission.status() != PrefillState.CapacityStatus.ACQUIRED) {
+            return PlacementResult.rejected(
+                    Response.error(prefillRejection(commitAdmission.status())));
+        }
         var reservationAttempt = new PrefillReservationAttempt(item);
-        try (PrefillEndpoint.RouteCommitAdmission routeCommit =
-                prefillEndpoint().tryBeginRouteCommitAdmission()) {
-            if (routeCommit == null) {
-                return PlacementResult.rejected(Response.error(StrategyErrorType.DISPATCH_FAILED));
-            }
+        try (PrefillEndpoint.RouteCommitAdmission routeCommit = commitAdmission.reservation()) {
             try (var admission = PrefillAdmissionResources.createCommittedOwner(List.of(member))) {
                 PlacementResult.Status result = lifecycle.commitRoute(item, reservationAttempt);
                 if (result != PlacementResult.Status.SUCCESS) {
@@ -400,6 +401,20 @@ public final class RouteAdmission implements AutoCloseable {
                 reservationAttempt.reservation().close();
             }
         }
+    }
+
+    private static StrategyErrorType prefillRejection(PrefillState.CapacityStatus status) {
+        return switch (status) {
+            case CAPACITY_FULL,
+                    STATUS_STALE,
+                    REQUEST_ALREADY_RESERVED,
+                    REQUEST_NOT_ACTIVE,
+                    BATCH_ID_ALREADY_RESERVED ->
+                    StrategyErrorType.RESOURCE_EXHAUSTED;
+            case ENDPOINT_RETIRED -> StrategyErrorType.DISPATCH_FAILED;
+            case ACQUIRED ->
+                    throw new IllegalStateException("successful admission cannot be rejected");
+        };
     }
 
     private void markCommitted() {
@@ -479,14 +494,7 @@ public final class RouteAdmission implements AutoCloseable {
             if (result == null) {
                 return StrategyErrorType.REQUEST_CANCELLED;
             }
-            return switch (result.status()) {
-                case CAPACITY_FULL -> StrategyErrorType.RESOURCE_EXHAUSTED;
-                case ENDPOINT_RETIRED -> StrategyErrorType.DISPATCH_FAILED;
-                case REQUEST_ALREADY_RESERVED, REQUEST_NOT_ACTIVE, BATCH_ID_ALREADY_RESERVED ->
-                        StrategyErrorType.RESOURCE_EXHAUSTED;
-                case ACQUIRED ->
-                        throw new IllegalStateException("successful admission cannot be rejected");
-            };
+            return prefillRejection(result.status());
         }
     }
 

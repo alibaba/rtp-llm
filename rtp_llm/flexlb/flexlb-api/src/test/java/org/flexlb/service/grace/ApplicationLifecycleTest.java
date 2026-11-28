@@ -13,11 +13,14 @@ import org.flexlb.httpserver.FlexlbGrpcServer;
 import org.flexlb.listener.ApplicationWarmupState;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.DisposableBean;
+import org.springframework.boot.SpringApplication;
+import org.springframework.boot.context.event.ApplicationReadyEvent;
 import org.springframework.context.annotation.AnnotationConfigApplicationContext;
 import org.springframework.context.event.ContextClosedEvent;
 import org.springframework.core.env.Environment;
 import org.springframework.test.util.ReflectionTestUtils;
 
+import java.time.Duration;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
@@ -149,6 +152,43 @@ class ApplicationLifecycleTest {
             assertTrue(context.getBean(ApplicationWarmupState.class).isWarmupFinished());
             ReflectionTestUtils.invokeMethod(client, "recordHeartbeat", false);
             assertEquals(1, client.healthSnapshot().consecutiveHeartbeatFailures());
+        }
+    }
+
+    @Test
+    void scheduleReadinessRequiresThisProcessAndServingGrpcUntilOffline() {
+        var grpc = mock(FlexlbGrpcServer.class);
+        var lifecycle =
+                new ApplicationLifecycle(
+                        mock(LBStatusConsistencyService.class),
+                        grpc,
+                        mock(GracefulLifecycleReporter.class),
+                        mock(Environment.class),
+                        new ApplicationWarmupState(),
+                        0L);
+        try (var owner = new AnnotationConfigApplicationContext();
+                var anotherContext = new AnnotationConfigApplicationContext()) {
+            lifecycle.setApplicationContext(owner);
+            var app = new SpringApplication(ApplicationLifecycleTest.class);
+            when(grpc.isServing()).thenReturn(true);
+            lifecycle.onApplicationReady(
+                    new ApplicationReadyEvent(app, new String[0], anotherContext, Duration.ZERO));
+            assertFalse(lifecycle.isReadyForSchedule());
+            when(grpc.isServing()).thenReturn(false);
+            lifecycle.onApplicationReady(
+                    new ApplicationReadyEvent(app, new String[0], owner, Duration.ZERO));
+            assertFalse(lifecycle.isReadyForSchedule());
+            when(grpc.isServing()).thenReturn(true);
+            assertTrue(lifecycle.isReadyForSchedule());
+            doAnswer(
+                            invocation -> {
+                                assertFalse(lifecycle.isReadyForSchedule());
+                                return null;
+                            })
+                    .when(grpc)
+                    .drain();
+            assertTrue(lifecycle.offline());
+            assertFalse(lifecycle.isReadyForSchedule());
         }
     }
 

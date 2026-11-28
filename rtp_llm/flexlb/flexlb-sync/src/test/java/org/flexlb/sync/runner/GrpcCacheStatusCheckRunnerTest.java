@@ -11,12 +11,18 @@ import org.flexlb.service.grpc.EngineGrpcService;
 import org.flexlb.service.monitor.EngineHealthReporter;
 import org.flexlb.sync.status.WorkerDirectory;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.Mockito;
 
+import java.util.Set;
 import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.atomic.LongAdder;
+import java.util.concurrent.RejectedExecutionException;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyLong;
@@ -78,15 +84,61 @@ class GrpcCacheStatusCheckRunnerTest {
                         localKvCacheAwareManager,
                         cacheIntervalService,
                         20,
-                        new LongAdder(),
-                        50L,
                         true,
                         Runnable::run)
                 .run();
 
         assertEquals(1000, status.getCacheStatus().getAvailableKvCache());
         assertEquals(2000, status.getCacheStatus().getTotalKvCache());
+        var diagnostics = status.latestCachePollDiagnostics();
+        assertEquals(WorkerStatus.PollOutcome.APPLIED, diagnostics.outcome());
+        assertTrue(diagnostics.acquiredUs() <= diagnostics.rpcStartedUs());
+        assertTrue(diagnostics.rpcStartedUs() <= diagnostics.rpcCompletedUs());
+        assertTrue(diagnostics.rpcCompletedUs() <= diagnostics.applicationStartedUs());
+        assertTrue(diagnostics.applicationStartedUs() <= diagnostics.finishedUs());
         verifyNoInteractions(localKvCacheAwareManager);
+    }
+
+    @Test
+    void rejectedCacheApplicationReleasesPollLease() {
+        WorkerStatus status = workerStatus();
+        when(engineGrpcService.getCacheStatusAsync(
+                        anyString(),
+                        anyInt(),
+                        eq(status),
+                        anyLong(),
+                        anyLong(),
+                        eq(RoleType.PREFILL)))
+                .thenReturn(
+                        CompletableFuture.completedFuture(
+                                EngineRpcService.CacheStatusPB.getDefaultInstance()));
+
+        new GrpcCacheStatusCheckRunner(
+                        "test-model",
+                        status.getLogicalIpPort(),
+                        "test-site",
+                        RoleType.PREFILL,
+                        status,
+                        status.tryBeginCachePoll(),
+                        directory(status),
+                        engineHealthReporter,
+                        engineGrpcService,
+                        localKvCacheAwareManager,
+                        cacheIntervalService,
+                        20,
+                        false,
+                        ignored -> {
+                            throw new RejectedExecutionException("test queue is full");
+                        })
+                .run();
+
+        var diagnostics = status.latestCachePollDiagnostics();
+        assertEquals(WorkerStatus.PollOutcome.APPLICATION_REJECTED, diagnostics.outcome());
+        assertEquals(0L, diagnostics.applicationStartedUs());
+        verifyNoInteractions(localKvCacheAwareManager);
+        try (var nextPoll = status.tryBeginCachePoll()) {
+            assertNotNull(nextPoll);
+        }
     }
 
     @Test
@@ -133,8 +185,6 @@ class GrpcCacheStatusCheckRunnerTest {
                         localKvCacheAwareManager,
                         cacheIntervalService,
                         20,
-                        new LongAdder(),
-                        50L,
                         true,
                         Runnable::run);
         runner.run();
@@ -156,6 +206,53 @@ class GrpcCacheStatusCheckRunnerTest {
                         eq(20L),
                         eq(RoleType.PREFILL));
         assertEquals(1L, workerStatus.getCacheIndexedVersion());
+    }
+
+    @Test
+    void acknowledgedVersionReusesKeysAndRefreshesCapacityUntilVersionChanges() {
+        WorkerStatus worker = workerStatus();
+        WorkerDirectory directory = directory(worker);
+        var first =
+                EngineRpcService.CacheStatusPB.newBuilder()
+                        .setVersion(1)
+                        .setAvailableKvCache(100)
+                        .putCacheKeys(42, true)
+                        .build();
+        var unchanged =
+                EngineRpcService.CacheStatusPB.newBuilder()
+                        .setVersion(1)
+                        .setAvailableKvCache(80)
+                        .setTotalKvCache(200)
+                        .build();
+        var cleared = unchanged.toBuilder().setVersion(2).build();
+        when(engineGrpcService.getCacheStatusAsync(
+                        anyString(),
+                        anyInt(),
+                        any(WorkerStatus.class),
+                        anyLong(),
+                        anyLong(),
+                        eq(RoleType.PREFILL)))
+                .thenReturn(
+                        CompletableFuture.completedFuture(first),
+                        CompletableFuture.completedFuture(unchanged),
+                        CompletableFuture.completedFuture(cleared));
+        when(localKvCacheAwareManager.updateFromWorkerStatus(worker))
+                .thenReturn(WorkerCacheUpdateResult.builder().success(true).build());
+
+        runCachePoll(worker.getLogicalIpPort(), worker, directory, false);
+        var keys = worker.getCacheStatus().getCachedKeys();
+        assertEquals(Set.of(42L), keys);
+
+        runCachePoll(worker.getLogicalIpPort(), worker, directory, false);
+        assertSame(keys, worker.getCacheStatus().getCachedKeys());
+        assertEquals(80, worker.getCacheStatus().getAvailableKvCache());
+        assertEquals(200, worker.getCacheStatus().getTotalKvCache());
+        verify(localKvCacheAwareManager).updateFromWorkerStatus(worker);
+
+        runCachePoll(worker.getLogicalIpPort(), worker, directory, false);
+        assertEquals(Set.of(), worker.getCacheStatus().getCachedKeys());
+        assertEquals(2, worker.getCacheIndexedVersion());
+        verify(localKvCacheAwareManager, times(2)).updateFromWorkerStatus(worker);
     }
 
     @Test
@@ -214,6 +311,158 @@ class GrpcCacheStatusCheckRunnerTest {
                         eq(RoleType.PREFILL));
     }
 
+    @ParameterizedTest
+    @ValueSource(booleans = {true, false})
+    void versionRegressionReplacesPreviouslyIndexedKeys(boolean restartedWithKeys) {
+        WorkerStatus worker = workerStatus();
+        String ipPort = worker.getLogicalIpPort();
+        WorkerDirectory directory = directory(worker);
+        var previous =
+                EngineRpcService.CacheStatusPB.newBuilder()
+                        .setVersion(5000)
+                        .putCacheKeys(42, true)
+                        .build();
+        var restarted = EngineRpcService.CacheStatusPB.newBuilder().setVersion(2);
+        if (restartedWithKeys) {
+            restarted.addCacheKeyList(99);
+        }
+        when(engineGrpcService.getCacheStatusAsync(
+                        anyString(),
+                        anyInt(),
+                        eq(worker),
+                        anyLong(),
+                        anyLong(),
+                        eq(RoleType.PREFILL)))
+                .thenReturn(
+                        CompletableFuture.completedFuture(previous),
+                        CompletableFuture.completedFuture(restarted.build()));
+        when(localKvCacheAwareManager.updateFromWorkerStatus(worker))
+                .thenReturn(WorkerCacheUpdateResult.builder().success(true).build());
+
+        runCachePoll(ipPort, worker, directory, false);
+        assertEquals(5000, worker.getCacheIndexedVersion());
+
+        runCachePoll(ipPort, worker, directory, false);
+        assertEquals(2, worker.getCacheIndexedVersion());
+        assertEquals(
+                restartedWithKeys ? Set.of(99L) : Set.of(),
+                worker.getCacheStatus().getCachedKeys());
+        verify(localKvCacheAwareManager, times(2)).updateFromWorkerStatus(worker);
+    }
+
+    @Test
+    void failedIndexUpdateAfterRegressionRequestsFullSnapshotEvenAtOldAcknowledgedVersion() {
+        WorkerStatus worker = workerStatus();
+        String ipPort = worker.getLogicalIpPort();
+        WorkerDirectory directory = directory(worker);
+        var previous =
+                EngineRpcService.CacheStatusPB.newBuilder()
+                        .setVersion(50)
+                        .putCacheKeys(42, true)
+                        .build();
+        var restarted =
+                EngineRpcService.CacheStatusPB.newBuilder()
+                        .setVersion(2)
+                        .putCacheKeys(99, true)
+                        .build();
+        var recovered = restarted.toBuilder().setVersion(50).build();
+        when(engineGrpcService.getCacheStatusAsync(
+                        anyString(),
+                        anyInt(),
+                        eq(worker),
+                        anyLong(),
+                        anyLong(),
+                        eq(RoleType.PREFILL)))
+                .thenReturn(
+                        CompletableFuture.completedFuture(previous),
+                        CompletableFuture.completedFuture(restarted),
+                        CompletableFuture.completedFuture(recovered));
+        var success = WorkerCacheUpdateResult.builder().success(true).build();
+        when(localKvCacheAwareManager.updateFromWorkerStatus(worker))
+                .thenReturn(
+                        success,
+                        WorkerCacheUpdateResult.builder()
+                                .success(false)
+                                .errorMessage("index failed")
+                                .build(),
+                        success);
+
+        runCachePoll(ipPort, worker, directory, false);
+        runCachePoll(ipPort, worker, directory, false);
+        assertEquals(-1, worker.getCacheIndexedVersion());
+
+        runCachePoll(ipPort, worker, directory, false);
+        assertEquals(Set.of(99L), worker.getCacheStatus().getCachedKeys());
+        assertEquals(50, worker.getCacheIndexedVersion());
+        verify(engineGrpcService, times(2))
+                .getCacheStatusAsync(
+                        eq("127.0.0.1"),
+                        eq(8081),
+                        eq(worker),
+                        eq(-1L),
+                        eq(20L),
+                        eq(RoleType.PREFILL));
+        verify(localKvCacheAwareManager, times(3)).updateFromWorkerStatus(worker);
+    }
+
+    @Test
+    void regressionToAcknowledgedVersionWithoutKeysRequestsFullSnapshotBeforeReplacingIndex() {
+        WorkerStatus worker = workerStatus();
+        String ipPort = worker.getLogicalIpPort();
+        WorkerDirectory directory = directory(worker);
+        var previous =
+                EngineRpcService.CacheStatusPB.newBuilder()
+                        .setVersion(50)
+                        .putCacheKeys(42, true)
+                        .build();
+        var advanced = previous.toBuilder().setVersion(60).build();
+        var omitted = EngineRpcService.CacheStatusPB.newBuilder().setVersion(50).build();
+        var full = omitted.toBuilder().addCacheKeyList(99).build();
+        when(engineGrpcService.getCacheStatusAsync(
+                        anyString(),
+                        anyInt(),
+                        eq(worker),
+                        anyLong(),
+                        anyLong(),
+                        eq(RoleType.PREFILL)))
+                .thenReturn(
+                        CompletableFuture.completedFuture(previous),
+                        CompletableFuture.completedFuture(advanced),
+                        CompletableFuture.completedFuture(omitted),
+                        CompletableFuture.completedFuture(full));
+        var success = WorkerCacheUpdateResult.builder().success(true).build();
+        when(localKvCacheAwareManager.updateFromWorkerStatus(worker))
+                .thenReturn(
+                        success,
+                        WorkerCacheUpdateResult.builder()
+                                .success(false)
+                                .errorMessage("index failed")
+                                .build(),
+                        success);
+
+        runCachePoll(ipPort, worker, directory, false);
+        runCachePoll(ipPort, worker, directory, false);
+        assertEquals(50, worker.getCacheIndexedVersion());
+        assertEquals(60, worker.getCacheStatus().getVersion());
+
+        runCachePoll(ipPort, worker, directory, false);
+        assertEquals(-1, worker.getCacheIndexedVersion());
+        verify(localKvCacheAwareManager, times(2)).updateFromWorkerStatus(worker);
+
+        runCachePoll(ipPort, worker, directory, false);
+        assertEquals(Set.of(99L), worker.getCacheStatus().getCachedKeys());
+        assertEquals(50, worker.getCacheIndexedVersion());
+        verify(engineGrpcService, times(2))
+                .getCacheStatusAsync(
+                        eq("127.0.0.1"),
+                        eq(8081),
+                        eq(worker),
+                        eq(-1L),
+                        eq(20L),
+                        eq(RoleType.PREFILL));
+        verify(localKvCacheAwareManager, times(3)).updateFromWorkerStatus(worker);
+    }
+
     @Test
     void staleGenerationCallbackCannotPublishAddressCache() {
         WorkerStatus oldStatus = workerStatus();
@@ -244,8 +493,6 @@ class GrpcCacheStatusCheckRunnerTest {
                         localKvCacheAwareManager,
                         cacheIntervalService,
                         20,
-                        new LongAdder(),
-                        50L,
                         true,
                         Runnable::run);
         runner.run();
@@ -276,8 +523,6 @@ class GrpcCacheStatusCheckRunnerTest {
                         localKvCacheAwareManager,
                         cacheIntervalService,
                         20,
-                        new LongAdder(),
-                        50L,
                         debug,
                         Runnable::run)
                 .run();

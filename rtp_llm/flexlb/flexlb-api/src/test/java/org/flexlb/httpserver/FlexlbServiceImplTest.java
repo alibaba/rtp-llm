@@ -6,9 +6,11 @@ import com.google.protobuf.ByteString;
 import com.google.protobuf.CodedOutputStream;
 import io.grpc.Context;
 import io.grpc.Status;
+import io.grpc.stub.ServerCallStreamObserver;
 import io.grpc.stub.StreamObserver;
 import org.flexlb.balance.scheduler.CancelReason;
 import org.flexlb.balance.scheduler.DeliveryClaimKind;
+import org.flexlb.balance.scheduler.RequestScheduler;
 import org.flexlb.balance.scheduler.RequestState;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.DispatcherConfig;
@@ -26,6 +28,7 @@ import org.flexlb.dao.route.ServiceRoute;
 import org.flexlb.engine.grpc.EngineRpcService;
 import org.flexlb.schedule.grpc.FlexlbScheduleProtocol;
 import org.flexlb.service.RouteService;
+import org.flexlb.service.TheoryCacheHitReporter;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.service.monitor.EngineHealthReporter;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
@@ -61,6 +64,8 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.argThat;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.inOrder;
@@ -123,32 +128,85 @@ class FlexlbServiceImplTest {
     }
 
     @Test
-    void batchGenerationRejectsMissingOrMalformedInputBeforeRouting() {
+    void batchGenerationRequestsMissingInputBeforeSubmittingTheResentRequest() {
         FlexlbConfig config = routingConfig();
         config.setDispatcher(new DispatcherConfig());
         when(configService.loadBalanceConfig()).thenReturn(config);
+        var scheduler = mock(RequestScheduler.class);
+        when(scheduler.submit(any()))
+                .thenReturn(
+                        CompletableFuture.completedFuture(
+                                Response.buildSuccessResponse(new Response(), true)));
+        var batchService =
+                new FlexlbServiceImpl(
+                        new RouteService(scheduler, mock(TheoryCacheHitReporter.class)),
+                        lbStatusConsistencyService,
+                        engineHealthReporter,
+                        grpcForwarder,
+                        configService,
+                        batchSchedulerReporter,
+                        serverLatencyRecorder,
+                        mock(RequestSchedulerReporter.class));
+        var request = FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder().setRequestId(7L);
+        StreamObserver<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> first =
+                mock(StreamObserver.class);
+        batchService.schedule(request.build(), first);
+        var rejection =
+                ArgumentCaptor.forClass(FlexlbScheduleProtocol.FlexlbScheduleResponsePB.class);
+        verify(first).onNext(rejection.capture());
+        verify(first).onCompleted();
+        assertEquals(
+                StrategyErrorType.GENERATE_INPUT_REQUIRED.getErrorCode(),
+                rejection.getValue().getCode());
+        assertFalse(rejection.getValue().getSuccess());
+        assertFalse(rejection.getValue().getEnqueuedByMaster());
+        assertFalse(rejection.getValue().hasLifecycle());
+        assertEquals(0, rejection.getValue().getServerStatusCount());
+        verifyNoInteractions(scheduler, grpcForwarder);
 
-        for (ByteString input :
-                List.of(ByteString.EMPTY, ByteString.copyFrom(new byte[] {(byte) 0x80}))) {
-            StreamObserver<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> observer =
-                    mock(StreamObserver.class);
-            service.schedule(
-                    FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
-                            .setRequestIdStr("7")
-                            .setGenerateInput(input)
-                            .build(),
-                    observer);
+        var input =
+                EngineRpcService.GenerateInputPB.newBuilder()
+                        .setRequestId(7L)
+                        .build()
+                        .toByteString();
+        StreamObserver<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> resend =
+                mock(StreamObserver.class);
+        batchService.schedule(request.setGenerateInput(input).build(), resend);
 
-            ArgumentCaptor<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> response =
-                    ArgumentCaptor.forClass(FlexlbScheduleProtocol.FlexlbScheduleResponsePB.class);
-            verify(observer).onNext(response.capture());
-            verify(observer).onCompleted();
-            assertFalse(response.getValue().getSuccess());
-            assertEquals(
-                    StrategyErrorType.INVALID_REQUEST.getErrorCode(),
-                    response.getValue().getCode());
-            assertTrue(response.getValue().getErrorMessage().contains("generate_input"));
-        }
+        var submitted = ArgumentCaptor.forClass(BalanceContext.class);
+        verify(scheduler).submit(submitted.capture());
+        assertEquals("7", submitted.getValue().getRequestId());
+        assertEquals(input, submitted.getValue().getGenerateInputPb());
+        verify(resend)
+                .onNext(
+                        argThat(
+                                response ->
+                                        response.getSuccess() && response.getEnqueuedByMaster()));
+        verify(resend).onCompleted();
+    }
+
+    @Test
+    void batchGenerationRejectsMalformedInputBeforeRouting() {
+        FlexlbConfig config = routingConfig();
+        config.setDispatcher(new DispatcherConfig());
+        when(configService.loadBalanceConfig()).thenReturn(config);
+        StreamObserver<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> observer =
+                mock(StreamObserver.class);
+        service.schedule(
+                FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
+                        .setRequestIdStr("7")
+                        .setGenerateInput(ByteString.copyFrom(new byte[] {(byte) 0x80}))
+                        .build(),
+                observer);
+
+        var response =
+                ArgumentCaptor.forClass(FlexlbScheduleProtocol.FlexlbScheduleResponsePB.class);
+        verify(observer).onNext(response.capture());
+        verify(observer).onCompleted();
+        assertFalse(response.getValue().getSuccess());
+        assertEquals(
+                StrategyErrorType.INVALID_REQUEST.getErrorCode(), response.getValue().getCode());
+        assertTrue(response.getValue().getErrorMessage().contains("generate_input"));
         verifyNoInteractions(routeService, grpcForwarder);
     }
 
@@ -210,7 +268,7 @@ class FlexlbServiceImplTest {
     }
 
     @Test
-    void scheduleKeepsOriginalNumericIdWhenStringIdDiffers() {
+    void nonBatchScheduleKeepsIdsWithoutRetainingGenerateInput() {
         when(lbStatusConsistencyService.isNeedConsistency()).thenReturn(false);
         when(routeService.route(any()))
                 .thenReturn(
@@ -222,8 +280,7 @@ class FlexlbServiceImplTest {
                 FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
                         .setRequestId(123)
                         .setRequestIdStr("007")
-                        .addScheduleRoles(
-                                FlexlbScheduleProtocol.ScheduleRolePB.SCHEDULE_ROLE_ENCODER)
+                        .setGenerateInput(ByteString.copyFromUtf8("ignored in NON_BATCH"))
                         .build(),
                 mock(StreamObserver.class));
 
@@ -231,6 +288,7 @@ class FlexlbServiceImplTest {
         verify(routeService).route(context.capture());
         assertEquals("007", context.getValue().getRequestId());
         assertEquals(123L, context.getValue().getOriginalNumericRequestId());
+        assertNull(context.getValue().getGenerateInputPb());
     }
 
     @ParameterizedTest
@@ -1348,6 +1406,11 @@ class FlexlbServiceImplTest {
 
         verify(routeService, never()).route(any());
         verify(grpcForwarder).forwardScheduleToMaster(request);
+        verify(grpcForwarder)
+                .forwardCompensatingCancelToMaster(
+                        argThat(cancel -> cancel.getRequestIdStr().equals("12348")),
+                        eq("10.0.0.2:7001"),
+                        any());
         verifyNoMoreInteractions(grpcForwarder);
         ArgumentCaptor<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> captor =
                 ArgumentCaptor.forClass(FlexlbScheduleProtocol.FlexlbScheduleResponsePB.class);
@@ -1360,6 +1423,41 @@ class FlexlbServiceImplTest {
         assertPvContains("\"scheduleOrigin\":\"FORWARD_FAILED\"");
         assertPvContains("\"requestExpiresAtMs\":");
         assertPvContains("\"realMasterHost\":\"10.0.0.2:7001\"");
+    }
+
+    @Test
+    void transportCancellationBeforeForwardResultCompensatesOnceWithoutAReply() {
+        when(lbStatusConsistencyService.isNeedConsistency()).thenReturn(true);
+        when(lbStatusConsistencyService.isMaster()).thenReturn(false);
+        CompletableFuture<FlexlbGrpcForwarder.MasterForwardResult> pending =
+                new CompletableFuture<>();
+        when(grpcForwarder.forwardScheduleToMaster(any())).thenReturn(pending);
+        when(grpcForwarder.forwardCompensatingCancelToMaster(any(), anyString(), any()))
+                .thenReturn(CompletableFuture.completedFuture(null));
+        ServerCallStreamObserver<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> observer = mock();
+        var request =
+                FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
+                        .setRequestIdStr("forwarded-before-cancel")
+                        .build();
+        service.schedule(request, observer);
+        var handler = ArgumentCaptor.forClass(Runnable.class);
+        verify(observer).setOnCancelHandler(handler.capture());
+        handler.getValue().run();
+        verify(grpcForwarder, never()).forwardCompensatingCancelToMaster(any(), anyString(), any());
+
+        pending.complete(
+                FlexlbGrpcForwarder.MasterForwardResult.failed(
+                        Status.CANCELLED.asRuntimeException(), "original:7001"));
+        handler.getValue().run();
+
+        verify(grpcForwarder)
+                .forwardCompensatingCancelToMaster(
+                        argThat(
+                                cancel ->
+                                        cancel.getRequestIdStr().equals("forwarded-before-cancel")),
+                        eq("original:7001"),
+                        any());
+        verify(routeService, never()).route(any());
     }
 
     @Test
@@ -2009,12 +2107,25 @@ class FlexlbServiceImplTest {
             verify(serverLatencyRecorder, never()).recordCompletion(any(), anyLong());
             verify(engineHealthReporter, never()).reportRequestPayload(any());
 
-            // The interceptor owns the span lifecycle; nothing is exported yet.
-            assertEquals(0, exporter.spans.size());
+            // The interceptor still owns the Schedule server span.
+            assertEquals(
+                    0,
+                    exporter.spans.stream()
+                            .filter(
+                                    data ->
+                                            data.getKind()
+                                                    == io.opentelemetry.api.trace.SpanKind.SERVER)
+                            .count());
             org.flexlb.telemetry.FlexlbTrace.finish(serverSpan, null);
 
-            assertEquals(1, exporter.spans.size());
-            io.opentelemetry.sdk.trace.data.SpanData span = exporter.spans.get(0);
+            io.opentelemetry.sdk.trace.data.SpanData span =
+                    exporter.spans.stream()
+                            .filter(
+                                    candidate ->
+                                            candidate.getKind()
+                                                    == io.opentelemetry.api.trace.SpanKind.SERVER)
+                            .findFirst()
+                            .orElseThrow();
             assertEquals(
                     io.opentelemetry.api.trace.StatusCode.ERROR, span.getStatus().getStatusCode());
             assertEquals(
@@ -2027,7 +2138,15 @@ class FlexlbServiceImplTest {
                             .get(
                                     io.opentelemetry.api.common.AttributeKey.longKey(
                                             "flexlb.schedule.code")));
-            assertTrue(span.getEvents().isEmpty());
+            assertEquals(
+                    List.of("flexlb.request.received", "flexlb.response.ready"),
+                    span.getEvents().stream().map(event -> event.getName()).toList());
+            assertFalse(
+                    exporter.spans.stream()
+                            .anyMatch(
+                                    data ->
+                                            data.getName()
+                                                    .equals("rtp_llm.flexlb.request.received")));
         } finally {
             org.flexlb.telemetry.FlexlbTrace.configure(null, "");
             sdk.close();
@@ -2044,7 +2163,11 @@ class FlexlbServiceImplTest {
                                 io.opentelemetry.sdk.trace.export.SimpleSpanProcessor.create(
                                         exporter))
                         .build()) {
-            var span = provider.get("test").spanBuilder("schedule").startSpan();
+            var span =
+                    provider.get("test")
+                            .spanBuilder("schedule")
+                            .setSpanKind(io.opentelemetry.api.trace.SpanKind.SERVER)
+                            .startSpan();
             when(lbStatusConsistencyService.isNeedConsistency()).thenReturn(true);
             when(lbStatusConsistencyService.isMaster()).thenReturn(false);
             when(grpcForwarder.forwardScheduleToMaster(any()))
@@ -2065,8 +2188,14 @@ class FlexlbServiceImplTest {
                                                     .build(),
                                             mock(StreamObserver.class)));
             org.flexlb.telemetry.FlexlbTrace.finishWithGrpcStatus(span, "OK", 0, true);
-            assertEquals(1, exporter.spans.size());
-            var data = exporter.spans.get(0);
+            var data =
+                    exporter.spans.stream()
+                            .filter(
+                                    candidate ->
+                                            candidate.getKind()
+                                                    == io.opentelemetry.api.trace.SpanKind.SERVER)
+                            .findFirst()
+                            .orElseThrow();
             assertEquals(
                     io.opentelemetry.api.trace.StatusCode.ERROR, data.getStatus().getStatusCode());
             assertEquals(
@@ -2079,8 +2208,53 @@ class FlexlbServiceImplTest {
                             .get(
                                     io.opentelemetry.api.common.AttributeKey.longKey(
                                             "flexlb.schedule.code")));
-            assertTrue(data.getEvents().isEmpty());
+            assertFalse(
+                    data.getEvents().stream()
+                            .anyMatch(event -> event.getName().contains("rejected")));
             verify(routeService, never()).route(any());
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {true, false})
+    void traceRecordsSelectedVitGrpcAddressOnlyForVitOnlySchedule(boolean vitOnly) {
+        ServerStatus vit = new ServerStatus();
+        vit.setRole(RoleType.VIT);
+        vit.setServerIp("10.0.0.30");
+        vit.setHttpPort(8000);
+        vit.setGrpcPort(30461);
+        Response response = new Response();
+        response.setSuccess(true);
+        response.setCode(200);
+        response.setServerStatus(List.of(vit));
+        when(routeService.route(any())).thenReturn(CompletableFuture.completedFuture(response));
+
+        RecordingExporter exporter = new RecordingExporter();
+        try (var provider =
+                io.opentelemetry.sdk.trace.SdkTracerProvider.builder()
+                        .addSpanProcessor(
+                                io.opentelemetry.sdk.trace.export.SimpleSpanProcessor.create(
+                                        exporter))
+                        .build()) {
+            var span = provider.get("test").spanBuilder("Schedule").startSpan();
+            var request =
+                    FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
+                            .setRequestId(991L)
+                            .setVitRouteOnly(vitOnly)
+                            .build();
+            Context.current()
+                    .withValue(
+                            org.flexlb.interceptor.GrpcTraceInterceptor.OTEL_CONTEXT_KEY,
+                            io.opentelemetry.context.Context.root().with(span))
+                    .run(() -> service.schedule(request, mock(StreamObserver.class)));
+            span.end();
+
+            assertEquals(
+                    vitOnly ? "10.0.0.30:30461" : null,
+                    exporter.spans
+                            .getFirst()
+                            .getAttributes()
+                            .get(org.flexlb.telemetry.FlexlbTrace.VIT_ADDRESS));
         }
     }
 
@@ -2468,8 +2642,14 @@ class FlexlbServiceImplTest {
                                 }
                             })
                     .join();
-            assertEquals(1, exporter.spans.size());
-            var data = exporter.spans.getFirst();
+            var data =
+                    exporter.spans.stream()
+                            .filter(
+                                    candidate ->
+                                            candidate.getKind()
+                                                    == io.opentelemetry.api.trace.SpanKind.SERVER)
+                            .findFirst()
+                            .orElseThrow();
             assertEquals(
                     success
                             ? io.opentelemetry.api.trace.StatusCode.OK

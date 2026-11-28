@@ -383,6 +383,11 @@ public class DefaultBatchDispatcher {
             return;
         }
 
+        // The outbound message now owns the input it needs, including during transport retries.
+        for (ScheduledRequest item : items) {
+            item.ctx().setGenerateInputPb(null);
+        }
+
         // 2. Log dispatch
         try {
             logDispatch(batchId, items, prefillEp, task.predictedMs(), task.reason());
@@ -564,8 +569,7 @@ public class DefaultBatchDispatcher {
                     "generateInputPb is missing for request " + item.requestId());
         }
         EngineRpcService.GenerateInputPB.Builder input =
-                EngineRpcService.GenerateInputPB.newBuilder();
-        input.mergeFrom(generateInput);
+                GenerateInputPayload.parse(generateInput).toWireBuilder();
         if (!Objects.equals(RequestId.parse(input), item.requestId())) {
             throw new IllegalArgumentException(
                     "request_id mismatch between schedule request and GenerateInputPB");

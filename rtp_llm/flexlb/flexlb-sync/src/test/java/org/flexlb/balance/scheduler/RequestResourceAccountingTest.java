@@ -429,7 +429,7 @@ class RequestResourceAccountingTest {
                                 }));
             }
             routeReservation = held.get();
-            try (var commit = prefill.tryBeginRouteCommitAdmission()) {
+            try (var commit = prefill.tryBeginRouteCommitAdmission().reservation()) {
                 assertNotNull(commit);
                 prefillHandoff = commit.commit(List.of(item), List.of(routeReservation));
             }

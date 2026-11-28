@@ -137,7 +137,7 @@ class RequestConfirmationTimeoutTest {
                                 }));
             }
             DeliveryClaim claim;
-            try (var routeCommit = prefill.tryBeginRouteCommitAdmission()) {
+            try (var routeCommit = prefill.tryBeginRouteCommitAdmission().reservation()) {
                 assertNotNull(routeCommit);
                 java.util.function.BooleanSupplier commitPrefill =
                         () -> {

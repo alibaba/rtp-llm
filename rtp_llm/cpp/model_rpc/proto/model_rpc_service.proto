@@ -525,6 +525,8 @@ message CacheStatusPB {
     int64 version = 4;
     map<int64, bool> cache_keys = 5;
     MultimodalCacheStatusPB multimodal_cache = 6;
+    // Prefer this list when nonempty; otherwise fall back to legacy cache_keys.
+    repeated sfixed64 cache_key_list = 7 [packed = true];
 }
 
 message MultimodalCacheStatusPB {
@@ -715,6 +717,8 @@ message WorkerStatusPB {
     // Number of matched cache blocks that must be recomputed by the engine.
     int32 cache_match_rollback_blocks = 26;
     WorkerStepMetricsPB last_step_metrics = 27;
+    // ViT only. Absent when media load is unknown; a present zero means idle.
+    google.protobuf.Int64Value mm_inflight_inputs = 28;
 }
 
 message EmbeddingInputPB {

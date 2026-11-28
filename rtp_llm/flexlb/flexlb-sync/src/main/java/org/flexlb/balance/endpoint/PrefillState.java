@@ -23,6 +23,7 @@ import java.util.Objects;
 import java.util.OptionalLong;
 import java.util.Set;
 import java.util.concurrent.locks.ReentrantLock;
+import java.util.function.BooleanSupplier;
 import java.util.function.LongSupplier;
 import java.util.function.ToLongFunction;
 
@@ -63,6 +64,7 @@ public final class PrefillState {
 
     private long unknownEngineRequestCount;
     private int batchLeasesInUse;
+    private long routeLeasesInUse;
 
     public PrefillState(
             ReentrantLock lock, PrefillActiveIndex activeIndex, Runnable capacityAvailable) {
@@ -94,8 +96,7 @@ public final class PrefillState {
     public boolean enqueueActiveUnderLock(ScheduledRequest item, long maxOutstandingRequests) {
         requireLock();
         if (requests.containsKey(item.requestId())
-                || (maxOutstandingRequests > 0L
-                        && !canAcceptRequestUnderLock(maxOutstandingRequests))) {
+                || (maxOutstandingRequests > 0L && !canAcceptRequest(maxOutstandingRequests))) {
             return false;
         }
         RequestEntry entry = new RequestEntry(item);
@@ -110,6 +111,11 @@ public final class PrefillState {
         return true;
     }
 
+    /** Advisory selection check; a positive result does not reserve capacity. */
+    public boolean canAcceptRequest(long requestLimit) {
+        return outstandingRequestCount < requestLimit;
+    }
+
     public boolean terminalizeActiveUnderLock(ScheduledRequest item) {
         requireLock();
         RequestEntry entry = requests.get(item.requestId());
@@ -121,9 +127,7 @@ public final class PrefillState {
                 lease == null || lease.state == LeaseState.OPEN,
                 "ACTIVE request owns a non-OPEN Prefill lease request_id=" + item.requestId());
         detachAdmissionIndexUnderLock(entry, item);
-        // BATCH preparation owns any OPEN batch lease together with a
-        // generation handoff. NON_BATCH item-owned route reservations use the
-        // atomic counterpart below so retirement can never observe an orphan.
+        // Delivery preparation releases its exact OPEN lease after queue removal.
         removeRequestUnderLock(item.requestId(), entry);
         recordMutationUnderLock();
         return true;
@@ -176,135 +180,6 @@ public final class PrefillState {
                     : AdmissionRejectReason.SAME_PRIORITY_AHEAD;
         }
         return AdmissionRejectReason.RESOURCE_EXHAUSTED;
-    }
-
-    public boolean canPreemptQueuedRequest(int priority, long requestLimit) {
-        lock.lock();
-        try {
-            long required = requestSlotsToReleaseUnderLock(requestLimit);
-            if (!PriorityNormalizer.hasPriority(priority)
-                    || required == 0L
-                    || required > activeIndex.size()) {
-                return false;
-            }
-            for (ScheduledRequest item : activeIndex) {
-                if (isQueuedPreemptionCandidate(item, priority) && --required == 0L) {
-                    return true;
-                }
-            }
-            return false;
-        } finally {
-            lock.unlock();
-        }
-    }
-
-    /** Select only uncommitted requests; Engine work cannot release a local queue seat. */
-    public List<ScheduledRequest> queuedPreemptionVictimsUnderLock(
-            int priority, long requestLimit) {
-        requireLock();
-        long required = requestSlotsToReleaseUnderLock(requestLimit);
-        if (!PriorityNormalizer.hasPriority(priority)
-                || required == 0L
-                || required > activeIndex.size()) {
-            return List.of();
-        }
-        List<ScheduledRequest> candidates = new ArrayList<>();
-        for (ScheduledRequest item : activeIndex) {
-            if (isQueuedPreemptionCandidate(item, priority)) {
-                candidates.add(item);
-            }
-        }
-        if (candidates.size() < required) {
-            return List.of();
-        }
-        candidates.sort(
-                Comparator.comparingInt(ScheduledRequest::priority)
-                        .thenComparing(
-                                Comparator.comparingLong(ScheduledRequest::enqueueSeq).reversed()));
-        return candidates.subList(0, (int) required);
-    }
-
-    /** Transfer exact queued request seats and OPEN route reservations in one ownership transaction. */
-    public RouteReservation replaceQueuedRoutesUnderLock(
-            List<ScheduledRequest> victims,
-            List<RouteReservation> reservations,
-            ScheduledRequest incoming,
-            long requestLimit) {
-        requireLock();
-        if (victims.isEmpty()
-                || victims.size() != reservations.size()
-                || victims.size() != requestSlotsToReleaseUnderLock(requestLimit)
-                || requests.containsKey(incoming.requestId())) {
-            return null;
-        }
-        Set<String> ids = new HashSet<>();
-        for (int index = 0; index < victims.size(); index++) {
-            ScheduledRequest victim = victims.get(index);
-            RequestEntry entry = requests.get(victim.requestId());
-            RouteReservation reservation = reservations.get(index);
-            if (!ids.add(victim.requestId())
-                    || entry == null
-                    || !entry.activeIdentity(victim)
-                    || !activeIndex.contains(victim)
-                    || reservation == null
-                    || reservation.owner != this
-                    || entry.reservation != reservation
-                    || reservation.state != LeaseState.OPEN
-                    || !PriorityNormalizer.hasPriority(victim.priority())
-                    || victim.priority() >= incoming.priority()) {
-                return null;
-            }
-        }
-        RequestEntry incomingEntry = new RequestEntry(incoming);
-        RouteReservation incomingReservation =
-                new RouteReservation(incomingEntry, incoming.requestId(), 0L);
-        incomingEntry.reservation = incomingReservation;
-        activeIndex.add(incoming);
-        try {
-            putRequestUnderLock(incoming.requestId(), incomingEntry);
-        } catch (RuntimeException | Error failure) {
-            activeIndex.remove(incoming);
-            throw failure;
-        }
-        for (int index = 0; index < victims.size(); index++) {
-            ScheduledRequest victim = victims.get(index);
-            RequestEntry entry = requests.get(victim.requestId());
-            closeOpenLeaseUnderLock(reservations.get(index));
-            activeIndex.remove(victim);
-            removeRequestUnderLock(victim.requestId(), entry);
-        }
-        recordMutationUnderLock();
-        return incomingReservation;
-    }
-
-    /**
-     * Remove one NON_BATCH ACTIVE owner and its item-owned OPEN route reservation
-     * in the same ownership transaction.
-     */
-    public boolean terminalizeActiveRouteUnderLock(
-            ScheduledRequest item, RouteReservation exactReservation) {
-        requireLock();
-        RequestEntry entry = requests.get(item.requestId());
-        if (entry == null || !entry.activeIdentity(item)) {
-            return false;
-        }
-        if (exactReservation == null
-                || exactReservation.owner != this
-                || entry.reservation != exactReservation
-                || exactReservation.state != LeaseState.OPEN) {
-            throw new IllegalStateException(
-                    "ACTIVE route request lost its exact Prefill reservation request_id="
-                            + item.requestId());
-        }
-        validateAdmissionIndexUnderLock(entry, item);
-
-        // Every operation below is allocation-free and runs under the same
-        // lock used by generation retirement.
-        detachAdmissionIndexUnderLock(entry, item);
-        closeOpenLeaseUnderLock(exactReservation);
-        removeRequestUnderLock(item.requestId(), entry);
-        recordMutationUnderLock();
-        return true;
     }
 
     /**
@@ -362,9 +237,27 @@ public final class PrefillState {
         return batchLeasesInUse;
     }
 
+    public CapacityBoundary.Availability routeAvailability(
+            long maximum, BooleanSupplier statusFresh) {
+        return new CapacityAvailability(
+                () -> statusFresh.getAsBoolean() && canDispatchRoute(maximum));
+    }
+
+    public boolean canDispatchRoute(long maximum) {
+        if (maximum == 0L) {
+            return true;
+        }
+        lock.lock();
+        try {
+            return routeCapacityAvailableUnderLock(maximum);
+        } finally {
+            lock.unlock();
+        }
+    }
+
     public CapacityBoundary.Availability batchAvailability(int maximum) {
         requirePositiveBatchLimit(maximum);
-        return new CapacityAvailability(maximum);
+        return new CapacityAvailability(() -> batchCapacityAvailable(maximum));
     }
 
     /**
@@ -383,7 +276,8 @@ public final class PrefillState {
             if (requests.containsKey(item.requestId())) {
                 return new ReservationResult<>(CapacityStatus.REQUEST_ALREADY_RESERVED, null);
             }
-            if (maxOutstandingRequests > 0L && !canAcceptRequestUnderLock(maxOutstandingRequests)) {
+            if (maxOutstandingRequests > 0L
+                    && !routeCapacityAvailableUnderLock(maxOutstandingRequests)) {
                 return new ReservationResult<>(CapacityStatus.CAPACITY_FULL, null);
             }
             RequestEntry entry = new RequestEntry(item, QueueMembership.UNINDEXED);
@@ -393,6 +287,7 @@ public final class PrefillState {
                     new ReservationResult<>(CapacityStatus.ACQUIRED, reservation);
             entry.reservation = reservation;
             putRequestUnderLock(item.requestId(), entry);
+            routeLeasesInUse++;
             committedWorkCapture = null;
             recordMutationUnderLock();
             return result;
@@ -563,8 +458,10 @@ public final class PrefillState {
             }
 
             int observedBatchLeases = 0;
+            long observedRouteLeases = 0;
             for (Reservation lease : leases) {
                 if (lease instanceof RouteReservation) {
+                    observedRouteLeases++;
                     if (lease.state != LeaseState.OPEN && lease.state != LeaseState.OWNED) {
                         invariantFailure =
                                 appendRetirementInvariant(
@@ -599,6 +496,12 @@ public final class PrefillState {
                                     invariantFailure,
                                     "retirement found an unknown Prefill lease type");
                 }
+            }
+            if (routeLeasesInUse != observedRouteLeases) {
+                invariantFailure =
+                        appendRetirementInvariant(
+                                invariantFailure,
+                                "route capacity does not match canonical retirement leases");
             }
             if (batchLeasesInUse != observedBatchLeases) {
                 invariantFailure =
@@ -635,6 +538,7 @@ public final class PrefillState {
             requests.clear();
             activeIndex.clear();
             batchLeasesInUse = 0;
+            routeLeasesInUse = 0L;
             unknownEngineRequestCount = 0L;
             committedWorkCapture = null;
             recordMutationUnderLock();
@@ -759,11 +663,6 @@ public final class PrefillState {
         }
     }
 
-    /** Advisory selection check; a positive result does not reserve capacity. */
-    public boolean canAcceptRequest(long requestLimit) {
-        return outstandingRequestCount < requestLimit;
-    }
-
     public long observedRequestCount() {
         lock.lock();
         try {
@@ -790,7 +689,8 @@ public final class PrefillState {
         return capture.materialize();
     }
 
-    ReservationResult<RouteReservation> reserveRoute(ScheduledRequest exactItem, long predictedMs) {
+    ReservationResult<RouteReservation> reserveRoute(
+            ScheduledRequest exactItem, long predictedMs, long maximum) {
         ScheduledRequest item = exactItem;
         lock.lock();
         try {
@@ -801,7 +701,11 @@ public final class PrefillState {
             if (entry.reservation != null) {
                 return new ReservationResult<>(CapacityStatus.REQUEST_ALREADY_RESERVED, null);
             }
+            if (!routeCapacityAvailableUnderLock(maximum)) {
+                return new ReservationResult<>(CapacityStatus.CAPACITY_FULL, null);
+            }
             RouteReservation lease = new RouteReservation(entry, item.requestId(), predictedMs);
+            routeLeasesInUse++;
             entry.reservation = lease;
             recordMutationUnderLock();
             return new ReservationResult<>(CapacityStatus.ACQUIRED, lease);
@@ -882,31 +786,11 @@ public final class PrefillState {
         }
     }
 
-    private boolean isQueuedPreemptionCandidate(ScheduledRequest item, int priority) {
+    private boolean routeCapacityAvailableUnderLock(long maximum) {
         requireLock();
-        RequestEntry entry = requests.get(item.requestId());
-        return PriorityNormalizer.hasPriority(item.priority())
-                && item.priority() < priority
-                && !item.future().isDone()
-                && entry != null
-                && entry.activeIdentity(item)
-                && entry.reservation instanceof RouteReservation
-                && entry.reservation.state == LeaseState.OPEN;
-    }
-
-    private long requestSlotsToReleaseUnderLock(long requestLimit) {
-        requireLock();
-        return requestLimit <= 0L
-                ? 0L
-                : Math.max(
-                        0L,
-                        saturatedAdd(requests.size(), unknownEngineRequestCount)
-                                - requestLimit
-                                + 1L);
-    }
-
-    private static long saturatedAdd(long left, long right) {
-        return left > Long.MAX_VALUE - right ? Long.MAX_VALUE : left + right;
+        return maximum == 0L
+                || routeLeasesInUse < maximum
+                        && unknownEngineRequestCount < maximum - routeLeasesInUse;
     }
 
     private boolean batchCapacityAvailable(int maximum) {
@@ -1078,6 +962,10 @@ public final class PrefillState {
         if (outstandingRequestCount != count) {
             outstandingRequestCount = count;
         }
+    }
+
+    private static long saturatedAdd(long left, long right) {
+        return left > Long.MAX_VALUE - right ? Long.MAX_VALUE : left + right;
     }
 
     private CommittedHandoff commitBatchUnderLock(
@@ -1539,17 +1427,20 @@ public final class PrefillState {
                     "Prefill OWNED terminal still owns an admission handoff");
         }
         lease.state = LeaseState.CLOSED;
-        releaseBatchSlotUnderLock(lease);
+        releaseDeliverySlotUnderLock(lease);
     }
 
-    private void releaseBatchSlotUnderLock(Reservation lease) {
+    private void releaseDeliverySlotUnderLock(Reservation lease) {
         requireLock();
         if (lease instanceof BatchReservation) {
             if (batchLeasesInUse <= 0) {
                 throw new IllegalStateException("Prefill batch capacity accounting underflow");
             }
             batchLeasesInUse--;
-        } else if (!(lease instanceof RouteReservation)) {
+        } else if (lease instanceof RouteReservation) {
+            requireState(routeLeasesInUse > 0L, "Prefill route capacity accounting underflow");
+            routeLeasesInUse--;
+        } else {
             throw new IllegalStateException("unknown Prefill reservation type");
         }
     }
@@ -1586,12 +1477,6 @@ public final class PrefillState {
         }
         first.addSuppressed(next);
         return first;
-    }
-
-    private boolean canAcceptRequestUnderLock(long maxOutstandingRequests) {
-        requireLock();
-        return requests.size() < maxOutstandingRequests
-                && unknownEngineRequestCount < maxOutstandingRequests - requests.size();
     }
 
     private WorkCapture captureWorkUnderLock(long nowMs) {
@@ -1690,7 +1575,7 @@ public final class PrefillState {
             batch.generationHandoff = null;
         }
         lease.state = LeaseState.CLOSED;
-        releaseBatchSlotUnderLock(lease);
+        releaseDeliverySlotUnderLock(lease);
         if (owner != null) {
             owner.reservation = null;
             if (owner.queueMembership == QueueMembership.UNINDEXED) {
@@ -1743,6 +1628,7 @@ public final class PrefillState {
     public enum CapacityStatus {
         ACQUIRED,
         CAPACITY_FULL,
+        STATUS_STALE,
         REQUEST_NOT_ACTIVE,
         REQUEST_ALREADY_RESERVED,
         BATCH_ID_ALREADY_RESERVED,
@@ -1915,36 +1801,13 @@ public final class PrefillState {
     public final class RouteReservation extends Reservation {
         private final PrefillState owner = PrefillState.this;
         private final String requestId;
-        /* guarded by PrefillState.lock until the reservation commits */
-        private long predictedWorkMs;
+        private final long predictedWorkMs;
 
         private RouteReservation(
                 RequestEntry originalOwner, String requestId, long predictedWorkMs) {
             super(originalOwner);
             this.requestId = requestId;
             this.predictedWorkMs = boundedPrediction(predictedWorkMs);
-        }
-
-        /** Bind the fresh delivery prediction to this exact OPEN reservation. */
-        public void updatePrediction(ScheduledRequest exactItem, long predictedMs) {
-            lock.lock();
-            try {
-                RequestEntry entry = requests.get(requestId);
-                if (state != LeaseState.OPEN
-                        || entry == null
-                        || !entry.activeIdentity(exactItem)
-                        || entry.reservation != this) {
-                    throw new IllegalStateException(
-                            "route prediction no longer owns ACTIVE request_id=" + requestId);
-                }
-                predictedWorkMs = boundedPrediction(predictedMs);
-                if (entry.queueMembership == QueueMembership.UNINDEXED) {
-                    committedWorkCapture = null;
-                }
-                recordMutationUnderLock();
-            } finally {
-                lock.unlock();
-            }
         }
     }
 
@@ -2348,16 +2211,16 @@ public final class PrefillState {
      * Exact wake capability permanently paired with this worker runtime.
      */
     private final class CapacityAvailability implements CapacityBoundary.Availability {
-        private final int maximum;
+        private final BooleanSupplier available;
         private Runnable subscribed;
 
-        private CapacityAvailability(int maximum) {
-            this.maximum = maximum;
+        private CapacityAvailability(BooleanSupplier available) {
+            this.available = available;
         }
 
         @Override
         public boolean isAvailable() {
-            return batchCapacityAvailable(maximum);
+            return available.getAsBoolean();
         }
 
         @Override

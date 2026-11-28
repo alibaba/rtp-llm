@@ -448,6 +448,9 @@ public class MetricConstant {
     public static final String CACHE_ROUTING_CANDIDATE_MAX_HIT_TOKENS =
             "app.cache.routing.candidate.max.hit.tokens";
 
+    /** Images on ViT-only routes, tagged by kind (total or theoretical hit). */
+    public static final String VIT_CACHE_AFFINITY_IMAGES = "app.vit.cache.affinity.images";
+
     /** Cache-affinity routing decisions, tagged by role, engineIp, and decision. */
     public static final String CACHE_AFFINITY_DECISION = "app.cache.affinity.decision.qps";
 
@@ -676,7 +679,7 @@ public class MetricConstant {
             "grpc.server.executor.max.pool.size";
 
     /**
-     * gRPC server executor rejected task counter. Rejection uses AbortPolicy.
+     * Counts gRPC callbacks executed inline after the executor rejected their submission.
      */
     public static final String GRPC_SERVER_EXECUTOR_REJECTED_TASKS =
             "grpc.server.executor.caller.runs";
@@ -845,4 +848,19 @@ public class MetricConstant {
      */
     public static final String AUTO_TPM_PREEMPTION_TARGET_INVALID_COUNT =
             "auto_tpm.preemption.target_invalid.count";
+
+    public static final String CACHE_CLUSTER_RECENT_HISTORY_COVERAGE_MS =
+            "app.cache.cluster.recent.history.coverage.ms";
+    public static final String CACHE_CLUSTER_RECENT_HISTORY_READY =
+            "app.cache.cluster.recent.history.ready";
+    public static final String CACHE_CLUSTER_RECENT_HIT_TOKENS =
+            "app.cache.cluster.recent.hit.tokens";
+    public static final String CACHE_CLUSTER_RECENT_INPUT_TOKENS =
+            "app.cache.cluster.recent.input.tokens";
+    public static final String NETTY_DIRECT_RESERVED_BYTES = "app.netty.direct.reserved.bytes";
+    public static final String NETTY_DIRECT_PINNED_BYTES = "app.netty.direct.pinned.bytes";
+    public static final String NETTY_MEMORY_SAMPLE_DURATION_MS =
+            "app.netty.memory.sample.duration.ms";
+    public static final String NETTY_MEMORY_SAMPLE_TIMESTAMP_MS =
+            "app.netty.memory.sample.timestamp.ms";
 }

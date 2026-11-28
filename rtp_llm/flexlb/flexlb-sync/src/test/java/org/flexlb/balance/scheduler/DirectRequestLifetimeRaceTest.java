@@ -78,7 +78,10 @@ class DirectRequestLifetimeRaceTest {
                             new PrefillState.ReservationResult<>(
                                     PrefillState.CapacityStatus.ACQUIRED, reservation));
             var routeCommit = mock(PrefillEndpoint.RouteCommitAdmission.class);
-            when(prefill.tryBeginRouteCommitAdmission()).thenReturn(routeCommit);
+            when(prefill.tryBeginRouteCommitAdmission())
+                    .thenReturn(
+                            new PrefillState.ReservationResult<>(
+                                    PrefillState.CapacityStatus.ACQUIRED, routeCommit));
             var handoff = mock(PrefillState.CommittedHandoff.class);
             when(handoff.precedingWork())
                     .thenReturn(

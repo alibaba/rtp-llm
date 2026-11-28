@@ -26,6 +26,7 @@ import org.flexlb.config.QueueOrderingConfig;
 import org.flexlb.config.VictimStage;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.SchedulingMetadata;
+import org.flexlb.dao.cache.HostCacheMatch;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.master.TaskInfo;
@@ -190,10 +191,16 @@ class TransientCapacityQueueContractTest {
                     INCIDENT_DECODE_MAX_CONCURRENCY);
             assertEquals(
                     INCIDENT_PREFILL_ENGINES,
-                    fixture.runtime.endpointRegistry().getEndpointCount(RoleType.PREFILL));
+                    fixture.runtime
+                            .endpointRegistry()
+                            .endpointAddressSnapshot(RoleType.PREFILL)
+                            .size());
             assertEquals(
                     INCIDENT_DECODE_ENGINES,
-                    fixture.runtime.endpointRegistry().getEndpointCount(RoleType.DECODE));
+                    fixture.runtime
+                            .endpointRegistry()
+                            .endpointAddressSnapshot(RoleType.DECODE)
+                            .size());
             fixture.metrics.resetPlacementWakeups();
             fixture.submission.holdCompletions();
             long firstRequestId = 100_000L;
@@ -321,6 +328,51 @@ class TransientCapacityQueueContractTest {
 
             assertTrue(waiting.get(2, TimeUnit.SECONDS).isSuccess());
             assertEquals(List.of("101"), fixture.submission.requestIds());
+        }
+    }
+
+    @Test
+    @Timeout(20)
+    void nonBatchKeepsCacheAffinityWhenTheSelectedPrefillHasNoKvYet() throws Exception {
+        FlexlbConfig config = config();
+        config.setDispatcher(DispatcherConfig.nonBatch());
+        config.getRouter().getRoles().getDecode().getAvailability().setMaxEngineRequests(16L);
+        var affinity = new org.flexlb.config.RoutingConfig.CacheAffinityConfig();
+        affinity.setMaxExtraTtftMs(5_000L);
+        affinity.setMinPrefixHitPercent(10.0);
+        config.getRouter().getRoles().getPrefill().setCacheAffinity(affinity);
+        try (Fixture fixture = new Fixture(null, config, true)) {
+            fixture.expandFleet(2, 1, 0);
+            var lowKv = statusResponse(RoleType.PREFILL, 2L, false);
+            lowKv.setAvailableKvCacheTokens(1L);
+            fixture.runtime.applyStatus(fixture.prefillStatus, lowKv);
+            when(fixture.cache.findMatchingEngines(any()))
+                    .thenReturn(
+                            new CacheMatchResult(
+                                    Map.of(
+                                            fixture.prefillStatus.getLogicalIpPort(),
+                                            HostCacheMatch.local(12)),
+                                    CacheMatchSource.LOCAL_SYNC,
+                                    0L,
+                                    8L));
+
+            var cacheKeys = LongStream.rangeClosed(1, 12).boxed().toList();
+            var firstContext = fixture.context(171L);
+            firstContext.getRequest().setBlockCacheKeys(cacheKeys);
+            var first = fixture.runtime.scheduler().submit(firstContext);
+            awaitCondition(() -> fixture.prefillEndpoint.queuedRequestCount() == 1, 2_000L);
+            var secondContext = fixture.context(172L);
+            secondContext.getRequest().setBlockCacheKeys(cacheKeys);
+            var second = fixture.runtime.scheduler().submit(secondContext);
+            awaitCondition(() -> fixture.prefillEndpoint.queuedRequestCount() == 2, 2_000L);
+            assertFalse(first.isDone());
+            assertFalse(second.isDone());
+            assertEquals(0, fixture.prefillEndpoints.get(1).queuedRequestCount());
+
+            fixture.runtime.applyStatus(
+                    fixture.prefillStatus, statusResponse(RoleType.PREFILL, 3L, false));
+            assertTrue(first.get(2, TimeUnit.SECONDS).isSuccess());
+            assertTrue(second.get(2, TimeUnit.SECONDS).isSuccess());
         }
     }
 
@@ -675,7 +727,7 @@ class TransientCapacityQueueContractTest {
             assertEquals(
                     2,
                     completedResponses(responses),
-                    "the configured request limit must hold the remaining requests in the global queue");
+                    "the configured request limit must hold the remaining requests before delivery");
 
             List<Long> delivered =
                     LongStream.range(0, responses.size())
@@ -1104,6 +1156,7 @@ class TransientCapacityQueueContractTest {
 
         private final FlexlbConfig config;
         private final ConfigService configService = mock(ConfigService.class);
+        private final CacheAwareService cache = mock(CacheAwareService.class);
         private final RecordingSubmissionPort submission = new RecordingSubmissionPort();
         private final PlacementMetrics metrics = new PlacementMetrics();
         private final RequestSchedulerTestRuntime runtime;
@@ -1162,7 +1215,6 @@ class TransientCapacityQueueContractTest {
             }
 
             WorkerDirectory workers = new WorkerDirectory(runtime.endpointRegistry());
-            CacheAwareService cache = mock(CacheAwareService.class);
             when(cache.findMatchingEngines(any()))
                     .thenReturn(CacheMatchResult.empty(CacheMatchSource.LOCAL_SYNC));
             CostBasedPrefillStrategy prefillSelector =

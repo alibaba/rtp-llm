@@ -473,6 +473,7 @@ class VitProxyRpcServer(MultimodalRpcServiceServicer):
         self._status_probes: dict[str, _WorkerStatusProbe] = {}
         self._status_probes_lock = threading.Lock()
         self._status_probes_stopped = False
+        self._worker_media_load: dict[str, tuple[float, int]] = {}
         self._worker_count_metric_lock = threading.Lock()
 
     @staticmethod
@@ -733,6 +734,18 @@ class VitProxyRpcServer(MultimodalRpcServiceServicer):
                     expected_version=probe.health_version,
                 )
                 self._status_probes.pop(worker_address, None)
+                if (
+                    current_alive
+                    and worker_status is not None
+                    and worker_status.HasField("mm_inflight_inputs")
+                    and worker_status.mm_inflight_inputs.value >= 0
+                ):
+                    self._worker_media_load[worker_address] = (
+                        time.monotonic(),
+                        worker_status.mm_inflight_inputs.value,
+                    )
+                else:
+                    self._worker_media_load.pop(worker_address, None)
         # A probe result only reaches subscribers when it agrees with the load
         # balancer's state. Voiding on a lost version CAS alone is wrong: every
         # forwarding completion advances the health version, so under
@@ -1097,7 +1110,22 @@ class VitProxyRpcServer(MultimodalRpcServiceServicer):
             request, context
         )
         if worker_status:
-            return worker_status
+            result = WorkerStatusPB()
+            result.CopyFrom(worker_status)
+            result.ClearField("mm_inflight_inputs")
+            now = time.monotonic()
+            with self._status_probes_lock:
+                samples = [
+                    self._worker_media_load.get(address)
+                    for address in self.load_balancer.worker_addresses
+                ]
+            if samples and all(
+                sample is not None and now - sample[0] <= 1.0 for sample in samples
+            ):
+                result.mm_inflight_inputs.value = sum(
+                    sample[1] for sample in samples if sample is not None
+                )
+            return result
         if status_check_timed_out:
             self._set_status_check_timeout(context)
         else:

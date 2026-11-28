@@ -318,7 +318,7 @@ class MMHashRpcTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(calls[1].kwargs["seq_len"], len(expected_tokens))
             self.assertEqual(calls[1].kwargs["selected_vit"], status)
             self.assertTrue(calls[1].kwargs["block_cache_keys"])
-            wire = calls[1].kwargs["input_pb"]
+            wire = calls[1].kwargs["input_pb_factory"]()
             self.assertEqual(list(wire.token_ids), expected_tokens)
             self.assertEqual(
                 [(s.offset, s.length) for s in wire.multimodal_token_layout.spans],

@@ -6,8 +6,11 @@ import io.grpc.ServerCall;
 import io.grpc.ServerCallHandler;
 import io.grpc.ServerInterceptor;
 import io.grpc.ServerInterceptors;
+import io.grpc.Status;
 import io.grpc.netty.NettyChannelBuilder;
 import io.grpc.netty.NettyServerBuilder;
+import io.grpc.stub.ServerCallStreamObserver;
+import io.grpc.stub.StreamObserver;
 import io.netty.channel.EventLoopGroup;
 import io.netty.channel.nio.NioEventLoopGroup;
 import org.flexlb.balance.scheduler.CancelReason;
@@ -35,6 +38,7 @@ import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -43,6 +47,8 @@ import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
@@ -57,7 +63,6 @@ import static org.mockito.Mockito.when;
  * Real Netty boundaries for forwarding guards and exact-owner cancellation.
  */
 class FlexlbForwardHopGuardNettyTest {
-
     @Test
     @Timeout(value = 10, unit = TimeUnit.SECONDS)
     void selfTargetReturnsImmediatelyWithoutRecursiveRpc() throws Exception {
@@ -344,6 +349,103 @@ class FlexlbForwardHopGuardNettyTest {
         }
     }
 
+    @Test
+    @Timeout(value = 15, unit = TimeUnit.SECONDS)
+    void pendingStateForwardsLeaveFollowerFreeAndPropagateCancellationAndDeadline()
+            throws Exception {
+        var leaderRequests = new LinkedBlockingQueue<ForwardedStateQuery>();
+        var leaderCancellations = new LinkedBlockingQueue<Long>();
+        Server leader =
+                NettyServerBuilder.forAddress(new InetSocketAddress("127.0.0.1", 0))
+                        .addService(
+                                new FlexlbServiceGrpc.FlexlbServiceImplBase() {
+                                    @Override
+                                    public void getRequestState(
+                                            FlexlbScheduleProtocol.GetRequestStateRequestPB request,
+                                            StreamObserver<
+                                                            FlexlbScheduleProtocol
+                                                                    .GetRequestStateResponsePB>
+                                                    observer) {
+                                        var call =
+                                                (ServerCallStreamObserver<
+                                                                FlexlbScheduleProtocol
+                                                                        .GetRequestStateResponsePB>)
+                                                        observer;
+                                        call.setOnCancelHandler(
+                                                () ->
+                                                        leaderCancellations.add(
+                                                                request.getRequestId()));
+                                        leaderRequests.add(
+                                                new ForwardedStateQuery(request, observer));
+                                    }
+                                })
+                        .build()
+                        .start();
+        try (Node follower = Node.start("10.0.0.1");
+                Client client = Client.connect(follower.grpcPort())) {
+            follower.masterAddress.set(
+                    "127.0.0.1:" + (leader.getPort() - FlexlbGrpcServer.FLEXLB_GRPC_PORT_OFFSET));
+            var stub = FlexlbServiceGrpc.newFutureStub(client.channel);
+            var queries = new ArrayList<ForwardedStateQuery>();
+            for (long requestId = 1;
+                    requestId <= follower.serverExecutor.getMaximumPoolSize();
+                    requestId++) {
+                var pending = stub.getRequestState(stateRequest(requestId));
+                var received = leaderRequests.poll(2, TimeUnit.SECONDS);
+                assertNotNull(received);
+                assertEquals(1, received.request().getForwardHop());
+                assertFalse(pending.isDone());
+                queries.add(received);
+            }
+            when(follower.routeService.getRequestState("999", 0L))
+                    .thenReturn(requestState(999L, RequestState.Phase.ACKNOWLEDGED));
+            assertTrue(
+                    client.stub
+                            .withDeadlineAfter(1, TimeUnit.SECONDS)
+                            .getRequestState(stateRequest(999L))
+                            .getFound());
+            follower.awaitExecutorIdle();
+
+            var cancelled = stub.getRequestState(stateRequest(101L));
+            assertNotNull(leaderRequests.poll(2, TimeUnit.SECONDS));
+            assertTrue(cancelled.cancel(true));
+            assertEquals(101L, leaderCancellations.poll(2, TimeUnit.SECONDS));
+
+            var expiring =
+                    stub.withDeadlineAfter(1, TimeUnit.SECONDS).getRequestState(stateRequest(102L));
+            assertNotNull(leaderRequests.poll(1, TimeUnit.SECONDS));
+            var timeout =
+                    assertThrows(
+                            java.util.concurrent.ExecutionException.class,
+                            () -> expiring.get(2, TimeUnit.SECONDS));
+            assertEquals(Status.Code.DEADLINE_EXCEEDED, Status.fromThrowable(timeout).getCode());
+            assertEquals(102L, leaderCancellations.poll(2, TimeUnit.SECONDS));
+
+            for (var query : queries) {
+                query.observer()
+                        .onNext(
+                                FlexlbScheduleProtocol.GetRequestStateResponsePB
+                                        .getDefaultInstance());
+                query.observer().onCompleted();
+            }
+            var retry = stub.getRequestState(stateRequest(103L));
+            var received = leaderRequests.poll(2, TimeUnit.SECONDS);
+            assertNotNull(received);
+            received.observer()
+                    .onNext(FlexlbScheduleProtocol.GetRequestStateResponsePB.getDefaultInstance());
+            received.observer().onCompleted();
+            assertFalse(retry.get(2, TimeUnit.SECONDS).getFound());
+        } finally {
+            leader.shutdownNow().awaitTermination(3, TimeUnit.SECONDS);
+        }
+    }
+
+    private static FlexlbScheduleProtocol.GetRequestStateRequestPB stateRequest(long requestId) {
+        return FlexlbScheduleProtocol.GetRequestStateRequestPB.newBuilder()
+                .setRequestId(requestId)
+                .build();
+    }
+
     private static FlexlbScheduleProtocol.FlexlbScheduleRequestPB request(long requestId) {
         return FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
                 .setRequestId(requestId)
@@ -362,6 +464,13 @@ class FlexlbForwardHopGuardNettyTest {
                 2L,
                 phase.name());
     }
+
+    /**
+     * A state query held by the Leader until the test responds or the caller cancels.
+     */
+    private record ForwardedStateQuery(
+            FlexlbScheduleProtocol.GetRequestStateRequestPB request,
+            StreamObserver<FlexlbScheduleProtocol.GetRequestStateResponsePB> observer) {}
 
     /**
      * Owns a client connection used to verify the forwarding hop limit over Netty.

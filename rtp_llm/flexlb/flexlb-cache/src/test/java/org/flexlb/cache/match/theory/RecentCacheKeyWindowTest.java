@@ -14,6 +14,24 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 class RecentCacheKeyWindowTest {
 
     @Test
+    void coverageGrowsToFullAndCapacityEvictionsShortenIt() {
+        AtomicLong now = new AtomicLong(100);
+        RecentCacheKeyWindow window = new RecentCacheKeyWindow(100, 2, now::get);
+        assertEquals(0L, window.record(List.of(1L)).getHistoryCoverageMs());
+        now.set(150);
+        assertEquals(50L, window.record(List.of(1L, 2L)).getHistoryCoverageMs());
+        now.set(200);
+        assertEquals(true, window.record(List.of(3L)).isHistoryComplete());
+        now.set(201);
+        assertEquals(51L, window.record(List.of(1L)).getHistoryCoverageMs());
+
+        window.reset();
+        var snapshot = window.record(List.of(1L));
+        assertEquals(0L, snapshot.getHistoryCoverageMs());
+        assertEquals(0L, snapshot.getRequestHitOccurrences());
+    }
+
+    @Test
     void repeatedKeysOnlyHitEntriesFromEarlierRequests() {
         RecentCacheKeyWindow window = new RecentCacheKeyWindow(1000L, 10L, () -> 0L);
 

@@ -18,6 +18,7 @@ final class PrefillCandidateSet {
     private long[] cacheHitTokens = new long[0];
     private long[] routingCacheMatchTokens = new long[0];
     private long[] ownershipVersions = new long[0];
+    private String[] admissionBlocks = new String[0];
 
     private int size;
     long minimumTtftRank;
@@ -28,6 +29,7 @@ final class PrefillCandidateSet {
     void reset(int expectedCapacity) {
         Arrays.fill(endpointAddresses, 0, size, null);
         Arrays.fill(endpoints, 0, size, null);
+        Arrays.fill(admissionBlocks, 0, size, null);
         ensureCapacity(expectedCapacity);
         size = 0;
         minimumTtftRank = Long.MAX_VALUE;
@@ -41,6 +43,15 @@ final class PrefillCandidateSet {
             PrefillEndpoint endpoint,
             RouteProjection.CandidateView candidate,
             long ownershipVersion) {
+        addCandidate(address, endpoint, candidate, ownershipVersion, null);
+    }
+
+    void addCandidate(
+            String address,
+            PrefillEndpoint endpoint,
+            RouteProjection.CandidateView candidate,
+            long ownershipVersion,
+            String admissionBlock) {
         if (!candidate.selectable() && !candidate.engineWorkUnmodeled()) {
             throw new IllegalArgumentException("candidate requires available capacity");
         }
@@ -52,6 +63,7 @@ final class PrefillCandidateSet {
         cacheHitTokens[size] = candidate.cacheHitTokens();
         routingCacheMatchTokens[size] = candidate.routingCacheMatchTokens();
         ownershipVersions[size] = ownershipVersion;
+        admissionBlocks[size] = admissionBlock;
         hasKnownTtft |= projectedTtftMs[size] >= 0L;
         minimumTtftRank = Math.min(minimumTtftRank, ttftRank(size));
         maximumCacheHit = Math.max(maximumCacheHit, cacheHitTokens[size]);
@@ -92,6 +104,10 @@ final class PrefillCandidateSet {
         return ownershipVersions[index];
     }
 
+    String admissionBlock(int index) {
+        return admissionBlocks[index];
+    }
+
     int size() {
         return size;
     }
@@ -109,5 +125,6 @@ final class PrefillCandidateSet {
         cacheHitTokens = Arrays.copyOf(cacheHitTokens, capacity);
         routingCacheMatchTokens = Arrays.copyOf(routingCacheMatchTokens, capacity);
         ownershipVersions = Arrays.copyOf(ownershipVersions, capacity);
+        admissionBlocks = Arrays.copyOf(admissionBlocks, capacity);
     }
 }

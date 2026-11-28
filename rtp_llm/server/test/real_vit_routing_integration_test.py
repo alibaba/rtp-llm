@@ -153,7 +153,7 @@ class RealVitRoutingIntegrationTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(calls[0].kwargs["cache_affinity_keys"], keys)
         self.assertTrue(calls[0].kwargs["vit_only"])
         self.assertEqual(calls[1].kwargs["selected_vit"], self.status)
-        wire = calls[1].kwargs["input_pb"]
+        wire = calls[1].kwargs["input_pb_factory"]()
         ids = list(wire.token_ids)
         self.assertEqual(ids[0], 1)
         self.assertEqual(ids[-1], 2)

@@ -3,7 +3,9 @@ package org.flexlb.balance.strategy;
 import org.flexlb.balance.PlacementResult;
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
+import org.flexlb.balance.endpoint.PrefillState;
 import org.flexlb.balance.projection.RouteProjection;
+import org.flexlb.balance.scheduler.PlacementKey;
 import org.flexlb.balance.scheduler.ScheduledRequest;
 import org.flexlb.cache.domain.CacheMatchResult;
 import org.flexlb.cache.domain.CacheMatchSource;
@@ -14,11 +16,12 @@ import org.flexlb.config.FlexlbConfig;
 import org.flexlb.config.PreemptionConfig;
 import org.flexlb.config.QueueOrderingConfig;
 import org.flexlb.config.RoutingConfig;
-import org.flexlb.config.VictimStage;
+import org.flexlb.config.SchedulerConfig;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.SchedulingMetadata;
 import org.flexlb.dao.cache.HostCacheMatch;
 import org.flexlb.dao.loadbalance.Request;
+import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.dao.master.TaskInfo;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
@@ -41,6 +44,8 @@ import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.doThrow;
@@ -164,28 +169,18 @@ class CostBasedPrefillSelectionMetricTest {
     }
 
     @ParameterizedTest
-    @CsvSource({
-        "5,1,false,BLOCKED",
-        "50,1,false,BLOCKED",
-        "5,2,false,SUCCESS",
-        "50,1,true,SUCCESS",
-        "10,1,true,BLOCKED",
-        "5,1,true,BLOCKED"
-    })
-    void fullRequestCapacityIsSelectableOnlyWithEligibleQueuedPreemption(
-            int incomingPriority,
-            int requestLimit,
-            boolean preemptQueued,
-            PlacementResult.Status expectedStatus) {
+    @CsvSource({"5,1,false", "50,1,false", "5,2,false", "50,1,true", "10,1,true", "5,1,true"})
+    void queuedNonBatchRequestsRemainSelectableAndKeepTheirQueuePosition(
+            int incomingPriority, int requestLimit, boolean preemptionConfigured) {
         registry.close();
         config.queueScheduler().getDecision().setMaxRequests(2);
         config.getDispatcher().setMaxInflightPerPrefillWorker(requestLimit);
         config.queueScheduler().getDecision().setMaxCollectionWaitMs(60_000L);
         QueueOrderingConfig ordering = QueueOrderingConfig.priority();
         ordering.setPreemption(null);
-        if (preemptQueued) {
+        if (preemptionConfigured) {
             PreemptionConfig preemption = new PreemptionConfig();
-            preemption.setAllowedVictimStages(Set.of(VictimStage.PREFILL_QUEUED));
+            preemption.setAllowedVictimStages(Set.of());
             ordering.setPreemption(preemption);
         }
         config.queueScheduler().setOrdering(ordering);
@@ -220,18 +215,13 @@ class CostBasedPrefillSelectionMetricTest {
                 SchedulingMetadata.explicit(
                         incomingPriority, System.currentTimeMillis() + 120_000L));
 
-        PlacementResult<SelectedRole, RoleType> result =
+        PlacementResult<SelectedRole, PlacementKey> result =
                 strategy.select(context, RoleType.PREFILL, null);
 
-        assertEquals(expectedStatus, result.status());
-        if (expectedStatus == PlacementResult.Status.BLOCKED) {
-            verify(cache, Mockito.never()).findMatchingEngines(any());
-        }
-        if (result.status() == PlacementResult.Status.SUCCESS) {
-            try (SelectedRole selected = result.value()) {
-                assertEquals("10.0.0.1", selected.serverStatus().getServerIp());
-                assertTrue(selected.prefillWorkMs() > 0L);
-            }
+        try (SelectedRole selected = result.value()) {
+            assertEquals(PlacementResult.Status.SUCCESS, result.status());
+            assertEquals("10.0.0.1", selected.serverStatus().getServerIp());
+            assertTrue(selected.prefillWorkMs() > 0L);
         }
         assertEquals(
                 1,
@@ -319,6 +309,47 @@ class CostBasedPrefillSelectionMetricTest {
         }
     }
 
+    @ParameterizedTest
+    @ValueSource(booleans = {true, false})
+    void fullCacheLeaderIsSkippedByDirectAndStillEligibleForQueue(boolean direct) {
+        registry.close();
+        if (direct) {
+            config.setScheduler(SchedulerConfig.direct());
+        }
+        config.getDispatcher().setMaxInflightPerPrefillWorker(1);
+        ConfigService service = mock(ConfigService.class);
+        when(service.loadBalanceConfig()).thenReturn(config);
+        registry = StrategyTestSupport.endpointRegistry(service);
+        strategy = new CostBasedPrefillStrategy(new WorkerDirectory(registry), cache, reporter);
+        publish("10.0.0.1", 8080);
+        configureAffinity(1_000L, 30.0);
+        var hot = (PrefillEndpoint) registry.get(RoleType.PREFILL, "10.0.0.2:8080@0");
+        var cold = (PrefillEndpoint) registry.get(RoleType.PREFILL, "10.0.0.1:8080@0");
+
+        try (var hotReservation = occupyRouteSlot(hot, "10002")) {
+            assertFalse(hot.canAcceptRequest());
+            try (var selected = select()) {
+                assertEquals(
+                        direct ? "10.0.0.1" : "10.0.0.2", selected.serverStatus().getServerIp());
+            }
+            if (direct) {
+                try (var coldReservation = occupyRouteSlot(cold, "10003")) {
+                    var result = strategy.select(context, RoleType.PREFILL, null);
+                    assertEquals(PlacementResult.Status.BLOCKED, result.status());
+                    assertEquals(
+                            StrategyErrorType.RESOURCE_EXHAUSTED.getErrorCode(),
+                            result.failure().getCode());
+                }
+            } else {
+                assertFalse(hot.routeAdmissionAvailability().isAvailable());
+            }
+        }
+        assertTrue(hot.routeAdmissionAvailability().isAvailable());
+        try (var selected = select()) {
+            assertEquals("10.0.0.2", selected.serverStatus().getServerIp());
+        }
+    }
+
     @Test
     void exactCostTiesRotateWithoutShrinkingTheCandidateFleet() {
         publish("10.0.0.2", 8080);
@@ -344,6 +375,19 @@ class CostBasedPrefillSelectionMetricTest {
         try (SelectedRole selected = select()) {
             assertEquals("10.0.0.1", selected.serverStatus().getServerIp());
             verify(reporter).reportCacheAffinityDecision(RoleType.PREFILL, "10.0.0.1:8080", reason);
+        }
+    }
+
+    @Test
+    void nonBatchEqualTtftFavorsHigherCacheHit() {
+        configureFocusedAffinity();
+        PrefillCandidateSet candidates = candidates(new long[] {100L, 100L}, new long[] {0L, 500L});
+
+        for (int attempt = 0; attempt < 3; attempt++) {
+            assertEquals(
+                    1,
+                    strategy.selectBestCandidate(
+                            candidates, 100L, RoleType.PREFILL, null, 1_000L, config));
         }
     }
 
@@ -432,8 +476,34 @@ class CostBasedPrefillSelectionMetricTest {
         }
     }
 
+    private PrefillState.RouteReservation occupyRouteSlot(PrefillEndpoint endpoint, String id) {
+        BalanceContext occupiedContext = new BalanceContext(config);
+        Request occupied = new Request();
+        occupied.setRequestId(id);
+        occupied.setSeqLen(100);
+        occupiedContext.setRequest(occupied);
+        occupiedContext.setSchedulingMetadata(
+                SchedulingMetadata.explicit(50, System.currentTimeMillis() + 60_000L));
+        ScheduledRequest incumbent =
+                new ScheduledRequest(
+                        occupiedContext,
+                        new CompletableFuture<>(),
+                        null,
+                        null,
+                        null,
+                        endpoint,
+                        null,
+                        null,
+                        System.currentTimeMillis());
+        try (var pin = endpoint.tryPinGeneration()) {
+            var reservation = endpoint.reserveUnqueuedRoute(pin, incumbent, 1L).reservation();
+            assertNotNull(reservation);
+            return reservation;
+        }
+    }
+
     private SelectedRole select() {
-        PlacementResult<SelectedRole, RoleType> result =
+        PlacementResult<SelectedRole, PlacementKey> result =
                 strategy.select(context, RoleType.PREFILL, null);
         assertEquals(PlacementResult.Status.SUCCESS, result.status());
         return result.value();

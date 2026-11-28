@@ -42,15 +42,20 @@ class FlexlbHeartbeatInfo:
     consecutive_failures: int = 0
     last_error: Optional[str] = None
     queue_length: int = 0
+    generate_input_optional_until: float = 0.0
 
     def mark_success(
-        self, real_master_host: Optional[str] = None, queue_length: int = 0
+        self,
+        real_master_host: Optional[str] = None,
+        queue_length: int = 0,
+        generate_input_optional_until: float = 0.0,
     ):
         self.health_status = HostHealthStatus.HEALTHY
         self.last_heartbeat_time = time.time()
         self.consecutive_failures = 0
         self.last_error = None
         self.queue_length = queue_length
+        self.generate_input_optional_until = generate_input_optional_until
         if real_master_host:
             self.is_master = f"{self.host.ip}:{self.host.port}" == real_master_host
 
@@ -58,6 +63,7 @@ class FlexlbHeartbeatInfo:
         self.last_heartbeat_time = time.time()
         self.consecutive_failures += 1
         self.last_error = error
+        self.generate_input_optional_until = 0.0
         if self.consecutive_failures >= 2:
             self.health_status = HostHealthStatus.UNHEALTHY
 
@@ -72,6 +78,7 @@ class HostHealthView:
     consecutive_failures: int
     last_heartbeat_time: Optional[float]
     queue_length: int
+    generate_input_optional_until: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -344,6 +351,12 @@ class MasterService:
                 return {
                     "real_master_host": result.get("real_master_host"),
                     "queue_length": result.get("queue_length", 0),
+                    "generate_input_optional_until": (
+                        time.monotonic() + 2 * self.refresh_interval_seconds
+                        if result.get("requires_generate_input") is False
+                        and result.get("ready", True) is True
+                        else 0.0
+                    ),
                 }
         except Exception as e:
             route_logger.debug(f"Heartbeat failed for {master_addr}: {e}")
@@ -365,6 +378,9 @@ class MasterService:
             heartbeat_info.mark_success(
                 real_master_host=result.get("real_master_host"),
                 queue_length=result.get("queue_length", 0),
+                generate_input_optional_until=result.get(
+                    "generate_input_optional_until", 0.0
+                ),
             )
             route_logger.debug(
                 f"Host {host_addr} healthy, is_master={heartbeat_info.is_master}, "
@@ -480,6 +496,7 @@ class MasterService:
                     consecutive_failures=info.consecutive_failures,
                     last_heartbeat_time=info.last_heartbeat_time,
                     queue_length=info.queue_length,
+                    generate_input_optional_until=info.generate_input_optional_until,
                 )
                 for addr, info in host_health_map.items()
             }
@@ -544,6 +561,13 @@ class MasterService:
             for addr, info in snapshot.host_health_status.items()
         }
 
+    def can_omit_generate_input(self, addr: str) -> bool:
+        with self._snapshot_lock:
+            info = self._route_snapshot.host_health_status.get(addr)
+        return (
+            info is not None and time.monotonic() < info.generate_input_optional_until
+        )
+
 
 class HostService:
     def __init__(self, args: Optional[HostServiceArgs] = None):
@@ -586,6 +610,9 @@ class HostService:
 
     def get_slave_addr(self) -> Optional[str]:
         return self.master_service.get_slave_addr()
+
+    def can_omit_generate_input(self, addr: str) -> bool:
+        return self.master_service.can_omit_generate_input(addr)
 
     def get_backend_role_addrs(
         self, role_list: List[RoleType], refresh: bool = False

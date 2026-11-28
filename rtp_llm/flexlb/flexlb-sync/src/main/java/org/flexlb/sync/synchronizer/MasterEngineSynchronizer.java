@@ -19,10 +19,11 @@ import org.springframework.stereotype.Component;
 import javax.annotation.PreDestroy;
 import java.util.List;
 import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.RejectedExecutionHandler;
 import java.util.concurrent.ScheduledThreadPoolExecutor;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.LongAdder;
+import java.util.concurrent.atomic.AtomicLong;
 
 import static org.flexlb.constant.MetricConstant.ENGINE_BALANCING_THREAD_POOL_INFO;
 
@@ -49,13 +50,15 @@ public final class MasterEngineSynchronizer {
 
     private final long syncRequestTimeoutMs;
 
-    private final LongAdder syncCount = new LongAdder();
+    private final AtomicLong syncCount = new AtomicLong();
     private final Long syncEngineStatusInterval;
 
     private final long statusStaleAfterUs;
 
     private final ScheduledThreadPoolExecutor scheduler;
     private final ThreadPoolExecutor statusCheckExecutor;
+    private final ThreadPoolExecutor cachePollExecutor;
+    private final ThreadPoolExecutor statusApplicationExecutor;
     private final ThreadPoolExecutor engineSyncExecutor;
 
     public MasterEngineSynchronizer(
@@ -88,6 +91,15 @@ public final class MasterEngineSynchronizer {
         engineSyncExecutor = executor(engineThreads, "engine-sync-executor");
         int statusThreads = flexlbConfig.getInternalRuntime().getStatusCheckExecutorThreads();
         statusCheckExecutor = executor(statusThreads, "status-checker-executor");
+        statusApplicationExecutor = executor(statusThreads, "status-application-executor");
+        statusApplicationExecutor.setRejectedExecutionHandler(new ThreadPoolExecutor.AbortPolicy());
+        var cacheStatus = flexlbConfig.getWorkerRegistry().getCacheStatus();
+        cachePollExecutor =
+                executor(
+                        cacheStatus.getPollExecutorThreads(),
+                        cacheStatus.getPollExecutorQueueCapacity(),
+                        "cache-poll-executor",
+                        new ThreadPoolExecutor.AbortPolicy());
         this.scheduler =
                 new ScheduledThreadPoolExecutor(
                         5,
@@ -99,11 +111,8 @@ public final class MasterEngineSynchronizer {
     }
 
     public void syncEngineStatus() {
-        syncCount.increment();
-        logger.debug(
-                "sync engine status start, times:{}, modelName:{}",
-                syncCount.longValue(),
-                modelName);
+        long syncCycleId = syncCount.incrementAndGet();
+        logger.debug("sync engine status start, times:{}, modelName:{}", syncCycleId, modelName);
         try {
             for (RoleType roleType : requiredRoles) {
                 engineSyncExecutor.submit(
@@ -112,13 +121,15 @@ public final class MasterEngineSynchronizer {
                                 workerDirectory,
                                 workerAddressService,
                                 statusCheckExecutor,
+                                cachePollExecutor,
+                                statusApplicationExecutor,
                                 engineHealthReporter,
                                 engineGrpcService,
                                 roleType,
                                 cacheAwareService,
                                 cacheIntervalService,
                                 syncRequestTimeoutMs,
-                                syncCount,
+                                syncCycleId,
                                 syncEngineStatusInterval,
                                 flexlbConfig.isKvcmCacheMatching(),
                                 flexlbConfig
@@ -132,26 +143,32 @@ public final class MasterEngineSynchronizer {
         }
     }
 
-    public boolean isReady() {
-        return requiredRoles.stream().allMatch(role -> workerDirectory.routingCapacity(role) > 0);
-    }
-
     @PreDestroy
     public void destroy() {
         scheduler.shutdown();
         engineSyncExecutor.shutdown();
         statusCheckExecutor.shutdown();
+        cachePollExecutor.shutdown();
+        statusApplicationExecutor.shutdown();
     }
 
     private static ThreadPoolExecutor executor(int threads, String name) {
+        return executor(threads, 15_000, name, new ThreadPoolExecutor.CallerRunsPolicy());
+    }
+
+    private static ThreadPoolExecutor executor(
+            int threads,
+            int queueCapacity,
+            String name,
+            RejectedExecutionHandler rejectionHandler) {
         return new ThreadPoolExecutor(
                 threads,
                 threads,
                 60L,
                 TimeUnit.SECONDS,
-                new LinkedBlockingQueue<>(15_000),
+                new LinkedBlockingQueue<>(queueCapacity),
                 new NamedThreadFactory(name),
-                new ThreadPoolExecutor.CallerRunsPolicy());
+                rejectionHandler);
     }
 
     private void reportExecutorMetrics() {
@@ -160,6 +177,12 @@ public final class MasterEngineSynchronizer {
                     ENGINE_BALANCING_THREAD_POOL_INFO, "engineSyncExecutor", engineSyncExecutor);
             engineHealthReporter.reportThreadPoolInfo(
                     ENGINE_BALANCING_THREAD_POOL_INFO, "statusCheckExecutor", statusCheckExecutor);
+            engineHealthReporter.reportThreadPoolInfo(
+                    ENGINE_BALANCING_THREAD_POOL_INFO, "cachePollExecutor", cachePollExecutor);
+            engineHealthReporter.reportThreadPoolInfo(
+                    ENGINE_BALANCING_THREAD_POOL_INFO,
+                    "statusApplicationExecutor",
+                    statusApplicationExecutor);
         } catch (Throwable failure) {
             logger.warn("Failed to report worker sync executor metrics", failure);
         }

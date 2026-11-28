@@ -13,6 +13,7 @@ import io.opentelemetry.context.Context;
 import io.opentelemetry.context.propagation.TextMapGetter;
 import io.opentelemetry.context.propagation.TextMapPropagator;
 import io.opentelemetry.context.propagation.TextMapSetter;
+import io.opentelemetry.sdk.common.Clock;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.enums.StatusEnum;
 
@@ -21,6 +22,7 @@ import java.util.HashMap;
 import java.util.Map;
 import java.util.WeakHashMap;
 import java.util.concurrent.TimeUnit;
+import java.util.function.Supplier;
 
 /**
  * Small fail-open facade for the FlexLB manual tracing points.
@@ -41,6 +43,10 @@ public final class FlexlbTrace {
             AttributeKey.stringKey("rtp_llm.prefill_address");
     public static final AttributeKey<String> DECODE_ADDRESS =
             AttributeKey.stringKey("rtp_llm.decode_address");
+    public static final AttributeKey<String> VIT_ADDRESS =
+            AttributeKey.stringKey("rtp_llm.vit_address");
+    public static final AttributeKey<String> VIT_VALIDATION_REASON =
+            AttributeKey.stringKey("rtp_llm.vit.validation_reason");
     public static final AttributeKey<String> DISPATCH_REASON =
             AttributeKey.stringKey("rtp_llm.dispatch_reason");
     public static final AttributeKey<String> SCHEDULE_MODE =
@@ -130,8 +136,97 @@ public final class FlexlbTrace {
         return start(name, parent, SpanKind.SERVER);
     }
 
+    /** Records a point on the Schedule span without exporting an extra child span. */
+    public static void recordScheduleEvent(Context context, String name) {
+        if (!enabled) {
+            return;
+        }
+        try {
+            Span span = spanFromContext(context);
+            if (span.isRecording()) {
+                span.addEvent(name);
+            }
+        } catch (Throwable ignored) {
+            // Telemetry must never interrupt the scheduler.
+        }
+    }
+
+    /** Emits a scheduling event and a timestamped child span. */
+    public static void schedulingEvent(Context context, String name) {
+        if (!enabled) {
+            return;
+        }
+        try {
+            Span parent = spanFromContext(context);
+            if (!parent.isRecording()) {
+                return;
+            }
+            long timestamp = Clock.getDefault().now();
+            parent.addEvent(name, timestamp, TimeUnit.NANOSECONDS);
+            Span point =
+                    tracer.spanBuilder("rtp_llm." + name)
+                            .setParent(context)
+                            .setSpanKind(SpanKind.INTERNAL)
+                            .setStartTimestamp(timestamp, TimeUnit.NANOSECONDS)
+                            .startSpan();
+            point.end(timestamp, TimeUnit.NANOSECONDS);
+        } catch (Throwable ignored) {
+            // Telemetry must never interrupt the scheduler.
+        }
+    }
+
+    /** Measures the synchronous routing decision in its original request trace. */
+    public static <T> T scheduleDecision(Context context, Supplier<T> decision) {
+        Span span = startInternal("rtp_llm.flexlb.pd_decision", context);
+        Throwable failure = null;
+        try {
+            return decision.get();
+        } catch (RuntimeException | Error error) {
+            failure = error;
+            throw error;
+        } finally {
+            finish(span, failure);
+        }
+    }
+
     public static Span startInternal(String name, Context parent) {
         return start(name, parent, SpanKind.INTERNAL);
+    }
+
+    public static void finish(Span span) {
+        finish(span, null);
+    }
+
+    public static void finish(Span span, Throwable error) {
+        if (!enabled || span == null) {
+            return;
+        }
+        BusinessError expectedError = null;
+        try {
+            // Inside the guard: the marker map is a synchronized WeakHashMap keyed
+            // by Span, so it calls hashCode()/equals() on an implementation this
+            // class does not control.
+            expectedError = error == null ? BUSINESS_ERRORS.remove(span) : null;
+            if (error == null) {
+                if (expectedError == null) {
+                    span.setStatus(StatusCode.OK);
+                } else {
+                    setBusinessError(span, expectedError.code(), expectedError.type());
+                }
+            } else {
+                BUSINESS_ERRORS.remove(span);
+                span.recordException(error);
+                span.setStatus(StatusCode.ERROR, error.getClass().getSimpleName());
+            }
+        } catch (Throwable ignored) {
+            // Exporter/provider failures are explicitly fail-open.
+        } finally {
+            try {
+                span.end();
+            } catch (Throwable ignored) {
+                // Exporter/provider failures are explicitly fail-open.
+            }
+        }
     }
 
     public static Span startClient(String name, Context parent) {
@@ -253,42 +348,6 @@ public final class FlexlbTrace {
         }
     }
 
-    public static void finish(Span span) {
-        finish(span, null);
-    }
-
-    public static void finish(Span span, Throwable error) {
-        if (!enabled || span == null) {
-            return;
-        }
-        BusinessError expectedError = null;
-        try {
-            // Inside the guard: the marker map is a synchronized WeakHashMap keyed
-            // by Span, so it calls hashCode()/equals() on an implementation this
-            // class does not control.
-            expectedError = error == null ? BUSINESS_ERRORS.remove(span) : null;
-            if (error == null) {
-                if (expectedError == null) {
-                    span.setStatus(StatusCode.OK);
-                } else {
-                    setBusinessError(span, expectedError.code(), expectedError.type());
-                }
-            } else {
-                BUSINESS_ERRORS.remove(span);
-                span.recordException(error);
-                span.setStatus(StatusCode.ERROR, error.getClass().getSimpleName());
-            }
-        } catch (Throwable ignored) {
-            // Exporter/provider failures are explicitly fail-open.
-        } finally {
-            try {
-                span.end();
-            } catch (Throwable ignored) {
-                // Exporter/provider failures are explicitly fail-open.
-            }
-        }
-    }
-
     /** Marks an already-created span from an asynchronous scheduling callback. */
     public static void markBusinessError(Context context, long code, String type) {
         if (!enabled) {
@@ -322,6 +381,9 @@ public final class FlexlbTrace {
             return null;
         }
         try {
+            if (kind == SpanKind.INTERNAL && !spanFromContext(parent).isRecording()) {
+                return null;
+            }
             Tracer tracer = FlexlbTrace.tracer;
             SpanBuilder builder = tracer.spanBuilder(name).setSpanKind(kind);
             if (parent == null) {

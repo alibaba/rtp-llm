@@ -2,10 +2,12 @@ package org.flexlb.config;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import org.flexlb.service.config.merger.FlexlbConfigMerger;
 import org.junit.jupiter.api.Test;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.List;
 import java.util.Map;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -101,6 +103,71 @@ class ConfigServiceTest {
     }
 
     @Test
+    void grpcServerKeepaliveDefaultsAndOverridesAreValidated() {
+        var defaults = ConfigTestFixtures.parse("{}").getGrpcServer();
+        assertEquals(30_000L, defaults.getPermitKeepAliveTimeMs());
+        assertTrue(defaults.isPermitKeepAliveWithoutCalls());
+
+        var configured =
+                ConfigTestFixtures.parse(
+                                """
+                {"grpcServer":{"permitKeepAliveTimeMs":20000,"permitKeepAliveWithoutCalls":false}}
+                """)
+                        .getGrpcServer();
+        assertEquals(20_000L, configured.getPermitKeepAliveTimeMs());
+        assertFalse(configured.isPermitKeepAliveWithoutCalls());
+        assertThrows(
+                ConfigValidationException.class,
+                () -> ConfigTestFixtures.parse("{\"grpcServer\":{\"permitKeepAliveTimeMs\":-1}}"));
+    }
+
+    @Test
+    void engineKvCacheResponseLimitUsesConfigDefaultsAndOverrides() {
+        assertEquals(
+                128 * 1024 * 1024,
+                ConfigTestFixtures.parse("{}").getEngineGrpc().getKvCacheMaxInboundMessageBytes());
+        var configured =
+                ConfigTestFixtures.parse(
+                        "{\"engineGrpc\":{\"kvCacheMaxInboundMessageBytes\":1048576}}");
+        assertEquals(1_048_576, configured.getEngineGrpc().getKvCacheMaxInboundMessageBytes());
+        assertThrows(
+                ConfigValidationException.class,
+                () ->
+                        ConfigTestFixtures.parse(
+                                "{\"engineGrpc\":{\"kvCacheMaxInboundMessageBytes\":0}}"));
+    }
+
+    @Test
+    void engineGrpcExecutorConfigurationUsesDefaultsAndRejectsNonPositiveOverrides() {
+        var defaults = ConfigTestFixtures.parse("{}").getEngineGrpc();
+        assertEquals(32, defaults.getExecutorThreads());
+        assertEquals(10_000, defaults.getExecutorQueueCapacity());
+        assertEquals(8, defaults.getEventLoopThreads());
+
+        var configured =
+                ConfigTestFixtures.parse(
+                                """
+                {"engineGrpc":{"executorThreads":3,"executorQueueCapacity":17,"eventLoopThreads":2}}
+                """)
+                        .getEngineGrpc();
+        assertEquals(3, configured.getExecutorThreads());
+        assertEquals(17, configured.getExecutorQueueCapacity());
+        assertEquals(2, configured.getEventLoopThreads());
+
+        for (String field :
+                List.of("executorThreads", "executorQueueCapacity", "eventLoopThreads")) {
+            for (int value : new int[] {0, -1}) {
+                assertInvalid(
+                        """
+                        {"engineGrpc":{"%s":%d}}
+                        """
+                                .formatted(field, value),
+                        "engineGrpc." + field);
+            }
+        }
+    }
+
+    @Test
     void requires_explicit_request_timeout_and_defaults_decision_lifetime() {
         assertThrows(ConfigValidationException.class, () -> new ConfigService((String) null));
         assertThrows(ConfigValidationException.class, () -> new ConfigService("   "));
@@ -149,6 +216,9 @@ class ConfigServiceTest {
         assertEquals(3000L, health.getCleanupIntervalMs());
         var cache = config.getWorkerRegistry().getCacheStatus();
         assertEquals(30, cache.getTargetDiffSize());
+        assertEquals(8, cache.getDiffParallelism());
+        assertEquals(32, cache.getPollExecutorThreads());
+        assertEquals(15_000, cache.getPollExecutorQueueCapacity());
         assertEquals(50L, cache.getMinRefreshIntervalMs());
         assertEquals(3000L, cache.getMaxRefreshIntervalMs());
         assertFalse(cache.isFullSnapshotDebugMode());
@@ -251,7 +321,8 @@ class ConfigServiceTest {
                       "cacheAffinity":{"maxExtraTtftMs":25,"minPrefixHitPercent":10}},
                       "decode":{"availability":{"maxKvUsagePercent":85,"maxEngineRequests":128}}}},
                   "workerRegistry":{"health":{"statusPollIntervalMs":25},
-                    "cacheStatus":{"minRefreshIntervalMs":100,"maxRefreshIntervalMs":2000}},
+                    "cacheStatus":{"minRefreshIntervalMs":100,"maxRefreshIntervalMs":2000,"diffParallelism":2,
+                      "pollExecutorThreads":4,"pollExecutorQueueCapacity":128}},
                   "observability":{"cacheHit":{"recentKeyWindow":{"durationMs":60000,"maxKeyOccurrences":100000},
                     "requestTraceLogEnabled":true,"theoryLog":{}}}
                 }
@@ -261,6 +332,10 @@ class ConfigServiceTest {
         assertTrue(
                 config.priorityOrdering().getPreemption().allows(VictimStage.DECODE_ENGINE_OWNED));
         assertEquals(12, config.fixedWindowDecision().getMaxRequests());
+        var cacheStatus = config.getWorkerRegistry().getCacheStatus();
+        assertEquals(2, cacheStatus.getDiffParallelism());
+        assertEquals(4, cacheStatus.getPollExecutorThreads());
+        assertEquals(128, cacheStatus.getPollExecutorQueueCapacity());
         assertEquals(90L, config.fixedWindowDecision().getMaxPredictedExecutionMs());
         assertEquals(4, config.getDispatcher().getMaxInflightPerPrefillWorker());
         assertEquals(
@@ -442,7 +517,7 @@ class ConfigServiceTest {
             assertEquals(
                     allStages, config.priorityOrdering().getPreemption().getAllowedVictimStages());
             for (VictimStage stage : allStages) {
-                assertTrue(config.allowsPreemption(stage));
+                assertTrue(config.priorityOrdering().getPreemption().allows(stage));
             }
         }
         for (String ordering :
@@ -453,20 +528,26 @@ class ConfigServiceTest {
             FlexlbConfig config =
                     ConfigTestFixtures.parse("{\"scheduler\":{\"ordering\":" + ordering + "}}");
             assertEquals(
-                    java.util.Set.of(VictimStage.PREFILL_QUEUED),
+                    java.util.Set.of(),
                     config.priorityOrdering().getPreemption().getAllowedVictimStages());
-            assertFalse(config.allowsPreemption(VictimStage.DECODE_ENGINE_OWNED));
+            assertFalse(
+                    config.priorityOrdering()
+                            .getPreemption()
+                            .allows(VictimStage.DECODE_ENGINE_OWNED));
         }
         FlexlbConfig fifo = ConfigTestFixtures.parse("{}");
         assertTrue(fifo.queueScheduler().getOrdering().preemptionPolicy().isEmpty());
-        for (VictimStage stage : allStages) {
-            assertFalse(fifo.allowsPreemption(stage));
-        }
+        FlexlbConfig disabled =
+                ConfigTestFixtures.parse(
+                        """
+                        {"scheduler":{"ordering":{"type":"PRIORITY","preemption":{"allowedVictimStages":[]}}}}
+                        """);
+        assertTrue(disabled.priorityOrdering().preemptionPolicy().isEmpty());
         assertInvalid(
                 """
-                {"scheduler":{"ordering":{"type":"PRIORITY","preemption":{"allowedVictimStages":[]}}}}
+                {"scheduler":{"ordering":{"type":"PRIORITY","preemption":{"allowedVictimStages":["UNKNOWN"]}}}}
                 """,
-                "allowedVictimStages");
+                "UNKNOWN");
     }
 
     @Test
@@ -517,22 +598,31 @@ class ConfigServiceTest {
     }
 
     @Test
-    void queued_prefill_preemption_is_valid_alone_or_with_decode_preemption() {
+    void legacy_prefill_stage_never_enables_decode_preemption() {
         FlexlbConfig config =
                 ConfigTestFixtures.parse(
                         """
                 {"scheduler":{"ordering":{"type":"PRIORITY","preemption":{
                   "allowedVictimStages":["PREFILL_QUEUED"]}}}}
                 """);
-        assertTrue(config.allowsPreemption(VictimStage.PREFILL_QUEUED));
+        assertTrue(config.priorityOrdering().getPreemption().getAllowedVictimStages().isEmpty());
+        assertTrue(config.priorityOrdering().preemptionPolicy().isEmpty());
+        FlexlbConfig merged =
+                FlexlbConfigMerger.merge(
+                        config,
+                        "{\"scheduler\":{\"ordering\":{\"defaultPriority\":60}}}",
+                        "test override");
+        assertEquals(60, merged.priorityOrdering().getDefaultPriority());
+        assertTrue(merged.priorityOrdering().preemptionPolicy().isEmpty());
         config =
                 ConfigTestFixtures.parse(
                         """
                 {"scheduler":{"ordering":{"type":"PRIORITY","preemption":{
                   "allowedVictimStages":["DECODE_RESERVED","PREFILL_QUEUED"]}}}}
                 """);
-        assertTrue(config.allowsPreemption(VictimStage.PREFILL_QUEUED));
-        assertTrue(config.allowsPreemption(VictimStage.DECODE_RESERVED));
+        assertFalse(
+                config.priorityOrdering().getPreemption().allows(VictimStage.DECODE_ENGINE_OWNED));
+        assertTrue(config.priorityOrdering().getPreemption().allows(VictimStage.DECODE_RESERVED));
         assertInvalid(
                 """
                 {"scheduler":{"ordering":{"type":"PRIORITY","preemption":{
@@ -693,6 +783,15 @@ class ConfigServiceTest {
                     ConfigValidationException.class, () -> ConfigTestFixtures.parse(patch), patch);
         }
         assertInvalid(
+                "{\"workerRegistry\":{\"cacheStatus\":{\"pollExecutorThreads\":0}}}",
+                "workerRegistry.cacheStatus.pollExecutorThreads");
+        assertInvalid(
+                "{\"workerRegistry\":{\"cacheStatus\":{\"pollExecutorQueueCapacity\":-1}}}",
+                "workerRegistry.cacheStatus.pollExecutorQueueCapacity");
+        assertInvalid(
+                "{\"workerRegistry\":{\"cacheStatus\":{\"diffParallelism\":0}}}",
+                "workerRegistry.cacheStatus.diffParallelism");
+        assertInvalid(
                 "{\"router\":{\"roles\":{\"prefill\":{\"executionTimeEstimator\":{\"expression\":\"sum(unknownTokens)\"}}}}}",
                 "expression");
         assertInvalid(
@@ -708,6 +807,32 @@ class ConfigServiceTest {
             assertThrows(
                     ConfigValidationException.class, () -> FlexlbConfigValidator.validate(config));
         }
+    }
+
+    @Test
+    void validatesVitCacheAffinityLoadGap() {
+        assertEquals(
+                32L,
+                ConfigTestFixtures.parse("{}")
+                        .getRouter()
+                        .getRoles()
+                        .getVit()
+                        .getMaxExtraInflightInputs());
+        assertEquals(
+                0L,
+                ConfigTestFixtures.parse(
+                                """
+                                {"router":{"roles":{"vit":{"maxExtraInflightInputs":0}}}}
+                                """)
+                        .getRouter()
+                        .getRoles()
+                        .getVit()
+                        .getMaxExtraInflightInputs());
+        assertInvalid(
+                """
+                {"router":{"roles":{"vit":{"maxExtraInflightInputs":-1}}}}
+                """,
+                "router.roles.vit.maxExtraInflightInputs");
     }
 
     @Test

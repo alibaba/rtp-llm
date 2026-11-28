@@ -13,6 +13,8 @@ import io.netty.channel.epoll.EpollSocketChannel;
 import io.netty.channel.socket.nio.NioSocketChannel;
 import lombok.Getter;
 import lombok.extern.slf4j.Slf4j;
+import org.flexlb.config.ConfigService;
+import org.flexlb.config.FlexlbConfig.EngineGrpcConfig;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.beans.factory.annotation.Value;
@@ -32,30 +34,89 @@ public class GrpcChannelFactory {
     public static final String CONNECT_TIMEOUT_PROPERTY = "flexlb.engine-grpc.connect-timeout-ms";
     private static final int DEFAULT_CONNECT_TIMEOUT_MILLIS = 20;
     private static final int DEFAULT_MAX_INBOUND_MESSAGE_BYTES = 16 * 1024 * 1024;
+    private static final long DEFAULT_KEEP_ALIVE_TIME_MILLIS = 2_000L;
+    private static final boolean DEFAULT_KEEP_ALIVE_WITHOUT_CALLS = true;
 
     private final ThreadPoolExecutor executor;
     private final EventLoopGroup eventLoopGroup;
     private final int connectTimeoutMillis;
+    private final long keepAliveTimeMillis;
+    private final boolean keepAliveWithoutCalls;
+    private final int kvCacheMaxInboundMessageBytes;
 
     @Autowired
     public GrpcChannelFactory(
             @Qualifier("managedChannelThreadPoolExecutor") ThreadPoolExecutor executor,
             @Qualifier("managedChannelEventLoopGroup") EventLoopGroup eventLoopGroup,
             @Value("${" + CONNECT_TIMEOUT_PROPERTY + ":" + DEFAULT_CONNECT_TIMEOUT_MILLIS + "}")
-                    int connectTimeoutMillis) {
-        if (connectTimeoutMillis <= 0) {
-            throw new IllegalArgumentException("connectTimeoutMillis must be positive");
-        }
-        this.executor = executor;
-        this.eventLoopGroup = eventLoopGroup;
-        this.connectTimeoutMillis = connectTimeoutMillis;
+                    int connectTimeoutMillis,
+            @Value("${flexlb.engine-grpc.keep-alive-time-ms:2000}") long keepAliveTimeMillis,
+            @Value("${flexlb.engine-grpc.keep-alive-without-calls:true}")
+                    boolean keepAliveWithoutCalls,
+            ConfigService configService) {
+        this(
+                executor,
+                eventLoopGroup,
+                connectTimeoutMillis,
+                keepAliveTimeMillis,
+                keepAliveWithoutCalls,
+                configService.loadBalanceConfig().getEngineGrpc());
+    }
+
+    public GrpcChannelFactory(
+            ThreadPoolExecutor executor, EventLoopGroup eventLoopGroup, int connectTimeoutMillis) {
+        this(
+                executor,
+                eventLoopGroup,
+                connectTimeoutMillis,
+                DEFAULT_KEEP_ALIVE_TIME_MILLIS,
+                DEFAULT_KEEP_ALIVE_WITHOUT_CALLS,
+                new EngineGrpcConfig());
     }
 
     public GrpcChannelFactory(ThreadPoolExecutor executor, EventLoopGroup eventLoopGroup) {
         this(executor, eventLoopGroup, DEFAULT_CONNECT_TIMEOUT_MILLIS);
     }
 
+    private GrpcChannelFactory(
+            ThreadPoolExecutor executor,
+            EventLoopGroup eventLoopGroup,
+            int connectTimeoutMillis,
+            long keepAliveTimeMillis,
+            boolean keepAliveWithoutCalls,
+            EngineGrpcConfig engineGrpcConfig) {
+        if (connectTimeoutMillis <= 0) {
+            throw new IllegalArgumentException("connectTimeoutMillis must be positive");
+        }
+        if (keepAliveTimeMillis <= 0) {
+            throw new IllegalArgumentException("keepAliveTimeMillis must be positive");
+        }
+        this.executor = executor;
+        this.eventLoopGroup = eventLoopGroup;
+        this.connectTimeoutMillis = connectTimeoutMillis;
+        this.keepAliveTimeMillis = keepAliveTimeMillis;
+        this.keepAliveWithoutCalls = keepAliveWithoutCalls;
+        this.kvCacheMaxInboundMessageBytes = engineGrpcConfig.getKvCacheMaxInboundMessageBytes();
+    }
+
     public ManagedChannel create(GrpcTarget target) {
+        return createChannel(target, DEFAULT_MAX_INBOUND_MESSAGE_BYTES);
+    }
+
+    public ManagedChannel createKvCacheStatus(GrpcTarget target) {
+        return createChannel(target, kvCacheMaxInboundMessageBytes);
+    }
+
+    /**
+     * Selects a channel implementation compatible with the configured event loop.
+     */
+    public static Class<? extends Channel> channelType(EventLoopGroup eventLoopGroup) {
+        return eventLoopGroup instanceof EpollEventLoopGroup
+                ? EpollSocketChannel.class
+                : NioSocketChannel.class;
+    }
+
+    private ManagedChannel createChannel(GrpcTarget target, int maxInboundMessageBytes) {
         log.info("Creating gRPC channel: {}", target);
         return NettyChannelBuilder.forAddress(target.host(), target.port())
                 .channelType(channelType(eventLoopGroup))
@@ -71,31 +132,21 @@ public class GrpcChannelFactory {
                 // Receive/send buffer size
                 .withOption(ChannelOption.SO_RCVBUF, 512 * 1024)
                 .withOption(ChannelOption.SO_SNDBUF, 512 * 1024)
-                .maxInboundMessageSize(DEFAULT_MAX_INBOUND_MESSAGE_BYTES)
+                .maxInboundMessageSize(maxInboundMessageBytes)
                 // HTTP/2 initial flow control window: prevents transmission issues due to flow
                 // control
                 .initialFlowControlWindow(2 * 1024 * 1024)
-                // Send an HTTP/2 PING after this interval without read activity
-                .keepAliveTime(2, TimeUnit.SECONDS)
+                // grpc-java raises intervals below 10 seconds to 10 seconds.
+                .keepAliveTime(keepAliveTimeMillis, TimeUnit.MILLISECONDS)
                 // Close the connection if no read activity is observed within this timeout after a
                 // PING
                 .keepAliveTimeout(10, TimeUnit.SECONDS)
-                // Keep probing even when there are no active RPC calls
-                .keepAliveWithoutCalls(true)
+                .keepAliveWithoutCalls(keepAliveWithoutCalls)
                 .executor(executor)
                 .eventLoopGroup(eventLoopGroup)
                 .usePlaintext()
                 .proxyDetector(GrpcUtil.NOOP_PROXY_DETECTOR)
                 .disableRetry()
                 .build();
-    }
-
-    /**
-     * Selects a channel implementation compatible with the configured event loop.
-     */
-    public static Class<? extends Channel> channelType(EventLoopGroup eventLoopGroup) {
-        return eventLoopGroup instanceof EpollEventLoopGroup
-                ? EpollSocketChannel.class
-                : NioSocketChannel.class;
     }
 }

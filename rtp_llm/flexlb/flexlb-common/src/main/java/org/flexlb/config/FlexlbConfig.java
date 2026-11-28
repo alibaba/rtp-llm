@@ -23,6 +23,7 @@ public final class FlexlbConfig {
     private WorkerRegistryConfig workerRegistry = new WorkerRegistryConfig();
     private ObservabilityConfig observability = new ObservabilityConfig();
     private GrpcServerConfig grpcServer = new GrpcServerConfig();
+    private EngineGrpcConfig engineGrpc = new EngineGrpcConfig();
     private ServiceDiscoveryRuntimeConfig serviceDiscovery = new ServiceDiscoveryRuntimeConfig();
     private CacheMatchingConfig cacheMatching = new LocalSyncCacheMatchingConfig();
     private OptimizerRuntimeConfig optimizer = new OptimizerRuntimeConfig();
@@ -60,13 +61,6 @@ public final class FlexlbConfig {
     @JsonIgnore
     public boolean isBatchDispatch() {
         return dispatcher.getType() == DispatcherConfig.Type.BATCH;
-    }
-
-    @JsonIgnore
-    public boolean allowsPreemption(VictimStage stage) {
-        return isPriorityOrdering()
-                && scheduler.getOrdering().getPreemption() != null
-                && scheduler.getOrdering().getPreemption().allows(stage);
     }
 
     @JsonIgnore
@@ -125,17 +119,38 @@ public final class FlexlbConfig {
     }
 
     /**
-     * Sets serving executor capacities and the quiet-period duration in milliseconds used during
-     * shutdown.
+     * Sets serving executor capacities, shutdown timing, and HTTP/2 keepalive policy.
      */
     @Getter
     @Setter
     public static final class GrpcServerConfig {
+        public static final int DEFAULT_MAX_RECEIVING_REQUESTS = 1024;
+        public static final int DEFAULT_MAX_RECEIVING_CONTROL_REQUESTS = 128;
+
         private int executorCoreSize = 1000;
         private int executorMaxSize = 1000;
         private int executorQueueSize = 1000;
+        private int maxReceivingRequests = DEFAULT_MAX_RECEIVING_REQUESTS;
+        private int maxReceivingControlRequests = DEFAULT_MAX_RECEIVING_CONTROL_REQUESTS;
 
         /** 静默时间：下线后每次 Schedule 到达重新计时，期满后等待已接收 RPC 完成。 */
         private long shutdownQuietPeriodMs = 5_000L;
+
+        private long permitKeepAliveTimeMs = 30_000L;
+        private long receiveTimeoutMs = 30_000L;
+        private long receiveBudgetBytes;
+        private boolean permitKeepAliveWithoutCalls = true;
+    }
+
+    /**
+     * Configures Engine gRPC callbacks, shared client I/O and the KV cache snapshot receive limit.
+     */
+    @Getter
+    @Setter
+    public static final class EngineGrpcConfig {
+        private int executorThreads = 32;
+        private int executorQueueCapacity = 10_000;
+        private int eventLoopThreads = 8;
+        private int kvCacheMaxInboundMessageBytes = 128 * 1024 * 1024;
     }
 }

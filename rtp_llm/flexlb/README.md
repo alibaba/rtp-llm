@@ -159,7 +159,7 @@ The online loader accepts schema 3 only. Duplicate keys, unknown or inactive fie
 
 | Setting                                             | Schema 3 behavior                                                                                                                                                                                                                                                      |
 | --------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `dispatcher.maxInflightPerPrefillWorker`            | Positive integer, default 2 in every mode. BATCH counts batches; NON_BATCH / DIRECT count requests.                                                                                                                                                                    |
+| `dispatcher.maxInflightPerPrefillWorker`            | Positive integer, default 2 in every mode. BATCH counts batches; NON_BATCH / DIRECT count requests at delivery. Waiting requests do not use execution slots.                                                                                                           |
 | `dispatcher.fetchAttachTimeoutMs`                   | Positive integer, default 3000 ms. BATCH sends this as Engine `fetch_attach_timeout_ms`, limiting the wait for `FetchResponse` attachment. Engine caps it by the remaining request timeout when present. Once attached, this timer does not limit generation duration. |
 | Prefill ownership                                   | Work remains tracked until authoritative completion, safe rollback or retirement. PDFUSION has no distinct Prefill-completion signal, so its ownership lasts through request termination.                                                                              |
 | `requestLifecycle.request.timeoutMs`                | Required positive integer; maximum request inactivity in milliseconds, renewed by matching Engine request status. No default.                                                                                                                                          |
@@ -171,7 +171,7 @@ The online loader accepts schema 3 only. Duplicate keys, unknown or inactive fie
 | `router.roles.decode.costEstimator.expression`      | Default `kvcache_used_ratio`; smallest cost wins within the same availability tier. Using `max_running_size` requires a positive `availability.maxEngineRequests`.                                                                                                     |
 | Transport timeout                                   | `flexlb.engine-grpc.enqueue-timeout-ms`, default 5000; outside the scheduling JSON.                                                                                                                                                                                    |
 | `scheduler.ordering.preemption.timeoutMs`           | Default 1000 ms, positive; Engine-owned Decode preemption only. Starts after the Cancel ACK phase and bounds the wait for the Engine terminal. ACK timeout stays internal, 50 ms.                                                                                      |
-| `scheduler.ordering.preemption.allowedVictimStages` | PRIORITY defaults to all three stages: `PREFILL_QUEUED`, `DECODE_RESERVED`, `DECODE_ENGINE_OWNED`, including when `preemption` is omitted. An explicit non-empty list replaces the defaults.                                                                           |
+| `scheduler.ordering.preemption.allowedVictimStages` | PRIORITY defaults to `DECODE_RESERVED` and `DECODE_ENGINE_OWNED`, including when `preemption` is omitted. An explicit list replaces the defaults. Use `[]` to disable Decode preemption. Legacy `PREFILL_QUEUED` is ignored with a warning.                            |
 
 The request timeout below is an explicit workload value; decision lifetime 2.0 is the default:
 
@@ -222,6 +222,7 @@ Omit `router.roles.decode.costEstimator` to balance by KV usage ratio. Set its
 ```
 
 `workerRegistry`, `observability.cacheHit`, and `router.groupSelector` remain available.
+
 Only schema 3 is accepted. Write the configuration directly with explicit values for
 `requestLifecycle.request.timeoutMs`, which has no default. A matching Engine request
 status renews this deadline. Once it expires, FlexLB releases the exact local
@@ -482,6 +483,35 @@ FlexLB provides comprehensive monitoring through:
 - Prometheus metrics endpoint: `/actuator/prometheus`
 - Health checks: `/actuator/health`
 - Application info: `/actuator/info`
+
+### Netty allocator metrics
+
+Set `scheduler.nettyMemoryReporter.enabled` to `true` in `FLEXLB_CONFIG` and restart
+the Master. The setting is available in QUEUE and DIRECT modes and defaults to
+`false`. The sampler runs on a dedicated daemon thread every 10 seconds by default.
+`intervalMs` accepts values of at least 1000 ms. Each scan takes Netty arena locks.
+
+| Metric                                 | What it reports                                           |
+| -------------------------------------- | --------------------------------------------------------- |
+| `app.netty.direct.reserved.bytes`      | Direct memory reserved by the allocator                   |
+| `app.netty.direct.pinned.bytes`        | Direct memory held by live buffers                        |
+| `app.netty.memory.sample.duration.ms`  | Time spent in the last scan                               |
+| `app.netty.memory.sample.timestamp.ms` | Unix timestamp in milliseconds of the last completed scan |
+
+The two direct-memory series carry an `allocator` tag. `netty_default` and
+`grpc_default` identify allocator instances, which can serve several transports.
+A shared instance is sampled once. If the gRPC default allocator is unavailable,
+the Master logs `event=netty_memory_allocator_unavailable`.
+
+To expose these series through Prometheus, append `flexlb_app_netty_` to the
+existing `flexlb.monitor.metric-whitelist` prefixes. KMonitor uses the same
+FlexMonitor registration path.
+
+For threshold-based logging, enable `scheduler.nettyMemoryReporter.autoCapture.enabled`.
+When JVM direct memory or monitored allocator reservations reach `thresholdBytes`
+(default 5 GiB), the sampler logs the values from that scan as
+`event=netty_memory_capture`. `cooldownMs` defaults to 300000 and accepts values
+of at least 1000 ms.
 
 ## Contributing
 

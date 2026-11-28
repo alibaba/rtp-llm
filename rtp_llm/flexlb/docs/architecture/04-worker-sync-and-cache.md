@@ -119,14 +119,14 @@ PAI-vLLM 端的 Encoder 状态上报不属于 FlexLB 实现范围。
 `cache_match_rollback_blocks`、`kv_cache_group_mode` 等。没有显式 TTFT 字段——负载估计由 `stepLatencyMs` 与本地
 `runningQueueTime` 组成。
 
-处理逻辑：版本号新才全量更新（并发/任务表/队列时间）；版本号旧也更新 alive、时间戳并做任务
-对账；`cache_status` 总量恒更新（used = total − available）。带 `CacheHitFeedback` 的完成
-任务会异步送 `CacheAwareService.buildCacheHitComparison`（预测 vs 实际命中对比，出指标 + pv 日志）。
-连续 3 次状态探测失败（RPC 失败或响应转换失败）会把该逻辑 worker 标为不健康并移除其 endpoint；
-同一 frontend 的其他已发布 logical worker 不受影响。任务既没有有效字符串 ID，也没有可兼容读取的
-旧 int64 编码时，整份状态观测被拒收，不发布部分任务状态，并按上述连续失败规则处理。
-新发现的 worker 在首次接受有效状态前不可路由。空响应标为不健康；未初始化状态
-（`status_version=0`）与响应处理异常跳过本轮更新。
+新版本状态更新并发、任务表和队列时间。同版本的有效心跳刷新健康证据并对账当前活动任务。
+版本回退、版本非正数或角色与发现记录不符时，当前 generation 会下线。
+带 `CacheHitFeedback` 的完成任务会异步产出预测与实际命中的对比指标和 PV 日志。
+
+RPC 失败只记录传输失败和超时指标。Master 仍按上次有效状态和 `statusStaleAfterMs` 判断过期。
+收到有效的 `alive=false` 状态时，立即下线对应 logical worker，同一 frontend 的其他
+logical worker 不受影响。空响应、本地响应转换失败和后续处理失败分别上报对应错误。
+任务没有可用请求 ID 时，转换失败会拒收整份观测。新 worker 在首次应用有效状态前不可路由。
 
 ### WorkerStatus 的本地预测与对账
 
@@ -151,6 +151,10 @@ PAI-vLLM 端的 Encoder 状态上报不属于 FlexLB 实现范围。
 cache 版本做增量；响应恒更新 KV token 总量，版本更新时把 `cached_keys`（block hash 集合）
 经 `CacheAwareService.updateFromWorkerStatus()` 喂给本地索引（仅 PREFILL/PDFUSION）。
 
+Cache RPC 由独立的池投递，心跳使用原有的状态查询池。两者的响应应用继续走现有的状态应用池。
+`workerRegistry.cacheStatus.pollExecutorThreads` 和 `pollExecutorQueueCapacity` 默认分别为 32
+和 15000，启动时读取。队列满时拒绝本次 cache 投递并归还该 worker 的 poll lease，后续轮次可重试。
+
 **动态间隔**：`DefaultDynamicCacheIntervalService` 维护 30 样本滚动平均 diff 大小，目标
 `CACHE_STATUS_DIFF_SIZE(30)`；偏差 >10% 时按 ±30% 调整间隔，钳制在
 [`CACHE_STATUS_MIN_INTERVAL_MS(50)`, `CACHE_STATUS_MAX_INTERVAL_MS(3000)`]——diff 大则加快
@@ -160,13 +164,16 @@ cache 版本做增量；响应恒更新 KV token 总量，版本更新时把 `ca
 
 ### LOCAL_SYNC 两级索引
 
-- **大表** `GlobalCacheIndex`：`ConcurrentHashMap<Long blockHash, Set<String engineIpPort>>`，
-  变更加单把 `ReentrantLock`。`batchCalculatePrefixMatchLength`：按序遍历请求 block 链，
+- **大表** `GlobalCacheIndex`：以原生 `long` 为键，使用哈希高位分成 256 个分片。
+  单块的 worker 映射使用紧凑的不可变集合，在分片锁下替换并更新计数。`batchCalculatePrefixMatchLength` 按序遍历请求 block 链，
   用候选集过滤 + 首个未命中即淘汰该引擎（早停），返回每引擎的前缀匹配块数。
-- **小表** `EngineLocalView`：`ConcurrentHashMap<String engineIpPort, Set<Long>>`。
-  `calculateDiff` 在专用 ForkJoinPool 上并行算 added/removed，diff 大小回馈动态间隔服务。
+- **小表** `EngineLocalView` 按逻辑 worker 保存原生 `long` 键集。
+  `calculateDiff` 在专用 ForkJoinPool 上分别计算两组原生增删键，diff 大小回馈动态间隔服务。
+  `workerRegistry.cacheStatus.diffParallelism` 默认 8，Master 启动时读取，有效并行度受 JVM 可见 CPU 数限制。
 - `KvCacheManager`：门面——`findMatchingEngines`（候选来自 `WorkerStatusProvider`）、
   `updateEngineCache`（diff 后双表应用）、`removeStaleEngineCaches`、`clear`。
+  状态更新与清理按逻辑 worker 串行执行。清理从小表取出该 worker 的键，只删除大表中
+  对应的 worker 映射，共享同一缓存块的其他 worker 仍可命中。
 - `LocalSyncCacheMatchProvider` 仅在 LOCAL_SYNC 模式订阅 `EngineAddressResolver`，按最新
   `WorkerHost` 集合清理已下线 frontend 的本地 cache；KVCM 模式不注册该 listener。
 

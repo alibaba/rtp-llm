@@ -81,7 +81,7 @@ final class PrefillAdmissionResources {
             PrefillState.CapacityStatus status,
             CapacityBoundary capacityFull) {
         return switch (status) {
-            case CAPACITY_FULL -> rejected(capacityFull);
+            case CAPACITY_FULL, STATUS_STALE -> rejected(capacityFull);
             case REQUEST_NOT_ACTIVE -> rejected(CapacityBoundary.OWNERSHIP_LOST);
             case ENDPOINT_RETIRED -> failed(retired("Prefill", item));
             case REQUEST_ALREADY_RESERVED, BATCH_ID_ALREADY_RESERVED ->

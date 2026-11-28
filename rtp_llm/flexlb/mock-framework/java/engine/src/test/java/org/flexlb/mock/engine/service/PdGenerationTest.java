@@ -52,8 +52,10 @@ class PdGenerationTest {
             var ps=rpc.getCacheStatus(query);
             var ds=RpcServiceGrpc.newBlockingStub(d.channel).withDeadlineAfter(2,TimeUnit.SECONDS).getCacheStatus(query);
             var base=org.flexlb.mock.protocol.MultimodalProtocol.computePromptKeys(org.flexlb.mock.protocol.MultimodalProtocol.text(request), 2, 0, 1).keys();
-            assertEquals(Set.of(base.get(3),base.get(7)),Set.copyOf(ps.getCacheKeysMap().keySet()));
-            assertTrue(ds.getCacheKeysMap().keySet().containsAll(base));
+            assertEquals(Set.of(base.get(3),base.get(7)),Set.copyOf(ps.getCacheKeyListList()));
+            assertTrue(ds.getCacheKeyListList().containsAll(base));
+            assertEquals(0, ps.getCacheKeysCount());
+            assertEquals(0, ds.getCacheKeysCount());
             assertEquals(8,ps.getBlockSize());assertEquals(128,ps.getTotalKvCache());
             assertEquals(2,ds.getBlockSize());assertEquals(64,ds.getTotalKvCache());
         }
@@ -101,7 +103,7 @@ class PdGenerationTest {
             var keys = org.flexlb.mock.protocol.MultimodalProtocol.computePromptKeys(new org.flexlb.mock.protocol.MultimodalProtocol.Prepared(prepared,
                 List.of(new Span(1, List.of(rowHash)))), 2, 0, 1).keys();
             var cached = rpc.getCacheStatus(CacheVersionPB.newBuilder().setNeedCacheKeys(true).build());
-            assertTrue(cached.getCacheKeysMap().keySet().containsAll(keys));
+            assertTrue(cached.getCacheKeyListList().containsAll(keys));
             assertEquals(6, calls.size());
             for(var item:List.of(Map.entry(p,6),Map.entry(d,5))) {
                 try(var stream=java.net.URI.create((String)item.getKey().node.endpoints().get("metrics")).toURL().openStream()) {
@@ -153,7 +155,7 @@ class PdGenerationTest {
             var prepared = new MultimodalProtocol.Prepared(expanded, List.of(new Span(1, List.of(131, -92))));
             var keys = MultimodalProtocol.computePromptKeys(prepared, 2, 0, 1).keys();
             var cached = rpc.getCacheStatus(CacheVersionPB.newBuilder().setNeedCacheKeys(true).build());
-            assertTrue(cached.getCacheKeysMap().keySet().containsAll(keys));
+            assertTrue(cached.getCacheKeyListList().containsAll(keys));
         } finally {
             vision.shutdownNow().awaitTermination(3, TimeUnit.SECONDS);
         }
@@ -173,7 +175,7 @@ class PdGenerationTest {
             var rpc = RpcServiceGrpc.newBlockingStub(p.channel).withDeadlineAfter(4, TimeUnit.SECONDS);
             var cached = rpc.getCacheStatus(CacheVersionPB.newBuilder().setNeedCacheKeys(true).build());
             var expected = MultimodalProtocol.computePromptKeys(MultimodalProtocol.text(request), 2, 0, 1).keys();
-            assertTrue(cached.getCacheKeysMap().keySet().containsAll(expected));
+            assertTrue(cached.getCacheKeyListList().containsAll(expected));
             assertEquals(42, RpcMessages.sampledToken(request));
 
             var malformed = request.toBuilder().setRequestId(203)

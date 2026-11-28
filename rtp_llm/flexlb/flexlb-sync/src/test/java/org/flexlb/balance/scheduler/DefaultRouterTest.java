@@ -27,6 +27,7 @@ import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.dao.route.RequestPhase;
 import org.flexlb.dao.route.RoleType;
+import org.flexlb.service.VitCacheSelector;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -52,6 +53,7 @@ import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.ArgumentMatchers.nullable;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
@@ -245,8 +247,9 @@ class DefaultRouterTest {
         verify(decode.pin).close();
     }
 
-    @Test
-    void directRouteRollsBackDecodeWhenPrefillAdmissionIsFull() {
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void directRouteRollsBackDecodeWhenPrefillIsFullOrStale(boolean stale) {
         when(modelMeta.requiredRoles()).thenReturn(List.of(RoleType.PREFILL, RoleType.DECODE));
         DefaultRouter router = router();
         BalanceContext context = context(8L);
@@ -260,16 +263,24 @@ class DefaultRouterTest {
                 .thenReturn(PlacementResult.success(prefill.selection));
         when(decodeSelector.select(context, DecodeBinding.capture(context), "g1"))
                 .thenReturn(PlacementResult.success(decode.selection));
-        stubPrefillCommit((PrefillEndpoint) prefill.endpoint);
         when(((DecodeEndpoint) decode.endpoint)
                         .reserve(eq(decode.pin), eq("8"), eq(32L), eq(48L), eq(50)))
                 .thenReturn(reservation);
         stubDecodePermit((DecodeEndpoint) decode.endpoint, reservation);
-        when(((PrefillEndpoint) prefill.endpoint)
-                        .reserveUnqueuedRoute(eq(prefill.pin), any(ScheduledRequest.class), eq(1L)))
-                .thenReturn(
-                        new PrefillState.ReservationResult<>(
-                                PrefillState.CapacityStatus.CAPACITY_FULL, null));
+        if (stale) {
+            when(((PrefillEndpoint) prefill.endpoint).tryBeginRouteCommitAdmission())
+                    .thenReturn(
+                            new PrefillState.ReservationResult<>(
+                                    PrefillState.CapacityStatus.STATUS_STALE, null));
+        } else {
+            stubPrefillCommit((PrefillEndpoint) prefill.endpoint);
+            when(((PrefillEndpoint) prefill.endpoint)
+                            .reserveUnqueuedRoute(
+                                    eq(prefill.pin), any(ScheduledRequest.class), eq(1L)))
+                    .thenReturn(
+                            new PrefillState.ReservationResult<>(
+                                    PrefillState.CapacityStatus.CAPACITY_FULL, null));
+        }
 
         assertEquals(
                 StrategyErrorType.RESOURCE_EXHAUSTED.getErrorCode(),
@@ -537,7 +548,7 @@ class DefaultRouterTest {
         DefaultRouter router = router();
         BalanceContext context = context(111L);
         when(prefillSelector.select(context, RoleType.PREFILL, null))
-                .thenReturn(PlacementResult.blocked(RoleType.DECODE));
+                .thenReturn(PlacementResult.blocked(PlacementKey.anyGroup(RoleType.DECODE)));
 
         PlacementResult<RouteAdmission, PlacementKey> blocked = router.select(context);
         assertEquals(PlacementResult.Status.BLOCKED, blocked.status());
@@ -702,6 +713,26 @@ class DefaultRouterTest {
         verify(prefillSelector).select(context, RoleType.PREFILL, null);
     }
 
+    @Test
+    void countsVitOnlyInputsEvenWhenNoVitWorkerIsSelected() {
+        when(modelMeta.requiredRoles()).thenReturn(List.of(RoleType.VIT));
+        var router = router();
+        var selector = mock(VitCacheSelector.class);
+        org.springframework.test.util.ReflectionTestUtils.setField(
+                router, "vitCacheSelector", selector);
+        var context = context(151L);
+        context.getRequest().setVitRouteOnly(true);
+        var keys = List.of("image", "image", "other");
+        context.getRequest().setCacheAffinityKeys(keys);
+        ServerStatus unavailable = new ServerStatus();
+        unavailable.setCode(StrategyErrorType.NO_VIT_WORKER.getErrorCode());
+        when(selector.select(eq(context), nullable(String.class))).thenReturn(unavailable);
+
+        assertEquals(
+                StrategyErrorType.NO_VIT_WORKER.getErrorCode(), router.routeVit(context).getCode());
+        verify(selector).recordVitOnlyInputs(keys);
+    }
+
     private static void stubPrefillCommit(PrefillEndpoint prefill) {
         stubRouteCommit(
                 prefill,
@@ -714,7 +745,10 @@ class DefaultRouterTest {
         var commit = mock(PrefillEndpoint.RouteCommitAdmission.class);
         var handoff = mock(PrefillState.CommittedHandoff.class);
         when(handoff.precedingWork()).thenReturn(precedingWork);
-        when(endpoint.tryBeginRouteCommitAdmission()).thenReturn(commit);
+        when(endpoint.tryBeginRouteCommitAdmission())
+                .thenReturn(
+                        new PrefillState.ReservationResult<>(
+                                PrefillState.CapacityStatus.ACQUIRED, commit));
         when(commit.commit(any(), any())).thenReturn(handoff);
     }
 
@@ -759,7 +793,16 @@ class DefaultRouterTest {
             PlacementResult<SelectedRole, RoleType> result) {
         switch (role) {
             case PREFILL, PDFUSION ->
-                    when(prefillSelector.select(context, role, group)).thenReturn(result);
+                    when(prefillSelector.select(context, role, group))
+                            .thenReturn(
+                                    new PlacementResult<>(
+                                            result.status(),
+                                            result.value(),
+                                            result.failure(),
+                                            result.blocker() == null
+                                                    ? null
+                                                    : new PlacementKey(result.blocker(), group),
+                                            result.diagnostics()));
             case DECODE ->
                     when(decodeSelector.select(context, DecodeBinding.capture(context), group))
                             .thenReturn(result);

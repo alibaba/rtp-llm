@@ -20,13 +20,28 @@ public final class RoutingConfig {
     private RolesConfig roles = new RolesConfig();
 
     /**
-     * Holds the independent Prefill and Decode selection policies.
+     * Holds the independent Prefill, Decode and ViT selection policies.
      */
     @Getter
     @Setter
     public static final class RolesConfig {
         private PrefillConfig prefill = new PrefillConfig();
         private DecodeConfig decode = new DecodeConfig();
+        private VitConfig vit = new VitConfig();
+    }
+
+    /**
+     * Controls whether new ViT routes prefer cached media within the allowed load gap.
+     */
+    @Getter
+    @Setter
+    public static final class VitConfig {
+        public static final long DEFAULT_MAX_EXTRA_INFLIGHT_INPUTS = 32L;
+
+        private boolean cacheAffinityEnabled = true;
+
+        /** How many more in-flight media inputs the best cache match may have. */
+        private long maxExtraInflightInputs = DEFAULT_MAX_EXTRA_INFLIGHT_INPUTS;
     }
 
     /**

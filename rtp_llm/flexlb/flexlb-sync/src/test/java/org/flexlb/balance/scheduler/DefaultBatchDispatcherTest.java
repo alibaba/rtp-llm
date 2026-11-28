@@ -41,6 +41,7 @@ import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
@@ -881,6 +882,22 @@ class DefaultBatchDispatcherTest {
         PrefillEndpoint prefillEp = createPrefillEndpoint();
         ScheduledRequest item = createScheduledRequest(1L, 500, 200, prefillEp);
         item.ctx().getRequest().setPriority(60);
+        var original =
+                EngineRpcService.GenerateInputPB.parseFrom(item.ctx().getGenerateInputPb())
+                        .toBuilder()
+                        .addAllTokenIds(List.of(0, 127, 128, 129264, -1, Integer.MIN_VALUE))
+                        .addMultimodalInputs(
+                                EngineRpcService.MultimodalInputPB.newBuilder()
+                                        .setMultimodalTensor(
+                                                EngineRpcService.TensorPB.newBuilder()
+                                                        .setFp16Data(
+                                                                com.google.protobuf.ByteString
+                                                                        .copyFrom(
+                                                                                new byte
+                                                                                        [1024
+                                                                                                * 1024]))))
+                        .build();
+        item.ctx().setGenerateInputPb(original.toByteString());
 
         List<EngineRpcService.EnqueueBatchRequestPB> sent = new CopyOnWriteArrayList<>();
         when(grpcClient.batchEnqueueAsync(
@@ -894,7 +911,15 @@ class DefaultBatchDispatcherTest {
         submit(List.of(item), 1L, 100, "test", callback);
 
         assertTrue(callback.successLatch.await(5, TimeUnit.SECONDS));
-        assertEquals(60, sentInput(sent.getFirst()).getPriority());
+        var encoded = sentInput(sent.getFirst());
+        assertEquals(0, encoded.getTokenIdsCount());
+        var received =
+                sentInput(
+                        EngineRpcService.EnqueueBatchRequestPB.parseFrom(
+                                sent.getFirst().toByteString()));
+        assertEquals(original.getTokenIdsList(), received.getTokenIdsList());
+        assertEquals(original.getMultimodalInputsList(), received.getMultimodalInputsList());
+        assertEquals(60, received.getPriority());
     }
 
     @Test
@@ -1322,6 +1347,8 @@ class DefaultBatchDispatcherTest {
                 .thenAnswer(
                         inv -> {
                             sent.add(inv.getArgument(2));
+                            assertNull(first.ctx().getGenerateInputPb());
+                            assertNull(second.ctx().getGenerateInputPb());
                             return CompletableFuture.completedFuture(
                                     ackResponse(92L, List.of(501L, 502L)));
                         });
@@ -1362,13 +1389,6 @@ class DefaultBatchDispatcherTest {
         assertEquals(
                 replaced ? "" : "vendor=two",
                 secondSent.getRequestInfo().getTraceContext().getTracestate());
-        assertEquals(
-                "vendor=one",
-                EngineRpcService.GenerateInputPB.parseFrom(first.ctx().getGenerateInputPb())
-                        .getRequestInfo()
-                        .getTraceContext()
-                        .getTracestate(),
-                "dispatch must not mutate the queued payload");
     }
 
     private PrefillEndpoint createPrefillEndpoint() {

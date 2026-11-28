@@ -1,6 +1,7 @@
 package org.flexlb.balance.endpoint;
 
 import lombok.Getter;
+import org.flexlb.balance.scheduler.PlacementAvailability;
 import org.flexlb.dao.master.WorkerStatus;
 
 import java.util.Objects;
@@ -44,9 +45,15 @@ public class WorkerEndpoint {
     @Getter private final WorkerStatus status;
 
     private final EndpointGenerationLifecycle generationLifecycle;
+    private final PlacementAvailability placementAvailability;
 
     public WorkerEndpoint(WorkerStatus status) {
+        this(status, null);
+    }
+
+    WorkerEndpoint(WorkerStatus status, PlacementAvailability placementAvailability) {
         this.status = Objects.requireNonNull(status, "status");
+        this.placementAvailability = placementAvailability;
         this.generationLifecycle =
                 new EndpointGenerationLifecycle(this::continueRetirementAfterHandoff);
     }
@@ -114,6 +121,11 @@ public class WorkerEndpoint {
         return NO_STATUS_PROJECTION;
     }
 
+    /** Capture an endpoint for new routing without restricting owned-work cleanup. */
+    public final GenerationPin tryPinSchedulingGeneration() {
+        return hasFreshSchedulingStatus() ? tryPinGeneration() : null;
+    }
+
     /**
      * Pin this exact endpoint generation for one admission handoff.
      *
@@ -125,6 +137,21 @@ public class WorkerEndpoint {
     public final GenerationPin tryPinGeneration() {
         EndpointGenerationLifecycle.HandoffPermit permit = generationLifecycle.tryAcquireHandoff();
         return permit == null ? null : new GenerationPin(this, status.getGenerationId(), permit);
+    }
+
+    /** Wake scheduling work parked while this generation's applied state was stale. */
+    public void signalSchedulingStatusRecovered() {
+        signalPlacementCapacityChanged();
+    }
+
+    /** Wake placement attempts when this generation can accept more work. */
+    public void signalPlacementCapacityChanged() {
+        if (placementAvailability != null
+                && !isGenerationRetiringOrRetired()
+                && hasFreshSchedulingStatus()) {
+            placementAvailability.capacityChanged(
+                    status.getRole(), status.topologySnapshot().group(), status.routingAddress());
+        }
     }
 
     /** Validate an exact, still-open pin before consuming its admission right. */
@@ -168,6 +195,10 @@ public class WorkerEndpoint {
         WorkerStatus.EngineObservation engine = status.committedEngineObservation();
         return OptionalLong.of(
                 engine.runningTaskList() == null ? 0L : engine.runningTaskList().size());
+    }
+
+    protected final boolean hasFreshSchedulingStatus() {
+        return status.hasFreshSchedulingStatus(System.nanoTime() / 1000);
     }
 
     protected final void requireStatusGeneration(WorkerStatus ws) {

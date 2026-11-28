@@ -84,7 +84,9 @@ public class ExpirationCleaner {
 
             EndpointRegistry.DetachedGeneration endpointToRetire = null;
             boolean retirementStarted = false;
-            workerStatus.lock.lock();
+            if (!workerStatus.lock.tryLock()) {
+                continue;
+            }
             try {
                 if (workerStatusMap.get(item.getKey()) != workerStatus) {
                     continue;
@@ -92,10 +94,8 @@ public class ExpirationCleaner {
                 if (!workerStatus.isActiveGeneration()) {
                     continue;
                 }
-                WorkerStatus.PollHealth health = workerStatus.pollHealth();
-                long expirationTime = health.lastSuccessfulPollUs() + workerTimeoutUs;
                 long currentTime = System.nanoTime() / 1000;
-                if (currentTime > expirationTime) {
+                if (workerStatus.tryClaimHealthRetirement(currentTime, workerTimeoutUs)) {
                     endpointToRetire =
                             workerDirectory.beginRetirement(role, item.getKey(), workerStatus);
                     retirementStarted = true;
@@ -111,21 +111,26 @@ public class ExpirationCleaner {
         return retirements;
     }
 
-    /** Phase two: await already-detached generations and finalize identities. */
+    /** Phase two: hand off drained-generation cleanup to the retirement executor. */
     private void completeRetirements(List<PendingRetirement> retirements) {
         for (PendingRetirement retirement : retirements) {
-            workerDirectory.completeRetirement(
+            workerDirectory.completeRetirementAsync(
                     retirement.role(),
                     retirement.ipPort(),
                     retirement.workerStatus(),
                     retirement.endpointToRetire(),
                     cacheAwareService,
                     logger);
-            logger.warn(
-                    "Retiring expired worker: {}, role: {}, generation={}",
-                    retirement.ipPort(),
-                    retirement.role(),
-                    retirement.workerStatus().getGenerationId());
+            if (logger.isWarnEnabled()) {
+                WorkerStatus worker = retirement.workerStatus();
+                logger.warn(
+                        "Retiring expired worker: {}, role: {}, generation={}, lastStatus={}, lastCache={}",
+                        retirement.ipPort(),
+                        retirement.role(),
+                        worker.getGenerationId(),
+                        worker.latestStatusPollDiagnostics(),
+                        worker.latestCachePollDiagnostics());
+            }
         }
     }
 

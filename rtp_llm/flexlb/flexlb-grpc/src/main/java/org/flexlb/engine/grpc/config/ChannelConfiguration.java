@@ -17,6 +17,7 @@ import org.springframework.context.annotation.Configuration;
 
 import java.nio.channels.spi.SelectorProvider;
 import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.RejectedExecutionHandler;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 
@@ -26,6 +27,9 @@ import java.util.concurrent.TimeUnit;
  */
 @Configuration
 public class ChannelConfiguration {
+    // gRPC shutdown can race with terminal callbacks. JDK CallerRunsPolicy drops them.
+    private static final RejectedExecutionHandler RUN_GRPC_CALLBACK_INLINE =
+            (callback, executor) -> callback.run();
 
     private final FlexlbConfig config;
 
@@ -35,14 +39,16 @@ public class ChannelConfiguration {
 
     @Bean
     public ThreadPoolExecutor managedChannelThreadPoolExecutor() {
+        var engineGrpc = config.getEngineGrpc();
+        int executorThreads = engineGrpc.getExecutorThreads();
         return new ThreadPoolExecutor(
-                config.getInternalRuntime().getGrpcClientExecutorThreads(),
-                config.getInternalRuntime().getGrpcClientExecutorThreads(),
+                executorThreads,
+                executorThreads,
                 5,
                 TimeUnit.MINUTES,
-                new LinkedBlockingQueue<>(
-                        config.getInternalRuntime().getGrpcClientExecutorQueueCapacity()),
-                new NamedThreadFactory("engine-grpc-client-executor"));
+                new LinkedBlockingQueue<>(engineGrpc.getExecutorQueueCapacity()),
+                new NamedThreadFactory("engine-grpc-client-executor"),
+                RUN_GRPC_CALLBACK_INLINE);
     }
 
     /**
@@ -63,7 +69,7 @@ public class ChannelConfiguration {
                 TimeUnit.MINUTES,
                 new LinkedBlockingQueue<>(2000),
                 new NamedThreadFactory("flexlb-forwarder-channel-executor"),
-                new ThreadPoolExecutor.AbortPolicy());
+                RUN_GRPC_CALLBACK_INLINE);
     }
 
     @Bean
@@ -76,7 +82,7 @@ public class ChannelConfiguration {
         // than the default unbounded MPSC queue. Load is bounded instead at
         // admission: the dispatch executor's admission permit bounds in-flight
         // EnqueueBatch payloads (see DefaultBatchDispatcher).
-        int threads = config.getInternalRuntime().getGrpcClientEventLoopThreads();
+        int threads = config.getEngineGrpc().getEventLoopThreads();
         if (Epoll.isAvailable()) {
             return new EpollEventLoopGroup(
                     threads,

@@ -1264,12 +1264,7 @@ class PrefillEndpointTest {
 
             assertEquals(
                     PrefillState.CapacityStatus.ENDPOINT_RETIRED,
-                    retirementEndpoint
-                            .reserveRouteOwnership(
-                                    createScheduledRequest(
-                                            retirementEndpoint, retirementConfig, 8_102L, 128, 0),
-                                    0L)
-                            .status());
+                    retirementEndpoint.tryBeginRouteCommitAdmission().status());
         } finally {
             retirementEndpoint.close();
             executor.shutdownNow();

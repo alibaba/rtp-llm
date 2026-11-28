@@ -441,6 +441,7 @@ class MultimodalRpcServer(MultimodalRpcServiceServicer):
         worker_status.role = "VIT"
         worker_status.status_version = 1
         worker_status.alive = True
+        worker_status.mm_inflight_inputs.value = self.engine.get_inflight_input_count()
         return worker_status
 
     def GetCacheStatus(self, request: CacheVersionPB, context):

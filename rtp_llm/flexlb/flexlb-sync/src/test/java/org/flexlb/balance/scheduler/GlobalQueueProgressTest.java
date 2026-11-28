@@ -1,5 +1,8 @@
 package org.flexlb.balance.scheduler;
 
+import io.opentelemetry.api.OpenTelemetry;
+import io.opentelemetry.api.trace.Span;
+import io.opentelemetry.context.Context;
 import org.flexlb.balance.PlacementResult;
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.EndpointRegistry.PrefillRoutingEntry;
@@ -8,13 +11,13 @@ import org.flexlb.balance.eviction.EvictionManager;
 import org.flexlb.balance.scheduler.RequestSlot.AdmissionHandle;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
-import org.flexlb.config.VictimStage;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
+import org.flexlb.telemetry.FlexlbTrace;
 import org.junit.jupiter.api.Test;
 import org.springframework.test.util.ReflectionTestUtils;
 
@@ -272,14 +275,6 @@ class GlobalQueueProgressTest {
     }
 
     @Test
-    void queuedPreemptionIsNotBlockedByOrdinarySeatExhaustion() throws Exception {
-        try (Fixture f = new Fixture(RoleType.PREFILL, true)) {
-            f.submit(1, "a");
-            awaitCondition(() -> f.admitted.contains(1L));
-        }
-    }
-
-    @Test
     void admissionFailureDoesNotFenceSmallerRequestOnTheSameWorker() throws Exception {
         try (Fixture f = new Fixture(RoleType.PREFILL)) {
             f.aSlots.set(1);
@@ -289,6 +284,35 @@ class GlobalQueueProgressTest {
             awaitCondition(() -> f.admitted.contains(2L));
             assertFalse(f.admitted.contains(1L));
             assertEquals(1, f.scheduler.getQueuedRequestCount());
+        }
+    }
+
+    @Test
+    void tracesActualRequeueButNotTheCompletedRequestNoOp() throws Exception {
+        Span span = mock(Span.class);
+        when(span.storeInContext(any())).thenCallRealMethod();
+        when(span.isRecording()).thenReturn(true);
+        FlexlbTrace.configure(OpenTelemetry.noop(), "test");
+        try (Fixture f = new Fixture(RoleType.PREFILL)) {
+            BalanceContext context = RequestLifecycleTestSupport.context(f.config, 1L);
+            context.setTraceContext(Context.root().with(span));
+            f.submit(context, "b", 50);
+            awaitCondition(
+                    () -> f.admitted.contains(1L) && f.scheduler.getQueuedRequestCount() == 0);
+
+            var queue =
+                    (GlobalQueueCoordinator)
+                            ReflectionTestUtils.getField(f.scheduler, "globalQueue");
+            var previous = mock(ScheduledRequest.class);
+            var future = f.requests.get(1L);
+            when(previous.future()).thenReturn(future);
+            assertTrue(queue.requeue(previous));
+
+            future.complete(new Response());
+            assertTrue(queue.requeue(previous));
+            verify(span).addEvent("flexlb.queue.requeued");
+        } finally {
+            FlexlbTrace.configure(null, "");
         }
     }
 
@@ -319,12 +343,12 @@ class GlobalQueueProgressTest {
             this(role, false);
         }
 
-        private Fixture(RoleType role, boolean preempt) {
+        private Fixture(RoleType role, boolean priorityOrdering) {
             this.role = role;
             SchedulingTestConfig.useFifoQueue(config);
-            if (preempt) {
+            if (priorityOrdering) {
                 SchedulingTestConfig.usePriorityQueue(config);
-                SchedulingTestConfig.allowVictim(config, VictimStage.PREFILL_QUEUED);
+                config.priorityOrdering().getPreemption().setAllowedVictimStages(Set.of());
             }
             SchedulingTestConfig.useNonBatchDispatcher(config).setMaxInflightPerPrefillWorker(1);
             ConfigService service = mock(ConfigService.class);
@@ -358,7 +382,7 @@ class GlobalQueueProgressTest {
                                 long id = Long.parseLong(context.getRequestId());
                                 selected.add(id);
                                 onSelection.accept(id);
-                                if ("a".equals(groups.get(id)) && aSlots.get() == 0 && !preempt) {
+                                if ("a".equals(groups.get(id)) && aSlots.get() == 0) {
                                     return PlacementResult.blocked(new PlacementKey(role, "a"));
                                 }
                                 if (decodeBlocked.contains(id)) {
@@ -416,8 +440,11 @@ class GlobalQueueProgressTest {
         }
 
         private void submit(long id, String group, int priority) {
-            groups.put(id, group);
-            BalanceContext context = RequestLifecycleTestSupport.context(config, id);
+            submit(RequestLifecycleTestSupport.context(config, id), group, priority);
+        }
+
+        private void submit(BalanceContext context, String group, int priority) {
+            groups.put(Long.parseLong(context.getRequestId()), group);
             context.setSchedulingMetadata(
                     org.flexlb.dao.SchedulingMetadata.explicit(
                             priority, System.currentTimeMillis() + TimeUnit.MINUTES.toMillis(1)));

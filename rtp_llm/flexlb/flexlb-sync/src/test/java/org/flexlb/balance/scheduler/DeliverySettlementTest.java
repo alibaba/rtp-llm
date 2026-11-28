@@ -1,5 +1,6 @@
 package org.flexlb.balance.scheduler;
 
+import com.google.protobuf.ByteString;
 import org.flexlb.balance.delivery.DeliveryResult;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.DeliverySettlementTestSupport;
@@ -8,10 +9,12 @@ import org.flexlb.balance.endpoint.PrefillState;
 import org.flexlb.balance.preemption.PreemptionCancelPhase;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
+import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
+import org.flexlb.engine.grpc.EngineRpcService;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
 import org.junit.jupiter.api.AfterEach;
@@ -23,6 +26,7 @@ import org.junit.jupiter.params.provider.ValueSource;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.OptionalLong;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
@@ -30,6 +34,7 @@ import java.util.concurrent.TimeUnit;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -98,6 +103,61 @@ class DeliverySettlementTest {
             registry.closeExpiration();
             registry.closePublisher();
         }
+    }
+
+    @Test
+    void cancellationDuringBatchClassificationDoesNotInterruptDeliveryOfLiveMember()
+            throws Exception {
+        var endpoints = new DeliveryStrategyTestSupport.TestEndpointCapabilities();
+        var submission = new DeliveryStrategyTestSupport.TestBatchSubmission();
+        var strategy =
+                new BatchDeliveryStrategy(
+                        submission::tryPrepareSubmission,
+                        () -> 701L,
+                        registry,
+                        new DeliveryStrategyTestSupport.TestTelemetry().metrics());
+        var liveContext = RequestLifecycleTestSupport.context(config, 1L);
+        var cancelledContext = spy(RequestLifecycleTestSupport.context(config, 2L));
+        ScheduledRequest live = queueBatchCandidate(liveContext, endpoints.prefill());
+        ScheduledRequest cancelled = queueBatchCandidate(cancelledContext, endpoints.prefill());
+
+        CountDownLatch inputRead = new CountDownLatch(1);
+        CountDownLatch resumeClassification = new CountDownLatch(1);
+        doAnswer(
+                        invocation -> {
+                            ByteString input = (ByteString) invocation.callRealMethod();
+                            if (input != null) {
+                                inputRead.countDown();
+                                await(resumeClassification);
+                            }
+                            return input;
+                        })
+                .when(cancelledContext)
+                .getGenerateInputPb();
+
+        try (var threads = Executors.newSingleThreadExecutor()) {
+            var delivery =
+                    threads.submit(
+                            () ->
+                                    new DeliveryStrategyTestSupport.TestContext()
+                                            .deliver(
+                                                    strategy,
+                                                    List.of(live, cancelled),
+                                                    "cancel-during-classification",
+                                                    0,
+                                                    OptionalLong.of(100L)));
+            try {
+                await(inputRead);
+                registry.cancelRequest(cancelled.requestId(), 0L, CancelReason.CLIENT_CANCELLED);
+                assertNull(cancelledContext.getGenerateInputPb());
+            } finally {
+                resumeClassification.countDown();
+            }
+            assertEquals("COMMITTED", delivery.get(5, TimeUnit.SECONDS));
+        }
+
+        assertEquals(List.of(live), submission.command().exactItems());
+        submission.complete(live, DeliveryResult.delivered());
     }
 
     @ParameterizedTest
@@ -189,6 +249,7 @@ class DeliverySettlementTest {
         for (int i = 1; i < members.size(); i++) {
             Member member = members.get(i);
             member.claim().complete(DeliveryResult.delivered());
+            assertNull(member.item().ctx().getGenerateInputPb());
             assertTrue(member.item().future().get(5, TimeUnit.SECONDS).isSuccess());
             new EndpointEventProjector(registry)
                     .onPrefillStatus(prefill, RoleType.PREFILL, ledger.finish(20L, member.item()));
@@ -248,8 +309,11 @@ class DeliverySettlementTest {
         Member replacement = member(50L, 51L);
         ledger.commit(51L, List.of(replacement.item()));
 
+        assertNotNull(old.item().ctx().getGenerateInputPb());
         reject(old);
 
+        assertNull(old.item().ctx().getGenerateInputPb());
+        assertNotNull(replacement.item().ctx().getGenerateInputPb());
         assertOccupancy(1, 1);
         assertFalse(replacement.item().future().isDone());
     }
@@ -370,6 +434,7 @@ class DeliverySettlementTest {
         ledger.commit(70L, List.of(member.item()));
         member.claim()
                 .complete(new DeliveryResult(status, new IllegalStateException("lost response")));
+        assertNull(member.item().ctx().getGenerateInputPb());
         assertOccupancy(1, 1);
         assertFalse(member.item().future().isDone());
         verify(member.item().decodeEp(), never())
@@ -392,6 +457,7 @@ class DeliverySettlementTest {
         member.claim()
                 .complete(
                         DeliveryResult.notSent(new IllegalStateException("request build failed")));
+        assertNull(member.item().ctx().getGenerateInputPb());
         assertFalse(member.item().future().get(5, TimeUnit.SECONDS).isSuccess());
         assertOccupancy(0, 0);
         verify(member.item().decodeEp())
@@ -749,6 +815,7 @@ class DeliverySettlementTest {
             DecodeEndpoint decode,
             DecodeEndpoint.ReservationHandle reservation) {
         var context = RequestLifecycleTestSupport.context(config, id);
+        context.setGenerateInputPb(ByteString.copyFromUtf8("input-" + id));
         var future = registry.register(context);
         var item =
                 new ScheduledRequest(
@@ -766,6 +833,34 @@ class DeliverySettlementTest {
         var claim = RequestLifecycleTestSupport.claimBatch(registry, item, batchId, () -> true);
         assertNotNull(claim);
         return new Member(item, registry.requestSlot(Long.toString(id)), claim);
+    }
+
+    private ScheduledRequest queueBatchCandidate(BalanceContext context, PrefillEndpoint endpoint) {
+        context.getRequest().setMaxNewTokens(8);
+        context.setGenerateInputPb(
+                EngineRpcService.GenerateInputPB.newBuilder()
+                        .setGenerateConfig(
+                                EngineRpcService.GenerateConfigPB.newBuilder()
+                                        .setCanUsePdSeparation(true)
+                                        .setMaxNewTokens(8)
+                                        .setNumBeams(1))
+                        .build()
+                        .toByteString());
+        var future = registry.register(context);
+        var item =
+                new ScheduledRequest(
+                        context,
+                        future,
+                        new Response(),
+                        null,
+                        null,
+                        endpoint,
+                        null,
+                        null,
+                        System.currentTimeMillis());
+        RequestLifecycleTestSupport.bindRoute(
+                registry, new RequestLifecycleTestSupport.Registered(item, future));
+        return item;
     }
 
     private void reject(Member member) {

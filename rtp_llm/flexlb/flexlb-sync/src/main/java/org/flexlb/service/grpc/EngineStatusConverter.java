@@ -1,5 +1,6 @@
 package org.flexlb.service.grpc;
 
+import it.unimi.dsi.fastutil.longs.LongOpenHashSet;
 import org.flexlb.dao.master.CacheStatus;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.master.WorkerStatus.EngineObservation;
@@ -13,7 +14,6 @@ import org.flexlb.enums.PriorityPreemptionProgress;
 import org.flexlb.enums.TaskPhase;
 
 import java.util.HashMap;
-import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -62,21 +62,38 @@ public class EngineStatusConverter {
     }
 
     /**
-     * Convert CacheStatusPB to CacheStatus
+     * Convert a cache snapshot, preferring packed keys when present.
      */
     public static CacheStatus convertToCacheStatus(EngineRpcService.CacheStatusPB cacheStatusPB) {
+        int packedCount = cacheStatusPB.getCacheKeyListCount();
+        LongOpenHashSet keys =
+                new LongOpenHashSet(
+                        packedCount == 0 ? cacheStatusPB.getCacheKeysCount() : packedCount);
+        if (packedCount == 0) {
+            for (long key : cacheStatusPB.getCacheKeysMap().keySet()) {
+                keys.add(key);
+            }
+        } else {
+            for (int index = 0; index < packedCount; index++) {
+                keys.add(cacheStatusPB.getCacheKeyList(index));
+            }
+        }
+        return convertToCacheStatus(cacheStatusPB, keys);
+    }
+
+    /**
+     * Refresh capacity using a key set already owned by the acknowledged cache version.
+     */
+    public static CacheStatus convertToCacheStatus(
+            EngineRpcService.CacheStatusPB cacheStatusPB, Set<Long> cachedKeys) {
         CacheStatus cacheStatus = new CacheStatus();
         cacheStatus.setAvailableKvCache(cacheStatusPB.getAvailableKvCache());
         cacheStatus.setTotalKvCache(cacheStatusPB.getTotalKvCache());
         cacheStatus.setBlockSize(cacheStatusPB.getBlockSize());
         cacheStatus.setVersion(cacheStatusPB.getVersion());
 
-        Map<Long, Boolean> cacheKeysMap = cacheStatusPB.getCacheKeysMap();
-        // Copy the keySet: protobuf MapField#keySet() returns a VIEW that keeps
-        // the whole WorkerStatusPB message graph reachable until the next sync.
-        Set<Long> cachedKeysSet = new HashSet<>(cacheKeysMap.keySet());
-        cacheStatus.setCachedKeys(cachedKeysSet);
-        cacheStatus.setCacheKeySize(cacheKeysMap.size());
+        cacheStatus.setCachedKeys(cachedKeys);
+        cacheStatus.setCacheKeySize(cachedKeys.size());
         return cacheStatus;
     }
 

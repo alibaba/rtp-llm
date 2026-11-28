@@ -74,6 +74,30 @@ UniConfig 和 Nacos 的内容直接使用同一种配置 JSON，不增加包装�
 `ENABLE_STDOUT_LOG`、`ENABLE_FALLBACK` 不再覆盖 JSON。行为配置只认
 所选来源的 `FLEXLB_CONFIG` 文档，避免嵌套字段到环境变量名的隐式转换。
 
+### ViT 选路
+
+v3 配置的 `router.roles.vit.cacheAffinityEnabled` 默认是 `true`。
+新选路会比较缓存最优和负载最低的 worker。缓存最优节点的估算在途量最多可多出
+`router.roles.vit.maxExtraInflightInputs` 个媒体输入，默认 32，超过就选负载最低的节点。
+设为 0 时只在同负载下优先命中缓存。所有候选负载未知或过期时，仍按缓存评分选址。
+
+`cacheAffinityEnabled` 设为 `false` 时，Master 按 ViT 在途负载与最近派发量选址，不读取或写入临时缓存放置。
+带 key 的 `VIT_ONLY` 请求仍按媒体输入数量记账，同一个 worker 同时被多个请求选中时，
+记账冲突的请求会重新比较负载。已有 ViT 选址结果继续按逻辑 worker、端口和代际校验。将以下字段合入现有 v3 配置。
+
+```json
+{
+  "schemaVersion": 3,
+  "router": { "roles": { "vit": { "cacheAffinityEnabled": false } } }
+}
+```
+
+Master 的 `app.vit.cache.affinity.images` 按图片计数，已加入 Prometheus 默认白名单。
+`kind=total` 统计 `VIT_ONLY` 入口收到的 affinity keys，重复 key 按图片数计入。
+`kind=hit` 统计亲和选路成功后，最终节点的 hash、CPU/GPU embedding 快照或已有临时放置预计能命中的图片。
+每张图最多记一次，计算时点在写入本次临时放置之前。这个指标来自 Master 的选路估算。
+纯负载选路只有总量，空 key 请求没有可计数的图片。
+
 ### UniConfig 连接
 
 Spectrum 部署的扩展配置中启用 Turbo UniConfig：
@@ -190,6 +214,21 @@ UniConfig / Nacos 的 v3 部分更新示例：
 - `router`：角色 availability、execution estimator、selector、cache affinity 和
   group selector。
 - `workerRegistry`：worker health 与 cache-status 刷新策略。
+- `grpcServer`：Master 启动时读取服务端 keepalive 许可。`permitKeepAliveTimeMs` 默认
+  `30000`，`permitKeepAliveWithoutCalls` 默认 `true`。出站 Engine 通道使用
+  Spring 属性 `flexlb.engine-grpc.keep-alive-time-ms` 和
+  `flexlb.engine-grpc.keep-alive-without-calls`，默认 `2000` 和 `true`；
+  grpc-java 会把低于 10 秒的出站间隔提升到 10 秒。
+  入站接收分为 `Schedule` 和 `Cancel` 两条通道。默认并发上限分别为
+  `maxReceivingRequests=1024` 和 `maxReceivingControlRequests=128`，设为 0 使用默认值。
+  `receiveTimeoutMs=30000` 限制读完请求体的时间。`receiveBudgetBytes=0` 使用 JVM
+  Direct 上限的四分之一作为总接收预算，其中八分之一分给 Cancel，最多 128 MiB。
+  接收预算按请求体的 wire bytes 计费，调度和推理耗时在接收计时之外。
+- `engineGrpc.executorThreads`（默认 32）和 `executorQueueCapacity`（默认 10000）控制
+  Master 到 Engine 的 gRPC 回调执行器。`eventLoopThreads`（默认 8）控制共享的 Netty I/O 线程，
+  Engine 通道和 Master 间转发通道共用。三个值均需为正整数，Master 启动时读取。
+- `engineGrpc.kvCacheMaxInboundMessageBytes`：Master 启动时读取 KV Cache 状态响应的
+  接收上限，默认 `134217728`（128 MiB）。其他出站通道仍沿用原有上限。
 - `observability.cacheHit`：recent-key window、指标和理论命中日志。理论命中查询、历史池更新、
   指标与请求日志由独立单线程按入队顺序处理；请求线程仅提交任务。
   后台任务直接读取路由完成后保持不变的请求字段；日志与指标开关在执行时从配置服务读取。
@@ -368,16 +407,14 @@ Engine received→waiting 和 waiting→running 使用 WorkerStatus 中 Engine �
 完成任务的时间戳完整时，无需在轮询中逐个观察到这些阶段。
 
 gRPC 服务端执行器与批次发送执行器初始化后立即通过 `FlexMonitor` 上报一次状态，之后每 2 秒上报忙碌线程数、总线程数和
-排队任务数；gRPC 服务端另报最大线程数、累计拒绝任务数。它们与其它线程池使用相同的
+排队任务数；gRPC 服务端另报最大线程数和在提交线程执行的累计回调数。它们与其它线程池使用相同的
 provider：KMonitor 部署上报 `whale-lb.grpc.server.executor.*` 和
 `whale-lb.dispatch.executor.*`，无需单独接入 Micrometer 采集。
 忙碌线程、排队数、总线程数、最大线程数使用 GAUGE，scrape 读取最近一次上报的快照，
 最多滞后 2 秒；不能用这些快照捕获短于采样间隔的峰值。瞬时指标保留原名。
-拒绝任务数使用 `grpc.server.executor.caller.runs` COUNTER。每次拒绝发生时直接上报 1，
-由监控 provider 累加，不维护本地累计值或上次上报位置。初始化及每 2 秒上报 0，
-使没有拒绝事件时指标仍可查询；零上报不增加计数。Master 重启后计数重新开始。拒绝数包含队列或线程饱和、
-线程池关闭后提交触发的拒绝。保留 `grpc.server.executor.caller.runs` 上报名，
-面板显示“任务拒绝数”，使用 `increase(...[1m])` 查看窗口拒绝数。
+线程池饱和或关闭时，gRPC 回调在提交线程继续执行，以便完成已有 RPC 的收尾。
+新 RPC 在队列满时返回 `RESOURCE_EXHAUSTED`。每次回退到提交线程时，服务端向
+`grpc.server.executor.caller.runs` 上报 1。初始化及每 2 秒上报 0，Master 重启后计数重新开始。
 已初始化的空闲线程池持续上报忙碌线程数和排队任务数为 0，总线程数仍包含空闲线程。
 
 `JvmGcMetricsReporter` 接收 JVM 的 GC 通知，每次记录一次回收和本次暂停毫秒数，
@@ -443,6 +480,10 @@ Decode 预留字段 `inputKvTokens = max(0, seqLen)`，
 - `/flexlb/cache_match/status`、`/flexlb/cache_match/failover`。
 - `/rtp_llm/schedule`、master notification 和 queue snapshot 等路由入口。
 - gRPC 调度入口及 follower-to-master forwarding。
+
+`POST /rtp_llm/master/info` 通过 `requires_generate_input` 公布本节点的派发模式是否需要
+`GenerateInput`。Frontend 可以按目标地址的最新明确能力省略请求体。BATCH Master 在入队前
+以 `8409` 拒绝缺少输入的生成请求，Frontend 可在本次调度的剩余时限内向同一地址补发一次。
 
 Spring profile 与日志、监控 provider 的具体默认值见
 `flexlb-api/src/main/resources/application.yml`。

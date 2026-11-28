@@ -169,6 +169,11 @@ public class LBStatusConsistencyService implements MasterElectService {
         return masterHostIp + ":" + serverPort;
     }
 
+    @Override
+    public long getLeadershipEpoch() {
+        return isNeedConsistency() ? zookeeperMasterElectService.getLeadershipEpoch() : 0L;
+    }
+
     /**
      * Resolves the local address during construction, before subclass fields initialize.
      */

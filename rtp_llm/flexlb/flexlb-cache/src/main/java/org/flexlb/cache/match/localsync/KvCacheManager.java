@@ -1,5 +1,6 @@
 package org.flexlb.cache.match.localsync;
 
+import com.google.common.util.concurrent.Striped;
 import lombok.extern.slf4j.Slf4j;
 import org.flexlb.cache.domain.DiffResult;
 import org.flexlb.cache.telemetry.CacheMetricsReporter;
@@ -20,6 +21,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.locks.Lock;
 
 /**
  * KV cache manager
@@ -42,6 +44,8 @@ public class KvCacheManager implements EngineCacheInvalidator {
     @Autowired private CacheMetricsReporter cacheMetricsReporter;
 
     private final Map<String, String> physicalIpPortByLogicalIpPort = new ConcurrentHashMap<>();
+    // Discovery cleanup and status application may run concurrently for the same logical worker.
+    private final Striped<Lock> workerCacheLocks = Striped.lock(256);
 
     @PostConstruct
     public void init() {
@@ -117,11 +121,17 @@ public class KvCacheManager implements EngineCacheInvalidator {
         if (workerStatus == null) {
             return;
         }
-        updateEngineCache(
-                workerStatus.getWorkerIdentity(),
-                workerStatus.getMetricIpPort(),
-                role,
-                newCacheBlocks);
+        WorkerIdentity identity = workerStatus.getWorkerIdentity();
+        if (identity == null || newCacheBlocks == null) {
+            return;
+        }
+        Lock lock = workerCacheLocks.get(identity.getLogicalIpPort());
+        lock.lock();
+        try {
+            updateEngineCache(identity, workerStatus.getMetricIpPort(), role, newCacheBlocks);
+        } finally {
+            lock.unlock();
+        }
     }
 
     /** Remove both local and global cache-index state for one engine. */
@@ -129,9 +139,7 @@ public class KvCacheManager implements EngineCacheInvalidator {
         if (engineIpPort == null) {
             return;
         }
-        engineLocalView.removeAllCacheBlockOfEngine(engineIpPort);
-        globalCacheIndex.removeAllCacheBlockOfEngine(engineIpPort);
-        physicalIpPortByLogicalIpPort.remove(engineIpPort);
+        removeCachedWorkerBlocks(engineIpPort, Set.of());
         cacheMetricsReporter.reportGlobalCacheMetrics(
                 globalCacheIndex.totalBlocks(), globalCacheIndex.totalMappings());
     }
@@ -145,30 +153,42 @@ public class KvCacheManager implements EngineCacheInvalidator {
             return;
         }
         Set<String> activePhysicalIpPorts = new HashSet<>(activeEngineIpPorts);
-        Set<String> staleEngineIpPorts = new HashSet<>(engineLocalView.getAllEngineIpPorts());
-        staleEngineIpPorts.removeIf(
-                engineIpPort ->
-                        activePhysicalIpPorts.contains(
-                                physicalIpPortByLogicalIpPort.getOrDefault(
-                                        engineIpPort, engineIpPort)));
-        for (String staleEngineIpPort : staleEngineIpPorts) {
+        for (String engineIpPort : engineLocalView.getAllEngineIpPorts()) {
+            if (activePhysicalIpPorts.contains(
+                    physicalIpPortByLogicalIpPort.getOrDefault(engineIpPort, engineIpPort))) {
+                continue;
+            }
             long startTime = System.nanoTime() / 1000;
-            engineLocalView.removeAllCacheBlockOfEngine(staleEngineIpPort);
-            globalCacheIndex.removeAllCacheBlockOfEngine(staleEngineIpPort);
-            physicalIpPortByLogicalIpPort.remove(staleEngineIpPort);
-            log.info(
-                    "Removed stale engine cache: {}, cost={}us",
-                    staleEngineIpPort,
-                    System.nanoTime() / 1000 - startTime);
+            if (removeCachedWorkerBlocks(engineIpPort, activePhysicalIpPorts)) {
+                log.info(
+                        "Removed stale engine cache: {}, cost={}us",
+                        engineIpPort,
+                        System.nanoTime() / 1000 - startTime);
+            }
+        }
+    }
+
+    private boolean removeCachedWorkerBlocks(
+            String engineIpPort, Set<String> activePhysicalIpPorts) {
+        Lock lock = workerCacheLocks.get(engineIpPort);
+        lock.lock();
+        try {
+            if (activePhysicalIpPorts.contains(
+                    physicalIpPortByLogicalIpPort.getOrDefault(engineIpPort, engineIpPort))) {
+                return false;
+            }
+            Set<Long> removedBlocks = engineLocalView.removeAllCacheBlockOfEngine(engineIpPort);
+            globalCacheIndex.removeAllCacheBlockOfEngine(engineIpPort, removedBlocks);
+            physicalIpPortByLogicalIpPort.remove(engineIpPort);
+            return true;
+        } finally {
+            lock.unlock();
         }
     }
 
     private void updateEngineCache(
             WorkerIdentity identity, String metricIpPort, String role, Set<Long> newCacheBlocks) {
-        String engineIPort = identity == null ? null : identity.getLogicalIpPort();
-        if (engineIPort == null || newCacheBlocks == null) {
-            return;
-        }
+        String engineIPort = identity.getLogicalIpPort();
         physicalIpPortByLogicalIpPort.put(engineIPort, identity.getPhysicalIpPort());
 
         // Calculate diff
@@ -183,18 +203,15 @@ public class KvCacheManager implements EngineCacheInvalidator {
         }
 
         // Apply added cache blocks
-        for (Long addedBlock : diffResult.getAddedBlocks()) {
-            boolean contains = newCacheBlocks.contains(addedBlock);
-            if (contains) {
-                // Update local view
-                engineLocalView.addOrUpdateCacheBlock(engineIPort, addedBlock);
-                // Update global index
-                globalCacheIndex.addCacheBlock(addedBlock, engineIPort);
-            }
+        for (var added = diffResult.getAddedBlocks().iterator(); added.hasNext(); ) {
+            long block = added.nextLong();
+            engineLocalView.addOrUpdateCacheBlock(engineIPort, block);
+            globalCacheIndex.addCacheBlock(block, engineIPort);
         }
 
         // Apply removed cache blocks
-        for (Long removedBlock : diffResult.getRemovedBlocks()) {
+        for (var removed = diffResult.getRemovedBlocks().iterator(); removed.hasNext(); ) {
+            long removedBlock = removed.nextLong();
             // Remove from local view
             engineLocalView.removeCacheBlock(engineIPort, removedBlock);
             // Remove from global index

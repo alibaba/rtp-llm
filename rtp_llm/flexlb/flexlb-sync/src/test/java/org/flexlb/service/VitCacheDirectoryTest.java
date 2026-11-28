@@ -4,10 +4,15 @@ import io.grpc.Server;
 import io.grpc.netty.NettyServerBuilder;
 import io.grpc.stub.StreamObserver;
 import io.netty.channel.nio.NioEventLoopGroup;
+import io.opentelemetry.api.OpenTelemetry;
+import io.opentelemetry.api.trace.Span;
+import io.opentelemetry.context.Context;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
+import org.flexlb.balance.scheduler.SchedulingTestConfig;
 import org.flexlb.config.CacheMatchConfiguration;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.consistency.LBStatusConsistencyService;
+import org.flexlb.constant.MetricConstant;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.master.WorkerStatus;
@@ -21,7 +26,11 @@ import org.flexlb.engine.grpc.client.EngineGrpcClient;
 import org.flexlb.engine.grpc.core.GrpcChannelFactory;
 import org.flexlb.engine.grpc.monitor.GrpcReporter;
 import org.flexlb.engine.grpc.nameresolver.EngineAddressResolver;
+import org.flexlb.metric.FlexMetricTags;
+import org.flexlb.metric.FlexMonitor;
+import org.flexlb.service.config.merger.FlexlbConfigMerger;
 import org.flexlb.sync.status.WorkerDirectory;
+import org.flexlb.telemetry.FlexlbTrace;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -29,7 +38,10 @@ import org.junit.jupiter.api.Test;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.OptionalLong;
+import java.util.Set;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.ThreadPoolExecutor;
@@ -43,9 +55,11 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.any;
 import static org.mockito.Mockito.eq;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
+import static org.mockito.Mockito.verifyNoMoreInteractions;
 import static org.mockito.Mockito.when;
 
 /**
@@ -54,6 +68,7 @@ import static org.mockito.Mockito.when;
 class VitCacheDirectoryTest {
     private VitCacheDirectory directory;
     private VitCacheSelector selector;
+    private final FlexMonitor monitor = mock(FlexMonitor.class);
 
     private final Map<String, WorkerStatus> live = new HashMap<>();
 
@@ -61,6 +76,7 @@ class VitCacheDirectoryTest {
     private WorkerStatus b;
     private EngineGrpcClient grpc;
     private LBStatusConsistencyService consistency;
+    private WorkerDirectory workers;
 
     @BeforeEach
     void setUp() {
@@ -68,10 +84,8 @@ class VitCacheDirectoryTest {
         b = worker("10.0.0.2", "two");
         live.put(a.routingAddress(), a);
         live.put(b.routingAddress(), b);
-        var workers = mock(WorkerDirectory.class);
-        when(workers.statusSnapshot(RoleType.VIT)).thenAnswer(call -> Map.copyOf(live));
-        when(workers.endpointAddressSnapshot(RoleType.VIT))
-                .thenAnswer(call -> new java.util.ArrayList<>(live.keySet()));
+        workers = mock(WorkerDirectory.class);
+        when(workers.vitRoutingSnapshot()).thenAnswer(call -> Map.copyOf(live));
         when(workers.captureEndpoint(eq(RoleType.VIT), any()))
                 .thenAnswer(
                         call -> {
@@ -83,7 +97,7 @@ class VitCacheDirectoryTest {
         grpc = mock(EngineGrpcClient.class);
         consistency = mock(LBStatusConsistencyService.class);
         directory = new VitCacheDirectory(workers, grpc, consistency);
-        selector = new VitCacheSelector(directory, workers);
+        selector = new VitCacheSelector(directory, workers, monitor);
     }
 
     @AfterEach
@@ -116,6 +130,205 @@ class VitCacheDirectoryTest {
         }
         live.put(b.getIpPort(), worker(b.getIp(), "one"));
         assertFalse(selector.validate(ctx, "one").isSuccess());
+    }
+
+    @Test
+    void selectedVitRejectsAnEngineIndexOutsideTheRegisteredEndpoint() {
+        var ctx = context("image");
+        var selected = selector.select(ctx, "one");
+        assertEquals(a.getPhysicalIpPort(), selected.getPhysicalIpPort());
+        ctx.getRequest().setSelectedVit(selected);
+        assertTrue(selector.validate(ctx, "one").isSuccess());
+
+        selected.setEngineIndex(1);
+        assertFalse(selector.validate(ctx, "one").isSuccess());
+    }
+
+    @Test
+    void vitOnlyWithoutAffinityKeysSelectsByLoadAndRevalidatesTheWorker() {
+        a.recordVitLoad(OptionalLong.of(8), a.vitRoutedInputs(), System.nanoTime());
+        b.recordVitLoad(OptionalLong.of(1), b.vitRoutedInputs(), System.nanoTime());
+        var route = context();
+        assertFalse(selector.select(route, null).isSuccess());
+
+        route.getRequest().setVitRouteOnly(true);
+        var cacheDirectory = mock(VitCacheDirectory.class);
+        var loadSelector = new VitCacheSelector(cacheDirectory, workers, monitor);
+        var selected = loadSelector.select(route, null);
+        assertTrue(selected.isSuccess());
+        assertEquals(b.getLogicalIpPort(), selected.getLogicalIpPort());
+        assertEquals(a.getLogicalIpPort(), loadSelector.select(route, "one").getLogicalIpPort());
+        assertEquals(0L, b.vitRoutedInputs());
+        verifyNoInteractions(cacheDirectory);
+
+        route.getRequest().setSelectedVit(selected);
+        assertTrue(loadSelector.validate(route, "two").isSuccess());
+    }
+
+    @Test
+    void loadOnlyModeIgnoresAffinityAndChargesEachMediaInputOnce() {
+        var config =
+                FlexlbConfigMerger.merge(
+                        SchedulingTestConfig.newConfig(),
+                        """
+                {"router":{"roles":{"vit":{"cacheAffinityEnabled":false}}}}
+                """,
+                        "FLEXLB_CONFIG");
+        snapshot(a, "a1", "image");
+        a.recordVitLoad(OptionalLong.of(8), a.vitRoutedInputs(), System.nanoTime());
+        b.recordVitLoad(OptionalLong.of(1), b.vitRoutedInputs(), System.nanoTime());
+        assertEquals(
+                a.getLogicalIpPort(), selector.select(context("image"), null).getLogicalIpPort());
+
+        var route = context(config, "image", "image");
+        route.getRequest().setVitRouteOnly(true);
+        var selected = selector.select(route, null);
+        assertEquals(b.getLogicalIpPort(), selected.getLogicalIpPort());
+        assertEquals(2L, b.vitRoutedInputs());
+        assertEquals(0L, a.vitRoutedInputs());
+
+        route.getRequest().setSelectedVit(selected);
+        assertTrue(selector.validate(route, "two").isSuccess());
+        assertEquals(2L, b.vitRoutedInputs());
+        verifyNoInteractions(monitor);
+    }
+
+    @Test
+    void loadOnlyModeRanksAgainAfterLosingTheAssignmentRace() throws Exception {
+        var config = new FlexlbConfig();
+        config.getRouter().getRoles().getVit().setCacheAffinityEnabled(false);
+        a.recordVitLoad(OptionalLong.of(0), 0L, System.nanoTime());
+        b.recordVitLoad(OptionalLong.of(1), 0L, System.nanoTime());
+        CountDownLatch bothSelectedA = new CountDownLatch(2);
+        var endpoint = new WorkerEndpoint(a);
+        when(workers.captureEndpoint(RoleType.VIT, a.routingAddress()))
+                .thenAnswer(
+                        call -> {
+                            bothSelectedA.countDown();
+                            assertTrue(bothSelectedA.await(5, TimeUnit.SECONDS));
+                            return endpoint.tryPinGeneration();
+                        });
+
+        try (var executor = Executors.newFixedThreadPool(2)) {
+            var first = context(config, "image", "image");
+            first.getRequest().setVitRouteOnly(true);
+            var second = context(config, "image", "image");
+            second.getRequest().setVitRouteOnly(true);
+            var one = executor.submit(() -> selector.select(first, null).getLogicalIpPort());
+            var two = executor.submit(() -> selector.select(second, null).getLogicalIpPort());
+            assertEquals(
+                    Set.of(a.getLogicalIpPort(), b.getLogicalIpPort()),
+                    Set.of(one.get(6, TimeUnit.SECONDS), two.get(6, TimeUnit.SECONDS)));
+        }
+        assertEquals(2L, a.vitRoutedInputs());
+        assertEquals(2L, b.vitRoutedInputs());
+        verify(workers, times(2)).captureEndpoint(RoleType.VIT, a.routingAddress());
+        verify(workers).captureEndpoint(RoleType.VIT, b.routingAddress());
+    }
+
+    @Test
+    void cacheAffinityKeepsTheDefaultGapBoundaryAndFallsBackAt33() {
+        snapshot(a, "a1", "x", "y");
+        var route = context("x", "y");
+        recordLoad(b, 10);
+        recordLoad(a, 42);
+        assertEquals(a.getIp(), selector.select(route, null).getServerIp());
+
+        recordLoad(a, 43);
+        assertEquals(b.getIp(), selector.select(route, null).getServerIp());
+    }
+
+    @Test
+    void cacheAffinityPrefersKnownLoadAndUsesCacheWhenAllSamplesAreUnknown() {
+        snapshot(a, "a1", "x");
+        var route = context("x");
+        long staleNanos = System.nanoTime() - TimeUnit.SECONDS.toNanos(2);
+        a.recordVitLoad(OptionalLong.of(0), a.vitRoutedInputs(), staleNanos);
+        assertEquals(a.getIp(), selector.select(route, null).getServerIp());
+
+        recordLoad(b, 100);
+        assertEquals(b.getIp(), selector.select(route, null).getServerIp());
+    }
+
+    @Test
+    void zeroGapUsesRoutedInputsAndReportsHitsOnTheFinalWorker() {
+        snapshot(a, "a1", "x", "y");
+        snapshot(b, "b1", "x");
+        var route = context("x", "y");
+        route.getRequest().setVitRouteOnly(true);
+        route.getConfig().getRouter().getRoles().getVit().setMaxExtraInflightInputs(0);
+        recordLoad(a, 0);
+        recordLoad(b, 0);
+
+        assertEquals(a.getIp(), selector.select(route, null).getServerIp());
+        assertEquals(b.getIp(), selector.select(route, null).getServerIp());
+        assertEquals(2L, a.vitRoutedInputs());
+        assertEquals(2L, b.vitRoutedInputs());
+        var hits = FlexMetricTags.of("kind", "hit");
+        verify(monitor).report(MetricConstant.VIT_CACHE_AFFINITY_IMAGES, hits, 2);
+        verify(monitor).report(MetricConstant.VIT_CACHE_AFFINITY_IMAGES, hits, 1);
+    }
+
+    @Test
+    void theoreticalCacheHitsCountOriginalImagesOnceBeforePublishingPlacements() {
+        tierSnapshot(a, List.of("both"), List.of("both", "gpu"), List.of("cpu"));
+        var route = context("both", "both", "gpu", "cpu", "cold", "cold");
+        route.getRequest().setVitRouteOnly(true);
+        var total = FlexMetricTags.of("kind", "total");
+        var hit = FlexMetricTags.of("kind", "hit");
+
+        selector.recordVitOnlyInputs(route.getRequest().getCacheAffinityKeys());
+        assertEquals(a.getIp(), selector.select(route, "one").getServerIp());
+        var reports = org.mockito.Mockito.inOrder(monitor);
+        reports.verify(monitor).report(MetricConstant.VIT_CACHE_AFFINITY_IMAGES, total, 6);
+        reports.verify(monitor).prepare(MetricConstant.VIT_CACHE_AFFINITY_IMAGES, hit);
+        reports.verify(monitor).report(MetricConstant.VIT_CACHE_AFFINITY_IMAGES, hit, 4);
+
+        assertEquals(a.getIp(), selector.select(route, "one").getServerIp());
+        reports.verify(monitor).report(MetricConstant.VIT_CACHE_AFFINITY_IMAGES, hit, 6);
+
+        var fullRoute = context("both");
+        assertEquals(a.getIp(), selector.select(fullRoute, "one").getServerIp());
+        verifyNoMoreInteractions(monitor);
+    }
+
+    @Test
+    void vitOnlyRoutesAccountForMediaAssignedSinceThePollStarted() {
+        snapshot(a, "a1");
+        snapshot(b, "b1");
+        long aPollCursor = a.vitRoutedInputs();
+        a.recordVitLoad(OptionalLong.of(0), aPollCursor, System.nanoTime());
+        b.recordVitLoad(OptionalLong.of(1), b.vitRoutedInputs(), System.nanoTime());
+
+        var route = context("cold", "cold");
+        route.getRequest().setVitRouteOnly(true);
+        assertEquals(a.getIp(), selector.select(route, null).getServerIp());
+        assertEquals(2L, a.vitRoutedInputs());
+
+        // A cold key still follows its pending placement while an unrelated key
+        // follows current load. A poll started before assignment keeps the charge.
+        a.recordVitLoad(OptionalLong.of(0), aPollCursor, System.nanoTime());
+        assertEquals(a.getIp(), selector.select(context("cold"), null).getServerIp());
+        assertEquals(b.getIp(), selector.select(context("independent"), null).getServerIp());
+        a.recordVitLoad(OptionalLong.of(0), a.vitRoutedInputs(), System.nanoTime());
+        assertEquals(a.getIp(), selector.select(context("another"), null).getServerIp());
+    }
+
+    @Test
+    void capturesOnlyTheWinningGenerationAndRejectsAReplacementBeforeAccounting() {
+        snapshot(a, "a1", "image");
+        snapshot(b, "b1");
+        var route = context("image");
+        route.getRequest().setVitRouteOnly(true);
+        var replacement = worker(a.getIp(), "one");
+        when(workers.captureEndpoint(RoleType.VIT, a.routingAddress()))
+                .thenReturn(new WorkerEndpoint(replacement).tryPinGeneration());
+        assertFalse(selector.select(route, null).isSuccess());
+        assertEquals(0L, a.vitRoutedInputs());
+        assertEquals(0L, replacement.vitRoutedInputs());
+        verify(workers).captureEndpoint(RoleType.VIT, a.routingAddress());
+        verify(workers, org.mockito.Mockito.never())
+                .captureEndpoint(RoleType.VIT, b.routingAddress());
     }
 
     @Test
@@ -374,15 +587,37 @@ class VitCacheDirectoryTest {
     }
 
     @Test
-    void selectedVitRejectsAnEngineIndexOutsideTheRegisteredEndpoint() {
+    void tracesWhyAnEarlierVitSelectionWasRejected() {
+        snapshot(a, "a1", "image");
         var ctx = context("image");
         var selected = selector.select(ctx, "one");
-        assertEquals(a.getPhysicalIpPort(), selected.getPhysicalIpPort());
         ctx.getRequest().setSelectedVit(selected);
-        assertTrue(selector.validate(ctx, "one").isSuccess());
+        Span span = mock(Span.class);
+        when(span.storeInContext(any())).thenCallRealMethod();
+        ctx.setTraceContext(Context.root().with(span));
+        FlexlbTrace.configure(OpenTelemetry.noop(), "test");
+        try {
+            assertTrue(selector.validate(ctx, "one").isSuccess());
+            verify(span, never()).setAttribute(eq(FlexlbTrace.VIT_VALIDATION_REASON), any());
 
-        selected.setEngineIndex(1);
-        assertFalse(selector.validate(ctx, "one").isSuccess());
+            assertFalse(selector.validate(ctx, "two").isSuccess());
+            verify(span).setAttribute(FlexlbTrace.VIT_VALIDATION_REASON, "policy_group_mismatch");
+
+            selected.setGrpcPort(9000);
+            assertFalse(selector.validate(ctx, "one").isSuccess());
+            verify(span).setAttribute(FlexlbTrace.VIT_VALIDATION_REASON, "grpc_port_mismatch");
+
+            selected.setGrpcPort(a.getGrpcPort());
+            selected.setWorkerGeneration(0);
+            assertFalse(selector.validate(ctx, "one").isSuccess());
+            verify(span).setAttribute(FlexlbTrace.VIT_VALIDATION_REASON, "generation_mismatch");
+
+            live.remove(a.routingAddress());
+            assertFalse(selector.validate(ctx, "one").isSuccess());
+            verify(span).setAttribute(FlexlbTrace.VIT_VALIDATION_REASON, "endpoint_unavailable");
+        } finally {
+            FlexlbTrace.configure(null, "");
+        }
     }
 
     @Test
@@ -456,13 +691,22 @@ class VitCacheDirectoryTest {
     }
 
     private BalanceContext context(String... keys) {
+        return context(new FlexlbConfig(), keys);
+    }
+
+    private BalanceContext context(FlexlbConfig config, String... keys) {
         Request request = new Request();
         request.setRequestId("123");
         request.setCacheAffinityKeys(List.of(keys));
         request.setGenerateTimeout(30000);
-        BalanceContext context = new BalanceContext(new FlexlbConfig());
+        BalanceContext context = new BalanceContext(config);
         context.setRequest(request);
         return context;
+    }
+
+    private static void recordLoad(WorkerStatus worker, long inflight) {
+        worker.recordVitLoad(
+                OptionalLong.of(inflight), worker.vitRoutedInputs(), System.nanoTime());
     }
 
     private void snapshot(WorkerStatus worker, String epoch, String... keys) {

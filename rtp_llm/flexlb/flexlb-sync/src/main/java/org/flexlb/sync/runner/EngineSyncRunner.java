@@ -24,7 +24,6 @@ import java.util.OptionalLong;
 import java.util.Set;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.RejectedExecutionException;
-import java.util.concurrent.atomic.LongAdder;
 import java.util.function.Function;
 import java.util.stream.Collectors;
 
@@ -43,6 +42,8 @@ public class EngineSyncRunner implements Runnable {
     private final WorkerAddressService workerAddressService;
 
     private final ExecutorService statusCheckExecutor;
+    private final ExecutorService cachePollExecutor;
+    private final ExecutorService statusApplicationExecutor;
 
     private final EngineHealthReporter engineHealthReporter;
 
@@ -56,7 +57,7 @@ public class EngineSyncRunner implements Runnable {
 
     private final long syncRequestTimeoutMs;
 
-    private final LongAdder syncCount;
+    private final long syncCycleId;
 
     private final Long syncEngineStatusInterval;
 
@@ -77,7 +78,7 @@ public class EngineSyncRunner implements Runnable {
             CacheAwareService cacheAwareService,
             DynamicCacheIntervalService cacheIntervalService,
             long syncRequestTimeoutMs,
-            LongAdder syncCount,
+            long syncCycleId,
             Long syncEngineStatusInterval,
             boolean cacheFullSnapshotDebugMode,
             long statusStaleAfterUs) {
@@ -86,13 +87,15 @@ public class EngineSyncRunner implements Runnable {
                 workerDirectory,
                 workerAddressService,
                 statusCheckExecutor,
+                statusCheckExecutor,
+                statusCheckExecutor,
                 engineHealthReporter,
                 engineGrpcService,
                 roleType,
                 cacheAwareService,
                 cacheIntervalService,
                 syncRequestTimeoutMs,
-                syncCount,
+                syncCycleId,
                 syncEngineStatusInterval,
                 false,
                 cacheFullSnapshotDebugMode,
@@ -104,13 +107,15 @@ public class EngineSyncRunner implements Runnable {
             WorkerDirectory workerDirectory,
             WorkerAddressService workerAddressService,
             ExecutorService statusCheckExecutor,
+            ExecutorService cachePollExecutor,
+            ExecutorService statusApplicationExecutor,
             EngineHealthReporter engineHealthReporter,
             EngineGrpcService engineGrpcService,
             RoleType roleType,
             CacheAwareService cacheAwareService,
             DynamicCacheIntervalService cacheIntervalService,
             long syncRequestTimeoutMs,
-            LongAdder syncCount,
+            long syncCycleId,
             Long syncEngineStatusInterval,
             boolean kvcmEnabled,
             boolean cacheFullSnapshotDebugMode,
@@ -120,6 +125,8 @@ public class EngineSyncRunner implements Runnable {
         this.workerAddressService = workerAddressService;
         this.workerDirectory = Objects.requireNonNull(workerDirectory, "workerDirectory");
         this.statusCheckExecutor = statusCheckExecutor;
+        this.cachePollExecutor = cachePollExecutor;
+        this.statusApplicationExecutor = statusApplicationExecutor;
         this.engineHealthReporter = engineHealthReporter;
         this.engineGrpcService = engineGrpcService;
         this.roleType = roleType;
@@ -127,7 +134,7 @@ public class EngineSyncRunner implements Runnable {
         this.cacheIntervalService =
                 Objects.requireNonNull(cacheIntervalService, "cacheIntervalService");
         this.syncRequestTimeoutMs = syncRequestTimeoutMs;
-        this.syncCount = syncCount;
+        this.syncCycleId = syncCycleId;
         this.syncEngineStatusInterval = syncEngineStatusInterval;
         this.kvcmEnabled = kvcmEnabled;
         this.cacheFullSnapshotDebugMode = cacheFullSnapshotDebugMode;
@@ -143,8 +150,14 @@ public class EngineSyncRunner implements Runnable {
                 "EngineSyncRunner start for model: {}, role: {}", modelName, roleType.toString());
         try {
             long startTimeInUs = System.nanoTime() / 1000;
-            List<WorkerHost> latestEngineWorkerList =
-                    workerAddressService.getEngineWorkerList(modelName, roleType);
+            List<WorkerHost> latestEngineWorkerList;
+            try {
+                latestEngineWorkerList =
+                        workerAddressService.getEngineWorkerList(modelName, roleType);
+            } catch (RuntimeException discoveryFailure) {
+                pollKnownWorkers(discoveryFailure);
+                return;
+            }
             logger.debug(
                     "workerAddressService getEngineWorkerList, model: {}, role: {}, size: {}",
                     modelName,
@@ -196,6 +209,7 @@ public class EngineSyncRunner implements Runnable {
 
             logger.debug(
                     "Submitting status check tasks for {} workers", latestEngineWorkerList.size());
+            boolean pollCache = shouldPollCache();
             for (WorkerHost host : latestEngineWorkerList) {
                 String workerIpPort = routingAddress.apply(host);
                 String site = host.getSite();
@@ -212,94 +226,14 @@ public class EngineSyncRunner implements Runnable {
                                 host.getEngineIndex(),
                                 host.getMultiEngineNum());
 
-                if (!workerStatus.isActiveGeneration()) {
-                    logger.debug(
-                            "Skip retiring WorkerStatus generation {} for {}",
-                            workerStatus.getGenerationId(),
-                            workerIpPort);
-                    continue;
-                }
-
-                WorkerStatus.PollLease statusPollLease = workerStatus.tryBeginStatusPoll();
-                if (statusPollLease != null) {
-                    boolean handedOff = false;
-                    try {
-                        logger.debug(
-                                "Submitting GrpcWorkerStatusRunner for worker: {}, site: {}",
-                                workerIpPort,
-                                site);
-                        GrpcWorkerStatusRunner grpcWorkerStatusRunner =
-                                new GrpcWorkerStatusRunner(
-                                        modelName,
-                                        workerIpPort,
-                                        host.getWorkerStatusPort(),
-                                        site,
-                                        roleType,
-                                        host.getGroup(),
-                                        workerStatus,
-                                        statusPollLease,
-                                        workerDirectory,
-                                        engineHealthReporter,
-                                        engineGrpcService,
-                                        syncRequestTimeoutMs,
-                                        cacheAwareService,
-                                        statusCheckExecutor);
-                        statusCheckExecutor.submit(grpcWorkerStatusRunner);
-                        handedOff = true;
-                    } catch (RejectedExecutionException e) {
-                        logger.debug(
-                                "Status check rejected for worker: {}, reset flag for retry",
-                                workerIpPort);
-                    } finally {
-                        if (!handedOff) {
-                            statusPollLease.close();
-                        }
-                    }
-                } else {
-                    logger.debug(
-                            "Skip status check for worker: {}, previous request in progress",
-                            workerIpPort);
-                }
-
-                WorkerStatus.PollLease cachePollLease =
-                        kvcmEnabled ? null : workerStatus.tryBeginCachePoll();
-                if (cachePollLease != null) {
-                    boolean handedOff = false;
-                    try {
-                        logger.debug(
-                                "Submitting GrpcCacheStatusCheckRunner for worker: {}, site: {}",
-                                workerIpPort,
-                                site);
-                        GrpcCacheStatusCheckRunner grpcCacheStatusCheckRunner =
-                                new GrpcCacheStatusCheckRunner(
-                                        modelName,
-                                        workerIpPort,
-                                        host.getWorkerStatusPort(),
-                                        site,
-                                        roleType,
-                                        workerStatus,
-                                        cachePollLease,
-                                        workerDirectory,
-                                        engineHealthReporter,
-                                        engineGrpcService,
-                                        cacheAwareService,
-                                        cacheIntervalService,
-                                        syncRequestTimeoutMs,
-                                        syncCount,
-                                        syncEngineStatusInterval,
-                                        cacheFullSnapshotDebugMode,
-                                        statusCheckExecutor);
-                        statusCheckExecutor.submit(grpcCacheStatusCheckRunner);
-                        handedOff = true;
-                    } catch (RejectedExecutionException e) {
-                        logger.debug(
-                                "Cache check rejected for worker: {}, reset flag for retry",
-                                workerIpPort);
-                    } finally {
-                        if (!handedOff) {
-                            cachePollLease.close();
-                        }
-                    }
+                if (workerStatus != null && workerStatus.isActiveGeneration()) {
+                    workerStatus.recordDiscoveredStatusPort(host.getWorkerStatusPort());
+                    submitPolls(
+                            workerStatus,
+                            host.getWorkerStatusPort(),
+                            site,
+                            host.getGroup(),
+                            pollCache);
                 }
             }
             logger.debug(
@@ -389,6 +323,127 @@ public class EngineSyncRunner implements Runnable {
         }
     }
 
+    private void pollKnownWorkers(RuntimeException failure) {
+        var known = workerDirectory.statusSnapshot(roleType);
+        logger.warn(
+                "Service discovery failed, polling known workers: model={}, role={}, workers={}",
+                modelName,
+                roleType,
+                known.size(),
+                failure);
+        engineHealthReporter.reportStatusCheckerFail(
+                BalanceStatusEnum.SERVICE_DISCOVERY_ERROR, null);
+        boolean pollCache = shouldPollCache();
+        for (WorkerStatus worker : known.values()) {
+            int statusPort = worker.discoveredStatusPort();
+            if (statusPort > 0
+                    && worker.isActiveGeneration()
+                    && workerDirectory.isCurrentStatus(roleType, worker.routingAddress(), worker)) {
+                var topology = worker.topologySnapshot();
+                submitPolls(worker, statusPort, topology.site(), topology.group(), pollCache);
+            }
+        }
+    }
+
+    private boolean shouldPollCache() {
+        if (kvcmEnabled) {
+            return false;
+        }
+        if (!roleType.requiresCacheKeys()) {
+            return true;
+        }
+        long roundInterval =
+                Math.max(
+                        1L, cacheIntervalService.getCurrentIntervalMs() / syncEngineStatusInterval);
+        return syncCycleId % roundInterval == 0L;
+    }
+
+    private void submitPolls(
+            WorkerStatus workerStatus,
+            int statusPort,
+            String site,
+            String group,
+            boolean pollCache) {
+        String workerIpPort = workerStatus.routingAddress();
+        WorkerStatus.PollLease statusPollLease = workerStatus.tryBeginStatusPoll();
+        if (statusPollLease != null) {
+            boolean handedOff = false;
+            try {
+                logger.debug(
+                        "Submitting GrpcWorkerStatusRunner for worker: {}, site: {}",
+                        workerIpPort,
+                        site);
+                GrpcWorkerStatusRunner grpcWorkerStatusRunner =
+                        new GrpcWorkerStatusRunner(
+                                modelName,
+                                workerIpPort,
+                                statusPort,
+                                site,
+                                roleType,
+                                group,
+                                workerStatus,
+                                statusPollLease,
+                                workerDirectory,
+                                engineHealthReporter,
+                                engineGrpcService,
+                                syncRequestTimeoutMs,
+                                cacheAwareService,
+                                statusApplicationExecutor);
+                statusCheckExecutor.submit(grpcWorkerStatusRunner);
+                handedOff = true;
+            } catch (RejectedExecutionException e) {
+                statusPollLease.completeDiagnostics(WorkerStatus.PollOutcome.SUBMISSION_REJECTED);
+                logger.debug(
+                        "Status check rejected for worker: {}, reset flag for retry", workerIpPort);
+            } finally {
+                if (!handedOff) {
+                    statusPollLease.close();
+                }
+            }
+        } else {
+            logger.debug(
+                    "Skip status check for worker: {}, previous request in progress", workerIpPort);
+        }
+
+        WorkerStatus.PollLease cachePollLease = pollCache ? workerStatus.tryBeginCachePoll() : null;
+        if (cachePollLease != null) {
+            boolean handedOff = false;
+            try {
+                logger.debug(
+                        "Submitting GrpcCacheStatusCheckRunner for worker: {}, site: {}",
+                        workerIpPort,
+                        site);
+                GrpcCacheStatusCheckRunner grpcCacheStatusCheckRunner =
+                        new GrpcCacheStatusCheckRunner(
+                                modelName,
+                                workerIpPort,
+                                statusPort,
+                                site,
+                                roleType,
+                                workerStatus,
+                                cachePollLease,
+                                workerDirectory,
+                                engineHealthReporter,
+                                engineGrpcService,
+                                cacheAwareService,
+                                cacheIntervalService,
+                                syncRequestTimeoutMs,
+                                cacheFullSnapshotDebugMode,
+                                statusApplicationExecutor);
+                cachePollExecutor.submit(grpcCacheStatusCheckRunner);
+                handedOff = true;
+            } catch (RejectedExecutionException e) {
+                cachePollLease.completeDiagnostics(WorkerStatus.PollOutcome.SUBMISSION_REJECTED);
+                logger.debug(
+                        "Cache check rejected for worker: {}, reset flag for retry", workerIpPort);
+            } finally {
+                if (!handedOff) {
+                    cachePollLease.close();
+                }
+            }
+        }
+    }
+
     private WorkerStatus getOrCreateWorkerStatus(
             String workerIpPort,
             String site,
@@ -416,10 +471,20 @@ public class EngineSyncRunner implements Runnable {
                                             engineIndex,
                                             multiEngineNum));
 
+            WorkerStatus.TopologySnapshot topology = workerStatus.topologySnapshot();
+            boolean sameOwnership =
+                    workerStatus.getRole() == roleType && Objects.equals(topology.group(), group);
+            if (sameOwnership
+                    && Objects.equals(topology.site(), site)
+                    && Objects.equals(topology.deploymentName(), deploymentName)) {
+                return workerStatus;
+            }
             EndpointRegistry.DetachedGeneration endpointToRetire = null;
             RoleType generationRole = null;
             boolean retirementStarted = false;
-            workerStatus.lock.lock();
+            if (!workerStatus.lock.tryLock()) {
+                return sameOwnership ? workerStatus : null;
+            }
             try {
                 if (!workerDirectory.isCurrentStatus(roleType, workerIpPort, workerStatus)) {
                     continue;
@@ -454,7 +519,7 @@ public class EngineSyncRunner implements Runnable {
             if (!retirementStarted) {
                 return workerStatus;
             }
-            workerDirectory.completeRetirement(
+            workerDirectory.completeRetirementAsync(
                     generationRole,
                     workerIpPort,
                     workerStatus,
@@ -499,6 +564,7 @@ public class EngineSyncRunner implements Runnable {
                 "Created WorkerStatus generation {} for worker: {}",
                 discovered.getGenerationId(),
                 workerIpPort);
+        discovered.configureStatusFreshness(statusStaleAfterUs);
         return discovered;
     }
 
@@ -506,7 +572,9 @@ public class EngineSyncRunner implements Runnable {
         EndpointRegistry.DetachedGeneration endpointToRetire = null;
         RoleType generationRole = null;
         boolean retirementStarted = false;
-        workerStatus.lock.lock();
+        if (!workerStatus.lock.tryLock()) {
+            return;
+        }
         try {
             if (!workerDirectory.isCurrentStatus(roleType, workerIpPort, workerStatus)) {
                 return;
@@ -514,8 +582,8 @@ public class EngineSyncRunner implements Runnable {
             if (!workerStatus.isActiveGeneration()) {
                 return;
             }
-            WorkerStatus.PollHealth health = workerStatus.pollHealth();
-            if (System.nanoTime() / 1000 - health.lastSuccessfulPollUs() <= statusStaleAfterUs) {
+            if (!workerStatus.tryClaimHealthRetirement(
+                    System.nanoTime() / 1000, statusStaleAfterUs)) {
                 return;
             }
 
@@ -528,7 +596,7 @@ public class EngineSyncRunner implements Runnable {
         }
 
         if (retirementStarted) {
-            workerDirectory.completeRetirement(
+            workerDirectory.completeRetirementAsync(
                     generationRole,
                     workerIpPort,
                     workerStatus,

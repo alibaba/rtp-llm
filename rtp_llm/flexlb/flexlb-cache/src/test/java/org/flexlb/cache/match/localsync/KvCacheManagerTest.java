@@ -2,6 +2,8 @@ package org.flexlb.cache.match.localsync;
 
 import org.flexlb.cache.domain.DiffResult;
 import org.flexlb.cache.telemetry.CacheMetricsReporter;
+import org.flexlb.config.ConfigService;
+import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.master.WorkerStatusProvider;
 import org.flexlb.dao.route.RoleType;
@@ -15,6 +17,7 @@ import org.springframework.test.util.ReflectionTestUtils;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.Callable;
 import java.util.concurrent.ForkJoinPool;
 import java.util.concurrent.ForkJoinTask;
 
@@ -48,15 +51,14 @@ class KvCacheManagerTest {
 
     @Test
     void engineLocalViewCreatesPoolForDiffAndClosesItOnShutdown() {
-        EngineLocalView view = new EngineLocalView();
-        ReflectionTestUtils.setField(
-                view, "dynamicIntervalManager", mock(DynamicCacheIntervalService.class));
+        EngineLocalView view = localViewWithParallelism(1);
         assertNull(ReflectionTestUtils.getField(view, "customPool"));
 
         try {
             assertEquals(
                     Set.of(11L), view.calculateDiff("10.0.0.1:8080", Set.of(11L)).getAddedBlocks());
             ForkJoinPool pool = (ForkJoinPool) ReflectionTestUtils.getField(view, "customPool");
+            assertEquals(1, pool.getParallelism());
             view.shutdown();
             assertTrue(pool.isShutdown());
             assertThrows(
@@ -69,18 +71,16 @@ class KvCacheManagerTest {
 
     @Test
     void diffFallsBackWhenPoolClosesBeforeSubmission() {
-        EngineLocalView view = new EngineLocalView();
+        EngineLocalView view = localViewWithParallelism(8);
         ForkJoinPool closingPool =
                 new ForkJoinPool(1) {
                     @Override
-                    public ForkJoinTask<?> submit(Runnable task) {
+                    public <T> ForkJoinTask<T> submit(Callable<T> task) {
                         shutdown();
                         return super.submit(task);
                     }
                 };
         ReflectionTestUtils.setField(view, "customPool", closingPool);
-        ReflectionTestUtils.setField(
-                view, "dynamicIntervalManager", mock(DynamicCacheIntervalService.class));
         try {
             view.addOrUpdateCacheBlock("engine", 11L);
 
@@ -108,6 +108,24 @@ class KvCacheManagerTest {
     }
 
     @Test
+    void retiresOnlyTheSelectedLogicalWorkersCacheKeys() {
+        KvCacheManager manager = kvCacheManagerWithRealIndexes();
+        var retiring = workerStatus(0, 2);
+        var remaining = workerStatus(1, 2);
+        List<String> candidates =
+                List.of(retiring.getLogicalIpPort(), remaining.getLogicalIpPort());
+        manager.updateEngineCache(retiring, "PREFILL", Set.of(11L, -22L));
+        manager.updateEngineCache(remaining, "PREFILL", Set.of(11L, 33L));
+
+        manager.removeEngineCache(retiring.getLogicalIpPort());
+
+        assertEquals(
+                Map.of(remaining.getLogicalIpPort(), 2),
+                manager.findMatchingEngines(List.of(11L, 33L), candidates));
+        assertTrue(manager.findMatchingEngines(List.of(-22L), candidates).isEmpty());
+    }
+
+    @Test
     void reportsRtpSingleEngineCacheMetricsWithPhysicalAddress() {
         WorkerStatus status = workerStatus(0, 1);
         when(engineLocalView.calculateDiff("10.0.0.1:8080@0", Set.of()))
@@ -121,11 +139,13 @@ class KvCacheManagerTest {
     @Test
     void removesStaleCacheWhenActiveWorkerIsReplacedAtTheSameCount() {
         when(engineLocalView.getAllEngineIpPorts()).thenReturn(Set.of("10.0.0.1:8080"));
+        when(engineLocalView.removeAllCacheBlockOfEngine("10.0.0.1:8080"))
+                .thenReturn(Set.of(11L, -22L));
 
         kvCacheManager.removeStaleEngineCaches(List.of("10.0.0.2:8080"));
 
         verify(engineLocalView).removeAllCacheBlockOfEngine("10.0.0.1:8080");
-        verify(globalCacheIndex).removeAllCacheBlockOfEngine("10.0.0.1:8080");
+        verify(globalCacheIndex).removeAllCacheBlockOfEngine("10.0.0.1:8080", Set.of(11L, -22L));
         verify(engineLocalView, never()).removeAllCacheBlockOfEngine("10.0.0.2:8080");
     }
 
@@ -139,7 +159,7 @@ class KvCacheManagerTest {
         kvCacheManager.removeStaleEngineCaches(List.of("10.0.0.1:8080"));
 
         verify(engineLocalView, never()).removeAllCacheBlockOfEngine("10.0.0.1:8080@0");
-        verify(globalCacheIndex, never()).removeAllCacheBlockOfEngine("10.0.0.1:8080@0");
+        verifyNoInteractions(globalCacheIndex);
     }
 
     @Test
@@ -152,7 +172,7 @@ class KvCacheManagerTest {
         kvCacheManager.removeStaleEngineCaches(List.of("10.0.0.2:8080"));
 
         verify(engineLocalView).removeAllCacheBlockOfEngine("10.0.0.1:8080@0");
-        verify(globalCacheIndex).removeAllCacheBlockOfEngine("10.0.0.1:8080@0");
+        verify(globalCacheIndex).removeAllCacheBlockOfEngine("10.0.0.1:8080@0", Set.of());
     }
 
     @Test
@@ -167,7 +187,7 @@ class KvCacheManagerTest {
         kvCacheManager.removeStaleEngineCaches(List.of("10.0.0.1:8080"));
 
         verify(engineLocalView, times(2)).removeAllCacheBlockOfEngine(logicalIpPort);
-        verify(globalCacheIndex, times(2)).removeAllCacheBlockOfEngine(logicalIpPort);
+        verify(globalCacheIndex, times(2)).removeAllCacheBlockOfEngine(logicalIpPort, Set.of());
     }
 
     @Test
@@ -185,8 +205,7 @@ class KvCacheManagerTest {
 
         verify(engineLocalView, never()).removeAllCacheBlockOfEngine("10.0.0.1:8080@0");
         verify(engineLocalView, never()).removeAllCacheBlockOfEngine("10.0.0.1:8080@1");
-        verify(globalCacheIndex, never()).removeAllCacheBlockOfEngine("10.0.0.1:8080@0");
-        verify(globalCacheIndex, never()).removeAllCacheBlockOfEngine("10.0.0.1:8080@1");
+        verifyNoInteractions(globalCacheIndex);
     }
 
     @Test
@@ -204,8 +223,8 @@ class KvCacheManagerTest {
 
         verify(engineLocalView).removeAllCacheBlockOfEngine("10.0.0.1:8080@0");
         verify(engineLocalView).removeAllCacheBlockOfEngine("10.0.0.1:8080@1");
-        verify(globalCacheIndex).removeAllCacheBlockOfEngine("10.0.0.1:8080@0");
-        verify(globalCacheIndex).removeAllCacheBlockOfEngine("10.0.0.1:8080@1");
+        verify(globalCacheIndex).removeAllCacheBlockOfEngine("10.0.0.1:8080@0", Set.of());
+        verify(globalCacheIndex).removeAllCacheBlockOfEngine("10.0.0.1:8080@1", Set.of());
     }
 
     @Test
@@ -215,7 +234,7 @@ class KvCacheManagerTest {
         kvCacheManager.removeStaleEngineCaches(List.of("10.0.0.1:8080"));
 
         verify(engineLocalView).removeAllCacheBlockOfEngine("10.0.0.1:8080@0");
-        verify(globalCacheIndex).removeAllCacheBlockOfEngine("10.0.0.1:8080@0");
+        verify(globalCacheIndex).removeAllCacheBlockOfEngine("10.0.0.1:8080@0", Set.of());
     }
 
     @Test
@@ -240,23 +259,19 @@ class KvCacheManagerTest {
 
     private KvCacheManager kvCacheManagerWithRealIndexes() {
         KvCacheManager manager = new KvCacheManager();
-        EngineLocalView localView = new EngineLocalView();
-        ReflectionTestUtils.setField(
-                localView,
-                "dynamicIntervalManager",
-                new DynamicCacheIntervalService() {
-                    @Override
-                    public void updateDiffStatistics(int diffSize) {}
-
-                    @Override
-                    public long getCurrentIntervalMs() {
-                        return 0;
-                    }
-                });
+        EngineLocalView localView = localViewWithParallelism(8);
         ReflectionTestUtils.setField(manager, "globalCacheIndex", new GlobalCacheIndex());
         ReflectionTestUtils.setField(manager, "engineLocalView", localView);
         ReflectionTestUtils.setField(manager, "workerStatusProvider", workerStatusProvider);
         ReflectionTestUtils.setField(manager, "cacheMetricsReporter", cacheMetricsReporter);
         return manager;
+    }
+
+    private static EngineLocalView localViewWithParallelism(int parallelism) {
+        FlexlbConfig config = new FlexlbConfig();
+        config.getWorkerRegistry().getCacheStatus().setDiffParallelism(parallelism);
+        ConfigService configService = mock(ConfigService.class);
+        when(configService.loadBalanceConfig()).thenReturn(config);
+        return new EngineLocalView(configService, mock(DynamicCacheIntervalService.class));
     }
 }

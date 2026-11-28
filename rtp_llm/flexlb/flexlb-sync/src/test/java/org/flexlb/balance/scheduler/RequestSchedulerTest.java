@@ -293,7 +293,6 @@ class RequestSchedulerTest {
         when(configService.loadBalanceConfig()).thenReturn(config);
         DefaultRouter router = mockRouter();
         EndpointRegistry endpointRegistry = mock(EndpointRegistry.class);
-        when(endpointRegistry.getEndpointCount(RoleType.PREFILL)).thenReturn(1);
         AtomicInteger availableSlots = new AtomicInteger();
         RequestRegistry lifecycle = mock(RequestRegistry.class);
         BalanceContext context = context(config, 899L);
