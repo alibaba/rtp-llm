@@ -155,7 +155,7 @@ class NativePipelineState:
         self.pending_decision = (output_key, self.step_features(spans), spans, loads)
 
     def bind(self, on_change, on_error, on_timing_sample=None):
-        """Observe this instance, preserving each Native call and its result."""
+        """Observe dispatches; an optional callback also publishes changed step state."""
         self._on_timing_sample = on_timing_sample
         self._on_timing_error = on_error
         stepper = self._stepper
@@ -220,7 +220,8 @@ class NativePipelineState:
             return result
 
         stepper._dispatch, stepper._push = dispatch, push
-        stepper.core.step_fn = MethodType(step, stepper)
+        if on_change is not None:
+            stepper.core.step_fn = MethodType(step, stepper)
 
     @staticmethod
     def signature(snapshot):

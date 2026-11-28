@@ -2129,3 +2129,11 @@ py_test(
     python_version = "PY3",
     deps = [":py_sched_lib"],
 )
+
+py_test(
+    name = "navi_sched_vllm_native_pipeline_state_test",
+    srcs = ["test/vllm/VLLMNativePipelineStateTest.py"],
+    main = "test/vllm/VLLMNativePipelineStateTest.py",
+    data = ["adapters/vllm/VLLMNativePipelineState.py"],
+    python_version = "PY3",
+)
