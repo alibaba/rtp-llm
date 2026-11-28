@@ -138,6 +138,11 @@ def _install_rtp_llm_stubs_for_moriep_wrapper() -> None:
         "rtp_llm.config.model_config",
         ModelConfig=type("ModelConfig", (), {}),
     )
+    # The wrapper imports this type before the production router is loaded.
+    _register_stub_module(
+        "rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter",
+        MoEConfigAdapter=type("MoEConfigAdapter", (), {}),
+    )
     _register_stub_module(
         "rtp_llm.utils.util",
         to_torch_dtype=_to_torch_dtype_stub,
@@ -176,11 +181,7 @@ def _load_production_router_modules() -> None:
         "rtp_llm.models_py.modules.factory.fused_moe.defs.quant_config",
         _FUSED_MOE_DEFS_DIR / "quant_config.py",
     )
-    # 3. config_adapter.py (MoEConfigAdapter) — stub with minimal class
-    _register_stub_module(
-        "rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter",
-        MoEConfigAdapter=type("MoEConfigAdapter", (), {}),
-    )
+    # 3. config_adapter.py was stubbed before loading moriep_wrapper.py.
     # 4. fused_moe.py (FusedMoeDataRouter, dataclasses)
     _load_module(
         "rtp_llm.models_py.modules.factory.fused_moe.defs.fused_moe",
@@ -534,40 +535,49 @@ def test_single(
     )
 
     processes = []
-    for rank in range(world_size):
-        _moriep_log(None, f"[parent] spawning worker rank={rank}")
-        p = mp.Process(
-            target=worker_function,
-            args=(
-                rank,
-                world_size,
-                token_num_per_rank,
-                max_tokens_on_rank,
-                dist_port,
-            ),
-            kwargs={},
-        )
-        processes.append(p)
-        p.start()
-        _moriep_log(None, f"[parent] worker rank={rank} started pid={p.pid}")
+    try:
+        for rank in range(world_size):
+            _moriep_log(None, f"[parent] spawning worker rank={rank}")
+            p = mp.Process(
+                target=worker_function,
+                args=(
+                    rank,
+                    world_size,
+                    token_num_per_rank,
+                    max_tokens_on_rank,
+                    dist_port,
+                ),
+            )
+            processes.append(p)
+            p.start()
+            _moriep_log(None, f"[parent] worker rank={rank} started pid={p.pid}")
 
-    _moriep_log(None, f"[parent] all {world_size} workers spawned; joining...")
-    for i, p in enumerate(processes):
-        _moriep_log(None, f"[parent] join worker[{i}] pid={p.pid} ...")
-        p.join(timeout=120)
-        if p.is_alive():
-            p.terminate()
+        _moriep_log(None, f"[parent] all {world_size} workers spawned; joining...")
+        for i, p in enumerate(processes):
+            _moriep_log(None, f"[parent] join worker[{i}] pid={p.pid} ...")
+            p.join(timeout=120)
+            if p.is_alive():
+                raise RuntimeError(f"Process timeout: rank={i}, pid={p.pid}")
+            if p.exitcode != 0:
+                raise RuntimeError(
+                    f"子进程异常退出，rank={i}, pid={p.pid}, 退出码: {p.exitcode}"
+                )
+            _moriep_log(
+                None,
+                f"[parent] join worker[{i}] done exitcode={p.exitcode}",
+            )
+    finally:
+        # A failed rank can leave every peer blocked in a collective/barrier.
+        # Signal all our live children before waiting; also handle partial spawn.
+        started = [p for p in processes if p.pid is not None]
+        for p in started:
+            if p.is_alive():
+                p.terminate()
+        for p in started:
             p.join(timeout=5)
             if p.is_alive():
                 p.kill()
-                p.join()
-            raise RuntimeError("Process timeout")
-        if p.exitcode != 0:
-            raise RuntimeError(f"子进程异常退出，退出码: {p.exitcode}")
-        _moriep_log(
-            None,
-            f"[parent] join worker[{i}] done exitcode={p.exitcode}",
-        )
+                p.join(timeout=5)
 
 
 _MAX_GPUS = int(os.environ.get("MORIEP_TEST_MAX_GPUS", "0"))

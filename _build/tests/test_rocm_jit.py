@@ -1,9 +1,26 @@
+import sys
 from types import SimpleNamespace
 from unittest.mock import Mock
 
 import pytest
 
 from _build import rocm_jit
+
+
+def test_mori_prewarm_builds_both_extensions_and_propagates_errors(monkeypatch):
+    compiled = Mock()
+    monkeypatch.setitem(
+        sys.modules, "mori.ops._jit_loader", SimpleNamespace(ensure_compiled=compiled)
+    )
+    rocm_jit.prepare_mori_modules()
+    assert [call.args[0] for call in compiled.call_args_list] == [
+        "shmem_kernels",
+        "ep_intranode",
+    ]
+
+    compiled.side_effect = RuntimeError("compiler failed")
+    with pytest.raises(RuntimeError, match="compiler failed"):
+        rocm_jit.prepare_mori_modules()
 
 
 def test_prebuilt_modules_are_loaded_without_rebuild():

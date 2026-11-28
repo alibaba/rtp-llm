@@ -1655,6 +1655,7 @@ class RemoteREAPIPlugin:
             gpu_req,
             extra_env=resolve_ci_profile_remote_env(self.rootdir, self.ci_profile),
             input_root_hash=input_root.hash,
+            prepare_mori=self.ci_profile == "py_ut_amd",
         )
 
         # --- Session test cache: load manifest, build deselect args ---

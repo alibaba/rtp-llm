@@ -1,5 +1,6 @@
-"""Prepare cold AITER extensions before starting timed pytest cases."""
+"""Prepare cold ROCm extensions before starting timed pytest cases."""
 
+import argparse
 import inspect
 import os
 
@@ -38,9 +39,25 @@ def prepare_modules(core):
         print(f"[rocm_jit] ready: {name}", flush=True)
 
 
+def prepare_mori_modules():
+    from mori.ops._jit_loader import ensure_compiled
+
+    # Cold EP compilation exceeds the router test's 120 s rank deadline.
+    # Compile once before spawning ranks, using the launcher's private cache.
+    for name in ("shmem_kernels", "ep_intranode"):
+        ensure_compiled(name)
+        print(f"[rocm_jit] ready: mori/{name}", flush=True)
+
+
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--mori", action="store_true")
+    args = parser.parse_args()
+
     import pybind11
     from aiter.jit import core
 
     print(f"[rocm_jit] pybind11={pybind11.__version__}", flush=True)
     prepare_modules(core)
+    if args.mori:
+        prepare_mori_modules()

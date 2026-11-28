@@ -366,7 +366,7 @@ def bootstrap_python_command() -> str:
 
 
 def build_remote_setup_command(
-    rootdir: Path, *, setup_env: Optional[dict] = None
+    rootdir: Path, *, setup_env: Optional[dict] = None, prepare_mori: bool = False
 ) -> str:
     """Return shell prefix executed before remote pytest command.
 
@@ -427,6 +427,22 @@ def build_remote_setup_command(
         'echo "[remote_setup] RTP_BAZEL_CONFIG=${RTP_BAZEL_CONFIG:-unset}"; '
         if "RTP_BAZEL_CONFIG" in (setup_env or {})
         else ""
+    )
+    # Keep unrelated ROCm/per-test actions on their existing preparation path.
+    # MORI's cold compile belongs to the AMD session's setup budget, not the
+    # shorter per-test action budget.
+    mori_setup = (
+        'MORI_JIT_CACHE_DIR=$(mktemp -d "$PWD/.mori-jit.XXXXXX") || exit $?; '
+        'export MORI_JIT_CACHE_DIR; '
+        'echo "[remote_setup] MORI_JIT_CACHE_DIR=$MORI_JIT_CACHE_DIR"; '
+        if prepare_mori
+        else ""
+    )
+    rocm_jit_command = (
+        "GPU_COUNT=1 python rtp_llm/test/utils/device_resource.py "
+        "python -m _build.rocm_jit --mori"
+        if prepare_mori
+        else "python -m _build.rocm_jit"
     )
     return (
         "export HOME=/home/admin; "
@@ -551,8 +567,9 @@ def build_remote_setup_command(
         "rtp_llm/libs/libth_transformer.so "
         "rtp_llm/libs/librtp_compute_ops.so 2>/dev/null || true; "
         "if [ -d /opt/rocm ] && [ -f _build/rocm_jit.py ]; then "
+        f"  {mori_setup}"
         '  echo ">>>PHASE:rocm_jit_start $(date +%s)"; '
-        "  python -m _build.rocm_jit & RJ_PID=$!; "
+        f"  {rocm_jit_command} & RJ_PID=$!; "
         '  (while kill -0 "$RJ_PID" 2>/dev/null; do '
         '    if [ -n "${RTP_REMOTE_HEARTBEAT_FILE:-}" ]; then '
         "      printf '%s %s\\n' \"$(date +%s)\" rocm_jit_active "
@@ -1255,6 +1272,7 @@ def build_runtime_config(
     *,
     extra_env: Optional[dict] = None,
     input_root_hash: Optional[str] = None,
+    prepare_mori: bool = False,
 ) -> RemoteRuntimeConfig:
     """Build env/platform/ignore/setup from a normalized GPU request."""
     env_vars: dict = {
@@ -1280,5 +1298,7 @@ def build_runtime_config(
         ignore_args=get_pytest_ignore_args(rootdir),
         env_vars=env_vars,
         platform_properties=platform_properties,
-        remote_setup_prefix=build_remote_setup_command(rootdir, setup_env=setup_env),
+        remote_setup_prefix=build_remote_setup_command(
+            rootdir, setup_env=setup_env, prepare_mori=prepare_mori
+        ),
     )
