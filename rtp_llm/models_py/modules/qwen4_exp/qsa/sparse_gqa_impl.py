@@ -77,6 +77,7 @@ class SparseGqaFmhaImpl(FMHAImplBase):
         self._qsa_main_cache_mutation_started = False
         self._qsa_target_visible_lengths = None
         self._qsa_main_geometry = None
+        self._model_prefill_geometry = None
         self._validate_runtime_mode()
         rope_writer_cls = (
             FusedRopeKVCachePrefillOpQKVOut
@@ -181,6 +182,7 @@ class SparseGqaFmhaImpl(FMHAImplBase):
         device: torch.device,
         graph_capture: bool = False,
         checks=None,
+        token_count: int | None = None,
     ) -> int:
         return fmha_validation._validate_main_paged_geometry(
             self,
@@ -191,6 +193,7 @@ class SparseGqaFmhaImpl(FMHAImplBase):
             device,
             graph_capture,
             checks,
+            token_count,
         )
 
     def validate_qsa_before_side_write(
@@ -235,9 +238,15 @@ class SparseGqaFmhaImpl(FMHAImplBase):
         qkv: torch.Tensor,
         kv_cache: Optional[LayerKVCache],
         selected_indices: torch.Tensor,
+        *,
+        prefix_reuse_confirmed: bool = False,
     ) -> dict:
         return fmha_inputs._prepare_incremental_prefill_inputs(
-            self, qkv, kv_cache, selected_indices
+            self,
+            qkv,
+            kv_cache,
+            selected_indices,
+            prefix_reuse_confirmed=prefix_reuse_confirmed,
         )
 
     @staticmethod
@@ -482,7 +491,10 @@ class SparseGqaFmhaImpl(FMHAImplBase):
         paged_plan = None
         if is_incremental_prefill:
             paged_plan = self._prepare_incremental_prefill_inputs(
-                qkv, kv_cache, selected_indices
+                qkv,
+                kv_cache,
+                selected_indices,
+                prefix_reuse_confirmed=is_incremental_prefill,
             )
         elif self.is_target_verify or not self.is_prefill:
             paged_plan = self._prepare_paged_inputs(qkv, kv_cache, selected_indices)

@@ -10,7 +10,7 @@ from rtp_llm.models.qwen4_exp.qwen4_exp_kv_cache import (
 from rtp_llm.models_py.model_desc.qwen4_exp_runtime.qsa_context import (
     Qwen4ExpQSARuntimeContext,
 )
-from rtp_llm.ops import RopeStyle
+from rtp_llm.ops import RopeConfig, RopeStyle
 
 
 @skipUnless(torch.cuda.is_available(), "CUDA is required for graph replay")
@@ -39,17 +39,14 @@ class Qwen4ExpQSADecodeGraphTest(TestCase):
             k_norm_gamma=(torch.randn(128, device="cuda") * 0.1).bfloat16(),
             norm_eps=1e-6,
         )
-        self.rope = SimpleNamespace(
-            style=RopeStyle.Mrope,
-            index_factor=3,
-            dim=64,
-            mrope_dim1=12,
-            mrope_dim2=10,
-            mrope_dim3=10,
-            mrope_interleaved=True,
-            base=10000,
-            scale=1.0,
-        )
+        self.rope = RopeConfig()
+        self.rope.style = RopeStyle.Mrope
+        self.rope.index_factor = 3
+        self.rope.dim = 64
+        self.rope.mrope_dim1 = 12
+        self.rope.mrope_dim2 = 10
+        self.rope.mrope_dim3 = 10
+        self.rope.mrope_interleaved = True
         self.q = torch.randn(1, 4, 128, dtype=torch.bfloat16, device="cuda")
         self.raw = torch.randn(1, 128, dtype=torch.bfloat16, device="cuda")
 
@@ -252,13 +249,10 @@ class Qwen4ExpQSADecodeGraphTest(TestCase):
     def _check_draft_graph_replay(self, use_cached_frequency):
         self.raw = torch.randn(1, 256, dtype=torch.bfloat16, device="cuda")[:, ::2]
         self.assertFalse(self.raw.is_contiguous())
-        self.rope = SimpleNamespace(
-            style=RopeStyle.Base,
-            index_factor=3,
-            dim=64,
-            base=10000,
-            scale=1.0,
-        )
+        self.rope = RopeConfig()
+        self.rope.style = RopeStyle.Base
+        self.rope.index_factor = 3
+        self.rope.dim = 64
         if use_cached_frequency:
             frequency = float(self.rope.base) ** (
                 -2.0 * torch.arange(32, dtype=torch.float32, device="cuda") / 64

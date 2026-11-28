@@ -18,6 +18,9 @@ from rtp_llm.models_py.modules.qwen4_exp.qsa.indexer import (
     build_qsa_rope_from_logical_positions,
     is_qsa_rope_style,
 )
+from rtp_llm.models_py.modules.qwen4_exp.qsa.indexer_compressor import (
+    write_aligned_prefill_cache,
+)
 
 from .qsa_cache_views import _block_table, _same_tensor_metadata, _typed_2d_pool
 from .qsa_selection import select_qsa_paged_tokens
@@ -29,12 +32,14 @@ def write_prefill_indexer_cache(
     *,
     indexer: Any,
     rope_config: Any,
+    collect_stats: bool = True,
 ) -> tuple[list[int], torch.Tensor, torch.Tensor, dict]:
     """Write one ragged prefill projection to both side pools.
 
     This path requires zero prefixes. Page-aligned prefix reuse uses
     select_prefix_reuse_prefill_tokens and its paged writer instead.
     """
+    self.require_idle_side_cache()
     lengths = self._validate_mode_and_metadata(expect_prefill=True)
     token_count = int(raw_keys.shape[0]) if raw_keys.dim() == 2 else -1
     if token_count < 0 or sum(lengths) != token_count:
@@ -199,8 +204,6 @@ def write_prefill_indexer_cache(
             write_zero_prefix_prefill,
         )
 
-        if self._side_cache_undo is not None:
-            raise RuntimeError("qwen4_exp QSA side-cache transaction is already active")
         try:
             fused_result = write_zero_prefix_prefill(
                 raw_keys,
@@ -235,18 +238,17 @@ def write_prefill_indexer_cache(
         except ValueError:
             # Preserve the runtime's CU diagnostic; error-only checking
             # happens before either side pool was mutated by the writer.
-            if defer_cu:
-                check_cu_partition()
+            check_cu_partition()
             raise
         if fused_result is not None:
-            object.__setattr__(self, "_side_cache_undo", fused_result.pop("undo"))
+            self._side_cache_undo = fused_result.pop("undo")
             return lengths, rope_cos, rope_sin, fused_result
 
     # Unsupported geometry or aliased pages returned without a mutation.
     # The fallback writer still needs the ordinary partition preflight.
     if defer_cu:
         check_cu_partition()
-    result = self._write_indexer_cache_transactional(
+    result = self._write_indexer_cache_with_undo(
         raw_keys,
         cu_seqlens,
         start_positions,
@@ -261,6 +263,7 @@ def write_prefill_indexer_cache(
         kv_tokens_per_block=kv_tokens_per_block,
         state_tokens_per_block=int(self.indexer_state_cache.seq_size_per_block),
         norm_eps=float(indexer.norm_eps),
+        collect_stats=collect_stats,
     )
     return lengths, rope_cos, rope_sin, result
 
@@ -286,6 +289,7 @@ def select_draft_graph_tokens(
         write_draft_window_with_undo_,
     )
 
+    self.require_idle_side_cache()
     inputs = self.main_inputs
     if (
         not self.is_mtp_draft
@@ -417,8 +421,6 @@ def select_draft_graph_tokens(
             device=q.device,
             inv_freq=frequency,
         )
-    if self._side_cache_undo is not None:
-        raise RuntimeError("QSA draft graph side-cache transaction is already active")
     undo = write_draft_window_with_undo_(
         raw_keys,
         inputs.cu_seqlens_device,
@@ -433,7 +435,7 @@ def select_draft_graph_tokens(
         state_table,
         norm_eps=float(indexer.norm_eps),
     )
-    object.__setattr__(self, "_side_cache_undo", undo)
+    self._side_cache_undo = undo
     if prepared is None:
         rotated = apply_partial_rope(q, cos.unsqueeze(1), sin.unsqueeze(1))
         padded = rotated.index_select(0, sources).reshape(batch, lanes, heads, dim)
@@ -558,6 +560,7 @@ def _incremental_prefill_selection(
     the emitted token ids are absolute KV positions.
     """
     label = "draft incremental prefill" if draft else "prefix-reuse prefill"
+    self.require_idle_side_cache()
 
     token_count = int(raw_keys.shape[0]) if raw_keys.dim() == 2 else -1
     plan = self._draft_incremental_prefill_geometry(
@@ -595,7 +598,6 @@ def _incremental_prefill_selection(
         position_state.stage()
     triton_draft_window = (
         draft
-        and max(plan.lengths) <= 4
         and int(plan.ratio) == 4
         and int(plan.head_dim) == 128
         and int(plan.kv_tokens_per_block) == 128
@@ -606,8 +608,6 @@ def _incremental_prefill_selection(
             write_draft_window_with_undo_,
         )
 
-        if self._side_cache_undo is not None:
-            raise RuntimeError("qwen4_exp QSA side-cache transaction is already active")
         undo = write_draft_window_with_undo_(
             raw_keys,
             plan.cu_seqlens,
@@ -624,9 +624,22 @@ def _incremental_prefill_selection(
             plan.state_table,
             norm_eps=float(indexer.norm_eps),
         )
-        object.__setattr__(self, "_side_cache_undo", undo)
+        self._side_cache_undo = undo
+    elif plan.aligned_write is not None:
+        undo = write_aligned_prefill_cache(
+            raw_keys,
+            plan.rope_cos,
+            plan.rope_sin,
+            indexer.k_norm_gamma,
+            plan.kv_pool,
+            plan.state_pool,
+            plan.aligned_write,
+            ratio=plan.ratio,
+            norm_eps=float(indexer.norm_eps),
+        )
+        self._side_cache_undo = undo
     else:
-        self._write_indexer_cache_transactional(
+        self._write_indexer_cache_with_undo(
             raw_keys,
             plan.cu_seqlens,
             plan.prefixes,
@@ -641,6 +654,7 @@ def _incremental_prefill_selection(
             kv_tokens_per_block=int(plan.kv_tokens_per_block),
             state_tokens_per_block=int(plan.state_tokens_per_block),
             norm_eps=float(indexer.norm_eps),
+            collect_stats=False,
             rope_is_token_aligned=True,
         )
 

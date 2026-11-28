@@ -23,9 +23,10 @@ def select_target_verify_tokens(
     raw_query: bool = False,
 ) -> torch.Tensor:
     """Select all ``gamma + 1`` target rows using a bounded tail overwrite."""
+    self.require_idle_side_cache()
     token_count = int(raw_keys.shape[0]) if raw_keys.dim() == 2 else -1
     plan = self._target_verify_plan
-    object.__setattr__(self, "_target_verify_plan", None)
+    self._target_verify_plan = None
     if plan is None:
         plan = self._target_verify_geometry(
             indexer=indexer, token_count=token_count, device=raw_keys.device
@@ -88,8 +89,6 @@ def select_target_verify_tokens(
             try_prepare_target_window,
         )
 
-        if self._side_cache_undo is not None:
-            raise RuntimeError("qwen4_exp QSA side-cache transaction is already active")
         prepared = try_prepare_target_window(
             q,
             raw_keys,
@@ -109,7 +108,7 @@ def select_target_verify_tokens(
         )
     if prepared is not None:
         rotated_q, undo = prepared
-        object.__setattr__(self, "_side_cache_undo", undo)
+        self._side_cache_undo = undo
     else:
         if position_state is not None:
             rope_cos, rope_sin = position_state.rope(rope_config, group=True)
@@ -139,10 +138,6 @@ def select_target_verify_tokens(
                 write_target_window_with_undo_,
             )
 
-            if self._side_cache_undo is not None:
-                raise RuntimeError(
-                    "qwen4_exp QSA side-cache transaction is already active"
-                )
             undo = write_target_window_with_undo_(
                 raw_keys,
                 plan.prefixes,
@@ -155,9 +150,9 @@ def select_target_verify_tokens(
                 plan.state_table,
                 norm_eps=float(indexer.norm_eps),
             )
-            object.__setattr__(self, "_side_cache_undo", undo)
+            self._side_cache_undo = undo
         else:
-            self._write_indexer_cache_transactional(
+            self._write_indexer_cache_with_undo(
                 raw_keys,
                 plan.cu_seqlens,
                 plan.prefixes.to(torch.int64),
@@ -172,6 +167,7 @@ def select_target_verify_tokens(
                 kv_tokens_per_block=int(plan.kv_tokens_per_block),
                 state_tokens_per_block=int(plan.state_tokens_per_block),
                 norm_eps=float(indexer.norm_eps),
+                collect_stats=False,
                 rope_is_token_aligned=True,
             )
 

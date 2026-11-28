@@ -27,6 +27,7 @@ def _validate_packed_inputs(
     TABLE_COL: tl.constexpr,
     PAGE_SIZE: tl.constexpr,
     PADDED: tl.constexpr,
+    CHECK_PAGES: tl.constexpr,
     BLOCK: tl.constexpr,
     BATCH: tl.constexpr,
 ):
@@ -40,8 +41,8 @@ def _validate_packed_inputs(
         bad = tl.sum(((b < B) & ((end - start) != length)).to(tl.int32), 0) > 0
         bad = bad | (tl.load(Cu) != 0) | (tl.load(Cu + B) != N)
         tl.atomic_or(Flag, 1, bad, sem="relaxed")
-    # Each request validates the physical pages in its visible KV range.
-    if row < B:
+    # A matching model preflight already checked every visible physical page.
+    if CHECK_PAGES and row < B:
         prefix = tl.load(Prefixes + row).to(tl.int64)
         length = tl.load(Lengths + row).to(tl.int64)
         # Widen before rounding up so large invalid prefixes cannot wrap.
@@ -98,7 +99,16 @@ def _validate_packed_inputs(
 
 
 def validate_prefill_inputs(
-    selected, cu, lengths, prefixes, table, page_size, pages, padded
+    selected,
+    cu,
+    lengths,
+    prefixes,
+    table,
+    page_size,
+    pages,
+    padded,
+    *,
+    check_pages=True
 ):
     tokens, width = selected.shape
     visible = torch.empty(tokens, dtype=torch.int32, device=selected.device)
@@ -106,8 +116,8 @@ def validate_prefill_inputs(
     _validate_packed_inputs[(tokens,)](
         selected,
         cu,
-        lengths,
-        prefixes,
+        lengths.contiguous(),
+        prefixes.contiguous(),
         table,
         visible,
         flag,
@@ -122,6 +132,7 @@ def validate_prefill_inputs(
         table.stride(1),
         page_size,
         padded,
+        check_pages,
         triton.next_power_of_2(width),
         triton.next_power_of_2(lengths.numel()),
         num_warps=4,

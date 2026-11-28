@@ -6,6 +6,7 @@ consumed by the production paged scorer.
 """
 
 import unittest
+from unittest.mock import patch
 
 import torch
 
@@ -17,8 +18,11 @@ from rtp_llm.models_py.modules.qwen4_exp.qsa.indexer import (
     apply_partial_rope,
 )
 from rtp_llm.models_py.modules.qwen4_exp.qsa.indexer_compressor import (
+    AlignedPrefillWritePlan,
     _write_indexer_cache_vectorized,
+    build_aligned_prefill_write_layout,
     restore_indexer_cache,
+    write_aligned_prefill_cache,
     write_indexer_cache,
 )
 
@@ -359,6 +363,100 @@ class IndexerCacheWriterTest(unittest.TestCase):
         self.assertEqual(decode["num_kv_writes"], 1)
         self.assertEqual(int(decode["kv_slots"][0]), 8)
         torch.testing.assert_close(kv_pool[4, 0], self._expected(block, 0))
+
+    def test_aligned_suffix_without_a_complete_group_only_writes_state(self):
+        raw = torch.randn(4, self.D, dtype=torch.bfloat16)
+        kv_pool, state_pool = self._pools()
+        kv_pool.fill_(1)
+        state_pool.fill_(2)
+        before_kv, before_state = kv_pool.clone(), state_pool.clone()
+        expected_kv, expected_state = before_kv.clone(), before_state.clone()
+        self._write(
+            raw,
+            [0, 1, 4],
+            [8, 16],
+            expected_kv,
+            [[1, 2, 0], [3, 4, 5]],
+            expected_state,
+            [[1, 4, 0], [2, 3, 6]],
+        )
+        layout = build_aligned_prefill_write_layout(
+            [1, 3],
+            [8, 16],
+            page_size=8,
+            ratio=self.RATIO,
+            ring_entries=self.RING_ENTRIES,
+            device=raw.device,
+        )
+        plan = AlignedPrefillWritePlan(
+            layout,
+            torch.tensor([4, 6], dtype=torch.int32),
+            torch.empty(0, dtype=torch.int32),
+        )
+        undo = write_aligned_prefill_cache(
+            raw,
+            self.cos,
+            self.sin,
+            self.gamma,
+            kv_pool,
+            state_pool,
+            plan,
+            ratio=self.RATIO,
+            norm_eps=_EPS,
+        )
+        self.assertEqual(undo.kv_slots.numel(), 0)
+        torch.testing.assert_close(kv_pool, expected_kv, rtol=0, atol=0)
+        torch.testing.assert_close(state_pool, expected_state, rtol=0, atol=0)
+        self.assertFalse(torch.equal(state_pool, before_state))
+        restore_indexer_cache(undo)
+        torch.testing.assert_close(kv_pool, before_kv, rtol=0, atol=0)
+        torch.testing.assert_close(state_pool, before_state, rtol=0, atol=0)
+
+    def test_vectorized_prewrite_errors_preserve_both_pools(self):
+        raw = torch.randn(8, self.D, dtype=torch.bfloat16)
+        kv_pool, state_pool = self._pools()
+        state_table = torch.tensor([[0], [state_pool.shape[0]]], dtype=torch.int32)
+
+        def write(policy="raise", collect_stats=True):
+            return _write_indexer_cache_vectorized(
+                raw,
+                torch.tensor([0, 4, 8], dtype=torch.int32),
+                torch.zeros(2, dtype=torch.int64),
+                self.cos,
+                self.sin,
+                self.gamma,
+                kv_pool,
+                torch.tensor([[1], [2]], dtype=torch.int32),
+                state_pool,
+                state_table,
+                ratio=self.RATIO,
+                kv_tokens_per_block=self.KV_TOKENS_PER_BLOCK,
+                state_tokens_per_block=self.STATE_TOKENS_PER_BLOCK,
+                norm_eps=_EPS,
+                invalid_block_policy=policy,
+                capture_undo=True,
+                rope_is_token_aligned=False,
+                collect_stats=collect_stats,
+            )
+
+        for policy in ("raise", "skip"):
+            with self.subTest(policy=policy):
+                with self.assertRaisesRegex(IndexError, "indexer_state physical block"):
+                    write(policy)
+        state_table[1, 0] = 3
+        with self.assertRaisesRegex(ValueError, "indexer_state.*unallocated"):
+            write()
+        state_table[0, 0] = 2
+        with patch.object(
+            torch.Tensor, "sum", side_effect=RuntimeError("stats failed")
+        ):
+            with self.assertRaisesRegex(RuntimeError, "stats failed"):
+                write()
+        self.assertEqual(int(torch.count_nonzero(kv_pool)), 0)
+        self.assertEqual(int(torch.count_nonzero(state_pool)), 0)
+        result = write(collect_stats=False)
+        self.assertNotIn("num_state_writes", result)
+        restore_indexer_cache(result["undo"])
 
     def test_second_logical_block_obeys_noncontiguous_block_tables(self):
         raw = torch.randn(4, self.D, dtype=torch.bfloat16)

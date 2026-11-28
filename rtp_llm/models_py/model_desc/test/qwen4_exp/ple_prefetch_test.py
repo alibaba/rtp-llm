@@ -215,7 +215,9 @@ class Qwen4ExpPLEPrefetchTest(PLERuntimeFixture, TestCase):
             sequence_lengths=torch.empty(0, dtype=torch.int32),
         )
         frame = SimpleNamespace(
-            input_ids=ids, embedding_inputs=SimpleNamespace(text_tokens_mask=mask)
+            input_ids=ids,
+            attention_inputs=inputs,
+            embedding_inputs=SimpleNamespace(text_tokens_mask=mask),
         )
         plans = self.model._start_eager_ple_prefetch(frame, inputs)
         history = torch.tensor([[7, 1, 7, 3]], device="cuda", dtype=torch.long)

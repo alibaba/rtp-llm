@@ -42,7 +42,7 @@ from .qsa_cache_views import _same_tensor_metadata
 from .qsa_plans import IncrementalPrefillPlan, TargetVerifyPlan
 
 
-@dataclass(frozen=True)
+@dataclass
 class Qwen4ExpQSARuntimeContext:
     main_cache: LayerKVCache
     main_inputs: PyAttentionInputs
@@ -68,13 +68,15 @@ class Qwen4ExpQSARuntimeContext:
     def take_prewrite_checks(self) -> DeviceChecks:
         """Consume flags once; the side writer verifies them before any mutation."""
         checks = self._prewrite_checks
-        object.__setattr__(self, "_prewrite_checks", None)
+        self._prewrite_checks = None
         return DeviceChecks() if checks is None else checks
 
     def host_values(self, tensor: torch.Tensor) -> list[int]:
         # This cache belongs to one forward invocation, never a graph buffer's
         # address across steps. Keep the tensor owner alongside the host values.
         cache = self.metadata_cache
+        if cache is None:
+            return tensor.tolist()
         key = (
             tensor.data_ptr(),
             tensor.shape,
@@ -82,25 +84,22 @@ class Qwen4ExpQSARuntimeContext:
             tensor.dtype,
             tensor.device,
         )
-        if cache is None:
-            return tensor.tolist()
         if key not in cache:
             cache[key] = (tensor, tensor.tolist())
         return cache[key][1]
 
-    def _write_indexer_cache_transactional(self, *args, **kwargs) -> dict:
+    def require_idle_side_cache(self) -> None:
         if self._side_cache_undo is not None:
             raise RuntimeError("qwen4_exp QSA side-cache transaction is already active")
+
+    def _write_indexer_cache_with_undo(self, *args, **kwargs) -> dict:
         result = write_indexer_cache(
             *args,
             **kwargs,
             capture_undo=True,
             is_s_padded=bool(self.main_inputs.is_s_padded),
         )
-        undo = result.pop("undo", None)
-        if not isinstance(undo, IndexerCacheUndo):
-            raise RuntimeError("qwen4_exp QSA writer did not return an undo record")
-        object.__setattr__(self, "_side_cache_undo", undo)
+        self._side_cache_undo = result.pop("undo")
         return result
 
     def rollback_side_cache(self) -> None:
@@ -115,7 +114,7 @@ class Qwen4ExpQSARuntimeContext:
             if undo.state_pool.is_cuda:
                 torch.cuda.current_stream(undo.state_pool.device).synchronize()
         finally:
-            object.__setattr__(self, "_side_cache_undo", None)
+            self._side_cache_undo = None
 
     def finalize_side_cache(self) -> None:
         """Discard undo state after the paired main attention succeeds."""
@@ -123,7 +122,7 @@ class Qwen4ExpQSARuntimeContext:
             raise RuntimeError(
                 "qwen4_exp QSA has no active side-cache transaction to finalize"
             )
-        object.__setattr__(self, "_side_cache_undo", None)
+        self._side_cache_undo = None
 
     def positions(self, ratio, checks=None):
         if self.position_state_cache is None:
@@ -131,7 +130,7 @@ class Qwen4ExpQSARuntimeContext:
         if self._position_state is None:
             from .qsa_position_state import QSAPositionState
 
-            object.__setattr__(self, "_position_state", QSAPositionState(self, ratio))
+            self._position_state = QSAPositionState(self, ratio)
         if checks is not None:
             self._position_state.add_checks(checks)
         return self._position_state
@@ -288,7 +287,7 @@ class Qwen4ExpQSARuntimeContext:
             # The same context immediately consumes this plan after its Q/K
             # projection. Revalidating GPU lengths and block IDs per layer
             # would add host synchronization without seeing new metadata.
-            object.__setattr__(self, "_target_verify_plan", plan)
+            self._target_verify_plan = plan
 
     def write_prefill_indexer_cache(
         self,
@@ -296,9 +295,14 @@ class Qwen4ExpQSARuntimeContext:
         *,
         indexer: Any,
         rope_config: Any,
+        collect_stats: bool = True,
     ) -> tuple[list[int], torch.Tensor, torch.Tensor, dict]:
         return qsa_prefill.write_prefill_indexer_cache(
-            self, raw_keys, indexer=indexer, rope_config=rope_config
+            self,
+            raw_keys,
+            indexer=indexer,
+            rope_config=rope_config,
+            collect_stats=collect_stats,
         )
 
     def select_draft_graph_tokens(

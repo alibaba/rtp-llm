@@ -99,6 +99,56 @@ class StateCacheInputsTest(unittest.TestCase):
         self.assertIs(prepare_state_cache_inputs(groups, object()), groups)
         self.assertIs(prepare_state_cache_inputs(groups, None), groups)
 
+    def test_replay_workspace_refreshes_projection_and_rebinds_layout(self):
+        for factor in (1, 2, 4):
+            with self.subTest(factor=factor):
+                physical = torch.tensor([[5, 7], [0, 9]], dtype=torch.int32)
+                source = SimpleNamespace(
+                    is_cuda_graph=True,
+                    kv_cache_kernel_block_id_device=_expand(physical, factor),
+                )
+                groups = {INDEXER_STATE_TAG: source}
+                cache = _CacheGeometry({INDEXER_STATE_TAG: factor})
+                workspace = {}
+                retained = prepare_state_cache_inputs(
+                    groups, cache, workspace=workspace
+                )[INDEXER_STATE_TAG]
+                pointer = retained.kv_cache_block_id_device.data_ptr()
+                physical[0, 0] = 11
+                source.kv_cache_kernel_block_id_device.copy_(_expand(physical, factor))
+                refreshed = prepare_state_cache_inputs(
+                    groups, cache, workspace=workspace
+                )[INDEXER_STATE_TAG]
+                self.assertIs(refreshed, retained)
+                self.assertEqual(refreshed.kv_cache_block_id_device.data_ptr(), pointer)
+                torch.testing.assert_close(refreshed.kv_cache_block_id_device, physical)
+                physical[0, 1] = 13
+                replacement = SimpleNamespace(
+                    is_cuda_graph=True,
+                    kv_cache_kernel_block_id_device=_expand(physical, factor),
+                )
+                groups[INDEXER_STATE_TAG] = replacement
+                refreshed = prepare_state_cache_inputs(
+                    groups, cache, workspace=workspace
+                )[INDEXER_STATE_TAG]
+                self.assertIs(refreshed, retained)
+                torch.testing.assert_close(refreshed.kv_cache_block_id_device, physical)
+                if factor == 1:
+                    self.assertIs(
+                        refreshed.kv_cache_block_id_device,
+                        replacement.kv_cache_kernel_block_id_device,
+                    )
+                replacement.kv_cache_kernel_block_id_device = _expand(
+                    physical[:1], factor
+                )
+                rebound = prepare_state_cache_inputs(
+                    groups, cache, workspace=workspace
+                )[INDEXER_STATE_TAG]
+                self.assertIsNot(rebound, retained)
+                torch.testing.assert_close(
+                    rebound.kv_cache_block_id_device, physical[:1]
+                )
+
     def test_common_padding_width_and_strided_sources(self):
         for factor in (2, 4, 8):
             table = torch.tensor([[0, 5, 7], [32768, 9, 0]], dtype=torch.int32)

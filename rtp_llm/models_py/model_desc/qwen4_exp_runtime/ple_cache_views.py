@@ -274,6 +274,7 @@ class PLECacheViews:
         device: torch.device,
         *,
         trusted_host_table: bool = False,
+        uploaded_indices: dict[torch.device, torch.Tensor] | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Resolve (batch row, logical page) pairs, used for per-page writes.
 
@@ -328,14 +329,20 @@ class PLECacheViews:
         ):
             raise RuntimeError(f"PLE cache {tag!r} physical block id exceeds its pool")
         if host_pairs:
-            # These indices originate on the host. Validate their bounds there,
-            # then upload together. Untrusted callers also check device blocks.
-            host_indices = torch.empty(
-                (2, rows_l.numel()), dtype=torch.long, device="cpu", pin_memory=True
+            device_indices = (
+                uploaded_indices.get(table.device)
+                if uploaded_indices is not None
+                else None
             )
-            host_indices[0].copy_(rows_l)
-            host_indices[1].copy_(pages_l)
-            device_indices = host_indices.to(device=table.device, non_blocking=True)
+            if device_indices is None:
+                host_indices = torch.empty(
+                    (2, rows_l.numel()), dtype=torch.long, device="cpu", pin_memory=True
+                )
+                host_indices[0].copy_(rows_l)
+                host_indices[1].copy_(pages_l)
+                device_indices = host_indices.to(device=table.device, non_blocking=True)
+                if uploaded_indices is not None:
+                    uploaded_indices[table.device] = device_indices
             rows_l, pages_l = device_indices.unbind(0)
         blocks = table[rows_l, pages_l]
         if not use_host_table and bool((blocks >= pool_rows).any().item()):

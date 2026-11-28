@@ -9,6 +9,7 @@ class DeviceChecks:
         self._flags = []
         self._offsets = []
         self.verified = False
+        self.prefill_metadata_readonly = False
 
     def add(self, invalid, message, error_type=RuntimeError):
         self.add_flags(invalid, [message], error_type)
@@ -18,6 +19,14 @@ class DeviceChecks:
         self._offsets.append(len(self._checks))
         self._flags.append(flags)
         self._checks.extend((message, error_type) for message in messages)
+
+    def extend(self, other):
+        if other._checks:
+            self.verified = False
+            offset = len(self._checks)
+            self._offsets.extend(offset + value for value in other._offsets)
+            self._flags.extend(other._flags)
+            self._checks.extend(other._checks)
 
     def verify(self, payload=None):
         self.verified = False

@@ -5,6 +5,16 @@ import torch
 from .validation import DeviceChecks
 
 
+def matching_model_prefill_geometry(impl, cache, table, bases, lengths, device):
+    receipts = impl._model_prefill_geometry
+    if receipts is None or cache.device != device:
+        return None
+    for receipt in receipts.get((device, cache.data_ptr()), ()):
+        if receipt.matches(impl, cache, table, bases, lengths):
+            return receipt
+    return None
+
+
 def main_geometry_checks(checks, bases, lengths, table, page_size, pages, padded):
     """Queue safe wide-integer checks; the caller owns the single host read."""
     bases = bases.to(device=table.device, dtype=torch.int64, non_blocking=True)
@@ -179,6 +189,7 @@ def _validate_main_paged_geometry(
     device: torch.device,
     graph_capture: bool = False,
     checks=None,
+    token_count: int | None = None,
 ) -> int:
     """Validate all pages that a paged prefill/decode may observe."""
     batch_size = int(sequence_bases.numel())
@@ -189,6 +200,22 @@ def _validate_main_paged_geometry(
         or batch_size <= 0
     ):
         raise RuntimeError("qwen4_exp QSA paged sequence metadata has invalid geometry")
+    receipt = None
+    if not graph_capture:
+        receipt = matching_model_prefill_geometry(
+            self, cache, block_table, sequence_bases, query_lengths, device
+        )
+    if token_count is not None:
+        error = "qwen4_exp QSA paged token count does not match batch/query geometry"
+        if receipt is not None and receipt.host_geometry is not None:
+            if receipt.host_geometry.token_count != token_count:
+                raise RuntimeError(error)
+        else:
+            mismatch = query_lengths.sum() != token_count
+            if checks is not None and mismatch.is_cuda:
+                checks.add(mismatch, error)
+            elif bool(mismatch.item()):
+                raise RuntimeError(error)
     if graph_capture:
         if sequence_bases.device.type != "cpu" or query_lengths.device.type != "cpu":
             raise RuntimeError("qwen4_exp sparse GQA Graph requires host lengths")
@@ -209,9 +236,10 @@ def _validate_main_paged_geometry(
                 "qwen4_exp QSA paged main block table does not cover the visible KV"
             )
         return page_size
-    for receipt in getattr(self, "_model_prefill_geometry", None) or ():
-        if receipt.matches(self, cache, block_table, sequence_bases, query_lengths):
-            return receipt.page_size
+    if receipt is not None:
+        if checks is not None:
+            checks.prefill_metadata_readonly = True
+        return receipt.page_size
     page_size = _try_validate_main_paged_geometry(
         self,
         cache,
@@ -311,18 +339,7 @@ def validate_qsa_before_side_write(
         # The model's side-writer preflight combines these read-only flags with
         # its position/CU and pool checks, before the first cache mutation.
         checks = DeviceChecks()
-        object.__setattr__(qsa_runtime, "_prewrite_checks", checks)
-    token_mismatch = query_lengths.sum() != int(hidden_states.shape[0])
-    if checks is not None and token_mismatch.is_cuda:
-        checks.add(
-            token_mismatch,
-            "qwen4_exp QSA paged token count does not match batch/query geometry",
-        )
-    elif bool(token_mismatch.item()):
-        raise RuntimeError(
-            "qwen4_exp QSA paged token count does not match batch/query geometry"
-        )
-    kwargs = {"checks": checks} if checks is not None else {}
+        qsa_runtime._prewrite_checks = checks
     page_size = self._validate_main_paged_geometry(
         qsa_runtime.main_cache.kv_cache_base,
         self.attn_inputs.kv_cache_kernel_block_id_device,
@@ -330,7 +347,8 @@ def validate_qsa_before_side_write(
         query_lengths,
         hidden_states.device,
         graph_capture=graph_capture,
-        **kwargs,
+        checks=checks,
+        token_count=int(hidden_states.shape[0]),
     )
     if not graph_capture and not is_incremental_prefill:
         from rtp_llm.models_py.model_desc.qwen4_exp_runtime.prefill_preflight import (

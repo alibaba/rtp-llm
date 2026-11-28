@@ -277,7 +277,6 @@ class PLEExecution:
                 for host, device_table in zip(host_block_tables, device_block_tables)
             )
         )
-        pair_kwargs = {"trusted_host_table": True} if trusted_host_tables else {}
         # Eager fallback must never reuse rows prepared for a captured graph.
         with ple.ple_embedding.lookup_context(graph_capture):
             local_rows = (
@@ -464,6 +463,8 @@ class PLEExecution:
                 write_pages_t = torch.tensor(
                     write_pages, dtype=torch.long, device="cpu"
                 )
+                # Both gathers consume these same logical pairs on the current stream.
+                uploaded_indices = {}
                 write_state_blocks, state_writable = self._physical_blocks_for_pairs(
                     state_inputs,
                     PLE_STATE_TAG,
@@ -471,7 +472,8 @@ class PLEExecution:
                     write_pages_t,
                     int(state_pool.shape[0]),
                     state_pool.device,
-                    **pair_kwargs,
+                    trusted_host_table=trusted_host_tables,
+                    uploaded_indices=uploaded_indices,
                 )
                 write_ctx_blocks, ctx_writable = self._physical_blocks_for_pairs(
                     ctx_inputs,
@@ -480,7 +482,8 @@ class PLEExecution:
                     write_pages_t,
                     int(ctx_pool.shape[0]),
                     ctx_pool.device,
-                    **pair_kwargs,
+                    trusted_host_table=trusted_host_tables,
+                    uploaded_indices=uploaded_indices,
                 )
                 # Decode resumes from the page holding each request's last token, so
                 # that page must exist even when the allocator dropped the rest of

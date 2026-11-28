@@ -283,6 +283,7 @@ class Qwen4ExpAttention(Qwen3NextAttention):
                 raw_keys,
                 indexer=self.qsa_indexer,
                 rope_config=self.qsa_rope_config,
+                collect_stats=False,
             )
         )
 
@@ -1226,12 +1227,15 @@ class Qwen4ExpModel(Qwen35Model):
                 tags.append(tag)
         return tags
 
-    def _layer_fmha_impl(self, decoder_layer, fmha_impl, layer_idx: int):
+    def _layer_fmha_impl(
+        self, decoder_layer, fmha_impl, layer_idx: int, tag: Optional[str] = None
+    ):
         if decoder_layer.layer_type == HybridAttentionType.LINEAR:
             return None
         if not isinstance(fmha_impl, Mapping):
             return fmha_impl
-        tag = self._attention_tag(layer_idx)
+        if tag is None:
+            tag = self._attention_tag(layer_idx)
         try:
             return fmha_impl[tag]
         except KeyError as error:
@@ -1324,8 +1328,10 @@ class Qwen4ExpModel(Qwen35Model):
         try:
             from .qwen4_exp_runtime.prefill_preflight import prefill_geometry_scope
 
-            with prefill_geometry_scope(self, inputs, fmha_impl):
-                outputs = self._forward_with_ple_prefetch(inputs, fmha_impl)
+            with prefill_geometry_scope(self, inputs, fmha_impl) as share_qsa_metadata:
+                outputs = self._forward_with_ple_prefetch(
+                    inputs, fmha_impl, share_qsa_metadata=share_qsa_metadata
+                )
             return outputs
         finally:
             if target_reduce is not None:
@@ -1337,7 +1343,11 @@ class Qwen4ExpModel(Qwen35Model):
                     finish()
 
     def _forward_with_ple_prefetch(
-        self, inputs: PyModelInputs, fmha_impl: Any = None
+        self,
+        inputs: PyModelInputs,
+        fmha_impl: Any = None,
+        *,
+        share_qsa_metadata: bool = True,
     ) -> PyModelOutputs:
         if (
             self.ple_layers
@@ -1441,7 +1451,8 @@ class Qwen4ExpModel(Qwen35Model):
             and hyper_states.dtype == torch.bfloat16
             and torch.cuda.get_device_capability(hyper_states.device) == (12, 0)
         )
-        qsa_metadata_cache = {}
+        metadata_cache = {}
+        qsa_metadata_cache = metadata_cache if share_qsa_metadata else None
         for i, decoder_layer in enumerate(self.layers):
             if str(i) in self.ple_layers:
                 if pending_injection is not None:
@@ -1458,10 +1469,11 @@ class Qwen4ExpModel(Qwen35Model):
                     hyper_states,
                     ple_input_ids,
                     attention_inputs,
-                    metadata_cache=qsa_metadata_cache,
+                    metadata_cache=metadata_cache,
                     **({"prefetch": ple_prefetch[i]} if i in ple_prefetch else {}),
                 )
             if self.kv_cache is None:
+                tag = None
                 layer_kv_cache = None
                 layer_attention_inputs = attention_inputs
             else:
@@ -1470,7 +1482,7 @@ class Qwen4ExpModel(Qwen35Model):
                 layer_attention_inputs = select_attention_inputs_for_tag(
                     attention_inputs, tag
                 )
-            layer_fmha_impl = self._layer_fmha_impl(decoder_layer, fmha_impl, i)
+            layer_fmha_impl = self._layer_fmha_impl(decoder_layer, fmha_impl, i, tag)
             # The engine rebuilds equivalent attention-input objects per batch,
             # so bind this layer to the exact object its sparse-GQA impl was
             # constructed with. The QSA runtime context, the impl and the
