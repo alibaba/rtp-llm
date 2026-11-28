@@ -16,12 +16,25 @@ from rtp_llm.models_py.modules.base.cuda.norm import RMSNorm
 from rtp_llm.models_py.modules.dsv4.hc.base import HCUnitBase
 from rtp_llm.models_py.modules.dsv4.hc.tilelang_impl import TileLangHCUnit
 
+try:
+    from rtp_llm.models_py.triton_kernels.fast_launch import fast_launch
+except ImportError:  # pragma: no cover
+
+    def fast_launch(jit_fn: Any, grid: Any, *args: Any, **kwargs: Any) -> Any:
+        return jit_fn[grid](*args, **kwargs)
+
+
 _MHC_MULT = 4
 _MHC_MULT2 = 16
 _MHC_MULT3 = 24
 _MHC_POST_MULT = 2.0
 _MAX_FUSED_HIDDEN = 8192
 _UE8M0_GROUP_SIZE = 128
+
+_FP8_E4M3_FINFO = torch.finfo(torch.float8_e4m3fn)
+_FP8_E4M3_MIN = float(_FP8_E4M3_FINFO.min)
+_FP8_E4M3_MAX = float(_FP8_E4M3_FINFO.max)
+_DEEPGEMM_WRAPPER: Any = None
 
 # The fused kernel launches one CTA per token row and processes the whole
 # BLOCK_H=4096 row (4 mHC lanes + RMSNorm + optional UE8M0 quant) inside that
@@ -579,8 +592,21 @@ def _run_fused_mhc_pre_norm(
     quant_ue8m0: bool,
     group_size: int = _UE8M0_GROUP_SIZE,
     clamp_eps: float = 1.0e-4,
+    out_gemm_mul: Optional[torch.Tensor] = None,
+    out_gemm_sqrsum: Optional[torch.Tensor] = None,
+    out_post_mix: Optional[torch.Tensor] = None,
+    out_comb_mix: Optional[torch.Tensor] = None,
+    out_norm: Optional[torch.Tensor] = None,
+    out_q: Optional[torch.Tensor] = None,
+    out_scale: Optional[torch.Tensor] = None,
 ):
-    from rtp_llm.models_py.kernels.cuda.deepgemm_wrapper import tf32_hc_prenorm_gemm
+    global _DEEPGEMM_WRAPPER
+    dg = _DEEPGEMM_WRAPPER
+    if dg is None:
+        from rtp_llm.models_py.kernels.cuda import deepgemm_wrapper as dg
+
+        _DEEPGEMM_WRAPPER = dg
+    tf32_hc_prenorm_gemm = dg.tf32_hc_prenorm_gemm
 
     if triton is None:
         raise RuntimeError("triton is unavailable")
@@ -593,11 +619,17 @@ def _run_fused_mhc_pre_norm(
     n_splits = _compute_num_split(
         64, mhc_hidden_size, (num_tokens + 63) // 64, x.device
     )
-    gemm_out_mul = torch.empty(
-        n_splits, num_tokens, _MHC_MULT3, dtype=torch.float32, device=x.device
+    gemm_out_mul = (
+        out_gemm_mul.view(n_splits, num_tokens, _MHC_MULT3)
+        if out_gemm_mul is not None
+        else torch.empty(
+            n_splits, num_tokens, _MHC_MULT3, dtype=torch.float32, device=x.device
+        )
     )
-    gemm_out_sqrsum = torch.empty(
-        n_splits, num_tokens, dtype=torch.float32, device=x.device
+    gemm_out_sqrsum = (
+        out_gemm_sqrsum.view(n_splits, num_tokens)
+        if out_gemm_sqrsum is not None
+        else torch.empty(n_splits, num_tokens, dtype=torch.float32, device=x.device)
     )
     tf32_hc_prenorm_gemm(
         residual_flat.view(num_tokens, mhc_hidden_size),
@@ -607,10 +639,20 @@ def _run_fused_mhc_pre_norm(
         n_splits,
     )
 
-    post_mix = torch.empty(num_tokens, _MHC_MULT, dtype=torch.float32, device=x.device)
-    comb_mix = torch.empty(num_tokens, _MHC_MULT2, dtype=torch.float32, device=x.device)
-    out_norm = torch.empty(
-        num_tokens, hidden_size, dtype=torch.bfloat16, device=x.device
+    post_mix = (
+        out_post_mix.view(num_tokens, _MHC_MULT)
+        if out_post_mix is not None
+        else torch.empty(num_tokens, _MHC_MULT, dtype=torch.float32, device=x.device)
+    )
+    comb_mix = (
+        out_comb_mix.view(num_tokens, _MHC_MULT2)
+        if out_comb_mix is not None
+        else torch.empty(num_tokens, _MHC_MULT2, dtype=torch.float32, device=x.device)
+    )
+    out_norm_buf = (
+        out_norm.view(num_tokens, hidden_size)
+        if out_norm is not None
+        else torch.empty(num_tokens, hidden_size, dtype=torch.bfloat16, device=x.device)
     )
 
     if hidden_size <= 512:
@@ -631,26 +673,35 @@ def _run_fused_mhc_pre_norm(
         num_warps = 2
 
     if quant_ue8m0:
-        out_q = torch.empty(
-            num_tokens, hidden_size, dtype=torch.float8_e4m3fn, device=x.device
+        out_q_buf = (
+            out_q.view(num_tokens, hidden_size)
+            if out_q is not None
+            else torch.empty(
+                num_tokens, hidden_size, dtype=torch.float8_e4m3fn, device=x.device
+            )
         )
-        out_scale = _make_ue8m0_scale_like(
-            num_tokens, hidden_size, device=x.device, group_size=group_size
+        out_scale_buf = (
+            out_scale
+            if out_scale is not None
+            else _make_ue8m0_scale_like(
+                num_tokens, hidden_size, device=x.device, group_size=group_size
+            )
         )
-        out_scale_stride_k = int(out_scale.stride(1))
+        out_scale_stride_k = int(out_scale_buf.stride(1))
         active_scale_packs = (active_groups + 3) // 4
-        finfo = torch.finfo(torch.float8_e4m3fn)
-        fp8_min = float(finfo.min)
-        fp8_max = float(finfo.max)
+        fp8_min = _FP8_E4M3_MIN
+        fp8_max = _FP8_E4M3_MAX
     else:
-        out_q = out_norm
-        out_scale = post_mix
+        out_q_buf = out_norm_buf
+        out_scale_buf = post_mix
         out_scale_stride_k = 1
         active_scale_packs = 1
         fp8_min = -448.0
         fp8_max = 448.0
 
-    _mhc_pre_big_fuse_rmsnorm_kernel[(num_tokens,)](
+    fast_launch(
+        _mhc_pre_big_fuse_rmsnorm_kernel,
+        (num_tokens,),
         gemm_out_mul,
         gemm_out_sqrsum,
         hc_unit.scale,
@@ -659,9 +710,9 @@ def _run_fused_mhc_pre_norm(
         norm.weight.data,
         post_mix,
         comb_mix,
-        out_norm,
-        out_q,
-        out_scale,
+        out_norm_buf,
+        out_q_buf,
+        out_scale_buf,
         num_tokens,
         n_splits,
         int(hc_unit.hc_sinkhorn_iters),
@@ -690,11 +741,11 @@ def _run_fused_mhc_pre_norm(
         num_stages=1 if num_chunks == 1 else 2,
     )
 
-    out_norm_view = out_norm.view(*outer_shape, hidden_size)
+    out_norm_view = out_norm_buf.view(*outer_shape, hidden_size)
     post_mix_view = post_mix.view(*outer_shape, _MHC_MULT, 1)
     comb_mix_view = comb_mix.view(*outer_shape, _MHC_MULT, _MHC_MULT)
     if quant_ue8m0:
-        return out_norm_view, post_mix_view, comb_mix_view, (out_q, out_scale)
+        return out_norm_view, post_mix_view, comb_mix_view, (out_q_buf, out_scale_buf)
     return out_norm_view, post_mix_view, comb_mix_view
 
 
@@ -702,9 +753,25 @@ def fused_mhc_pre_norm(
     x: torch.Tensor,
     hc_unit: TileLangHCUnit,
     norm: RMSNorm,
+    *,
+    out_gemm_mul: Optional[torch.Tensor] = None,
+    out_gemm_sqrsum: Optional[torch.Tensor] = None,
+    out_post_mix: Optional[torch.Tensor] = None,
+    out_comb_mix: Optional[torch.Tensor] = None,
+    out_norm: Optional[torch.Tensor] = None,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Run fused mHC pre + RMSNorm and return (x_pre_normed, post_mix, comb_mix)."""
-    return _run_fused_mhc_pre_norm(x, hc_unit, norm, quant_ue8m0=False)
+    return _run_fused_mhc_pre_norm(
+        x,
+        hc_unit,
+        norm,
+        quant_ue8m0=False,
+        out_gemm_mul=out_gemm_mul,
+        out_gemm_sqrsum=out_gemm_sqrsum,
+        out_post_mix=out_post_mix,
+        out_comb_mix=out_comb_mix,
+        out_norm=out_norm,
+    )
 
 
 def fused_mhc_pre_norm_quant(
@@ -714,6 +781,13 @@ def fused_mhc_pre_norm_quant(
     *,
     group_size: int = _UE8M0_GROUP_SIZE,
     clamp_eps: float = 1.0e-4,
+    out_gemm_mul: Optional[torch.Tensor] = None,
+    out_gemm_sqrsum: Optional[torch.Tensor] = None,
+    out_post_mix: Optional[torch.Tensor] = None,
+    out_comb_mix: Optional[torch.Tensor] = None,
+    out_norm: Optional[torch.Tensor] = None,
+    out_q: Optional[torch.Tensor] = None,
+    out_scale: Optional[torch.Tensor] = None,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
     """Run fused mHC pre + RMSNorm + FP8 UE8M0 quant for attention QKV reuse."""
     return _run_fused_mhc_pre_norm(
@@ -723,6 +797,13 @@ def fused_mhc_pre_norm_quant(
         quant_ue8m0=True,
         group_size=group_size,
         clamp_eps=clamp_eps,
+        out_gemm_mul=out_gemm_mul,
+        out_gemm_sqrsum=out_gemm_sqrsum,
+        out_post_mix=out_post_mix,
+        out_comb_mix=out_comb_mix,
+        out_norm=out_norm,
+        out_q=out_q,
+        out_scale=out_scale,
     )
 
 
@@ -754,7 +835,9 @@ def mhc_mean_copy(
     ):
         block_n = 1024
         grid = (rows, triton.cdiv(dim, block_n))
-        _mhc_mean_copy_kernel[grid](
+        fast_launch(
+            _mhc_mean_copy_kernel,
+            grid,
             hidden,
             buf,
             rows,
@@ -795,7 +878,9 @@ def copy_2d_buffer(flat: torch.Tensor, buf: torch.Tensor, *, rows: int) -> None:
             return
         block_n = 1024
         grid = (rows, triton.cdiv(dim, block_n))
-        _triton_copy_2d_kernel[grid](
+        fast_launch(
+            _triton_copy_2d_kernel,
+            grid,
             flat,
             buf,
             rows,

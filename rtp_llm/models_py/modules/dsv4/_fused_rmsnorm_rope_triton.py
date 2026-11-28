@@ -14,8 +14,25 @@ import torch
 import triton
 import triton.language as tl
 
+try:
+    from rtp_llm.models_py.triton_kernels.fast_launch import fast_launch
+except ImportError:  # pragma: no cover
+
+    def fast_launch(jit_fn, grid, *args, **kwargs):
+        return jit_fn[grid](*args, **kwargs)
+
+
 _CACHED_CUDA_OP = False
 _CUDA_RMSNORM_ROPE_OP = None
+_DUMMY_RMSNORM_WEIGHTS: dict[torch.device, torch.Tensor] = {}
+
+
+def _get_dummy_rmsnorm_weight(device: torch.device) -> torch.Tensor:
+    t = _DUMMY_RMSNORM_WEIGHTS.get(device)
+    if t is None:
+        t = torch.empty(1, dtype=torch.float32, device=device)
+        _DUMMY_RMSNORM_WEIGHTS[device] = t
+    return t
 
 
 def _get_cuda_rmsnorm_rope_op():
@@ -380,7 +397,7 @@ def _fused_rmsnorm_rope_impl(
             )
             return out_flat.view(*orig_shape)
 
-    w = w_opt if w_opt is not None else torch.empty(1, dtype=torch.float32, device=x.device)
+    w = w_opt if w_opt is not None else _get_dummy_rmsnorm_weight(x.device)
 
     BLOCK_D = triton.next_power_of_2(D)
     assert BLOCK_D <= 4096
@@ -416,7 +433,9 @@ def _fused_rmsnorm_rope_impl(
         group_num_warps = (
             8 if (BLOCK_D > 512 or selected_group_heads * BLOCK_D >= 4096) else 4
         )
-        _fused_rmsnorm_rope_group_heads_kernel[grid](
+        fast_launch(
+            _fused_rmsnorm_rope_group_heads_kernel,
+            grid,
             x_flat,
             w,
             freqs_ri,
@@ -445,7 +464,9 @@ def _fused_rmsnorm_rope_impl(
             num_stages=1,
         )
     else:
-        _fused_rmsnorm_rope_kernel[(N,)](
+        fast_launch(
+            _fused_rmsnorm_rope_kernel,
+            (N,),
             x_flat,
             w,
             freqs_ri,

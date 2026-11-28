@@ -8,6 +8,14 @@ from typing import Optional, Tuple
 import torch
 
 try:
+    from rtp_llm.models_py.triton_kernels.fast_launch import fast_launch
+except ImportError:  # pragma: no cover
+
+    def fast_launch(jit_fn, grid, *args, **kwargs):
+        return jit_fn[grid](*args, **kwargs)
+
+
+try:
     import triton
     import triton.language as tl
 
@@ -438,7 +446,9 @@ def try_build_cp_restore_indices(
     grid = (triton.cdiv(total_tokens, _BLOCK_SIZE),)
     batch_size = int(lengths.numel())
     if batch_size == 1:
-        _cp_restore_b1_kernel[grid](
+        fast_launch(
+            _cp_restore_b1_kernel,
+            grid,
             out,
             total_tokens,
             int(total_local_kv),
@@ -448,7 +458,9 @@ def try_build_cp_restore_indices(
             num_warps=4,
         )
     else:
-        _cp_restore_varlen_kernel[grid](
+        fast_launch(
+            _cp_restore_varlen_kernel,
+            grid,
             lengths,
             out,
             total_tokens,
@@ -489,7 +501,9 @@ def try_build_cp_full_prefill_positions(
     grid = (triton.cdiv(total_tokens, _BLOCK_SIZE),)
     batch_size = int(lengths.numel())
     if batch_size == 1:
-        _cp_positions_b1_kernel[grid](
+        fast_launch(
+            _cp_positions_b1_kernel,
+            grid,
             prefixes,
             positions,
             request_ids,
@@ -498,7 +512,9 @@ def try_build_cp_full_prefill_positions(
             num_warps=4,
         )
     else:
-        _cp_positions_varlen_kernel[grid](
+        fast_launch(
+            _cp_positions_varlen_kernel,
+            grid,
             lengths,
             prefixes,
             positions,
@@ -591,7 +607,9 @@ def try_build_cp_forward_metadata(
         )
     batch_block = _batch_block(batch_size)
     grid = (triton.cdiv(total_rows, _BLOCK_SIZE),)
-    _cp_forward_metadata_kernel[grid](
+    fast_launch(
+        _cp_forward_metadata_kernel,
+        grid,
         lengths,
         chunk_lengths,
         prefixes,

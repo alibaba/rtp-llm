@@ -27,7 +27,11 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
 
 
 def _flat_optional(t: Optional[torch.Tensor]) -> Optional[torch.Tensor]:
-    return None if t is None else t.reshape(-1).contiguous()
+    if t is None:
+        return None
+    if t.dim() == 1 and t.is_contiguous():
+        return t
+    return t.reshape(-1).contiguous()
 
 
 def build_and_propagate_prefill_meta_fp8(

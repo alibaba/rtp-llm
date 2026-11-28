@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import functools
 from typing import Any, NamedTuple, Optional, Tuple
 
 import torch
@@ -9,6 +10,7 @@ import torch
 from rtp_llm.models_py.modules.dsv4 import _profiler
 from rtp_llm.models_py.modules.dsv4.hc.base import HCUnitBase
 from rtp_llm.models_py.modules.dsv4.hc.tilelang_impl import TileLangHCUnit
+from rtp_llm.models_py.triton_kernels.fast_launch import is_cuda_stream_capturing
 
 _HC_MULT = 4
 _HC_MIX_COUNT = (2 + _HC_MULT) * _HC_MULT  # 24
@@ -102,14 +104,30 @@ def _normalize_cuda_device(device: Any) -> Optional[torch.device]:
     return dev
 
 
-def _is_sm10x_device(device: torch.device) -> bool:
-    if device.type != "cuda" or not torch.cuda.is_available():
+# Maps (layer_id, unit_name) -> cached profiler label so we avoid f-string churn.
+_PROFILE_RANGE_NAMES: dict[Tuple[int, str], str] = {}
+
+
+@functools.cache
+def _is_sm10x_device_idx(dev_idx: int) -> bool:
+    if not torch.cuda.is_available():
         return False
     try:
-        major, _ = torch.cuda.get_device_capability(device)
+        major, _ = torch.cuda.get_device_capability(dev_idx)
     except Exception:
         return False
     return int(major) == 10
+
+
+def _is_sm10x_device(device: torch.device) -> bool:
+    if device.type != "cuda":
+        return False
+    dev_idx = (
+        int(device.index)
+        if device.index is not None
+        else int(torch.cuda.current_device())
+    )
+    return _is_sm10x_device_idx(dev_idx)
 
 
 def _same_cuda_device(tensor_device: torch.device, target: torch.device) -> bool:
@@ -138,7 +156,7 @@ def can_use_on_current_stream(device: Any) -> bool:
     dev = _normalize_cuda_device(device)
     if dev is None or _get_mega_mhc() is None or not _is_sm10x_device(dev):
         return False
-    if torch.cuda.is_current_stream_capturing():
+    if is_cuda_stream_capturing():
         return _stream_key(dev) in _WARMED_STREAMS
     return True
 
@@ -312,6 +330,10 @@ def try_fused_post_pre(
     previous: Any,
     next_hc: Any,
     norm: Any,
+    out_residual: Optional[torch.Tensor] = None,
+    out_y: Optional[torch.Tensor] = None,
+    out_post: Optional[torch.Tensor] = None,
+    out_comb: Optional[torch.Tensor] = None,
 ) -> Optional[Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]]:
     """Fuse ``previous.post(x_sub, residual, post, comb)`` -> ``next_hc.pre`` -> ``norm``.
 
@@ -341,21 +363,42 @@ def try_fused_post_pre(
     comb_3d = comb.reshape(tokens, _HC_MULT, _HC_MULT)
 
     # deep_gemm.mega_mhc forbids new_residual aliasing residual.
-    new_residual_3d = torch.empty_like(res_3d)
-    new_post_3d = torch.empty(
-        (tokens, _HC_MULT, 1), dtype=torch.float32, device=res_3d.device
+    if out_residual is not None:
+        new_residual_3d = out_residual.reshape(tokens, _HC_MULT, dim)
+        if new_residual_3d.data_ptr() == res_3d.data_ptr():
+            raise ValueError("out_residual must not alias residual")
+    else:
+        new_residual_3d = torch.empty_like(res_3d)
+    new_post_3d = (
+        out_post.reshape(tokens, _HC_MULT, 1)
+        if out_post is not None
+        else torch.empty(
+            (tokens, _HC_MULT, 1), dtype=torch.float32, device=res_3d.device
+        )
     )
-    new_comb_3d = torch.empty(
-        (tokens, _HC_MULT, _HC_MULT), dtype=torch.float32, device=res_3d.device
+    new_comb_3d = (
+        out_comb.reshape(tokens, _HC_MULT, _HC_MULT)
+        if out_comb is not None
+        else torch.empty(
+            (tokens, _HC_MULT, _HC_MULT), dtype=torch.float32, device=res_3d.device
+        )
     )
-    normalized_2d = torch.empty(
-        (tokens, dim), dtype=torch.bfloat16, device=res_3d.device
+    normalized_2d = (
+        out_y.reshape(tokens, dim)
+        if out_y is not None
+        else torch.empty((tokens, dim), dtype=torch.bfloat16, device=res_3d.device)
     )
 
-    layer = f"L{next_hc.layer_id:02d}" if int(next_hc.layer_id) >= 0 else "Lxx"
-    name = next_hc.name or "unit"
+    layer_id = int(next_hc.layer_id)
+    unit_name = next_hc.name or "unit"
+    prof_key = (layer_id, unit_name)
+    prof_label = _PROFILE_RANGE_NAMES.get(prof_key)
+    if prof_label is None:
+        layer_tag = f"L{layer_id:02d}" if layer_id >= 0 else "Lxx"
+        prof_label = f"dsv4.hc.{layer_tag}.{unit_name}.mega_mhc"
+        _PROFILE_RANGE_NAMES[prof_key] = prof_label
     with (
-        _profiler.record_function_range(f"dsv4.hc.{layer}.{name}.mega_mhc"),
+        _profiler.record_function_range(prof_label),
         torch.inference_mode(),
     ):
         mega_mhc(
@@ -383,7 +426,7 @@ def try_fused_post_pre(
             y_bf16=normalized_2d,
         )
 
-    if not torch.cuda.is_current_stream_capturing():
+    if not is_cuda_stream_capturing():
         _WARMED_STREAMS.add(_stream_key(dev))
     dev_idx = (
         int(dev.index) if dev.index is not None else int(torch.cuda.current_device())
@@ -481,7 +524,7 @@ def prepare_capture_stream(
         dev = _normalize_cuda_device(device)
     if dev is None or not _is_sm10x_device(dev):
         return False
-    if torch.cuda.is_current_stream_capturing():
+    if is_cuda_stream_capturing():
         return False
 
     dev_idx = (

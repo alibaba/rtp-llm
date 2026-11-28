@@ -30,7 +30,9 @@ from rtp_llm.models_py.modules.dsv4.hc import (
     fused_mhc_pre_norm_quant,
 )
 from rtp_llm.models_py.modules.dsv4.hc import mega_mhc as _mega_mhc
+from rtp_llm.models_py.modules.dsv4.hc._fused_mhc_pre_norm import _compute_num_split
 from rtp_llm.models_py.modules.dsv4.hc.decode_transition import PendingDecodePost
+from rtp_llm.models_py.modules.dsv4.prefill_workspace import PrefillWorkspace
 from rtp_llm.models_py.modules.factory.fused_moe.utils.fp8_fp4.chunked_layer import (
     ChunkedFp8Fp4MoeLayer,
 )
@@ -77,6 +79,12 @@ def _prefill_fast_norm(norm: nn.Module, x: torch.Tensor) -> torch.Tensor:
 
 
 class Block(nn.Module):
+    _cp_sync_after_attn_done: bool = False
+    _prefill_ws: Optional[PrefillWorkspace] = None
+    _prefill_ws_allow_residual: bool = True
+    _attn_hc_pre_norm_profile: str = "dsv4.hc.attn.pre_norm"
+    _ffn_hc_pre_norm_profile: str = "dsv4.hc.ffn.pre_norm"
+
     def __init__(
         self,
         layer_id: int,
@@ -160,6 +168,10 @@ class Block(nn.Module):
             tp_rank=tp_rank,
         )
         self._cp_sync_after_attn_done = False
+        self._prefill_ws: Optional[PrefillWorkspace] = None
+        self._prefill_ws_allow_residual: bool = True
+        self._attn_hc_pre_norm_profile = f"dsv4.hc.L{layer_id:02d}.attn.pre_norm"
+        self._ffn_hc_pre_norm_profile = f"dsv4.hc.L{layer_id:02d}.ffn.pre_norm"
         if commit_only:
             self.ffn = None
             self.attn_norm = None
@@ -319,6 +331,58 @@ class Block(nn.Module):
             self._prefill_fast_hc_impls_cached = impls
         return impls
 
+    def _active_prefill_workspace(self) -> Optional[PrefillWorkspace]:
+        ws = getattr(self, "_prefill_ws", None)
+        return ws if isinstance(ws, PrefillWorkspace) else None
+
+    @staticmethod
+    def _mhc_pre_out_kwargs(
+        ws: Optional[PrefillWorkspace],
+        prefix: str,
+        x: torch.Tensor,
+        hc_unit,
+        *,
+        with_quant: bool = False,
+    ) -> Dict[str, torch.Tensor]:
+        if ws is None:
+            return {}
+        outer_shape = x.shape[:-2]
+        tokens = 1
+        for dim_val in outer_shape:
+            tokens *= int(dim_val)
+        hidden_size = int(hc_unit.dim)
+        mhc_mult = int(hc_unit.hc_mult)
+        if tokens <= 0 or mhc_mult != 4 or hidden_size <= 0:
+            return {}
+        n_splits = _compute_num_split(
+            64, mhc_mult * hidden_size, (tokens + 63) // 64, x.device
+        )
+        kwargs: Dict[str, torch.Tensor] = {
+            "out_gemm_mul": ws.scratch(
+                "mhc_gemm_mul", (n_splits, tokens, 24), torch.float32
+            ),
+            "out_gemm_sqrsum": ws.scratch(
+                "mhc_gemm_sqrsum", (n_splits, tokens), torch.float32
+            ),
+            "out_post_mix": ws.scratch(
+                f"{prefix}_post", (*outer_shape, mhc_mult, 1), torch.float32
+            ),
+            "out_comb_mix": ws.scratch(
+                f"{prefix}_comb", (*outer_shape, mhc_mult, mhc_mult), torch.float32
+            ),
+            "out_norm": ws.scratch(
+                f"{prefix}_x_pre", (*outer_shape, hidden_size), torch.bfloat16
+            ),
+        }
+        if with_quant:
+            kwargs["out_q"] = ws.scratch(
+                "attn_qkv_q", (*outer_shape, hidden_size), torch.float8_e4m3fn
+            )
+            kwargs["out_scale"] = ws.scratch_ue8m0_scale(
+                "attn_qkv_scale", tokens, hidden_size, group_size=128
+            )
+        return kwargs
+
     def _prefill_fast_hc_pre_norm(
         self,
         x: torch.Tensor,
@@ -326,21 +390,49 @@ class Block(nn.Module):
         hc_unit,
         hc_pre_impl: Callable,
         norm: nn.Module,
+        ws_prefix: Optional[str] = None,
     ):
         if hc_pre_impl == hc_unit._pre_impl and can_use_fused_mhc_pre_norm(
             x, hc_unit, norm
         ):
-            return fused_mhc_pre_norm(x, hc_unit, norm)
+            out_kwargs = (
+                self._mhc_pre_out_kwargs(
+                    self._active_prefill_workspace(), ws_prefix, x, hc_unit
+                )
+                if ws_prefix is not None
+                else {}
+            )
+            return fused_mhc_pre_norm(x, hc_unit, norm, **out_kwargs)
         x_pre, post, comb = hc_pre_impl(x)
         x_pre = _prefill_fast_norm(norm, x_pre)
         return x_pre, post, comb
 
-    def _hc_pre_norm_profiled(self, x: torch.Tensor, hc_unit, norm: nn.Module):
+    def _hc_pre_norm_profiled(
+        self,
+        x: torch.Tensor,
+        hc_unit,
+        norm: nn.Module,
+        *,
+        ws_prefix: Optional[str] = None,
+    ):
         if can_use_fused_mhc_pre_norm(x, hc_unit, norm):
-            layer = f"L{hc_unit.layer_id:02d}" if hc_unit.layer_id >= 0 else "Lxx"
-            name = hc_unit.name or "unit"
-            with _profiler.record_function_range(f"dsv4.hc.{layer}.{name}.pre_norm"):
-                return fused_mhc_pre_norm(x, hc_unit, norm)
+            if hc_unit is self.attn_hc:
+                prof_name = self._attn_hc_pre_norm_profile
+            elif hc_unit is self.ffn_hc:
+                prof_name = self._ffn_hc_pre_norm_profile
+            else:
+                layer = f"L{hc_unit.layer_id:02d}" if hc_unit.layer_id >= 0 else "Lxx"
+                name = hc_unit.name or "unit"
+                prof_name = f"dsv4.hc.{layer}.{name}.pre_norm"
+            out_kwargs = (
+                self._mhc_pre_out_kwargs(
+                    self._active_prefill_workspace(), ws_prefix, x, hc_unit
+                )
+                if ws_prefix is not None
+                else {}
+            )
+            with _profiler.record_function_range(prof_name):
+                return fused_mhc_pre_norm(x, hc_unit, norm, **out_kwargs)
         x_pre, post, comb = hc_unit.pre(x)
         if x_pre.dim() > 2:
             bsz, q_len, dim_ = x_pre.shape
@@ -422,6 +514,32 @@ class Block(nn.Module):
         post: torch.Tensor,
         comb: torch.Tensor,
     ) -> Optional[Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]]:
+        ws = self._active_prefill_workspace()
+        extra: Dict[str, torch.Tensor] = {}
+        if ws is not None and residual.dim() in (3, 4) and self.ffn_hc is not None:
+            mhc_mult = int(residual.shape[-2])
+            hidden_size = int(residual.shape[-1])
+            tokens = int(residual.numel() // max(mhc_mult * hidden_size, 1))
+            if tokens > 0 and mhc_mult == int(self.ffn_hc.hc_mult):
+                outer_shape = residual.shape[:-2]
+                extra["out_y"] = ws.scratch(
+                    "mhc_ffn_x_pre", tuple(attn_out.shape), torch.bfloat16
+                )
+                extra["out_post"] = ws.scratch(
+                    "mhc_ffn_post", (*outer_shape, mhc_mult, 1), torch.float32
+                )
+                extra["out_comb"] = ws.scratch(
+                    "mhc_ffn_comb", (*outer_shape, mhc_mult, mhc_mult), torch.float32
+                )
+                if getattr(self, "_prefill_ws_allow_residual", True):
+                    res_cand = ws.scratch(
+                        "mhc_attn_post_res_0", tuple(residual.shape), torch.bfloat16
+                    )
+                    if res_cand.data_ptr() == residual.data_ptr():
+                        res_cand = ws.scratch(
+                            "mhc_attn_post_res_1", tuple(residual.shape), torch.bfloat16
+                        )
+                    extra["out_residual"] = res_cand
         return _mega_mhc.try_fused_post_pre(
             attn_out,
             residual,
@@ -430,6 +548,7 @@ class Block(nn.Module):
             previous=self.attn_hc,
             next_hc=self.ffn_hc,
             norm=self.ffn_norm,
+            **extra,
         )
 
     def _finish_attn_post_ffn_pre(
@@ -635,6 +754,16 @@ class Block(nn.Module):
                     if profile_fused
                     else nullcontext()
                 )
+                ws = self._active_prefill_workspace()
+                extra_quant: Dict[str, torch.Tensor] = {}
+                if ws is not None and x_pre.dim() == 2 and int(x_pre.shape[0]) > 0:
+                    tokens, width = int(x_pre.shape[0]), int(x_pre.shape[1])
+                    extra_quant["out_q"] = ws.scratch(
+                        "attn_qkv_q", (tokens, width), torch.float8_e4m3fn
+                    )
+                    extra_quant["out_scale"] = ws.scratch_ue8m0_scale(
+                        "attn_qkv_scale", tokens, width, group_size=128
+                    )
                 with range_ctx:
                     x_pre, shared_input_quant = fused_rmsnorm_fp8_ue8m0_quant(
                         x_pre,
@@ -642,6 +771,7 @@ class Block(nn.Module):
                         eps=self.attn_norm.variance_epsilon,
                         emit_norm=True,
                         out_norm=x_pre,
+                        **extra_quant,
                     )
                 attn_out = self.attn.forward_with_shared_input_quant(
                     x_pre,
@@ -717,6 +847,7 @@ class Block(nn.Module):
             ffn_hc_post,
         ) = self._prefill_fast_hc_impls()
 
+        ws = self._active_prefill_workspace()
         residual = x
         can_reuse_qkv_quant = self._can_reuse_qkv_quant()
         if (
@@ -726,8 +857,11 @@ class Block(nn.Module):
                 x, self.attn_hc, self.attn_norm, quant_ue8m0=True
             )
         ):
+            out_kwargs = self._mhc_pre_out_kwargs(
+                ws, "mhc_attn", x, self.attn_hc, with_quant=True
+            )
             x_pre, post, comb, shared_input_quant = fused_mhc_pre_norm_quant(
-                x, self.attn_hc, self.attn_norm
+                x, self.attn_hc, self.attn_norm, **out_kwargs
             )
             attn_out = self.attn.forward_with_shared_input_quant(
                 x_pre,
@@ -742,7 +876,10 @@ class Block(nn.Module):
             and attn_hc_pre == self.attn_hc._pre_impl
             and can_use_fused_mhc_pre_norm(x, self.attn_hc, self.attn_norm)
         ):
-            x_pre, post, comb = fused_mhc_pre_norm(x, self.attn_hc, self.attn_norm)
+            out_kwargs = self._mhc_pre_out_kwargs(ws, "mhc_attn", x, self.attn_hc)
+            x_pre, post, comb = fused_mhc_pre_norm(
+                x, self.attn_hc, self.attn_norm, **out_kwargs
+            )
             attn_out = self.attn(
                 x_pre,
                 positions,
@@ -775,7 +912,11 @@ class Block(nn.Module):
 
             residual = x
             x_pre, post, comb = self._prefill_fast_hc_pre_norm(
-                x, hc_unit=self.ffn_hc, hc_pre_impl=ffn_hc_pre, norm=self.ffn_norm
+                x,
+                hc_unit=self.ffn_hc,
+                hc_pre_impl=ffn_hc_pre,
+                norm=self.ffn_norm,
+                ws_prefix="mhc_ffn",
             )
         ffn_out = self.ffn(x_pre, input_ids)
         return ffn_hc_post(ffn_out, residual, post, comb)
@@ -809,6 +950,7 @@ class Block(nn.Module):
         # be false while this branch still constructs AttentionFP8, so dispatch
         # on the module type instead of only the cache config.
         if isinstance(self.attn, AttentionFP8):
+            ws = self._active_prefill_workspace()
             can_reuse_qkv_quant = self._can_reuse_qkv_quant()
             hc_pre_unpatched = (
                 "_hc_pre_norm_profiled" not in self.__dict__
@@ -821,17 +963,12 @@ class Block(nn.Module):
                     x, self.attn_hc, self.attn_norm, quant_ue8m0=True
                 )
             ):
-                layer = (
-                    f"L{self.attn_hc.layer_id:02d}"
-                    if self.attn_hc.layer_id >= 0
-                    else "Lxx"
+                out_kwargs = self._mhc_pre_out_kwargs(
+                    ws, "mhc_attn", x, self.attn_hc, with_quant=True
                 )
-                name = self.attn_hc.name or "unit"
-                with _profiler.record_function_range(
-                    f"dsv4.hc.{layer}.{name}.pre_norm"
-                ):
+                with _profiler.record_function_range(self._attn_hc_pre_norm_profile):
                     x_pre, post, comb, shared_input_quant = fused_mhc_pre_norm_quant(
-                        x, self.attn_hc, self.attn_norm
+                        x, self.attn_hc, self.attn_norm, **out_kwargs
                     )
                 attn_out = self.attn.forward_with_shared_input_quant(
                     x_pre,
@@ -854,7 +991,7 @@ class Block(nn.Module):
                 )
             else:
                 x_pre, post, comb = self._hc_pre_norm_profiled(
-                    x, self.attn_hc, self.attn_norm
+                    x, self.attn_hc, self.attn_norm, ws_prefix="mhc_attn"
                 )  # [T, dim], [T, hc, 1], [T, hc, hc]
                 attn_out = self.attn(
                     x_pre,  # [T, dim]
@@ -928,7 +1065,7 @@ class Block(nn.Module):
             # FFN path
             residual = x
             x_pre, post, comb = self._hc_pre_norm_profiled(
-                x, self.ffn_hc, self.ffn_norm
+                x, self.ffn_hc, self.ffn_norm, ws_prefix="mhc_ffn"
             )  # [T, dim], ...
         ffn_in_ids = (
             input_ids

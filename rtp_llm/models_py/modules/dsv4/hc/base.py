@@ -55,6 +55,10 @@ class HCUnitBase(nn.Module):
         self.hc_eps = hc_eps
         self.layer_id = layer_id
         self.name = name
+        layer_tag = f"L{layer_id:02d}" if layer_id >= 0 else "Lxx"
+        unit_name = name or "unit"
+        self._profile_pre_name = f"dsv4.hc.{layer_tag}.{unit_name}.pre"
+        self._profile_post_name = f"dsv4.hc.{layer_tag}.{unit_name}.post"
 
     def _check_residual_shape(self, x: torch.Tensor, arg_name: str) -> Tuple[int, ...]:
         if x.dim() not in (3, 4):
@@ -111,9 +115,7 @@ class HCUnitBase(nn.Module):
             ``[B, S, hc_mult, hc_mult]``.
         """
         leading = self._check_residual_shape(x, "pre input")
-        layer = f"L{self.layer_id:02d}" if self.layer_id >= 0 else "Lxx"
-        name = self.name or "unit"
-        with record_function_range(f"dsv4.hc.{layer}.{name}.pre"):
+        with record_function_range(self._profile_pre_name):
             y, post, comb = self._pre_impl(x, dbg_tag=dbg_tag)
         self._check_pre_output(leading, y, post, comb)
         return y, post, comb
@@ -161,9 +163,7 @@ class HCUnitBase(nn.Module):
                 f"{self.__class__.__name__}.post expected comb shape={expected_comb}, "
                 f"got {tuple(comb.shape)}"
             )
-        layer = f"L{self.layer_id:02d}" if self.layer_id >= 0 else "Lxx"
-        name = self.name or "unit"
-        with record_function_range(f"dsv4.hc.{layer}.{name}.post"):
+        with record_function_range(self._profile_post_name):
             out = self._post_impl(x, residual, post, comb)
         if tuple(out.shape) != tuple(residual.shape):
             raise ValueError(

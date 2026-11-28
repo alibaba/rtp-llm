@@ -24,11 +24,13 @@ ring layout; SWA reads consume those flat slots in ``_swa_dequant_triton.py``.
 
 from __future__ import annotations
 
-from typing import Tuple
+from typing import Optional, Tuple
 
 import torch
 import triton
 import triton.language as tl
+
+from rtp_llm.models_py.triton_kernels.fast_launch import fast_launch
 
 # Mirror vLLM's combined-topk row alignment (kernel tile width).
 _SPARSE_PREFILL_TOPK_ALIGNMENT = 128
@@ -112,7 +114,9 @@ def compute_prefill_gather_lens(
             f"{_GATHER_LENS_FIXED_BLOCK_SIZE}; bump _GATHER_LENS_FIXED_BLOCK_SIZE."
         )
     block_size = _GATHER_LENS_FIXED_BLOCK_SIZE
-    _compute_prefill_gather_lens_kernel[(1,)](
+    fast_launch(
+        _compute_prefill_gather_lens_kernel,
+        (1,),
         out,
         seq_lens,
         query_start_loc,
@@ -253,9 +257,9 @@ def compute_window_topk_and_length_varlen(
 
     block_t = 16
     block_w = max(1, triton.next_power_of_2(window_size))
-    _compute_window_topk_and_length_varlen_kernel[
-        ((num_tokens + block_t - 1) // block_t,)
-    ](
+    fast_launch(
+        _compute_window_topk_and_length_varlen_kernel,
+        ((num_tokens + block_t - 1) // block_t,),
         topk_idxs,
         topk_length,
         cu_seqlens,
@@ -392,7 +396,9 @@ def compute_swa_slot_mapping(
     BLOCK_M = 256
     num_chunks = max(1, (num_tokens + BLOCK_M - 1) // BLOCK_M)
     grid = (num_reqs, num_chunks)
-    _compute_swa_slot_mapping_kernel[grid](
+    fast_launch(
+        _compute_swa_slot_mapping_kernel,
+        grid,
         slot_mapping,
         block_table,
         query_start_loc,
@@ -512,7 +518,9 @@ def compute_swa_slot_mapping_from_positions(
     max_blocks_per_seq = int(block_table.shape[1])
     BLOCK_M = 256
     grid = ((num_tokens + BLOCK_M - 1) // BLOCK_M,)
-    _compute_swa_slot_mapping_from_positions_kernel[grid](
+    fast_launch(
+        _compute_swa_slot_mapping_from_positions_kernel,
+        grid,
         slot_mapping,
         block_table,
         req_id_per_token,
@@ -629,7 +637,9 @@ def compute_swa_cp_sliced_slot_mapping(
     BLOCK_M = 256
     num_chunks = max(1, (num_tokens + BLOCK_M - 1) // BLOCK_M)
     grid = (num_reqs, num_chunks)
-    _compute_swa_cp_sliced_slot_mapping_kernel[grid](
+    fast_launch(
+        _compute_swa_cp_sliced_slot_mapping_kernel,
+        grid,
         slot_mapping,
         block_table,
         query_start_loc,
@@ -734,7 +744,9 @@ def compute_swa_slot_in_flat(
     if has_cu_swa_offsets and not cu_swa_offsets.is_contiguous():
         cu_swa_offsets = cu_swa_offsets.contiguous()
     block_m = 256
-    _compute_swa_slot_in_flat_kernel[(triton.cdiv(num_tokens, block_m),)](
+    fast_launch(
+        _compute_swa_slot_in_flat_kernel,
+        (triton.cdiv(num_tokens, block_m),),
         out,
         position_ids,
         req_id_per_token,
@@ -853,7 +865,9 @@ def compute_swa_slot_in_flat_from_cu(
         )
     block_b = max(1, triton.next_power_of_2(num_reqs))
     block_m = 256
-    _compute_swa_slot_in_flat_from_cu_kernel[(triton.cdiv(num_tokens, block_m),)](
+    fast_launch(
+        _compute_swa_slot_in_flat_from_cu_kernel,
+        (triton.cdiv(num_tokens, block_m),),
         out,
         cu_seqlens,
         prefix_lengths,
@@ -1074,6 +1088,8 @@ def combine_topk_swa_indices(
     cu_cmp_offsets: Optional[torch.Tensor] = None,
     cu_swa_offsets: Optional[torch.Tensor] = None,
     dense_arange_topk: bool = False,
+    out_indices: Optional[torch.Tensor] = None,
+    out_lens: Optional[torch.Tensor] = None,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """Build ``(combined_indices, combined_lens)`` for ``flash_mla_sparse_fwd``.
 
@@ -1128,13 +1144,19 @@ def combine_topk_swa_indices(
         if flash_mla_indices
         else (num_tokens, combined_topk)
     )
-    combined_indices = torch.empty(
-        combined_indices_shape,
-        dtype=torch.int32,
-        device=topk_indices.device,
+    combined_indices = (
+        out_indices.view(combined_indices_shape)
+        if out_indices is not None
+        else torch.empty(
+            combined_indices_shape,
+            dtype=torch.int32,
+            device=topk_indices.device,
+        )
     )
-    combined_lens = torch.empty(
-        num_tokens, dtype=torch.int32, device=topk_indices.device
+    combined_lens = (
+        out_lens.view(num_tokens)
+        if out_lens is not None
+        else torch.empty(num_tokens, dtype=torch.int32, device=topk_indices.device)
     )
 
     if num_tokens == 0 or num_reqs == 0:
@@ -1163,7 +1185,9 @@ def combine_topk_swa_indices(
     in_stride_arg = in_stride // 4 if aligned_in else in_stride
 
     dummy_off = query_start_loc
-    _combine_topk_swa_indices_kernel[(triton.cdiv(num_tokens, BLOCK_T),)](
+    fast_launch(
+        _combine_topk_swa_indices_kernel,
+        (triton.cdiv(num_tokens, BLOCK_T),),
         combined_indices,
         out_stride_arg,
         combined_lens,
@@ -1378,6 +1402,8 @@ def combine_topk_swa_indices_cp(
     dense_arange_topk: bool = False,
     cu_cmp_offsets: torch.Tensor | None = None,
     cu_swa_offsets: torch.Tensor | None = None,
+    out_indices: Optional[torch.Tensor] = None,
+    out_lens: Optional[torch.Tensor] = None,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """CP-aware fused combine for ``flash_mla_sparse_fwd``.
 
@@ -1403,13 +1429,19 @@ def combine_topk_swa_indices_cp(
         if flash_mla_indices
         else (num_tokens, combined_topk)
     )
-    combined_indices = torch.empty(
-        combined_indices_shape,
-        dtype=torch.int32,
-        device=topk_indices.device,
+    combined_indices = (
+        out_indices.view(combined_indices_shape)
+        if out_indices is not None
+        else torch.empty(
+            combined_indices_shape,
+            dtype=torch.int32,
+            device=topk_indices.device,
+        )
     )
-    combined_lens = torch.empty(
-        num_tokens, dtype=torch.int32, device=topk_indices.device
+    combined_lens = (
+        out_lens.view(num_tokens)
+        if out_lens is not None
+        else torch.empty(num_tokens, dtype=torch.int32, device=topk_indices.device)
     )
     if num_tokens == 0:
         return combined_indices, combined_lens
@@ -1488,7 +1520,9 @@ def combine_topk_swa_indices_cp(
     in_stride_arg = in_stride // 4 if aligned_in else in_stride
 
     grid = (triton.cdiv(num_tokens, BLOCK_T),)
-    _combine_topk_swa_indices_cp_kernel[grid](
+    fast_launch(
+        _combine_topk_swa_indices_cp_kernel,
+        grid,
         combined_indices,
         out_stride_arg,
         combined_lens,
@@ -1519,3 +1553,114 @@ def combine_topk_swa_indices_cp(
         num_warps=4,
     )
     return combined_indices, combined_lens
+
+
+# ---------------------------------------------------------------------------
+# 6) Fused suffix pool slot mapping (requests x suffix positions -> flat slot)
+# ---------------------------------------------------------------------------
+
+
+@triton.jit(
+    do_not_specialize=[
+        "max_gather",
+        "bt_stride_r",
+        "bt_stride_c",
+        "max_blocks",
+        "entries_per_block",
+        "tokens_per_block",
+        "ring_entries",
+    ]
+)
+def _compute_suffix_pool_slot_mapping_kernel(
+    out_ptr,  # [B, max_gather] int64
+    block_table_ptr,  # [>=B, max_blocks] int32/int64
+    seq_lens_ptr,  # [B] int32/int64
+    gather_lens_ptr,  # [B] int32/int64
+    max_gather,
+    bt_stride_r,
+    bt_stride_c,
+    max_blocks,
+    entries_per_block,
+    tokens_per_block,
+    ring_entries,
+    BLOCK_C: tl.constexpr,
+):
+    pid_c = tl.program_id(0).to(tl.int64)
+    b = tl.program_id(1).to(tl.int64)
+
+    cols = pid_c * BLOCK_C + tl.arange(0, BLOCK_C).to(tl.int64)
+    col_mask = cols < max_gather
+
+    g_len = tl.load(gather_lens_ptr + b).to(tl.int64)
+    s_len = tl.load(seq_lens_ptr + b).to(tl.int64)
+    abs_pos = (s_len - g_len) + cols
+    valid_pos = (cols < g_len) & (abs_pos >= 0)
+
+    safe_abs = tl.where(valid_pos, abs_pos, 0)
+    block_in_seq = safe_abs // tokens_per_block
+    in_block = safe_abs % ring_entries
+    in_capacity = valid_pos & (block_in_seq < max_blocks)
+    safe_block = tl.where(in_capacity, block_in_seq, 0)
+
+    bt_ptr = block_table_ptr + b * bt_stride_r + safe_block * bt_stride_c
+    block_id = tl.load(bt_ptr, mask=in_capacity, other=0).to(tl.int64)
+    valid = in_capacity & (block_id > 0)
+    slot = block_id * entries_per_block + in_block
+    out_val = tl.where(valid, slot, -1)
+    tl.store(out_ptr + b * max_gather + cols, out_val, mask=col_mask)
+
+
+def compute_suffix_pool_slot_mapping(
+    block_table: torch.Tensor,
+    seq_lens: torch.Tensor,
+    gather_lens: torch.Tensor,
+    *,
+    entries_per_block: int,
+    tokens_per_block_for_block_table: int,
+    ring_entries: int,
+    max_gather: int,
+) -> torch.Tensor:
+    """Fused Triton builder for request-major ``[B, max_gather]`` int64 flat slots."""
+    device = block_table.device
+    seq_lens_1d = (
+        seq_lens
+        if seq_lens.dim() == 1 and seq_lens.is_contiguous()
+        else seq_lens.reshape(-1).contiguous()
+    )
+    gather_lens_1d = (
+        gather_lens
+        if gather_lens.dim() == 1 and gather_lens.is_contiguous()
+        else gather_lens.reshape(-1).contiguous()
+    )
+    B = int(seq_lens_1d.numel())
+    assert int(gather_lens_1d.numel()) == B
+    if B == 0:
+        return torch.empty((0, 0), dtype=torch.long, device=device)
+    if max_gather <= 0:
+        return torch.empty((B, 0), dtype=torch.long, device=device)
+    max_blocks = int(block_table.shape[1])
+    if max_blocks <= 0:
+        return torch.full((B, max_gather), -1, dtype=torch.long, device=device)
+    assert int(block_table.shape[0]) >= B
+
+    out = torch.empty((B, max_gather), dtype=torch.long, device=device)
+    BLOCK_C = 128
+    grid = (triton.cdiv(max_gather, BLOCK_C), B)
+    fast_launch(
+        _compute_suffix_pool_slot_mapping_kernel,
+        grid,
+        out,
+        block_table,
+        seq_lens_1d,
+        gather_lens_1d,
+        int(max_gather),
+        int(block_table.stride(0)),
+        int(block_table.stride(1)),
+        max_blocks,
+        int(entries_per_block),
+        int(tokens_per_block_for_block_table),
+        int(ring_entries),
+        BLOCK_C=BLOCK_C,
+        num_warps=4,
+    )
+    return out

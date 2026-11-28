@@ -32,6 +32,8 @@ from typing import Optional
 
 import torch
 
+from rtp_llm.models_py.triton_kernels.fast_launch import fast_launch
+
 try:
     import triton
     import triton.language as tl
@@ -259,7 +261,9 @@ def fused_compressor_slot_mapping(
 
     BLOCK = 128
     grid = ((N + BLOCK - 1) // BLOCK,)
-    _compressor_slot_mapping_kernel[grid](
+    fast_launch(
+        _compressor_slot_mapping_kernel,
+        grid,
         positions,
         b_idx,
         state_bt,

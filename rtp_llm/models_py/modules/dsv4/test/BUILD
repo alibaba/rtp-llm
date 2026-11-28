@@ -280,3 +280,18 @@ cuda13_sm100_py_test(
         "//rtp_llm/models_py:tile_kernels_mhc",
     ],
 )
+
+cuda13_sm100_py_test(
+    name = "test_prefill_host_overhead_perf",
+    srcs = ["test_prefill_host_overhead_perf.py"],
+    legacy_create_init = 0,
+    main = "test_prefill_host_overhead_perf.py",
+    tags = [
+        "manual",
+        "perf",
+    ],
+    deps = _MODEL_TEST_DEPS + [
+        "//rtp_llm/models_py:models",
+        "//rtp_llm/models_py:tile_kernels_mhc",
+    ],
+)

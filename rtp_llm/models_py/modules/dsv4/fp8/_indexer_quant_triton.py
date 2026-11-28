@@ -41,6 +41,8 @@ import torch
 import triton
 import triton.language as tl
 
+from rtp_llm.models_py.triton_kernels.fast_launch import fast_launch
+
 INDEXER_HEAD_DIM = 128
 INDEXER_ENTRY_BYTES = 132  # 128 FP8 + 4 fp32 scale (per token, total)
 FP8_E4M3_MAX = 448.0
@@ -155,7 +157,9 @@ def quantize_indexer_k(
     cache_block_size = kv_cache_packed.shape[1]
     cache_stride_b = cache_block_size * INDEXER_ENTRY_BYTES
 
-    _indexer_k_quant_kernel[(T,)](
+    fast_launch(
+        _indexer_k_quant_kernel,
+        (T,),
         k_bf16,
         slot_mapping,
         kv_cache_packed,
@@ -261,7 +265,9 @@ def dequantize_indexer_k(
         torch.bfloat16: tl.bfloat16,
         torch.float16: tl.float16,
     }[out_dtype]
-    _indexer_k_dequant_kernel[(T,)](
+    fast_launch(
+        _indexer_k_dequant_kernel,
+        (T,),
         kv_cache_packed,
         slot_mapping,
         out,

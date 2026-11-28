@@ -25,10 +25,21 @@ eager inv-RoPE + per-group quant, and ≤2-ULP end-to-end vs wo_a GEMM).
 
 from __future__ import annotations
 
+import functools
+
 import torch
 import triton
 import triton.language as tl
 
+try:
+    from rtp_llm.models_py.triton_kernels.fast_launch import fast_launch
+except ImportError:  # pragma: no cover
+
+    def fast_launch(jit_fn, grid, *args, **kwargs):
+        return jit_fn[grid](*args, **kwargs)
+
+
+_FP8_E4M3_MAX = float(torch.finfo(torch.float8_e4m3fn).max)
 _CACHED_CUDA_INV_ROPE_OP = False
 _CUDA_INV_ROPE_OP = None
 
@@ -48,7 +59,27 @@ def _get_cuda_inv_rope_fp8_quant_op():
     return _CUDA_INV_ROPE_OP
 
 
+@functools.cache
+def _is_blackwell_device_idx(dev_idx: int) -> bool:
+    try:
+        major, _ = torch.cuda.get_device_capability(dev_idx)
+    except Exception:
+        return False
+    return major >= 10
+
+
 def _is_blackwell_device(device: torch.device | int | None = None) -> bool:
+    if isinstance(device, int):
+        return _is_blackwell_device_idx(device)
+    if isinstance(device, torch.device):
+        if device.index is not None:
+            return _is_blackwell_device_idx(device.index)
+        return _is_blackwell_device_idx(torch.cuda.current_device())
+    if device is None:
+        try:
+            return _is_blackwell_device_idx(torch.cuda.current_device())
+        except Exception:
+            return False
     try:
         major, _ = torch.cuda.get_device_capability(device)
     except Exception:
@@ -469,7 +500,7 @@ def fused_inv_rope_fp8_quant(
     )
     packed_sf_k = num_scale_blocks // chunks_per_head  # = heads_per_group
 
-    fp8_max = torch.finfo(torch.float8_e4m3fn).max
+    fp8_max = _FP8_E4M3_MAX
 
     fp8_work, scale_work = _alloc_output_buffers(
         M, n_groups, d_per_group, packed_sf_k, o.device, fp8_buf, scale_buf
@@ -533,7 +564,9 @@ def fused_inv_rope_fp8_quant(
         cos = freqs_cis_per_b.real.contiguous()
         sin = freqs_cis_per_b.imag.contiguous()
         grid = (tma_M, n_groups * heads_per_group)
-        _fused_inv_rope_fp8_quant_per_head[grid](
+        fast_launch(
+            _fused_inv_rope_fp8_quant_per_head,
+            grid,
             o_flat,
             cos,
             sin,
@@ -580,7 +613,9 @@ def fused_inv_rope_fp8_quant(
         block_rope = triton.next_power_of_2(max(rope_head_dim, 2))
         block_tail_nope = triton.next_power_of_2(max(rope_start, 1))
         grid = (tma_M, n_groups, heads_per_group // selected_heads_per_cta)
-        _fused_inv_rope_fp8_quant_group_heads[grid](
+        fast_launch(
+            _fused_inv_rope_fp8_quant_group_heads,
+            grid,
             o_flat,
             freqs_ri,
             pos_flat,

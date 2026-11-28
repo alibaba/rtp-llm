@@ -95,8 +95,14 @@ py_library(
 )
 
 py_library(
+    name = "fast_launch",
+    srcs = ["fast_launch.py"],
+    visibility = ["//visibility:public"],
+)
+
+py_library(
     name = "triton_kernels",
-    srcs = ["legacy_fp8_indexer_score.py", "linear_replay.py"],
+    srcs = ["fast_launch.py", "legacy_fp8_indexer_score.py", "linear_replay.py"],
     deps = [
         ":attention",
         ":autotune_cache",

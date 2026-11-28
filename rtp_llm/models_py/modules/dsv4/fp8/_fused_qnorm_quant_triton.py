@@ -6,6 +6,8 @@ from typing import Optional
 
 import torch
 
+from rtp_llm.models_py.triton_kernels.fast_launch import fast_launch
+
 try:
     import triton
     import triton.language as tl
@@ -537,7 +539,9 @@ def fused_rmsnorm_fp8_ue8m0_quant(
         block_m = _block_m if _block_m is not None else default_m
         num_warps = _num_warps if _num_warps is not None else default_warps
         grid = (triton.cdiv(rows, block_m),)
-        _fused_qnorm_fp8_ue8m0_small_d_kernel[grid](
+        fast_launch(
+            _fused_qnorm_fp8_ue8m0_small_d_kernel,
+            grid,
             flat_x,
             weight,
             flat_norm,
@@ -576,7 +580,9 @@ def fused_rmsnorm_fp8_ue8m0_quant(
         block_m = _block_m if _block_m is not None else default_m
         num_warps = _num_warps if _num_warps is not None else default_warps
         grid = (triton.cdiv(rows, block_m),)
-        _fused_qnorm_fp8_ue8m0_chunked_kernel[grid](
+        fast_launch(
+            _fused_qnorm_fp8_ue8m0_chunked_kernel,
+            grid,
             flat_x,
             weight,
             flat_norm,

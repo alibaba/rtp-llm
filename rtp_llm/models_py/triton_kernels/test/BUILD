@@ -1,6 +1,15 @@
 load("//rtp_llm/test/utils:cuda13_sm100_test.bzl", "cuda13_sm100_py_test")
 
 cuda13_sm100_py_test(
+    name = "fast_launch_test",
+    srcs = ["fast_launch_test.py"],
+    deps = [
+        "//rtp_llm/models_py/triton_kernels:fast_launch",
+        "//rtp_llm:testlib",
+    ],
+)
+
+cuda13_sm100_py_test(
     name = "legacy_fp8_indexer_score_test",
     srcs = ["legacy_fp8_indexer_score_test.py"],
     deps = ["//rtp_llm:testlib"],

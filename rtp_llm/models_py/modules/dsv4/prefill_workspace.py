@@ -30,9 +30,17 @@ layers, never recycled by the allocator) and relies on the
 """
 
 from contextlib import contextmanager
-from typing import Iterator, Optional
+from typing import Dict, Iterator, Optional, Tuple
 
 import torch
+
+try:
+    from rtp_llm.models_py.triton_kernels.fast_launch import is_cuda_stream_capturing
+except ImportError:  # pragma: no cover - CPU/decode minimal targets
+
+    def is_cuda_stream_capturing() -> bool:
+        return torch.cuda.is_available() and torch.cuda.is_current_stream_capturing()
+
 
 # Default union-buffer alignment. Rounding every per-forward union block up to a
 # clean 1 GiB multiple makes the caching allocator hand back an identically-sized
@@ -44,8 +52,25 @@ import torch
 # allocation.
 _PREFILL_WS_ALIGN_BYTES = 1 << 30
 
+_DTYPE_SIZES: Dict[torch.dtype, int] = {
+    torch.float16: 2,
+    torch.bfloat16: 2,
+    torch.float32: 4,
+    torch.float64: 8,
+    torch.int8: 1,
+    torch.uint8: 1,
+    torch.int16: 2,
+    torch.int32: 4,
+    torch.int64: 8,
+    torch.bool: 1,
+    torch.float8_e4m3fn: 1,
+}
+
 
 def _dtype_size(dtype: torch.dtype) -> int:
+    size = _DTYPE_SIZES.get(dtype)
+    if size is not None:
+        return size
     return torch.empty((), dtype=dtype).element_size()
 
 
@@ -129,6 +154,86 @@ class PrefillWorkspace:
         self._hca_disjoint_restore: Optional[torch.Tensor] = None
         self._disjoint_main_gather_buf: Optional[torch.Tensor] = None
         self._disjoint_live_q_end_bytes: int = 0
+        self._scratch: Dict[str, torch.Tensor] = {}
+        self.reuse_layer_out_scratch: bool = False
+
+    def scratch(
+        self,
+        key: str,
+        shape: Tuple[int, ...],
+        dtype: torch.dtype,
+        *,
+        zero: bool = False,
+    ) -> torch.Tensor:
+        """Return a per-forward grow-only reusable scratch view of ``(shape, dtype)``."""
+        elem_bytes = _dtype_size(dtype)
+        numel = 1
+        for dim in shape:
+            numel *= int(dim)
+        nbytes = numel * elem_bytes
+        if nbytes == 0:
+            return self._union[:0].view(dtype).view(shape)
+        buf = self._scratch.get(key)
+        if buf is None or int(buf.numel()) < nbytes:
+            buf = torch.empty(nbytes, dtype=torch.uint8, device=self._device)
+            self._scratch[key] = buf
+        out = buf[:nbytes].view(dtype).view(shape)
+        if zero:
+            out.zero_()
+        return out
+
+    def scratch_ue8m0_scale(
+        self,
+        key: str,
+        rows: int,
+        width: int,
+        group_size: int = 128,
+    ) -> torch.Tensor:
+        """Return ``[rows, aligned_k // 4]`` transposed int32 TMA-aligned UE8M0 scale view."""
+        scale_cols = int(width) // int(group_size)
+        aligned_m = ((int(rows) + 3) // 4) * 4
+        aligned_k = ((scale_cols + 3) // 4) * 4
+        raw = self.scratch(key, (aligned_k // 4, aligned_m), torch.int32)
+        return raw.transpose(-1, -2)[: int(rows), :]
+
+    def scratch_inv_rope_scale(
+        self,
+        key: str,
+        m_rows: int,
+        n_groups: int,
+        packed_sf_k: int,
+    ) -> torch.Tensor:
+        """Return column-major TMA-aligned int32 scale view for inverse RoPE FP8 quant."""
+        tma_m = ((int(m_rows) + 3) // 4) * 4
+        raw = self.scratch(
+            key, (int(n_groups) * int(packed_sf_k) * tma_m,), torch.int32
+        )
+        return raw.as_strided(
+            (int(n_groups), tma_m, int(packed_sf_k)),
+            (int(packed_sf_k) * tma_m, 1, tma_m),
+        )
+
+    def owns_tensor(self, tensor: torch.Tensor) -> bool:
+        """Return True if ``tensor`` aliases storage owned by this workspace."""
+        ptr = int(tensor.data_ptr())
+        if ptr == 0:
+            return False
+        union_ptr = int(self._union.data_ptr())
+        if union_ptr <= ptr < union_ptr + int(self._union.numel()):
+            return True
+        for buf in self._scratch.values():
+            bptr = int(buf.data_ptr())
+            if bptr <= ptr < bptr + int(buf.numel()):
+                return True
+        if self._hca_disjoint_gather is not None:
+            gptr = int(self._hca_disjoint_gather.data_ptr())
+            if gptr <= ptr < gptr + int(self._hca_disjoint_gather.numel()):
+                return True
+        if self._hca_disjoint_restore is not None:
+            rptr = int(self._hca_disjoint_restore.data_ptr())
+            if rptr <= ptr < rptr + int(self._hca_disjoint_restore.numel()):
+                return True
+        return False
 
     def try_disjoint_hca_gather(
         self,
@@ -184,7 +289,7 @@ class PrefillWorkspace:
                 .view(cp_rows, dim)
             )
 
-        if self._device.type != "cuda" or torch.cuda.is_current_stream_capturing():
+        if self._device.type != "cuda" or is_cuda_stream_capturing():
             return None
 
         if (

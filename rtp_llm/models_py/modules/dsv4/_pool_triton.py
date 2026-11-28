@@ -7,6 +7,14 @@ from typing import Optional
 import torch
 
 try:
+    from rtp_llm.models_py.triton_kernels.fast_launch import fast_launch
+except ImportError:  # pragma: no cover - CPU-only targets without triton_kernels dep
+
+    def fast_launch(jit_fn, grid, *args, **kwargs):
+        return jit_fn[grid](*args, **kwargs)
+
+
+try:
     import triton
     import triton.language as tl
 
@@ -118,7 +126,9 @@ def masked_copy_to_pool(
     slot_flat = _flat_index(slot_mapping)
     D = int(source.shape[-1])
     BLOCK_D = triton.next_power_of_2(D)
-    _masked_copy_to_pool_kernel[(int(source.shape[0]),)](
+    fast_launch(
+        _masked_copy_to_pool_kernel,
+        (int(source.shape[0]),),
         source,
         slot_flat,
         pool_view,
@@ -168,7 +178,9 @@ def masked_gather_from_pool(
     ):
         out = torch.empty((rows, D), dtype=out_dtype, device=pool_view.device)
         BLOCK_D = triton.next_power_of_2(D)
-        _masked_gather_from_pool_kernel[(rows,)](
+        fast_launch(
+            _masked_gather_from_pool_kernel,
+            (rows,),
             pool_view,
             slot_flat,
             valid_flat,

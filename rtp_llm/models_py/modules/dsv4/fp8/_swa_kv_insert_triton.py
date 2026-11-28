@@ -26,6 +26,7 @@ import triton.language as tl
 from rtp_llm.models_py.modules.dsv4.fp8._swa_cp_byte_sliced import (
     CPByteSlicedSlotCompaction,
 )
+from rtp_llm.models_py.triton_kernels.fast_launch import fast_launch
 
 
 @triton.jit
@@ -194,7 +195,9 @@ def quantize_and_insert_k_cache(
     block_stride = int(k_cache.stride(0))  # bytes per block (TMA-padded)
 
     grid = (num_tokens,)
-    _quantize_and_insert_k_kernel[grid](
+    fast_launch(
+        _quantize_and_insert_k_kernel,
+        grid,
         k,
         slot_mapping,
         k_cache,
@@ -429,7 +432,9 @@ def row_scatter(
 
     contiguous_cols = dst_w.stride(1) == 1 and src_w.stride(1) == 1
     grid = (triton.cdiv(n_rows, block_n), triton.cdiv(d_eff, block_d))
-    _row_scatter_kernel[grid](
+    fast_launch(
+        _row_scatter_kernel,
+        grid,
         dst_w,
         slots_1d,
         src_w,
@@ -660,7 +665,9 @@ def quantize_and_insert_k_cache_cp_byte_sliced(
 
     if k_cache_raw.is_cuda and k.stride(1) == 1:
         block_c = 2048
-        _zero_indexed_rows_kernel[(num_unique, triton.cdiv(local_slice_bytes, block_c))](
+        fast_launch(
+            _zero_indexed_rows_kernel,
+            (num_unique, triton.cdiv(local_slice_bytes, block_c)),
             k_cache_raw,
             unique_blocks,
             num_rows=num_unique,
@@ -671,7 +678,9 @@ def quantize_and_insert_k_cache_cp_byte_sliced(
             TRAP_INVALID_KV_ACCESS=True,
             num_warps=4,
         )
-        _quantize_and_insert_k_cp_byte_sliced_kernel[(num_tokens,)](
+        fast_launch(
+            _quantize_and_insert_k_cp_byte_sliced_kernel,
+            (num_tokens,),
             k,
             int(k.stride(0)),
             compact_slots,

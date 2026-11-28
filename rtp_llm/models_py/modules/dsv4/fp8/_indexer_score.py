@@ -25,6 +25,7 @@ Caller is responsible for FP8 quantizing Q via
 
 from __future__ import annotations
 
+import functools
 from typing import Optional
 
 import torch
@@ -61,12 +62,26 @@ except ImportError:
     _DEEP_GEMM_SM100_LEGACY_OK = False
 
 
+@functools.cache
+def _device_major_cached(dev_idx: int) -> int:
+    return torch.cuda.get_device_capability(dev_idx)[0]
+
+
+def _device_major(device) -> int:
+    if isinstance(device, int):
+        return _device_major_cached(device)
+    if isinstance(device, torch.device):
+        if device.index is not None:
+            return _device_major_cached(device.index)
+        return _device_major_cached(torch.cuda.current_device())
+    if device is None:
+        return _device_major_cached(torch.cuda.current_device())
+    return torch.cuda.get_device_capability(device)[0]
+
+
 def _sm100_needs_triton_fallback(device) -> bool:
     """Whether this wheel rejects the group-128 legacy logits calls on SM100."""
-    return (
-        torch.cuda.get_device_capability(device)[0] == 10
-        and not _DEEP_GEMM_SM100_LEGACY_OK
-    )
+    return _device_major(device) == 10 and not _DEEP_GEMM_SM100_LEGACY_OK
 
 
 def deepgemm_supports_block_kv(device, block_kv: int) -> bool:
@@ -76,7 +91,7 @@ def deepgemm_supports_block_kv(device, block_kv: int) -> bool:
     and ``block_kv == 32`` on SM100 only (a pre-SM90 device such as L20/SM89
     rejects either); sizes outside that list are unconstrained here.
     """
-    major = torch.cuda.get_device_capability(device)[0]
+    major = _device_major(device)
     if block_kv == 32:
         return major == 10
     if block_kv == 64:

@@ -32,6 +32,8 @@ import torch
 import triton
 import triton.language as tl
 
+from rtp_llm.models_py.triton_kernels.fast_launch import fast_launch
+
 _CACHED_CUDA_IDX_Q_OP = False
 _CUDA_IDX_Q_OP = None
 
@@ -42,13 +44,12 @@ def _get_cuda_indexer_q_rope_op():
         try:
             from rtp_llm.ops import rtp_llm_ops
 
-            _CUDA_IDX_Q_OP = getattr(
-                rtp_llm_ops, "dsv4_indexer_q_rope_fp8_fold", None
-            )
+            _CUDA_IDX_Q_OP = getattr(rtp_llm_ops, "dsv4_indexer_q_rope_fp8_fold", None)
         except Exception:
             _CUDA_IDX_Q_OP = None
         _CACHED_CUDA_IDX_Q_OP = True
     return _CUDA_IDX_Q_OP
+
 
 INDEXER_HEAD_DIM = 128
 FP8_E4M3_MAX = 448.0
@@ -118,7 +119,9 @@ def indexer_q_fp8_quant_fold(
         return q_fp8, w_fold
 
     block_r = 8
-    _indexer_q_fp8_fold_kernel[(triton.cdiv(BSH, block_r),)](
+    fast_launch(
+        _indexer_q_fp8_fold_kernel,
+        (triton.cdiv(BSH, block_r),),
         q_bf16,
         weights,
         q_fp8,
@@ -260,6 +263,8 @@ def _indexer_q_rope_fp8_quant_fold_impl(
     *,
     group_heads: int | None = None,
     allow_cuda: bool = True,
+    out_q_fp8: torch.Tensor | None = None,
+    out_w_fold: torch.Tensor | None = None,
 ):
     assert q_bf16.dim() == 4 and q_bf16.shape[-1] == INDEXER_HEAD_DIM
     assert q_bf16.dtype == torch.bfloat16
@@ -271,14 +276,33 @@ def _indexer_q_rope_fp8_quant_fold_impl(
         q_bf16 = q_bf16.contiguous()
     if weights.dtype != torch.bfloat16 and weights.dtype != torch.float32:
         weights = weights.float()
-    weights = weights.contiguous()
+    if not weights.is_contiguous():
+        weights = weights.contiguous()
     if not freqs_cis.is_contiguous():
         freqs_cis = freqs_cis.contiguous()
 
     B, S, H, D = q_bf16.shape
     BSH = B * S * H
-    q_fp8 = torch.empty(B, S, H, D, dtype=torch.float8_e4m3fn, device=q_bf16.device)
-    w_fold = torch.empty(B, S, H, dtype=torch.float32, device=q_bf16.device)
+    if out_q_fp8 is not None:
+        assert (
+            out_q_fp8.shape == q_bf16.shape
+            and out_q_fp8.dtype == torch.float8_e4m3fn
+            and out_q_fp8.device == q_bf16.device
+            and out_q_fp8.is_contiguous()
+        )
+        q_fp8 = out_q_fp8
+    else:
+        q_fp8 = torch.empty(B, S, H, D, dtype=torch.float8_e4m3fn, device=q_bf16.device)
+    if out_w_fold is not None:
+        assert (
+            out_w_fold.shape == weights.shape
+            and out_w_fold.dtype == torch.float32
+            and out_w_fold.device == q_bf16.device
+            and out_w_fold.is_contiguous()
+        )
+        w_fold = out_w_fold
+    else:
+        w_fold = torch.empty(B, S, H, dtype=torch.float32, device=q_bf16.device)
     if BSH == 0:
         return q_fp8, w_fold
 
@@ -339,7 +363,9 @@ def _indexer_q_rope_fp8_quant_fold_impl(
     )
     if can_group_heads:
         grid = (n_freq, freq_stride_n // selected_group_heads)
-        _indexer_q_rope_fp8_fold_group_heads_kernel[grid](
+        fast_launch(
+            _indexer_q_rope_fp8_fold_group_heads_kernel,
+            grid,
             q_bf16,
             weights,
             freqs_ri,
@@ -357,7 +383,9 @@ def _indexer_q_rope_fp8_quant_fold_impl(
             num_warps=4,
         )
     else:
-        _indexer_q_rope_fp8_fold_kernel[(BSH,)](
+        fast_launch(
+            _indexer_q_rope_fp8_fold_kernel,
+            (BSH,),
             q_bf16,
             weights,
             freqs_ri,
@@ -384,6 +412,8 @@ def _indexer_q_rope_fp8_quant_fold_triton(
     rope_head_dim: int,
     *,
     group_heads: int | None = None,
+    out_q_fp8: torch.Tensor | None = None,
+    out_w_fold: torch.Tensor | None = None,
 ):
     return _indexer_q_rope_fp8_quant_fold_impl(
         q_bf16,
@@ -392,6 +422,8 @@ def _indexer_q_rope_fp8_quant_fold_triton(
         rope_head_dim,
         group_heads=group_heads,
         allow_cuda=False,
+        out_q_fp8=out_q_fp8,
+        out_w_fold=out_w_fold,
     )
 
 
@@ -402,6 +434,8 @@ def indexer_q_rope_fp8_quant_fold(
     rope_head_dim: int,
     *,
     group_heads: int | None = None,
+    out_q_fp8: torch.Tensor | None = None,
+    out_w_fold: torch.Tensor | None = None,
 ):
     """Fused RoPE + per-(token, head) FP8 quant + scale fold.
 
@@ -417,4 +451,6 @@ def indexer_q_rope_fp8_quant_fold(
         rope_head_dim,
         group_heads=group_heads,
         allow_cuda=True,
+        out_q_fp8=out_q_fp8,
+        out_w_fold=out_w_fold,
     )

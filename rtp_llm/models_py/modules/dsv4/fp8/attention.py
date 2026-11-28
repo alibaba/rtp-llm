@@ -15,6 +15,7 @@ slow but correct. M6 will swap in FlashMLA sparse impl.
 import json
 import logging
 import os
+import sys
 import threading
 from contextlib import contextmanager, nullcontext, suppress
 from typing import Any, Dict, NamedTuple, Optional, Tuple, Union
@@ -30,6 +31,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+import rtp_llm.models_py.utils.flash_mla_legacy as _fml_wrapper
 from rtp_llm.config.quant_config import Fp8BlockWiseQuantConfig
 from rtp_llm.models_py.distributed import collective_torch as _collective_torch_mod
 from rtp_llm.models_py.distributed.collective_torch import Group
@@ -47,6 +49,8 @@ from rtp_llm.models_py.modules.dsv4._fused_rmsnorm_fp8_quant_triton import (
 # Validated by test_fused_rmsnorm_rope.py (bf16 <=1-ULP + 1.25-1.75x).
 from rtp_llm.models_py.modules.dsv4._fused_rmsnorm_rope_triton import fused_rmsnorm_rope
 from rtp_llm.models_py.modules.dsv4._profiler import record_function_range
+
+_ORIG_FUSED_RMSNORM_ROPE = fused_rmsnorm_rope
 from rtp_llm.models_py.modules.dsv4.chunk_env import dsv4_chunk_tokens_from_env
 from rtp_llm.models_py.modules.dsv4.cp import (
     _CP_ROLE_MAIN,
@@ -96,6 +100,67 @@ from rtp_llm.models_py.modules.dsv4.prefill_workspace import PrefillWorkspace
 from rtp_llm.models_py.modules.dsv4.rope import precompute_freqs_cis
 from rtp_llm.models_py.modules.factory.linear import LinearFactory
 from rtp_llm.models_py.utils.memory import dispose_tensor
+
+_ORIG_GET_LEGACY_FLASH_MLA = getattr(_fml_wrapper, "get_legacy_flash_mla", None)
+_CACHED_FLASH_MLA_MOD: Any = None
+_CACHED_FLASH_MLA_ATTR: Any = None
+_CACHED_FLASH_MLA_FN: Any = None
+
+
+def _resolve_flash_mla_sparse_fwd() -> Any:
+    global _CACHED_FLASH_MLA_MOD, _CACHED_FLASH_MLA_ATTR, _CACHED_FLASH_MLA_FN
+    legacy_mod = sys.modules.get("flash_mla_legacy")
+    if legacy_mod is not None:
+        return legacy_mod.flash_mla_sparse_fwd
+    if (
+        "flash_mla_sparse_fwd" in _fml_wrapper.__dict__
+        or getattr(_fml_wrapper, "get_legacy_flash_mla", None)
+        is not _ORIG_GET_LEGACY_FLASH_MLA
+    ):
+        return _fml_wrapper.flash_mla_sparse_fwd
+    flash_mla_mod = sys.modules.get("flash_mla")
+    cached_fn = _CACHED_FLASH_MLA_FN
+    if (
+        cached_fn is not None
+        and flash_mla_mod is _CACHED_FLASH_MLA_MOD
+        and getattr(flash_mla_mod, "flash_mla_sparse_fwd", None)
+        is _CACHED_FLASH_MLA_ATTR
+    ):
+        return cached_fn
+    fn = _fml_wrapper.flash_mla_sparse_fwd
+    if (
+        sys.modules.get("flash_mla_legacy") is None
+        and sys.modules.get("flash_mla") is not None
+    ):
+        resolved_flash_mla = sys.modules.get("flash_mla")
+        _CACHED_FLASH_MLA_MOD = resolved_flash_mla
+        _CACHED_FLASH_MLA_ATTR = getattr(
+            resolved_flash_mla, "flash_mla_sparse_fwd", None
+        )
+        _CACHED_FLASH_MLA_FN = fn
+    return fn
+
+
+try:
+    from rtp_llm.models_py.triton_kernels.fast_launch import is_cuda_stream_capturing
+except ImportError:  # pragma: no cover
+
+    def is_cuda_stream_capturing() -> bool:
+        return torch.cuda.is_available() and torch.cuda.is_current_stream_capturing()
+
+
+_DEEPGEMM_LINEAR_MODULE = (
+    "rtp_llm.models_py.modules.factory.linear.impl.cuda.fp8_deepgemm_linear"
+)
+
+
+def _supports_out_linear(layer: nn.Module, method_name: str = "forward") -> bool:
+    return (
+        type(layer).__name__ == "CudaFp8DeepGEMMLinear"
+        and type(layer).__module__ == _DEEPGEMM_LINEAR_MODULE
+        and method_name not in getattr(layer, "__dict__", {})
+        and hasattr(layer, "N")
+    )
 
 
 def _use_cp_cache_hit_raw_q_merge() -> bool:
@@ -178,6 +243,8 @@ def _get_cp_post_gather_stream(
 
 
 def _flat_1d(t: torch.Tensor) -> torch.Tensor:
+    if t.dim() == 1 and t.is_contiguous():
+        return t
     return t.reshape(-1).contiguous()
 
 
@@ -205,14 +272,40 @@ def _build_suffix_pool_slot_mapping(
     B = int(seq_lens.numel())
     if B == 0:
         return torch.empty((0, 0), dtype=torch.long, device=device)
+    assert int(gather_lens.numel()) == B
+
+    if max_gather is None:
+        max_gather = (
+            int(gather_lens.to(torch.long).max().item()) if gather_lens.numel() else 0
+        )
+    if max_gather <= 0:
+        return torch.empty((B, 0), dtype=torch.long, device=device)
+
+    if (
+        block_table.is_cuda
+        and seq_lens.is_cuda
+        and gather_lens.is_cuda
+        and block_table.dtype in (torch.int32, torch.int64)
+        and seq_lens.dtype in (torch.int32, torch.int64)
+        and gather_lens.dtype in (torch.int32, torch.int64)
+    ):
+        from rtp_llm.models_py.modules.dsv4.fp8 import _swa_ops_triton as _swa_ops
+
+        return _swa_ops.compute_suffix_pool_slot_mapping(
+            block_table=block_table,
+            seq_lens=seq_lens,
+            gather_lens=gather_lens,
+            entries_per_block=int(entries_per_block),
+            tokens_per_block_for_block_table=int(tokens_per_block_for_block_table),
+            ring_entries=int(ring_entries),
+            max_gather=int(max_gather),
+        )
 
     gather_lens_l = gather_lens.to(device=device, dtype=torch.long).reshape(-1)
     seq_lens_l = seq_lens.to(device=device, dtype=torch.long).reshape(-1)
-    assert int(gather_lens_l.numel()) == B
-    if max_gather is None:
-        max_gather = int(gather_lens_l.max().item()) if gather_lens_l.numel() else 0
-    if max_gather <= 0:
-        return torch.empty((B, 0), dtype=torch.long, device=device)
+    max_blocks = int(block_table.shape[1])
+    if max_blocks <= 0:
+        return torch.full((B, max_gather), -1, dtype=torch.long, device=device)
 
     step = torch.arange(max_gather, device=device, dtype=torch.long)
     start = seq_lens_l - gather_lens_l
@@ -221,16 +314,15 @@ def _build_suffix_pool_slot_mapping(
 
     block_in_seq = abs_pos // int(tokens_per_block_for_block_table)
     in_block = abs_pos % int(ring_entries)
-    max_blocks = int(block_table.shape[1])
     in_capacity = valid_pos & (block_in_seq >= 0) & (block_in_seq < max_blocks)
-    safe_block = torch.where(in_capacity, block_in_seq, torch.zeros_like(block_in_seq))
+    safe_block = torch.where(in_capacity, block_in_seq, 0)
 
     bt_long = block_table[:B].to(device=device, dtype=torch.long)
     req = torch.arange(B, device=device, dtype=torch.long).unsqueeze(1)
     block_id = bt_long[req, safe_block]
     valid = in_capacity & (block_id > 0)
     slot = block_id * int(entries_per_block) + in_block
-    return torch.where(valid, slot, torch.full_like(slot, -1)).contiguous()
+    return torch.where(valid, slot, -1).contiguous()
 
 
 def _build_suffix_cp_sliced_slot_mapping(
@@ -310,17 +402,17 @@ def bind_attn_cache(attn, kv_cache=None, block_tables_by_type=None, cp_ctx=BIND_
     prev_bt = attn._block_tables_by_type
     prev_cp = attn._cp_ctx
     if kv_cache is not None:
-        attn._kv_cache = kv_cache
+        object.__setattr__(attn, "_kv_cache", kv_cache)
     if block_tables_by_type is not None:
-        attn._block_tables_by_type = block_tables_by_type
+        object.__setattr__(attn, "_block_tables_by_type", block_tables_by_type)
     if cp_ctx is not BIND_KEEP:
-        attn._cp_ctx = cp_ctx
+        object.__setattr__(attn, "_cp_ctx", cp_ctx)
     try:
         yield attn
     finally:
-        attn._kv_cache = prev_kv
-        attn._block_tables_by_type = prev_bt
-        attn._cp_ctx = prev_cp
+        object.__setattr__(attn, "_kv_cache", prev_kv)
+        object.__setattr__(attn, "_block_tables_by_type", prev_bt)
+        object.__setattr__(attn, "_cp_ctx", prev_cp)
 
 
 _DSV4_FP8_INDEXER_ENTRY_BYTES = 132
@@ -861,6 +953,8 @@ class PrefillQKV(NamedTuple):
 
 
 class AttentionFP8(nn.Module):
+    _profile_prefill_name: str = "dsv4.fp8.attn.prefill"
+
     def __init__(
         self,
         layer_id: int,
@@ -897,6 +991,7 @@ class AttentionFP8(nn.Module):
         indexer."""
         super().__init__()
         self.layer_id = layer_id
+        self._profile_prefill_name = f"dsv4.fp8.attn.L{layer_id:02d}.prefill"
         self.dim = dim
         self.q_lora_rank = q_lora_rank
         self.o_lora_rank = o_lora_rank
@@ -2046,12 +2141,22 @@ class AttentionFP8(nn.Module):
         layer: nn.Module,
         quantized_input: Tuple[torch.Tensor, torch.Tensor],
         shape: torch.Size,
+        out: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        y = layer.forward_quantized(*quantized_input)
+        y = (
+            layer.forward_quantized(*quantized_input, out=out)
+            if out is not None
+            else layer.forward_quantized(*quantized_input)
+        )
         return y.view(*shape[:-1], y.shape[-1])
 
     def _wo_a_einsum_from_fp8(
-        self, o_fp8: torch.Tensor, o_scale: torch.Tensor, B: int, S: int
+        self,
+        o_fp8: torch.Tensor,
+        o_scale: torch.Tensor,
+        B: int,
+        S: int,
+        workspace: Optional[PrefillWorkspace] = None,
     ) -> torch.Tensor:
         """One ``fp8_einsum`` call on pre-quantized activations.
 
@@ -2062,7 +2167,10 @@ class AttentionFP8(nn.Module):
         ``"bhr,hdr->bhd"`` + recipe ``(1, 1, 128)`` for SM100 UE8M0)."""
         M, G, _K = o_fp8.shape
         R = self.o_lora_rank
-        out = torch.empty(M, G, R, dtype=torch.bfloat16, device=o_fp8.device)
+        if isinstance(workspace, PrefillWorkspace) and M > 0:
+            out = workspace.scratch("attn_wo_a", (M, G, R), torch.bfloat16)
+        else:
+            out = torch.empty(M, G, R, dtype=torch.bfloat16, device=o_fp8.device)
         deep_gemm.fp8_einsum(
             "bhr,hdr->bhd",
             (o_fp8, o_scale),
@@ -2584,23 +2692,21 @@ class AttentionFP8(nn.Module):
         prev_kv = self._kv_cache
         prev_bt = self._block_tables_by_type
         if kv_cache is not None:
-            self._kv_cache = kv_cache
+            object.__setattr__(self, "_kv_cache", kv_cache)
         if block_tables_by_type is not None:
-            self._block_tables_by_type = block_tables_by_type
+            object.__setattr__(self, "_block_tables_by_type", block_tables_by_type)
         try:
             with record_function_range("dsv4.fp8.attn.set_pool_context"):
                 self._set_compressor_pool_context()
             try:
-                with record_function_range(
-                    f"dsv4.fp8.attn.L{self.layer_id:02d}.prefill"
-                ):
+                with record_function_range(self._profile_prefill_name):
                     return self._forward_prefill(x, positions)
             finally:
                 with record_function_range("dsv4.fp8.attn.clear_pool_context"):
                     self._clear_compressor_pool_context()
         finally:
-            self._kv_cache = prev_kv
-            self._block_tables_by_type = prev_bt
+            object.__setattr__(self, "_kv_cache", prev_kv)
+            object.__setattr__(self, "_block_tables_by_type", prev_bt)
 
     def forward_with_shared_input_quant(
         self,
@@ -2615,16 +2721,14 @@ class AttentionFP8(nn.Module):
         prev_kv = self._kv_cache
         prev_bt = self._block_tables_by_type
         if kv_cache is not None:
-            self._kv_cache = kv_cache
+            object.__setattr__(self, "_kv_cache", kv_cache)
         if block_tables_by_type is not None:
-            self._block_tables_by_type = block_tables_by_type
+            object.__setattr__(self, "_block_tables_by_type", block_tables_by_type)
         try:
             with record_function_range("dsv4.fp8.attn.set_pool_context"):
                 self._set_compressor_pool_context()
             try:
-                with record_function_range(
-                    f"dsv4.fp8.attn.L{self.layer_id:02d}.prefill"
-                ):
+                with record_function_range(self._profile_prefill_name):
                     return self._forward_prefill(
                         x, positions, shared_input_quant=shared_input_quant
                     )
@@ -2632,8 +2736,8 @@ class AttentionFP8(nn.Module):
                 with record_function_range("dsv4.fp8.attn.clear_pool_context"):
                     self._clear_compressor_pool_context()
         finally:
-            self._kv_cache = prev_kv
-            self._block_tables_by_type = prev_bt
+            object.__setattr__(self, "_kv_cache", prev_kv)
+            object.__setattr__(self, "_block_tables_by_type", prev_bt)
 
     # ------------------------------------------------------------------
     # CP-overlap orchestration helpers (Phase-Z; env-default-off)
@@ -2660,7 +2764,7 @@ class AttentionFP8(nn.Module):
             return False
         if common.device.type != "cuda":
             return False
-        if torch.cuda.is_available() and torch.cuda.is_current_stream_capturing():
+        if is_cuda_stream_capturing():
             return False
         return True
 
@@ -3692,10 +3796,23 @@ class AttentionFP8(nn.Module):
                     swa_pool_3d=swa_pool_3d,
                 )
             with record_function_range("dsv4.fp8.attn.prefill.output_proj"):
-                out = self._prefill_output_proj(o, common.freqs_cis)
+                if (
+                    isinstance(common.workspace, PrefillWorkspace)
+                    and "_prefill_output_proj" not in self.__dict__
+                    and type(self)._prefill_output_proj
+                    is _ORIG_ATTN_PREFILL_OUTPUT_PROJ
+                ):
+                    out = self._prefill_output_proj(
+                        o, common.freqs_cis, workspace=common.workspace
+                    )
+                else:
+                    out = self._prefill_output_proj(o, common.freqs_cis)
             self._prefill_output_all_reduce(out)
             return out
 
+        ws = (
+            common.workspace if isinstance(common.workspace, PrefillWorkspace) else None
+        )
         use_ragged = wm.cu_swa_offsets is not None
         async_workspace_reads = self._should_async_workspace_reads_for_prefill(common)
         with record_function_range("dsv4.fp8.attn.workspace.alloc"):
@@ -3703,14 +3820,14 @@ class AttentionFP8(nn.Module):
             # gather, SWA-prefix gather, or fresh-K overlay; keep this
             # uninitialized to avoid a full workspace memset per layer.
             if use_ragged:
-                workspace = torch.empty(
-                    (max(wm.total_ws_rows, 1), D),
-                    dtype=torch.bfloat16,
-                    device=qkv.q.device,
-                )
+                ws_shape = (max(wm.total_ws_rows, 1), D)
+            else:
+                ws_shape = (B, wm.M, D)
+            if ws is not None and not async_workspace_reads:
+                workspace = ws.scratch("attn_ws", ws_shape, torch.bfloat16)
             else:
                 workspace = torch.empty(
-                    (B, wm.M, D), dtype=torch.bfloat16, device=qkv.q.device
+                    ws_shape, dtype=torch.bfloat16, device=qkv.q.device
                 )
 
         cmp_pending = None
@@ -4011,7 +4128,12 @@ class AttentionFP8(nn.Module):
             # path free of casts / gathers / per-request slicing.
             ws_flat = workspace if use_ragged else workspace.view(B * wm.M, D)
             with record_function_range("dsv4.fp8.attn.workspace.overlay_new_k"):
-                kv_bf16 = qkv.kv_full.to(torch.bfloat16).reshape(-1, D)
+                kv_src = (
+                    qkv.kv_full
+                    if qkv.kv_full.dtype == torch.bfloat16
+                    else qkv.kv_full.to(torch.bfloat16)
+                )
+                kv_bf16 = kv_src.reshape(-1, D)
                 row_scatter(
                     ws_flat,
                     wm.new_k_slot_in_flat,
@@ -4023,8 +4145,12 @@ class AttentionFP8(nn.Module):
                 # each FlashMLA chunk immediately after attention.
                 # The NamedTuple ref keeps it alive otherwise, costing ~1.1 GiB
                 # of peak overlap with the sparse-attn workspace at 1M ctx.
-                dispose_tensor(kv_bf16)
-                dispose_tensor(qkv.kv_full)
+                if kv_bf16.data_ptr() != qkv.kv_full.data_ptr() and (
+                    ws is None or not ws.owns_tensor(kv_bf16)
+                ):
+                    dispose_tensor(kv_bf16)
+                if ws is None or not ws.owns_tensor(qkv.kv_full):
+                    dispose_tensor(qkv.kv_full)
 
             # combine_topk: HCA uses precomputed dense arange(N_max); CSA uses
             # the runtime indexer output (raw compressed-pool offsets in [0, N_b)).
@@ -4054,12 +4180,17 @@ class AttentionFP8(nn.Module):
             # stream, so moving pure CPU/view/allocation work here lets it run
             # while the GPU drains the pre-combine dependency chain.
             kv_view = ws_flat.unsqueeze(1)
-            projected_out = torch.empty(
-                qkv.q.shape[0],
-                self.dim,
-                dtype=torch.bfloat16,
-                device=qkv.q.device,
-            )
+            if ws is not None and ws.reuse_layer_out_scratch and qkv.q.shape[0] > 0:
+                projected_out = ws.scratch(
+                    "attn_out", (int(qkv.q.shape[0]), self.dim), torch.bfloat16
+                )
+            else:
+                projected_out = torch.empty(
+                    qkv.q.shape[0],
+                    self.dim,
+                    dtype=torch.bfloat16,
+                    device=qkv.q.device,
+                )
 
             if common.cp_on:
                 # Phase F2/Phase-2: kernel ``combine_topk_swa_indices`` derives
@@ -4113,6 +4244,23 @@ class AttentionFP8(nn.Module):
                         req_id_per_token=_flat_1d(common.req_id_per_token),
                         prefix_lengths=_flat_1d(common.prefix_lengths),
                     )
+                    combine_out_kwargs: Dict[str, torch.Tensor] = {}
+                    if combine_cache is None and ws is not None:
+                        comb_tokens = int(cmp_topk.shape[0])
+                        comb_topk = (
+                            (int(cmp_topk.shape[-1]) + self.window_size + 127) // 128
+                        ) * 128
+                        if comb_tokens > 0:
+                            combine_out_kwargs["out_indices"] = ws.scratch(
+                                "attn_comb_idx",
+                                (comb_tokens, 1, comb_topk),
+                                torch.int32,
+                            )
+                            combine_out_kwargs["out_lens"] = ws.scratch(
+                                "attn_comb_len",
+                                (comb_tokens,),
+                                torch.int32,
+                            )
                     with record_function_range(
                         "dsv4.fp8.attn.workspace.combine_topk_cp"
                     ):
@@ -4120,6 +4268,7 @@ class AttentionFP8(nn.Module):
                             **combine_kwargs,
                             flash_mla_indices=True,
                             dense_arange_topk=is_dense_hca,
+                            **combine_out_kwargs,
                         )
                     if combine_cache is not None and combine_key is not None:
                         combine_cache[combine_key] = (
@@ -4152,6 +4301,23 @@ class AttentionFP8(nn.Module):
                 if cached_combine is not None:
                     combined_indices, combined_lens = cached_combine
                 else:
+                    combine_out_kwargs = {}
+                    if combine_cache is None and ws is not None:
+                        comb_tokens = int(cmp_topk.shape[0])
+                        comb_topk = (
+                            (int(cmp_topk.shape[-1]) + self.window_size + 127) // 128
+                        ) * 128
+                        if comb_tokens > 0:
+                            combine_out_kwargs["out_indices"] = ws.scratch(
+                                "attn_comb_idx",
+                                (comb_tokens, 1, comb_topk),
+                                torch.int32,
+                            )
+                            combine_out_kwargs["out_lens"] = ws.scratch(
+                                "attn_comb_len",
+                                (comb_tokens,),
+                                torch.int32,
+                            )
                     with record_function_range("dsv4.fp8.attn.workspace.combine_topk"):
                         combined_indices, combined_lens = combine_topk_swa_indices(
                             topk_indices=cmp_topk,
@@ -4167,6 +4333,7 @@ class AttentionFP8(nn.Module):
                             cu_cmp_offsets=wm.cu_cmp_offsets,
                             cu_swa_offsets=wm.cu_swa_offsets,
                             dense_arange_topk=is_dense_hca,
+                            **combine_out_kwargs,
                         )
                     if combine_cache is not None and combine_key is not None:
                         combine_cache[combine_key] = (
@@ -4444,9 +4611,8 @@ class AttentionFP8(nn.Module):
         ), "_attn_via_workspace_cp_raw_q_merge: prefill Q not materialized"
         from rtp_llm.models_py.distributed.collective_torch import Group, all_gather
         from rtp_llm.models_py.modules.dsv4.fp8 import _swa_dequant_triton as _swa_dq
-        from rtp_llm.models_py.utils.flash_mla_legacy import (
-            flash_mla_sparse_fwd,  # type: ignore[import-not-found]
-        )
+
+        flash_mla_sparse_fwd = _resolve_flash_mla_sparse_fwd()
 
         assert common.cp_ctx is not None
         cp_ctx = common.cp_ctx
@@ -4726,7 +4892,7 @@ class AttentionFP8(nn.Module):
         per ratio and broadcasts to every layer attention sharing that
         ratio. ``None`` clears the binding (used at end of forward).
         """
-        self._prefill_meta_shared = meta
+        object.__setattr__(self, "_prefill_meta_shared", meta)
 
     def _ensure_freqs_cis_bound(self) -> None:
         """Bind ``self.freqs_cis`` onto this layer's compressor / indexer
@@ -4933,7 +5099,7 @@ class AttentionFP8(nn.Module):
         if any_cont is None and host_pf is not None and len(host_pf) == batch_size:
             any_cont = any(int(p) > 0 for p in host_pf)
         if any_cont is None:
-            if prefix_lengths.is_cuda and torch.cuda.is_current_stream_capturing():
+            if prefix_lengths.is_cuda and is_cuda_stream_capturing():
                 raise RuntimeError(
                     "CUDA Graph prefill metadata requires host-derived any_cont"
                 )
@@ -5086,6 +5252,37 @@ class AttentionFP8(nn.Module):
 
         # ``use_varlen`` stays explicit because lower builders share one
         # metadata contract.
+        reuse_swa_cache_slot_mapping: Optional[torch.Tensor] = None
+        reuse_swa_cache_compaction: Optional[CPByteSlicedSlotCompaction] = None
+        if reuse_common_meta is not None:
+            reuse_src_swa = reuse_common_meta.swa_meta
+            if (
+                reuse_src_swa is not None
+                and reuse_src_swa.cache_slot_mapping is not None
+                and (
+                    not cp_on
+                    or (
+                        cp_ctx is not None
+                        and cp_ctx.cu_seqlens_global is not None
+                        and cp_ctx.input_lengths_global is not None
+                    )
+                )
+            ):
+                reuse_swa_cache_slot_mapping = reuse_src_swa.cache_slot_mapping
+                reuse_swa_cache_compaction = reuse_src_swa.cache_compaction
+            else:
+                reuse_ws_meta: Optional[WorkspaceMeta] = None
+                if reuse_common_meta.csa_meta is not None:
+                    reuse_ws_meta = reuse_common_meta.csa_meta.workspace_meta
+                elif reuse_common_meta.hca_meta is not None:
+                    reuse_ws_meta = reuse_common_meta.hca_meta.workspace_meta
+                if (
+                    reuse_ws_meta is not None
+                    and reuse_ws_meta.swa_cache_slot_mapping is not None
+                ):
+                    reuse_swa_cache_slot_mapping = reuse_ws_meta.swa_cache_slot_mapping
+                    reuse_swa_cache_compaction = reuse_ws_meta.swa_cache_compaction
+
         csa_meta: Optional[CsaPrefillMeta] = None
         hca_meta: Optional[HcaPrefillMeta] = None
         if self.compress_ratio == 4:
@@ -5107,6 +5304,8 @@ class AttentionFP8(nn.Module):
                     host_input_lengths=host_in_local,
                     host_input_lengths_global=host_in_global,
                     host_prefix_lengths=host_pf,
+                    reuse_swa_cache_slot_mapping=reuse_swa_cache_slot_mapping,
+                    reuse_swa_cache_compaction=reuse_swa_cache_compaction,
                 )
         elif self.compress_ratio == 128:
             with record_function_range("dsv4.fp8.meta.hca"):
@@ -5127,6 +5326,8 @@ class AttentionFP8(nn.Module):
                     host_input_lengths=host_in_local,
                     host_input_lengths_global=host_in_global,
                     host_prefix_lengths=host_pf,
+                    reuse_swa_cache_slot_mapping=reuse_swa_cache_slot_mapping,
+                    reuse_swa_cache_compaction=reuse_swa_cache_compaction,
                 )
 
         return PrefillMeta(
@@ -5178,6 +5379,8 @@ class AttentionFP8(nn.Module):
         host_input_lengths: Optional[Tuple[int, ...]] = None,
         host_input_lengths_global: Optional[Tuple[int, ...]] = None,
         host_prefix_lengths: Optional[Tuple[int, ...]] = None,
+        reuse_swa_cache_slot_mapping: Optional[torch.Tensor] = None,
+        reuse_swa_cache_compaction: Optional[CPByteSlicedSlotCompaction] = None,
     ) -> CsaPrefillMeta:
         """Build CSA-layer per-call metadata: indexer prepare + main CSA
         compressor prepare_metadata.
@@ -5323,6 +5526,8 @@ class AttentionFP8(nn.Module):
                     host_input_lengths_global if cp_active else host_input_lengths
                 ),
                 host_prefix_lengths=host_prefix_lengths,
+                reuse_swa_cache_slot_mapping=reuse_swa_cache_slot_mapping,
+                reuse_swa_cache_compaction=reuse_swa_cache_compaction,
             )
         return CsaPrefillMeta(
             indexer_meta=indexer_meta,
@@ -5349,6 +5554,8 @@ class AttentionFP8(nn.Module):
         host_input_lengths: Optional[Tuple[int, ...]] = None,
         host_input_lengths_global: Optional[Tuple[int, ...]] = None,
         host_prefix_lengths: Optional[Tuple[int, ...]] = None,
+        reuse_swa_cache_slot_mapping: Optional[torch.Tensor] = None,
+        reuse_swa_cache_compaction: Optional[CPByteSlicedSlotCompaction] = None,
     ) -> HcaPrefillMeta:
         """Build HCA-layer per-call metadata: main HCA compressor
         prepare_metadata."""
@@ -5427,6 +5634,8 @@ class AttentionFP8(nn.Module):
                     host_input_lengths_global if cp_active else host_input_lengths
                 ),
                 host_prefix_lengths=host_prefix_lengths,
+                reuse_swa_cache_slot_mapping=reuse_swa_cache_slot_mapping,
+                reuse_swa_cache_compaction=reuse_swa_cache_compaction,
             )
         return HcaPrefillMeta(
             compressor_meta=compressor_meta,
@@ -5451,6 +5660,8 @@ class AttentionFP8(nn.Module):
         max_seqlen_q: int = 0,
         host_input_lengths: Optional[Tuple[int, ...]] = None,
         host_prefix_lengths: Optional[Tuple[int, ...]] = None,
+        reuse_swa_cache_slot_mapping: Optional[torch.Tensor] = None,
+        reuse_swa_cache_compaction: Optional[CPByteSlicedSlotCompaction] = None,
     ) -> Optional[WorkspaceMeta]:
         """Static index/dim metadata for the vLLM-style workspace + dual-
         gather + ``combine_topk_swa_indices`` flow. Returns ``None`` when
@@ -5632,7 +5843,7 @@ class AttentionFP8(nn.Module):
             swa_cache_cu_tiles: Optional[torch.Tensor] = None
             swa_cache_total_tiles: Optional[int] = None
             cu_swa_offsets_cpu: Optional[Tuple[int, ...]] = None
-            if device.type == "cuda" and torch.cuda.is_current_stream_capturing():
+            if device.type == "cuda" and is_cuda_stream_capturing():
                 N_max = (
                     int(cmp_bt.shape[1])
                     * _dsv4_pool_tokens_per_block(self._kv_cache, tag=cmp_at)
@@ -5901,31 +6112,42 @@ class AttentionFP8(nn.Module):
                     )
                 )
 
-        if device.type == "cuda" and torch.cuda.is_current_stream_capturing():
-            swa_max_gather_host: Optional[int] = win - 1
-        elif host_prefix_lengths is not None and len(host_prefix_lengths) == B:
-            swa_max_gather_host = min(
-                max((int(p) for p in host_prefix_lengths), default=0),
-                win - 1,
-            )
+        can_reuse_swa_cache = (
+            reuse_swa_cache_slot_mapping is not None
+            and int(reuse_swa_cache_slot_mapping.shape[0]) == B
+            and reuse_swa_cache_slot_mapping.device == device
+            and (not swa_byte_sliced or reuse_swa_cache_compaction is not None)
+        )
+        if can_reuse_swa_cache:
+            assert reuse_swa_cache_slot_mapping is not None
+            swa_cache_slot_mapping = reuse_swa_cache_slot_mapping
+            swa_cache_compaction = reuse_swa_cache_compaction
         else:
-            swa_max_gather_host = None
-        swa_cache_slot_mapping = _build_suffix_pool_slot_mapping(
-            block_table=swa_bt_int32,
-            seq_lens=swa_cache_seq_lens,
-            gather_lens=swa_cache_gather_lens,
-            entries_per_block=swa_eb,
-            tokens_per_block_for_block_table=swa_tokens_per_block,
-            ring_entries=swa_eb,
-            max_gather=swa_max_gather_host,
-        )
-        swa_cache_compaction = self._build_swa_cp_byte_compaction(
-            swa_cache_slot_mapping,
-            full_entries_per_block=swa_eb,
-            validation_site="swa.gather_cp_byte.slot_indices",
-            negative_mode="skip_any",
-            gather_lens=swa_cache_gather_lens,
-        )
+            if device.type == "cuda" and is_cuda_stream_capturing():
+                swa_max_gather_host: Optional[int] = win - 1
+            elif host_prefix_lengths is not None and len(host_prefix_lengths) == B:
+                swa_max_gather_host = min(
+                    max((int(p) for p in host_prefix_lengths), default=0),
+                    win - 1,
+                )
+            else:
+                swa_max_gather_host = None
+            swa_cache_slot_mapping = _build_suffix_pool_slot_mapping(
+                block_table=swa_bt_int32,
+                seq_lens=swa_cache_seq_lens,
+                gather_lens=swa_cache_gather_lens,
+                entries_per_block=swa_eb,
+                tokens_per_block_for_block_table=swa_tokens_per_block,
+                ring_entries=swa_eb,
+                max_gather=swa_max_gather_host,
+            )
+            swa_cache_compaction = self._build_swa_cp_byte_compaction(
+                swa_cache_slot_mapping,
+                full_entries_per_block=swa_eb,
+                validation_site="swa.gather_cp_byte.slot_indices",
+                negative_mode="skip_any",
+                gather_lens=swa_cache_gather_lens,
+            )
 
         return WorkspaceMeta(
             M=M,
@@ -6258,7 +6480,7 @@ class AttentionFP8(nn.Module):
         cache_gather_lens: Optional[torch.Tensor] = None
         cache_cu_tiles: Optional[torch.Tensor] = None
         cache_total_tiles: Optional[int] = None
-        capturing = device.type == "cuda" and torch.cuda.is_current_stream_capturing()
+        capturing = device.type == "cuda" and is_cuda_stream_capturing()
         if any_cont:
             cache_seq_lens = prefix_lengths.to(device=device, dtype=torch.int32)[
                 :write_B
@@ -6508,6 +6730,10 @@ class AttentionFP8(nn.Module):
         """
         x_3d = x.unsqueeze(0)
         rd = common.rd
+        ws = (
+            common.workspace if isinstance(common.workspace, PrefillWorkspace) else None
+        )
+        rows = int(x.shape[0]) if x.dim() == 2 else int(x.numel() // x.shape[-1])
         if self._can_reuse_qkv_input_quant():
             if shared_input_quant is None:
                 with record_function_range("dsv4.fp8.attn.qkv.shared_input_quant"):
@@ -6520,15 +6746,51 @@ class AttentionFP8(nn.Module):
             Tuple[Optional[torch.Tensor], Optional[Tuple[torch.Tensor, torch.Tensor]]]
         ):
             with record_function_range("dsv4.fp8.attn.qkv.q_lora_a_norm"):
+                q_proj_out = (
+                    ws.scratch("attn_q_proj", (rows, int(self.wq_a.N)), torch.bfloat16)
+                    if ws is not None
+                    and rows > 0
+                    and _supports_out_linear(
+                        self.wq_a,
+                        (
+                            "forward_quantized"
+                            if shared_input_quant is not None
+                            else "forward"
+                        ),
+                    )
+                    else None
+                )
                 if shared_input_quant is not None:
                     q_proj = self._lin_from_shared_quant(
-                        self.wq_a, shared_input_quant, x_3d.shape
+                        self.wq_a, shared_input_quant, x_3d.shape, out=q_proj_out
                     )
                 else:
-                    q_proj = self._lin(self.wq_a, x_3d)
+                    q_proj = self._lin(self.wq_a, x_3d, out=q_proj_out)
                 q_proj_2d = q_proj.reshape(-1, q_proj.shape[-1])
                 if self._can_use_qr_fused_quant(q_proj_2d, self.q_norm):
                     emit_norm = not self._indexer_can_consume_qr_quant()
+                    qr_rows = int(q_proj_2d.shape[0])
+                    out_norm = (
+                        q_proj_2d
+                        if (emit_norm and ws is not None and qr_rows > 0)
+                        else None
+                    )
+                    out_q = (
+                        ws.scratch(
+                            "attn_qr_fp8",
+                            tuple(q_proj_2d.shape),
+                            torch.float8_e4m3fn,
+                        )
+                        if ws is not None and qr_rows > 0
+                        else None
+                    )
+                    out_scale = (
+                        ws.scratch_ue8m0_scale(
+                            "attn_qr_scale", qr_rows, int(q_proj_2d.shape[1])
+                        )
+                        if ws is not None and qr_rows > 0
+                        else None
+                    )
                     qr_norm, qr_quant = fused_rmsnorm_fp8_ue8m0_quant(
                         q_proj_2d,
                         self.q_norm,
@@ -6536,6 +6798,9 @@ class AttentionFP8(nn.Module):
                         group_size=128,
                         clamp_eps=1.0e-4,
                         emit_norm=emit_norm,
+                        out_norm=out_norm,
+                        out_q=out_q,
+                        out_scale=out_scale,
                     )
                     return qr_norm, qr_quant
                 return (
@@ -6545,14 +6810,54 @@ class AttentionFP8(nn.Module):
 
         def compute_kv() -> torch.Tensor:
             with record_function_range("dsv4.fp8.attn.qkv.kv_proj_rope"):
+                kv_in_out = (
+                    ws.scratch("attn_kv_in", (rows, int(self.wkv.N)), torch.bfloat16)
+                    if ws is not None
+                    and rows > 0
+                    and _supports_out_linear(
+                        self.wkv,
+                        (
+                            "forward_quantized"
+                            if shared_input_quant is not None
+                            else "forward"
+                        ),
+                    )
+                    else None
+                )
                 if shared_input_quant is not None:
                     kv_in = self._lin_from_shared_quant(
-                        self.wkv, shared_input_quant, x_3d.shape
+                        self.wkv, shared_input_quant, x_3d.shape, out=kv_in_out
                     )
                 else:
-                    kv_in = self._lin(self.wkv, x_3d)
+                    kv_in = self._lin(self.wkv, x_3d, out=kv_in_out)
+                kv_out_buf = (
+                    ws.scratch(
+                        "attn_kv_local" if common.cp_on else "attn_kv_full",
+                        tuple(kv_in.shape),
+                        kv_in.dtype,
+                    )
+                    if ws is not None
+                    and rows > 0
+                    and kv_in.is_cuda
+                    and kv_in.is_contiguous()
+                    and fused_rmsnorm_rope is _ORIG_FUSED_RMSNORM_ROPE
+                    else None
+                )
+                if kv_out_buf is not None:
+                    return fused_rmsnorm_rope(
+                        kv_in,
+                        self.kv_norm,
+                        common.freqs_cis,
+                        rd,
+                        eps=self.eps,
+                        out=kv_out_buf,
+                    )
                 return fused_rmsnorm_rope(
-                    kv_in, self.kv_norm, common.freqs_cis, rd, eps=self.eps
+                    kv_in,
+                    self.kv_norm,
+                    common.freqs_cis,
+                    rd,
+                    eps=self.eps,
                 )
 
         qr, qr_quant = compute_qr()
@@ -6763,13 +7068,20 @@ class AttentionFP8(nn.Module):
             int(freqs_cis.shape[0]) == s_q
         ), f"RoPE rows ({freqs_cis.shape[0]}) != Q rows ({s_q})"
 
-        from rtp_llm.models_py.utils.flash_mla_legacy import (
-            flash_mla_sparse_fwd,  # type: ignore[import-not-found]
-        )
+        flash_mla_sparse_fwd = _resolve_flash_mla_sparse_fwd()
 
         chunk_rows = min(_FLASH_MLA_SPARSE_Q_CHUNK, s_q)
         if out is None:
-            out = torch.empty(s_q, self.dim, dtype=torch.bfloat16, device=q.device)
+            if (
+                isinstance(prefill_workspace, PrefillWorkspace)
+                and prefill_workspace.reuse_layer_out_scratch
+                and s_q > 0
+            ):
+                out = prefill_workspace.scratch(
+                    "attn_out", (s_q, self.dim), torch.bfloat16
+                )
+            else:
+                out = torch.empty(s_q, self.dim, dtype=torch.bfloat16, device=q.device)
         else:
             assert (
                 out.dtype == torch.bfloat16
@@ -6795,11 +7107,24 @@ class AttentionFP8(nn.Module):
                     topk_length=topk_length[start:end],
                 )
             with record_function_range("dsv4.fp8.attn.prefill.output_proj"):
-                self._prefill_output_proj_into(
-                    o_part,
-                    freqs_cis[start:end],
-                    out=out[start:end, :],
-                )
+                if (
+                    isinstance(prefill_workspace, PrefillWorkspace)
+                    and "_prefill_output_proj_into" not in self.__dict__
+                    and type(self)._prefill_output_proj_into
+                    is _ORIG_ATTN_PREFILL_OUTPUT_PROJ_INTO
+                ):
+                    self._prefill_output_proj_into(
+                        o_part,
+                        freqs_cis[start:end],
+                        out=out[start:end, :],
+                        workspace=prefill_workspace,
+                    )
+                else:
+                    self._prefill_output_proj_into(
+                        o_part,
+                        freqs_cis[start:end],
+                        out=out[start:end, :],
+                    )
             dispose_tensor(o_part)
 
         self._prefill_output_all_reduce(out)
@@ -6865,7 +7190,11 @@ class AttentionFP8(nn.Module):
             profile_name="dsv4.fp8.attn.swa.flash_mla_kv_full",
         )
         # kv_full has no remaining consumer after all attention chunks drain.
-        dispose_tensor(qkv.kv_full)
+        ws = (
+            common.workspace if isinstance(common.workspace, PrefillWorkspace) else None
+        )
+        if ws is None or not ws.owns_tensor(qkv.kv_full):
+            dispose_tensor(qkv.kv_full)
         return out
 
     def _attn_fp8_swa_via_concat(
@@ -6918,20 +7247,16 @@ class AttentionFP8(nn.Module):
         assert common.use_varlen, "DSV4 FP8 SWA concat requires varlen metadata"
         B = common.batch_size
 
+        ws = (
+            common.workspace if isinstance(common.workspace, PrefillWorkspace) else None
+        )
         use_ragged = meta.cu_swa_offsets is not None
         # E5b: meta.combined_indices is built from valid prefix/new-K slots only.
-        if use_ragged:
-            workspace = torch.empty(
-                (max(meta.total_ws_rows, 1), D),
-                dtype=torch.bfloat16,
-                device=qkv.q.device,
-            )
+        ws_shape = (max(meta.total_ws_rows, 1), D) if use_ragged else (B, meta.M, D)
+        if ws is not None:
+            workspace = ws.scratch("attn_ws", ws_shape, torch.bfloat16)
         else:
-            workspace = torch.empty(
-                (B, meta.M, D),
-                dtype=torch.bfloat16,
-                device=qkv.q.device,
-            )
+            workspace = torch.empty(ws_shape, dtype=torch.bfloat16, device=qkv.q.device)
 
         # 1. Prefix tail dequant through precomputed global SWA slots.
         if meta.prefix_len_max > 0:
@@ -6969,7 +7294,11 @@ class AttentionFP8(nn.Module):
                     )
 
         # 2. New K BF16 overlay.
-        kv_bf16 = qkv.kv_full.to(torch.bfloat16)
+        kv_bf16 = (
+            qkv.kv_full
+            if qkv.kv_full.dtype == torch.bfloat16
+            else qkv.kv_full.to(torch.bfloat16)
+        )
         # ``meta.slot_in_flat`` is pre-baked in ``_build_swa_prefill_meta_varlen``
         # (via ``cu_swa_offsets`` in ragged mode). Single vectorized ``row_scatter``
         # here — no per-layer casts / gathers / arith.
@@ -6983,8 +7312,12 @@ class AttentionFP8(nn.Module):
         # overlay nothing else reads it on this path; the NamedTuple ref
         # would otherwise keep it alive through the sparse-attn workspace
         # alloc — ~1.1 GiB peak overlap at 1M ctx.
-        dispose_tensor(kv_bf16)
-        dispose_tensor(qkv.kv_full)
+        if kv_bf16.data_ptr() != qkv.kv_full.data_ptr() and (
+            ws is None or not ws.owns_tensor(kv_bf16)
+        ):
+            dispose_tensor(kv_bf16)
+        if ws is None or not ws.owns_tensor(qkv.kv_full):
+            dispose_tensor(qkv.kv_full)
 
         # 3. Chunked flash_mla_sparse_fwd over the flat KV view.
         return self._flash_mla_sparse_fwd_chunked_projected(
@@ -7014,11 +7347,28 @@ class AttentionFP8(nn.Module):
         self,
         o: torch.Tensor,
         freqs_cis: torch.Tensor,
+        *,
+        workspace: Optional[PrefillWorkspace] = None,
     ) -> torch.Tensor:
         """Inverse-RoPE + grouped wo_a + wo_b into a fresh ``[T, dim]`` tensor."""
         seqlen = o.shape[-3]
-        out = torch.empty(seqlen, self.dim, dtype=torch.bfloat16, device=o.device)
-        self._prefill_output_proj_into(o, freqs_cis, out=out)
+        if (
+            isinstance(workspace, PrefillWorkspace)
+            and workspace.reuse_layer_out_scratch
+            and seqlen > 0
+        ):
+            out = workspace.scratch("attn_out", (int(seqlen), self.dim), torch.bfloat16)
+        else:
+            out = torch.empty(seqlen, self.dim, dtype=torch.bfloat16, device=o.device)
+        if (
+            isinstance(workspace, PrefillWorkspace)
+            and "_prefill_output_proj_into" not in self.__dict__
+            and type(self)._prefill_output_proj_into
+            is _ORIG_ATTN_PREFILL_OUTPUT_PROJ_INTO
+        ):
+            self._prefill_output_proj_into(o, freqs_cis, out=out, workspace=workspace)
+        else:
+            self._prefill_output_proj_into(o, freqs_cis, out=out)
         return out
 
     def _prefill_output_proj_into(
@@ -7027,6 +7377,7 @@ class AttentionFP8(nn.Module):
         freqs_cis: torch.Tensor,
         *,
         out: torch.Tensor,
+        workspace: Optional[PrefillWorkspace] = None,
     ) -> None:
         """Inverse-RoPE + grouped wo_a + wo_b into an existing ``[T, dim]`` tensor.
 
@@ -7036,20 +7387,55 @@ class AttentionFP8(nn.Module):
         """
         o_3d = o.view(-1, self.n_heads, self.head_dim)
         seqlen = o_3d.shape[0]
+        heads_per_group = self.n_heads // self.n_groups
+        fp8_buf: Optional[torch.Tensor] = None
+        scale_buf: Optional[torch.Tensor] = None
+        if (
+            isinstance(workspace, PrefillWorkspace)
+            and seqlen > 0
+            and self.n_heads % self.n_groups == 0
+            and self.head_dim % 128 == 0
+            and (self.head_dim // 128) <= 4
+        ):
+            d_per_group = heads_per_group * self.head_dim
+            fp8_buf = workspace.scratch(
+                "attn_out_fp8",
+                (self.n_groups, seqlen, d_per_group),
+                torch.float8_e4m3fn,
+            )
+            scale_buf = workspace.scratch_inv_rope_scale(
+                "attn_out_scale", seqlen, self.n_groups, heads_per_group
+            )
         with record_function_range("dsv4.fp8.attn.out.fused_inv_rope_quant"):
             o_fp8, o_scale = fused_inv_rope_fp8_quant(
                 o_3d,
                 freqs_cis,
                 n_groups=self.n_groups,
-                heads_per_group=self.n_heads // self.n_groups,
+                heads_per_group=heads_per_group,
                 nope_dim=self.head_dim - self.rope_head_dim,
                 rope_head_dim=self.rope_head_dim,
+                fp8_buf=fp8_buf,
+                scale_buf=scale_buf,
             )
         with record_function_range("dsv4.fp8.attn.out.wo_a_einsum"):
-            o_proj = self._wo_a_einsum_from_fp8(o_fp8, o_scale, 1, seqlen)
+            if (
+                isinstance(workspace, PrefillWorkspace)
+                and "_wo_a_einsum_from_fp8" not in self.__dict__
+                and type(self)._wo_a_einsum_from_fp8 is _ORIG_ATTN_WO_A_EINSUM_FROM_FP8
+            ):
+                o_proj = self._wo_a_einsum_from_fp8(
+                    o_fp8, o_scale, 1, seqlen, workspace=workspace
+                )
+            else:
+                o_proj = self._wo_a_einsum_from_fp8(o_fp8, o_scale, 1, seqlen)
         with record_function_range("dsv4.fp8.attn.out.wo_b"):
             wo_b_in = o_proj.flatten(2).reshape(seqlen, -1)
             self.wo_b(wo_b_in, out=out)
+
+
+_ORIG_ATTN_PREFILL_OUTPUT_PROJ = AttentionFP8._prefill_output_proj
+_ORIG_ATTN_PREFILL_OUTPUT_PROJ_INTO = AttentionFP8._prefill_output_proj_into
+_ORIG_ATTN_WO_A_EINSUM_FROM_FP8 = AttentionFP8._wo_a_einsum_from_fp8
 
 
 class CommitOnlyAttentionFP8(AttentionFP8):
@@ -7096,6 +7482,7 @@ class CommitOnlyAttentionFP8(AttentionFP8):
         # indexer, and their caches are unreachable from forward_commit.
         nn.Module.__init__(self)
         self.layer_id = int(layer_id)
+        self._profile_prefill_name = f"dsv4.fp8.attn.L{self.layer_id:02d}.prefill"
         self.dim = int(dim)
         self.q_lora_rank = int(q_lora_rank)
         self.o_lora_rank = int(o_lora_rank)
