@@ -16,6 +16,16 @@ cc_library(
 
 %{PYTHON_INCLUDE_GENRULE}
 
+# The interpreter this repository was configured with (PYTHON_BIN_PATH, else
+# `python` on PATH). --config=xpu uses it as --python_top instead of
+# //:python310, so Bazel's Python targets run on the active environment.
+py_runtime(
+    name = "python_runtime",
+    interpreter_path = "%{PYTHON_BIN_PATH}",
+    python_version = "PY3",
+    stub_shebang = "#!%{PYTHON_BIN_PATH}",
+)
+
 genrule(
     name = "python_import_lib",
     outs = [

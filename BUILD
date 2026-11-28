@@ -87,6 +87,11 @@ config_setting(
 )
 
 config_setting(
+    name = "using_xpu",
+    values = {"define": "using_xpu=true"},
+)
+
+config_setting(
     name = "rocm_gfx950",
     define_values = {
         "using_rocm": "true",
