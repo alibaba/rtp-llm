@@ -3920,6 +3920,139 @@ def test_r11_warmup_mem_and_masked_kernels(device: torch.device) -> None:
     print("  PASS test_r11_warmup_mem_and_masked_kernels")
 
 
+def test_r12_norm_router_and_prequant_scatter(device: torch.device) -> None:
+    """Verify M12-1 1-pass latent norm, u64 single-reduction router tie-break, 2D prequant_fp8 scatter, and blocking contig sync."""
+    from rtp_llm.models_py.modules.qwen4_5 import mxfp4_ops
+    from rtp_llm.models_py.modules.qwen4_5.moe import _qwen45_sigmoid_topk_router_kernel
+    from rtp_llm.models_py.modules.qwen4_5.mxfp4_ops import (
+        mxfp4_moe_deepgemm_contiguous,
+        mxfp4_moe_deepgemm_masked,
+    )
+
+    dev_idx = int(device.index or 0)
+
+    # 1. _run_latent_norm_mul_sigmoid: Decode M<=512 (1-pass) and Prefill M=1024 (tiling) parity
+    moe_ln = Qwen4_5LatentMoE(
+        hidden_size=5120,
+        routed_expert_hidden_size=2560,
+        moe_intermediate_size=128,
+        shared_expert_intermediate_size=320,
+        num_experts=640,
+        num_experts_per_tok=10,
+        dtype=torch.bfloat16,
+        device=device,
+    )
+    _init_latent_moe_weights(moe_ln, seed=1201)
+    for M_ln in (1, 8, 16, 64, 512, 1024):
+        dg = torch.randn((M_ln, 5120), dtype=torch.bfloat16, device=device) * 0.5
+        y_tri = moe_ln._run_latent_norm_mul_sigmoid(dg, run_triton=True)
+        y_ref = moe_ln._run_latent_norm_mul_sigmoid(dg, run_triton=False)
+        ma, _, cos = _diff_stats(y_tri, y_ref)
+        assert cos >= 0.999999 and ma <= 8e-3, f"latent_norm mismatch M={M_ln}: ma={ma}, cos={cos}"
+
+    # 2. Router u64 packed argmax exact tie-breaking (lowest index wins) & SPLIT_K=5 parity
+    E_rt, K_rt = 640, 10
+    logits_tie = torch.zeros((4, E_rt), dtype=torch.bfloat16, device=device)
+    logits_tie[:, 500] = 1.5
+    logits_tie[:, 12] = 1.5
+    logits_tie[:, 7] = 1.5
+    logits_tie[1] = -2.0
+    logits_tie[1, 300] = -0.25
+    logits_tie[1, 3] = -0.25
+    bias_rt = torch.zeros((E_rt,), dtype=torch.float32, device=device)
+    ids_u64 = torch.empty((4, K_rt), dtype=torch.int32, device=device)
+    w_u64 = torch.empty((4, K_rt), dtype=torch.float32, device=device)
+    _qwen45_sigmoid_topk_router_kernel[(4,)](
+        logits_tie,
+        bias_rt,
+        ids_u64,
+        w_u64,
+        E_rt,
+        logits_tie.stride(0),
+        E_PAD=1024,
+        TOP_K=K_rt,
+        TOP_K_PAD=16,
+        HAS_BIAS=False,
+        NORMALIZE=True,
+        ROUND_BF16=True,
+        num_warps=4,
+    )
+    # Lowest expert indices must win exact ties
+    assert ids_u64[0, :3].tolist() == [7, 12, 500], f"Unexpected tie order row0: {ids_u64[0, :3]}"
+    assert ids_u64[1, :2].tolist() == [3, 300], f"Unexpected tie order row1: {ids_u64[1, :2]}"
+
+    # Split-K router parity across M=1,8,16,64 (covers sk=10 & sk=5) with bias on & off
+    for use_bias in (True, False):
+        moe_ln.moe_router_enable_expert_bias = use_bias
+        moe_ln.expert_bias = (
+            torch.nn.Parameter(torch.randn((E_rt,), dtype=torch.float32, device=device) * 0.05)
+            if use_bias
+            else None
+        )
+        for M_rt in (1, 8, 16, 64):
+            r_in = torch.randn((M_rt, 2560), dtype=torch.bfloat16, device=device) * 0.4
+            ids_t, w_t = moe_ln.route(r_in, use_triton=True)
+            ids_r, w_r = moe_ln.route(r_in, use_triton=False)
+            assert _diff_stats(w_t.sort(dim=-1).values, w_r.sort(dim=-1).values)[2] >= 0.999999
+            if use_bias:
+                assert torch.equal(ids_t, ids_r), f"Router mismatch bias=True M={M_rt}"
+
+    # 3. prequant_fp8 masked scatter parity + CG + blocking contig sync EP=4 parity
+    if has_deepgemm_fp8_fp4(dev_idx):
+        L_m, I_m, E_m = 2560, 2560, 32
+        w13_u8, w13_sc = quantize_mxfp4(
+            torch.randn((E_m, 2 * I_m, L_m), dtype=torch.bfloat16, device=device) * 0.02
+        )
+        w2_u8, w2_sc = quantize_mxfp4(
+            torch.randn((E_m, L_m, I_m), dtype=torch.bfloat16, device=device) * 0.02
+        )
+        mw_m = prepare_mxfp4_moe_weights(
+            w13_u8=w13_u8, w13_scale=w13_sc, w2_u8=w2_u8, w2_scale=w2_sc
+        )
+        del w13_u8, w13_sc, w2_u8, w2_sc
+
+        for M_t in (1, 16):
+            xm = torch.randn((M_t, L_m), dtype=torch.bfloat16, device=device) * 0.4
+            xq, xsc = per_token_group_quant_fp8_ue8m0(xm, scale_format="raw")
+            ids = torch.randint(0, E_m * 2, (M_t, 10), dtype=torch.int32, device=device)
+            if M_t >= 2:
+                ids[0, 0] = E_m + 2
+                ids[0, 1] = E_m + 2
+                ids[-1] = -1
+            tw = torch.softmax(torch.randn((M_t, 10), dtype=torch.float32, device=device), dim=-1)
+            if M_t >= 2:
+                tw[-1] = 0.0
+            y_pq = mxfp4_moe_deepgemm_masked(
+                None, ids, tw, mw_m, ep_start=E_m, ep_size=2, prequant_fp8=(xq, xsc)
+            )
+            y_ref = mxfp4_moe_forward_ref(
+                xm, ids, tw, mw_m, ep_start=E_m, ep_size=2, fp8_activations=True
+            )
+            assert _diff_stats(y_pq, y_ref)[2] >= 0.9999, f"prequant_fp8 scatter mismatch M={M_t}"
+            if M_t == 16:
+                g = torch.cuda.CUDAGraph()
+                with torch.cuda.graph(g):
+                    y_pq_cg = mxfp4_moe_deepgemm_masked(
+                        None, ids, tw, mw_m, ep_start=E_m, ep_size=2, prequant_fp8=(xq, xsc)
+                    )
+                g.replay()
+                torch.cuda.synchronize(device)
+                assert torch.equal(y_pq_cg, y_pq)
+                g.reset()
+
+        # Verify contiguous blocking sync event EP>1 parity
+        x_c = torch.randn((128, L_m), dtype=torch.bfloat16, device=device) * 0.4
+        ids_c = torch.randint(0, E_m * 4, (128, 10), dtype=torch.int32, device=device)
+        tw_c = torch.softmax(torch.randn((128, 10), dtype=torch.float32, device=device), dim=-1)
+        y_ct = mxfp4_moe_deepgemm_contiguous(x_c, ids_c, tw_c, mw_m, ep_start=E_m, ep_size=4)
+        y_ct_ref = mxfp4_moe_forward_ref(
+            x_c, ids_c, tw_c, mw_m, ep_start=E_m, ep_size=4, fp8_activations=True
+        )
+        assert _diff_stats(y_ct, y_ct_ref)[2] >= 0.9999
+
+    print("  PASS test_r12_norm_router_and_prequant_scatter")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Qwen 4.5-Flash LatentMoE & SM100 MXFP4 test suite")
     parser.add_argument("--distributed", action="store_true", help="Run multi-GPU FastAllReduce/TP/EP tests")
@@ -3988,6 +4121,7 @@ def main() -> int:
         test_r9_tgv_tactics_and_contig_overlap(device)
         test_r10_dg_jit_dedup_and_shared_tgv(device)
         test_r11_warmup_mem_and_masked_kernels(device)
+        test_r12_norm_router_and_prequant_scatter(device)
 
     if args.distributed:
         test_distributed_fast_comm_tp_ep(world_size=args.world_size)

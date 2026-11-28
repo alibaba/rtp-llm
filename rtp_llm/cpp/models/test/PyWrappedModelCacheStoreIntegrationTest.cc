@@ -1,4 +1,5 @@
 #include <algorithm>
+#include <chrono>
 #include <cstdint>
 #include <cstring>
 #include <map>
@@ -17,6 +18,7 @@
 
 #include "rtp_llm/cpp/cache/CacheConfig.h"
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
+#include "rtp_llm/cpp/cache/MHAKVCacheSpec.h"
 #include "kmonitor/client/MetricType.h"
 #include "kmonitor/client/core/MetricsRecord.h"
 #include "rtp_llm/cpp/engine_base/WeightsConverter.h"
@@ -66,6 +68,36 @@ struct PyWrappedModelTestPeer {
 
     static bool generationPrefillCudaGraphReady(const PyWrappedModel& model) {
         return model.generation_prefill_graph_runner_ != nullptr;
+    }
+
+    static std::pair<torch_ext::PyAttentionInputs, torch_ext::AttentionInputsByTag>
+    prepareDecodeAttentionAndSnapshot(PyWrappedModel& model, const GptModelInputs& inputs) {
+        model.prepareAttentionInputs(inputs);
+        auto res = std::make_pair(model.attention_inputs_, model.attention_inputs_by_tag_);
+        model.releaseBuffers();
+        return res;
+    }
+
+    static std::pair<double, py::dict>
+    benchmarkDecodePrepareAttention(PyWrappedModel& model, const std::vector<GptModelInputs>& step_inputs, int iters) {
+        for (size_t i = 0; i < 10; ++i) {
+            model.prepareAttentionInputs(step_inputs[i % step_inputs.size()]);
+            model.releaseBuffers();
+        }
+        c10::cuda::getCurrentCUDAStream().synchronize();
+        const auto t0 = std::chrono::steady_clock::now();
+        for (int i = 0; i < iters; ++i) {
+            model.prepareAttentionInputs(step_inputs[static_cast<size_t>(i) % step_inputs.size()]);
+            model.releaseBuffers();
+        }
+        c10::cuda::getCurrentCUDAStream().synchronize();
+        const auto t1 = std::chrono::steady_clock::now();
+        const double us =
+            std::chrono::duration<double, std::micro>(t1 - t0).count() / static_cast<double>(std::max(1, iters));
+        py::dict diag;
+        diag["pinned_check_remaining"] = model.pinned_check_remaining_;
+        diag["decode_meta_capacity"]   = model.decode_meta_capacity_;
+        return {us, std::move(diag)};
     }
 };
 
@@ -1591,6 +1623,207 @@ runPyWrappedModelSpeculativeCommitBridge(py::object py_model, const std::string&
     throw std::invalid_argument("unknown PyWrappedModel speculative commit bridge action: " + action);
 }
 
+py::dict runDecodePrepareCoalescedScenario(py::object              py_model,
+                                           int                     group_count,
+                                           const std::vector<int>& batch_sizes,
+                                           bool                    non_contiguous,
+                                           bool                    unpinned_host,
+                                           bool                    reverse_payload_tags,
+                                           bool                    mixed_kernel_span,
+                                           bool                    single_group_extra_payload,
+                                           bool                    enable_cuda_graph,
+                                           int                     bench_iters) {
+    ensureRuntimeInitialized();
+    RTP_LLM_CHECK_WITH_INFO(group_count >= 1 && !batch_sizes.empty(), "requires positive group_count and batch_sizes");
+
+    const size_t           model_group_count = single_group_extra_payload ? 1 : static_cast<size_t>(group_count);
+    std::vector<GroupSpec> specs;
+    specs.reserve(model_group_count);
+    std::vector<std::string> payload_tags;
+    payload_tags.reserve(static_cast<size_t>(group_count));
+    for (int g = 0; g < group_count; ++g) {
+        std::string tag = "group_" + std::to_string(g);
+        payload_tags.push_back(tag);
+        if (static_cast<size_t>(g) < model_group_count) {
+            const size_t tpb = (mixed_kernel_span && g % 2 == 1) ? 8 : 4;
+            specs.push_back({std::move(tag), tpb, 64});
+        }
+    }
+    CacheConfig manager_config = makeCacheConfig(specs);
+    if (mixed_kernel_span && model_group_count > 1) {
+        std::vector<GroupBase>   topology_groups;
+        std::vector<std::string> layer_tags;
+        for (size_t g = 0; g < model_group_count; ++g) {
+            GroupBase group;
+            group.tag          = "group_" + std::to_string(g);
+            const uint32_t tpb = 8;
+            const uint32_t ktpb = (g == 1 || g == 3) ? 4 : 8;
+            group.spec         = std::make_shared<MHAKVCacheSpec>(group.tag, tpb, ktpb);
+            group.policy       = defaultCacheGroupPolicy(CacheGroupType::FULL);
+            group.policy.explicit_block_num = kPhysicalBlocks;
+            group.block_num                 = kPhysicalBlocks;
+            topology_groups.push_back(std::move(group));
+            layer_tags.push_back("group_" + std::to_string(g));
+        }
+        LayerBase layer;
+        layer.layer_id   = kLayerId;
+        layer.group_tags = std::move(layer_tags);
+        manager_config.setTopology(std::move(topology_groups), {std::move(layer)});
+    }
+    auto layout_and_bases = makeLayout(manager_config);
+    auto manager          = std::make_shared<KVCacheManager>(manager_config,
+                                                    /*warmup=*/true,
+                                                    /*metrics_reporter=*/nullptr,
+                                                    KVCacheConfig{},
+                                                    ParallelismConfig{});
+
+    Weights weights;
+    weights.layers.resize(1);
+    GptModelDescription description;
+    description.data_type                    = DataType::TYPE_BF16;
+    description.norm_type                    = NormType::rmsnorm;
+    description.attention_conf.head_num      = 1;
+    description.attention_conf.kv_head_num   = 1;
+    description.attention_conf.size_per_head = 4;
+
+    HWKernelConfig hw_cfg;
+    hw_cfg.enable_cuda_graph         = enable_cuda_graph;
+    hw_cfg.decode_capture_batch_sizes = {1, 8, 16, 32};
+
+    RuntimeConfig runtime_cfg;
+    runtime_cfg.fifo_scheduler_config.max_context_batch_size = 32;
+
+    GptModelInitParams params{weights,
+                              description,
+                              std::make_optional(layout_and_bases.layout),
+                              /*model_id=*/0,
+                              ParallelismConfig{},
+                              hw_cfg,
+                              ProfilingDebugLoggingConfig{},
+                              runtime_cfg,
+                              ConcurrencyConfig{},
+                              SpeculativeExecutionConfig{},
+                              /*max_seq_len=*/64,
+                              /*hidden_size=*/4,
+                              manager,
+                              /*mtp_cache_config_index=*/0,
+                              /*hc_mult=*/1,
+                              /*metrics_reporter=*/nullptr,
+                              /*kernel_block_table_width=*/8};
+    params.owns_py_model = false;
+
+    PyWrappedModel model(params,
+                         std::move(py_model),
+                         /*is_prefill_cuda_graph_mode=*/false,
+                         /*use_spec_decoding=*/false,
+                         DSparkModelRole::NONE,
+                         /*allow_cuda_graph=*/enable_cuda_graph,
+                         /*track_cache_store_completion=*/false,
+                         /*enable_cache_store=*/false);
+
+    std::vector<std::string> ordered_tags = payload_tags;
+    if (reverse_payload_tags && ordered_tags.size() > 1) {
+        std::reverse(ordered_tags.begin(), ordered_tags.end());
+    }
+
+    constexpr int64_t           kBlockCols = 8;
+    std::vector<GptModelInputs> built_inputs;
+    built_inputs.reserve(batch_sizes.size());
+
+    auto make_host_i32 = [unpinned_host](torch::Tensor t) {
+        return unpinned_host ? t : t.pin_memory();
+    };
+
+    py::list snapshots;
+    for (size_t step_idx = 0; step_idx < batch_sizes.size(); ++step_idx) {
+        const int      bs = batch_sizes[step_idx];
+        GptModelInputs inp;
+        inp.kv_cache_group_tags = ordered_tags;
+        inp.combo_tokens        = torch::arange(bs, torch::kInt32).cuda();
+        inp.input_lengths       = make_host_i32(torch::ones({bs}, torch::kInt32));
+        inp.sequence_lengths    = make_host_i32(torch::arange(10, 10 + bs, torch::kInt32));
+        inp.prefix_lengths      = make_host_i32(torch::empty({0}, torch::kInt32));
+
+        // Build deterministic 3D [group_count, bs, kBlockCols] block tables; optionally non-contiguous!
+        torch::Tensor kernel_3d;
+        torch::Tensor phys_3d;
+        if (non_contiguous) {
+            // Use explicit non-contiguous [group_count, bs, kBlockCols] pinned view whose rows [bs, kBlockCols] ARE contiguous
+            // (padded along group stride, i.e., size(0) step > bs*kBlockCols) so 3D coalescing takes the row fallback.
+            auto big_k = torch::empty({group_count * 2, bs, kBlockCols},
+                                      torch::TensorOptions(torch::kInt32).pinned_memory(true));
+            auto big_p = torch::empty({group_count * 2, bs, kBlockCols},
+                                      torch::TensorOptions(torch::kInt32).pinned_memory(true));
+            kernel_3d = big_k.slice(0, 0, group_count * 2, 2);
+            phys_3d   = big_p.slice(0, 0, group_count * 2, 2);
+            for (int r = 0; r < group_count; ++r) {
+                for (int b = 0; b < bs; ++b) {
+                    for (int c = 0; c < kBlockCols; ++c) {
+                        kernel_3d[r][b][c] =
+                            static_cast<int32_t>((r + 1) * 1000 + b * 10 + c + static_cast<int>(step_idx));
+                        phys_3d[r][b][c] =
+                            static_cast<int32_t>((r + 1) * 2000 + b * 10 + c + static_cast<int>(step_idx));
+                    }
+                }
+            }
+        } else {
+            kernel_3d = torch::empty({group_count, bs, kBlockCols},
+                                     torch::TensorOptions(torch::kInt32).pinned_memory(!unpinned_host));
+            phys_3d   = torch::empty({group_count, bs, kBlockCols},
+                                     torch::TensorOptions(torch::kInt32).pinned_memory(!unpinned_host));
+            for (int r = 0; r < group_count; ++r) {
+                for (int b = 0; b < bs; ++b) {
+                    for (int c = 0; c < kBlockCols; ++c) {
+                        kernel_3d[r][b][c] = static_cast<int32_t>((r + 1) * 1000 + b * 10 + c + static_cast<int>(step_idx));
+                        phys_3d[r][b][c]   = static_cast<int32_t>((r + 1) * 2000 + b * 10 + c + static_cast<int>(step_idx));
+                    }
+                }
+            }
+        }
+        inp.kv_cache_kernel_block_id = kernel_3d;
+        inp.kv_cache_block_id        = phys_3d;
+        if (!non_contiguous) {
+            built_inputs.push_back(inp);
+        }
+
+        auto [attn, by_tag] = PyWrappedModelTestPeer::prepareDecodeAttentionAndSnapshot(model, inp);
+        c10::cuda::getCurrentCUDAStream().synchronize();
+
+        py::dict snap;
+        snap["batch_size"]                  = bs;
+        snap["total_tokens"]                = attn.total_tokens;
+        snap["cu_seqlens"]                  = attn.cu_seqlens.cpu();
+        snap["cu_seqlens_device"]           = attn.cu_seqlens_device.cpu();
+        snap["cu_kv_seqlens_device"]        = attn.cu_kv_seqlens_device.cpu();
+        snap["decode_cu_seqlens"]           = attn.decode_cu_seqlens.cpu();
+        snap["decode_cu_seqlens_device"]    = attn.decode_cu_seqlens_device.cpu();
+        snap["sequence_lengths_plus_1_dev"] = attn.sequence_lengths_plus_1_device.cpu();
+        snap["prefix_lengths"]              = attn.prefix_lengths.cpu();
+        snap["prefix_lengths_device"]       = attn.prefix_lengths_device.cpu();
+        snap["single_kernel_dev"]           = attn.kv_cache_kernel_block_id_device.cpu();
+        snap["single_kv_dev"]               = attn.kv_cache_block_id_device.cpu();
+        snap["by_tag_size"]                 = static_cast<int>(by_tag.size());
+        py::dict tag_devs;
+        py::dict tag_kv_devs;
+        for (const auto& [tag, g_attn] : by_tag) {
+            tag_devs[py::str(tag)]    = g_attn.kv_cache_kernel_block_id_device.cpu();
+            tag_kv_devs[py::str(tag)] = g_attn.kv_cache_block_id_device.cpu();
+        }
+        snap["by_tag_kernel_devs"] = std::move(tag_devs);
+        snap["by_tag_kv_devs"]     = std::move(tag_kv_devs);
+        snapshots.append(std::move(snap));
+    }
+
+    py::dict out;
+    out["snapshots"] = std::move(snapshots);
+    if (bench_iters > 0 && !built_inputs.empty()) {
+        auto [us, diag] = PyWrappedModelTestPeer::benchmarkDecodePrepareAttention(model, built_inputs, bench_iters);
+        out["avg_us"]   = us;
+        out["diag"]     = std::move(diag);
+    }
+    return out;
+}
+
 }  // namespace
 }  // namespace rtp_llm::test
 
@@ -1655,4 +1888,16 @@ PYBIND11_MODULE(libth_pywrapped_model_cache_store_integration_test, m) {
           py::arg("py_model"),
           py::arg("action"),
           py::arg("is_speculative_target") = true);
+    m.def("run_decode_prepare_coalesced_scenario",
+          &rtp_llm::test::runDecodePrepareCoalescedScenario,
+          py::arg("py_model"),
+          py::arg("group_count")                = 11,
+          py::arg("batch_sizes")                = std::vector<int>{1, 8},
+          py::arg("non_contiguous")             = false,
+          py::arg("unpinned_host")              = false,
+          py::arg("reverse_payload_tags")       = false,
+          py::arg("mixed_kernel_span")          = false,
+          py::arg("single_group_extra_payload") = false,
+          py::arg("enable_cuda_graph")          = false,
+          py::arg("bench_iters")                = 0);
 }

@@ -3684,5 +3684,127 @@ class NativeLogitsBoundaryTest(unittest.TestCase):
                     )
 
 
+@unittest.skipUnless(torch.cuda.is_available(), "requires CUDA/ROCm")
+class PyWrappedModelDecodePrepareCoalesceTest(unittest.TestCase):
+    def test_11_tag_coalesced_kv_cache_and_cached_decode_metadata(self):
+        class StubModel:
+            def __init__(self, requires_cg_prepare: bool = False) -> None:
+                self.requires_cg_prepare = requires_cg_prepare
+
+            def initialize(self, _init_res) -> bool:
+                return True
+
+            def prepare_fmha_impl(self, _inputs, is_cuda_graph: bool = False):
+                if not is_cuda_graph:
+                    return None
+
+                class Handle:
+                    def __init__(self, req: bool) -> None:
+                        self.requires_cuda_graph_prepare = req
+
+                    def support_cuda_graph(self) -> bool:
+                        return True
+
+                    def prepare_cuda_graph(self, _attn) -> None:
+                        pass
+
+                return Handle(self.requires_cg_prepare)
+
+            def forward(self, inputs, fmha_impl=None):
+                del fmha_impl
+                if inputs.input_hiddens is not None and inputs.input_hiddens.numel() > 0:
+                    return PyModelOutputs(inputs.input_hiddens.clone())
+                h = torch.zeros((inputs.input_ids.numel(), 4), dtype=torch.bfloat16, device="cuda")
+                return PyModelOutputs(h)
+
+        # 1) Contiguous 11-tag + reversed payload tags + batch grow past 128 + CUDA Graph prepare
+        res = _extension.run_decode_prepare_coalesced_scenario(
+            StubModel(requires_cg_prepare=False),
+            group_count=11,
+            batch_sizes=[1, 8, 16, 160, 1],
+            non_contiguous=False,
+            unpinned_host=False,
+            reverse_payload_tags=True,
+            mixed_kernel_span=False,
+            single_group_extra_payload=False,
+            enable_cuda_graph=False,
+            bench_iters=0,
+        )
+        for step_idx, snap in enumerate(res["snapshots"]):
+            bs = snap["batch_size"]
+            self.assertEqual(snap["total_tokens"], 0)
+            self.assertEqual(snap["by_tag_size"], 11)
+            torch.testing.assert_close(snap["cu_seqlens"], torch.zeros(bs + 1, dtype=torch.int32))
+            torch.testing.assert_close(snap["cu_seqlens_device"], torch.zeros(bs + 1, dtype=torch.int32))
+            torch.testing.assert_close(snap["cu_kv_seqlens_device"], torch.zeros(bs + 1, dtype=torch.int32))
+            torch.testing.assert_close(snap["decode_cu_seqlens"], torch.arange(bs + 1, dtype=torch.int32))
+            torch.testing.assert_close(snap["decode_cu_seqlens_device"], torch.arange(bs + 1, dtype=torch.int32))
+            torch.testing.assert_close(
+                snap["sequence_lengths_plus_1_dev"],
+                torch.arange(11, 11 + bs, dtype=torch.int32),
+            )
+            self.assertEqual(snap["prefix_lengths"].numel(), 0)
+            self.assertEqual(snap["prefix_lengths_device"].numel(), 0)
+            for g in range(11):
+                tag = f"group_{g}"
+                # Reversed order maps group_g to payload_row = 10 - g
+                row = 10 - g
+                exp = torch.empty((bs, 8), dtype=torch.int32)
+                for b in range(bs):
+                    for c in range(8):
+                        exp[b, c] = (row + 1) * 1000 + b * 10 + c + step_idx
+                torch.testing.assert_close(snap["by_tag_kernel_devs"][tag], exp)
+                torch.testing.assert_close(snap["by_tag_kv_devs"][tag], exp)
+
+        # 2) Non-contiguous strided 3D + mixed kernel span (>1 kernel blocks per KV block) + unpinned host >3 rounds
+        res_mixed = _extension.run_decode_prepare_coalesced_scenario(
+            StubModel(),
+            group_count=5,
+            batch_sizes=[2, 4, 3, 5, 1],
+            non_contiguous=True,
+            unpinned_host=True,
+            reverse_payload_tags=False,
+            mixed_kernel_span=True,
+            single_group_extra_payload=False,
+            enable_cuda_graph=False,
+            bench_iters=0,
+        )
+        for step_idx, snap in enumerate(res_mixed["snapshots"]):
+            bs = snap["batch_size"]
+            for g in range(5):
+                tag = f"group_{g}"
+                exp_k = torch.empty((bs, 8), dtype=torch.int32)
+                exp_p = torch.empty((bs, 8), dtype=torch.int32)
+                for b in range(bs):
+                    for c in range(8):
+                        exp_k[b, c] = (g + 1) * 1000 + b * 10 + c + step_idx
+                        exp_p[b, c] = (g + 1) * 2000 + b * 10 + c + step_idx
+                torch.testing.assert_close(snap["by_tag_kernel_devs"][tag], exp_k)
+                expected_kv = exp_p if g in (1, 3) else exp_k
+                torch.testing.assert_close(snap["by_tag_kv_devs"][tag], expected_kv)
+
+        # 3) Single-group model receiving multi-group shared payload keeps empty by_tag and exact single table
+        res_single = _extension.run_decode_prepare_coalesced_scenario(
+            StubModel(),
+            group_count=4,
+            batch_sizes=[2, 3],
+            non_contiguous=False,
+            unpinned_host=False,
+            reverse_payload_tags=True,
+            mixed_kernel_span=False,
+            single_group_extra_payload=True,
+            enable_cuda_graph=False,
+            bench_iters=0,
+        )
+        for step_idx, snap in enumerate(res_single["snapshots"]):
+            self.assertEqual(snap["by_tag_size"], 0)
+            bs = snap["batch_size"]
+            exp_k = torch.empty((bs, 8), dtype=torch.int32)
+            for b in range(bs):
+                for c in range(8):
+                    exp_k[b, c] = (3 + 1) * 1000 + b * 10 + c + step_idx
+            torch.testing.assert_close(snap["single_kernel_dev"], exp_k)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -402,6 +402,64 @@ def _combine_latent_shared_out_kernel(
 
 
 @triton.jit
+def _topk_sigmoid_router_select_and_store(
+    raw,
+    bias_ptr,
+    ids_ptr,
+    weights_ptr,
+    row,
+    offs_e,
+    mask_e,
+    TOP_K: tl.constexpr,
+    TOP_K_PAD: tl.constexpr,
+    HAS_BIAS: tl.constexpr,
+    NORMALIZE: tl.constexpr,
+    ROUND_BF16: tl.constexpr,
+):
+    """Apply sigmoid + optional bias, single-reduction u64 argmax top-k, and store."""
+    scores = tl.where(mask_e, tl.div_rn(1.0, 1.0 + libdevice.exp(-raw)), 0.0)
+    if HAS_BIAS:
+        bias = tl.load(bias_ptr + offs_e, mask=mask_e, other=0.0).to(tl.float32)
+        sel = tl.where(mask_e, scores + bias, -3.4e38)
+    else:
+        sel = tl.where(mask_e, scores, -3.4e38)
+
+    # Order-preserving IEEE-754 f32 -> u32 key packed with inverted index so a single
+    # tl.max finds both best score and lowest-index tie-breaker.
+    bits = sel.to(tl.uint32, bitcast=True)
+    neg = (bits >> 31) != 0
+    ord_u32 = tl.where(neg, ~bits, bits | 0x80000000).to(tl.uint64)
+    inv_idx = (0xFFFFFFFF - offs_e.to(tl.uint32)).to(tl.uint64)
+    packed = tl.where(mask_e, (ord_u32 << 32) | inv_idx, 0)
+
+    slots = tl.arange(0, TOP_K_PAD)
+    chosen_w = tl.zeros((TOP_K_PAD,), dtype=tl.float32)
+    chosen_ids = tl.zeros((TOP_K_PAD,), dtype=tl.int32)
+    for i in tl.static_range(TOP_K):
+        best_p = tl.max(packed, axis=0)
+        best_idx = (0xFFFFFFFF - (best_p & 0xFFFFFFFF).to(tl.uint32)).to(tl.int32)
+        if HAS_BIAS:
+            best_score = tl.sum(tl.where(offs_e == best_idx, scores, 0.0), axis=0)
+        else:
+            hi = (best_p >> 32).to(tl.uint32)
+            best_score = (
+                hi ^ tl.where((hi >> 31) != 0, 0x80000000, 0xFFFFFFFF)
+            ).to(tl.float32, bitcast=True)
+        chosen_w = tl.where(slots == i, best_score, chosen_w)
+        chosen_ids = tl.where(slots == i, best_idx, chosen_ids)
+        packed = tl.where(offs_e == best_idx, 0, packed)
+
+    if NORMALIZE:
+        denom = tl.sum(chosen_w, axis=0) + 1e-8
+        chosen_w = tl.div_rn(chosen_w, denom)
+    if ROUND_BF16:
+        chosen_w = chosen_w.to(tl.bfloat16).to(tl.float32)
+
+    tl.store(ids_ptr + row * TOP_K + slots, chosen_ids, mask=slots < TOP_K)
+    tl.store(weights_ptr + row * TOP_K + slots, chosen_w, mask=slots < TOP_K)
+
+
+@triton.jit
 def _qwen45_sigmoid_topk_router_kernel(
     logits_ptr,
     bias_ptr,
@@ -423,31 +481,20 @@ def _qwen45_sigmoid_topk_router_kernel(
     raw = tl.load(
         logits_ptr + row * stride_lm + offs_e, mask=mask_e, other=0.0
     ).to(tl.float32)
-    scores = tl.where(mask_e, tl.div_rn(1.0, 1.0 + libdevice.exp(-raw)), 0.0)
-    if HAS_BIAS:
-        bias = tl.load(bias_ptr + offs_e, mask=mask_e, other=0.0).to(tl.float32)
-        sel = tl.where(mask_e, scores + bias, -3.4e38)
-    else:
-        sel = tl.where(mask_e, scores, -3.4e38)
-
-    slots = tl.arange(0, TOP_K_PAD)
-    chosen_w = tl.zeros((TOP_K_PAD,), dtype=tl.float32)
-    ids_base = ids_ptr + row * TOP_K
-    for i in tl.static_range(TOP_K):
-        best_val = tl.max(sel, axis=0)
-        best_idx = tl.min(tl.where(sel == best_val, offs_e, 2147483647), axis=0)
-        best_score = tl.sum(tl.where(offs_e == best_idx, scores, 0.0), axis=0)
-        chosen_w = tl.where(slots == i, best_score, chosen_w)
-        tl.store(ids_base + i, best_idx)
-        sel = tl.where(offs_e == best_idx, -3.4e38, sel)
-
-    if NORMALIZE:
-        denom = tl.sum(chosen_w, axis=0) + 1e-8
-        chosen_w = tl.div_rn(chosen_w, denom)
-    if ROUND_BF16:
-        chosen_w = chosen_w.to(tl.bfloat16).to(tl.float32)
-
-    tl.store(weights_ptr + row * TOP_K + slots, chosen_w, mask=slots < TOP_K)
+    _topk_sigmoid_router_select_and_store(
+        raw,
+        bias_ptr,
+        ids_ptr,
+        weights_ptr,
+        row,
+        offs_e,
+        mask_e,
+        TOP_K=TOP_K,
+        TOP_K_PAD=TOP_K_PAD,
+        HAS_BIAS=HAS_BIAS,
+        NORMALIZE=NORMALIZE,
+        ROUND_BF16=ROUND_BF16,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -572,31 +619,20 @@ def _qwen45_router_splitk_reduce_topk_kernel(
         )
 
     raw = acc.to(tl.bfloat16).to(tl.float32) if ROUND_BF16 else acc
-    scores = tl.where(mask_e, tl.div_rn(1.0, 1.0 + libdevice.exp(-raw)), 0.0)
-    if HAS_BIAS:
-        bias = tl.load(bias_ptr + offs_e, mask=mask_e, other=0.0).to(tl.float32)
-        sel = tl.where(mask_e, scores + bias, -3.4e38)
-    else:
-        sel = tl.where(mask_e, scores, -3.4e38)
-
-    slots = tl.arange(0, TOP_K_PAD)
-    chosen_w = tl.zeros((TOP_K_PAD,), dtype=tl.float32)
-    ids_base = ids_ptr + row * TOP_K
-    for i in tl.static_range(TOP_K):
-        best_val = tl.max(sel, axis=0)
-        best_idx = tl.min(tl.where(sel == best_val, offs_e, 2147483647), axis=0)
-        best_score = tl.sum(tl.where(offs_e == best_idx, scores, 0.0), axis=0)
-        chosen_w = tl.where(slots == i, best_score, chosen_w)
-        tl.store(ids_base + i, best_idx)
-        sel = tl.where(offs_e == best_idx, -3.4e38, sel)
-
-    if NORMALIZE:
-        denom = tl.sum(chosen_w, axis=0) + 1e-8
-        chosen_w = tl.div_rn(chosen_w, denom)
-    if ROUND_BF16:
-        chosen_w = chosen_w.to(tl.bfloat16).to(tl.float32)
-
-    tl.store(weights_ptr + row * TOP_K + slots, chosen_w, mask=slots < TOP_K)
+    _topk_sigmoid_router_select_and_store(
+        raw,
+        bias_ptr,
+        ids_ptr,
+        weights_ptr,
+        row,
+        offs_e,
+        mask_e,
+        TOP_K=TOP_K,
+        TOP_K_PAD=TOP_K_PAD,
+        HAS_BIAS=HAS_BIAS,
+        NORMALIZE=NORMALIZE,
+        ROUND_BF16=ROUND_BF16,
+    )
 
 
 # Re-export circular-dependency-free SM100+ TGV BF16 helpers from activation.py.
@@ -1596,10 +1632,12 @@ class Qwen4_5LatentMoE(nn.Module):
             routed_2d = routed if routed.stride(-1) == 1 else routed.contiguous()
             topk_ids = torch.empty((M_r, self.top_k), dtype=torch.int32, device=routed_2d.device)
             topk_weights = torch.empty((M_r, self.top_k), dtype=torch.float32, device=routed_2d.device)
-            sk_n = 10 if (self.latent_dim % 640) == 0 else 8
+            use_sk5 = M_r >= 8 and (self.latent_dim % 640) == 0 and (self.latent_dim // 5) % 128 == 0
+            sk_n = 5 if use_sk5 else (10 if (self.latent_dim % 640) == 0 else 8)
             bn = 32 if M_r >= 8 else 64
             bm = 16 if M_r <= 16 else (32 if M_r <= 32 else 64)
-            nw = 2 if (M_r >= 8 and bn == 32) else 4
+            bk = 128 if use_sk5 else 64
+            nw = 4 if use_sk5 else (2 if (M_r >= 8 and bn == 32) else 4)
             part = torch.empty(
                 (sk_n, M_r, self.num_experts), dtype=torch.float32, device=routed_2d.device
             )
@@ -1619,7 +1657,7 @@ class Qwen4_5LatentMoE(nn.Module):
                     SPLIT_K=sk_n,
                     BLOCK_M=bm,
                     BLOCK_N=bn,
-                    BLOCK_K=64,
+                    BLOCK_K=bk,
                     num_warps=nw,
                     num_stages=3,
                 )
@@ -1711,6 +1749,14 @@ class Qwen4_5LatentMoE(nn.Module):
                     ln_w = ln_w_raw if ln_w_raw.is_contiguous() else ln_w_raw.contiguous()
                     self._pre_moe_ln_w_c = ln_w
                     self._pre_moe_ln_w_ptr = ptr
+                # Decode M<=512 fits in a single pass up to 4096 cols for 1.6x faster RMSNorm+sigmoid;
+                # Prefill M>512 stays at small BLOCK_K for high CTA occupancy.
+                if M_dg <= 512 and self.latent_dim <= 4096:
+                    ln_block_k = triton.next_power_of_2(max(self.latent_dim, 64))
+                    ln_warps = 8 if ln_block_k > 1024 else 4
+                else:
+                    ln_block_k = self._latent_ln_block_k
+                    ln_warps = 4
                 with _cuda_device_ctx(dg_2d.device):
                     _latent_norm_mul_sigmoid_kernel[(M_dg,)](
                         dg_2d,
@@ -1721,8 +1767,8 @@ class Qwen4_5LatentMoE(nn.Module):
                         dg_2d.stride(0),
                         self.latent_dim,
                         eps=self.rms_norm_eps,
-                        BLOCK_K=self._latent_ln_block_k,
-                        num_warps=4,
+                        BLOCK_K=ln_block_k,
+                        num_warps=ln_warps,
                     )
             return routed
         d_part, g_part = dg.split(self.latent_dim, dim=-1)

@@ -77,7 +77,7 @@ def _get_contig_sync_state(
         entry = cache.get(key)
         if entry is None:
             pinned = torch.empty((1,), dtype=torch.int32, pin_memory=True)
-            ev = torch.cuda.Event()
+            ev = torch.cuda.Event(blocking=True)
             slab = torch.empty((need_i32,), dtype=torch.int32, device=dev)
             entry = [pinned, ev, slab]
             cache[key] = entry
@@ -3079,6 +3079,7 @@ def mxfp4_moe_deepgemm_contiguous(
         if (topk_weights.dtype == torch.float32 and topk_weights.is_contiguous())
         else topk_weights.float().contiguous()
     )
+    out = torch.empty((M, L), dtype=res_dtype, device=dev)
 
     if use_cap_nosync:
         all_tokens = (
@@ -3182,7 +3183,6 @@ def mxfp4_moe_deepgemm_contiguous(
         )
     del h_fp8, h_scale
 
-    out = torch.empty((M, L), dtype=res_dtype, device=dev)
     BLOCK_K = 512 if L >= 512 else triton.next_power_of_2(max(L, 64))
     _gather_slot_weighted_reduce_kernel[(M, triton.cdiv(L, BLOCK_K))](
         down_out,

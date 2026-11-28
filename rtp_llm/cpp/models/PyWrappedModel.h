@@ -212,6 +212,22 @@ private:
     // is_pinned() is expensive on CPU; only assert during first N forwards as a sanity check.
     static constexpr int kPinnedCheckForwardCount = 3;
     int                  pinned_check_remaining_{kPinnedCheckForwardCount};
+    bool                 saw_unpinned_host_input_{false};
+
+    // Cached empty i32 tensors and reusable read-only decode metadata buffers
+    // to avoid per-step CUDA/pinned allocations and redundant H2D copies.
+    torch::Tensor empty_host_i32_;
+    torch::Tensor empty_cuda_i32_;
+    int64_t       decode_meta_capacity_{0};
+    torch::Tensor decode_zeros_host_;
+    torch::Tensor decode_cu_seqlens_zeros_cuda_;
+    torch::Tensor decode_cu_kv_zeros_cuda_;
+    torch::Tensor decode_cu_seqlens_host_;
+    torch::Tensor decode_cu_seqlens_cuda_;
+
+    // Cached KV payload group tag mapping from the previous multi-group forward.
+    std::vector<std::string> cached_kv_payload_tags_;
+    std::vector<int64_t>     cached_kv_payload_rows_;
 
     std::atomic<bool>               prepared_attention_inputs_{false};
     torch_ext::PyAttentionInputs    attention_inputs_;

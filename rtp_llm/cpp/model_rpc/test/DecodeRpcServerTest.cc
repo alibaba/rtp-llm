@@ -2121,13 +2121,14 @@ public:
                                        int64_t  concurrency_limit,
                                        int64_t  max_generate_batch_size,
                                        int64_t  max_inited_kv_cache_streams,
-                                       uint32_t seq_size_per_block) {
+                                       uint32_t seq_size_per_block,
+                                       int64_t  max_seq_len = 64) {
         EngineInitParams params;
         params.pd_sep_config.role_type                                         = role_type;
         params.concurrency_config.concurrency_limit                            = static_cast<int>(concurrency_limit);
         params.runtime_config.max_generate_batch_size                          = max_generate_batch_size;
         params.runtime_config.fifo_scheduler_config.max_inited_kv_cache_streams = max_inited_kv_cache_streams;
-        params.model_config_.max_seq_len                                       = 64;
+        params.model_config_.max_seq_len                                       = max_seq_len;
         params.model_config_.attn_config.tokens_per_block                      = seq_size_per_block;
         return params;
     }
@@ -2137,17 +2138,20 @@ public:
                         int64_t                concurrency_limit,
                         int64_t                max_generate_batch_size,
                         int64_t                max_inited_kv_cache_streams,
-                        int64_t                reserve_block_ratio = 0):
+                        int64_t                reserve_block_ratio = 0,
+                        int64_t                max_seq_len         = 64):
         EngineBase(makeParams(role_type,
                               concurrency_limit,
                               max_generate_batch_size,
                               max_inited_kv_cache_streams,
-                              cache_config.seq_size_per_block)),
+                              cache_config.seq_size_per_block,
+                              max_seq_len)),
         params_(makeParams(role_type,
                            concurrency_limit,
                            max_generate_batch_size,
                            max_inited_kv_cache_streams,
-                           cache_config.seq_size_per_block)) {
+                           cache_config.seq_size_per_block,
+                           max_seq_len)) {
         KVCacheConfig kv_cfg;
         kv_cfg.reserve_block_ratio = reserve_block_ratio;
         cache = std::make_shared<KVCacheManager>(cache_config,
@@ -2629,6 +2633,129 @@ TEST_F(DecodeRpcAdmissionTest, RemoteGenerateCancellationReleasesAdmissionAndWak
 
     grpc_server->Shutdown();
     grpc_server->Wait();
+}
+
+TEST_F(DecodeRpcAdmissionTest, ResolveDecodeGrowthHeadroomTokensDefaultsAndCapsSafely) {
+    const auto prod_4107 = test::makeSimpleMhaCacheConfig(1, 4108, 128, DataType::TYPE_FP16);
+    EXPECT_EQ(DecodeRpcServer::resolveDecodeGrowthHeadroomTokens(prod_4107), 4096);
+
+    // Hybrid pool with large FULL pool + tiny rolling explicit SWA pool retains full 4096 headroom.
+    CacheConfig hybrid_cfg;
+    hybrid_cfg.dtype              = DataType::TYPE_FP16;
+    hybrid_cfg.layer_num          = 2;
+    hybrid_cfg.seq_size_per_block = 128;
+    auto full_spec                = test::makeResolvedMhaSpec(DataType::TYPE_FP16, 1, 1, 128, "full");
+    auto swa_spec                 = test::makeResolvedMhaSpec(DataType::TYPE_FP16, 1, 1, 128, "hca_state");
+    auto full_pol                 = defaultCacheGroupPolicy(CacheGroupType::FULL);
+    full_pol.explicit_block_num   = 4108;
+    auto swa_pol                  = defaultCacheGroupPolicy(CacheGroupType::SWA);
+    swa_pol.explicit_block_num    = 11;
+    swa_pol.active_tail_blocks    = 1;
+    hybrid_cfg.fromGroupedSpecs(
+        {full_spec, swa_spec}, {{0}, {1}}, {CacheGroupType::FULL, CacheGroupType::SWA}, {"full", "hca_state"}, {full_pol, swa_pol});
+    hybrid_cfg.setGroupBlockLayout(
+        {"full", "hca_state"}, {4108, 11}, {full_spec->block_size_bytes(), swa_spec->block_size_bytes()}, {0, 0});
+    EXPECT_EQ(DecodeRpcServer::resolveDecodeGrowthHeadroomTokens(hybrid_cfg), 4096);
+
+    // Compute budget must treat explicit FULL pools as reservable while excluding explicit SWA pools.
+    const auto hybrid_budget = DecodeRpcServer::computeDecodeHeadroomBudget(hybrid_cfg, {}, 4096);
+    EXPECT_EQ(hybrid_budget.total_reservable_blocks, 4108u);
+
+    // Small test pools cap default headroom to 25% of usable blocks so small-pool concurrency never starves.
+    const auto small_16 = test::makeSimpleMhaCacheConfig(1, 16, 4, DataType::TYPE_FP16);
+    EXPECT_EQ(DecodeRpcServer::resolveDecodeGrowthHeadroomTokens(small_16), 12);
+
+    const auto tiny_4 = test::makeSimpleMhaCacheConfig(1, 4, 4, DataType::TYPE_FP16);
+    EXPECT_EQ(DecodeRpcServer::resolveDecodeGrowthHeadroomTokens(tiny_4), 0);
+
+    // Explicit env var stays uncapped.
+    autil::EnvGuard override_env("RTP_LLM_DECODE_GROWTH_HEADROOM_TOKENS", "8192");
+    EXPECT_EQ(DecodeRpcServer::resolveDecodeGrowthHeadroomTokens(small_16), 8192);
+}
+
+TEST_F(DecodeRpcAdmissionTest, DefaultHeadroomPrevents16LongStreams4KGenerationMallocFailedOn4107Pool) {
+    // Reproduce online 4107-usable-block pool (block_size=128, reserve_block_ratio=5 -> 205 reserved)
+    // under >16 concurrent long streams generating 4096 output tokens with default headroom.
+    // Prompt = 26,368 tokens (206 blocks), growth = 4,096 tokens (32 blocks) -> 238 blocks/stream.
+    // 16 * 238 + 205 = 4,013 <= 4,107 admits all 16 concurrently, while 17..20 wait cleanly,
+    // and every stream finishes full 4K generation with ZERO MALLOC_FAILED.
+    auto cache_config = test::makeSimpleMhaCacheConfig(1, 4108, 128, DataType::TYPE_FP16);
+    auto pol          = cache_config.group("default").policy;
+    pol.explicit_block_num = 4108;
+    test::setTestGroupPolicies(cache_config, {pol});
+
+    auto engine = std::make_shared<AdmissionFakeEngine>(cache_config,
+                                                        RoleType::DECODE,
+                                                        /*concurrency_limit=*/32,
+                                                        /*max_generate_batch_size=*/32,
+                                                        /*max_inited_kv_cache_streams=*/0,
+                                                        /*reserve_block_ratio=*/5,
+                                                        /*max_seq_len=*/65536);
+    ASSERT_EQ(engine->cache->freeBlocksNum(), 4107u);
+    ASSERT_EQ(engine->cache->reserveBlocksNum(), 205u);
+
+    DecodeRpcServer server;
+    server.engine_           = engine;
+    server.meta_             = std::make_shared<RpcServerRuntimeMeta>();
+    server.maga_init_params_ = engine->params_;
+    AdmissionAllocateHarness harness(server);
+
+    constexpr int            kTotalRequests = 20;
+    constexpr int            kPromptTokens  = 206 * 128;
+    constexpr int            kGenTokens     = 4096;
+    std::atomic<int>         alloc_failures{0};
+    std::atomic<int>         incr_failures{0};
+    std::atomic<int>         completed{0};
+    std::atomic<size_t>      max_observed_active{0};
+    std::mutex               err_mutex;
+    std::vector<std::string> errors;
+    std::vector<std::thread> workers;
+    workers.reserve(kTotalRequests);
+
+    for (int i = 0; i < kTotalRequests; ++i) {
+        workers.emplace_back([&, i]() {
+            auto call = harness.allocate(1000 + i, kPromptTokens, kGenTokens, /*timeout_ms=*/15000);
+            if (!call->alloc_ok) {
+                alloc_failures.fetch_add(1);
+                std::lock_guard<std::mutex> lock(err_mutex);
+                errors.push_back("alloc failed req=" + std::to_string(i) + ": " + call->status.error_message());
+                return;
+            }
+            const size_t active_now = server.activeInitedStreamCount();
+            size_t       prev       = max_observed_active.load();
+            while (active_now > prev && !max_observed_active.compare_exchange_weak(prev, active_now)) {}
+
+            auto stream = harness.getStream(1000 + i);
+            stream->setIsContextStream(false);
+            for (int generated = 128; generated <= kGenTokens; generated += 128) {
+                stream->setSeqLength(kPromptTokens + generated);
+                const auto st = stream->incrKVBlock();
+                if (!st.ok()) {
+                    incr_failures.fetch_add(1);
+                    std::lock_guard<std::mutex> lock(err_mutex);
+                    errors.push_back("incrKVBlock failed req=" + std::to_string(i) + " gen=" + std::to_string(generated)
+                                     + ": " + st.ToString());
+                    break;
+                }
+            }
+            EXPECT_EQ(stream->curBlocksNum(), 238);
+            stream.reset();
+            EXPECT_TRUE(call->close().ok());
+            completed.fetch_add(1);
+        });
+    }
+
+    for (auto& t : workers) {
+        t.join();
+    }
+
+    EXPECT_TRUE(errors.empty()) << (errors.empty() ? "" : errors.front());
+    EXPECT_EQ(alloc_failures.load(), 0);
+    EXPECT_EQ(incr_failures.load(), 0);
+    EXPECT_EQ(completed.load(), kTotalRequests);
+    EXPECT_LE(max_observed_active.load(), 16u);
+    EXPECT_EQ(server.activeInitedStreamCount(), 0u);
+    EXPECT_EQ(engine->cache->freeBlocksNum(), 4107u);
 }
 
 }  // namespace rtp_llm

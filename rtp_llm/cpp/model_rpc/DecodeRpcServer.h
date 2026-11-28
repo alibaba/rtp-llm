@@ -181,11 +181,17 @@ private:
         int64_t                       reserve_step{0};
     };
 
+    struct InflightStreamEntry {
+        uint64_t            token{0};
+        AdmittedStreamEntry budget;
+    };
+
     struct AdmissionWaitState {
         std::mutex                       mutex;
         std::condition_variable          cv;
         std::vector<AdmittedStreamEntry> admitted_streams;
-        size_t                           inflight_pre_init{0};
+        std::vector<InflightStreamEntry> inflight_streams;
+        uint64_t                         next_inflight_token{0};
         size_t                           pending_init_blocks{0};
         size_t                           pending_full_init_blocks{0};
         uint64_t                         release_generation{0};
@@ -203,6 +209,12 @@ private:
 private:
     static AdmittedStreamEntry  captureAdmittedStreamBudget(const std::shared_ptr<GenerateStream>& stream);
     static void                 pruneAdmittedStreamsLocked(AdmissionWaitState& state);
+    static void                 addStreamGrowthBudget(const std::vector<GroupBase>& groups,
+                                                      const AdmittedStreamEntry&    entry,
+                                                      int64_t                       window_tokens,
+                                                      size_t&                       total_growth_blocks,
+                                                      size_t&                       full_growth_blocks);
+    static int64_t              resolveDecodeGrowthHeadroomTokens(const CacheConfig& cache_config);
     static DecodeHeadroomBudget computeDecodeHeadroomBudget(const CacheConfig&                      cache_config,
                                                             const std::vector<AdmittedStreamEntry>& active_streams,
                                                             int64_t                                 window_tokens);

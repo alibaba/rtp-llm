@@ -2310,6 +2310,156 @@ class TestCudaGraphTaggedCache(unittest.TestCase):
                 )
                 torch.testing.assert_close(output.mtp_target_hidden_states, expected)
 
+    def test_requires_cuda_graph_prepare_false_skips_prepare_and_host_mirrors(
+        self,
+    ) -> None:
+        class NoPrepareHandle:
+            def __init__(self, is_cuda_graph: bool = True) -> None:
+                self.is_cuda_graph = bool(is_cuda_graph)
+                self.call_count = 0
+                self.last_arg = None
+
+            @property
+            def requires_cuda_graph_prepare(self) -> bool:
+                return not self.is_cuda_graph
+
+            def support_cuda_graph(self) -> bool:
+                return True
+
+            def prepare_cuda_graph(self, attn_inputs_or_by_tag) -> None:
+                self.call_count += 1
+                self.last_arg = attn_inputs_or_by_tag
+
+        class NoPrepareTaggedModel(TaggedBlockTableModel):
+            def __init__(self) -> None:
+                self.handles = []
+
+            def prepare_fmha_impl(
+                self,
+                inputs: PyModelInputs,
+                is_cuda_graph: bool = False,
+                cuda_graph_selection_mode: Optional[str] = None,
+            ):
+                del inputs, cuda_graph_selection_mode
+                h = NoPrepareHandle(is_cuda_graph=is_cuda_graph)
+                self.handles.append(h)
+                return h
+
+        for is_target_verify in (False, True):
+            with self.subTest(is_target_verify=is_target_verify):
+                model = NoPrepareTaggedModel()
+                runner = CudaGraphRunner()
+                runner.init_decode(
+                    model,
+                    HIDDEN_SIZE,
+                    TOKENS_PER_BLOCK,
+                    KERNEL_BLOCK_TABLE_WIDTH,
+                    [1, 3],
+                    GROUP_TAGS,
+                    is_target_verify,
+                    2 if is_target_verify else 1,
+                )
+                self.assertTrue(all(h.call_count == 0 for h in model.handles))
+
+                sequence = (
+                    (2, 3, 5),
+                    (1, 7, 11),
+                    (3, 4, 6),
+                    (1, 13, 2),
+                )
+                for batch_size, full_val, aux_val in sequence:
+                    inputs = (
+                        _build_target_verify_inputs(
+                            GROUP_TAGS,
+                            {"full": full_val, "aux": aux_val},
+                            batch_size=batch_size,
+                            query_len=2,
+                            prefix_len=1,
+                        )
+                        if is_target_verify
+                        else _build_decode_inputs(
+                            GROUP_TAGS,
+                            {"full": full_val, "aux": aux_val},
+                            batch_size=batch_size,
+                        )
+                    )
+                    with torch.profiler.profile(
+                        activities=[torch.profiler.ProfilerActivity.CPU]
+                    ) as prof:
+                        self.assertTrue(runner.prepare(inputs))
+                    scopes = {event.key for event in prof.key_averages()}
+                    prefix = "cuda_graph.prepareAttentionInputs("
+                    self.assertIn(prefix + "fused_d2d_copy)", scopes)
+                    self.assertNotIn(prefix + "host_mirror_copy)", scopes)
+                    self.assertNotIn(prefix + "wait_forward_event)", scopes)
+                    self.assertNotIn(prefix + "prepare_cuda_graph)", scopes)
+
+                    output = runner.forward(inputs).hidden_states.clone()
+                    torch.cuda.synchronize()
+                    expected = torch.full_like(output, full_val + 16 * aux_val)
+                    torch.testing.assert_close(output, expected)
+                    self.assertTrue(all(h.call_count == 0 for h in model.handles))
+
+                # Direct Python callers must keep prepare_cuda_graph operational.
+                direct_handle = NoPrepareHandle(is_cuda_graph=True)
+                direct_in = _build_decode_inputs(
+                    GROUP_TAGS, {"full": 9, "aux": 3}, batch_size=1
+                )
+                direct_handle.prepare_cuda_graph(direct_in.attention_inputs)
+                self.assertEqual(direct_handle.call_count, 1)
+                self.assertIsNotNone(direct_handle.last_arg)
+
+    def test_requires_cuda_graph_prepare_true_preserves_host_mirrors(self) -> None:
+        class OptInPrepareHandle:
+            def __init__(self) -> None:
+                self.call_count = 0
+
+            @property
+            def requires_cuda_graph_prepare(self) -> bool:
+                return True
+
+            def support_cuda_graph(self) -> bool:
+                return True
+
+            def prepare_cuda_graph(self, _attn_inputs_or_by_tag) -> None:
+                self.call_count += 1
+
+        class OptInPrepareModel(TaggedBlockTableModel):
+            def __init__(self) -> None:
+                self.handles = []
+
+            def prepare_fmha_impl(self, inputs: PyModelInputs, is_cuda_graph: bool = False):
+                del inputs, is_cuda_graph
+                h = OptInPrepareHandle()
+                self.handles.append(h)
+                return h
+
+        model = OptInPrepareModel()
+        runner = CudaGraphRunner()
+        runner.init_decode(
+            model,
+            HIDDEN_SIZE,
+            TOKENS_PER_BLOCK,
+            KERNEL_BLOCK_TABLE_WIDTH,
+            [2],
+            GROUP_TAGS,
+        )
+        inputs = _build_decode_inputs(GROUP_TAGS, {"full": 5, "aux": 2}, batch_size=2)
+        with torch.profiler.profile(
+            activities=[torch.profiler.ProfilerActivity.CPU]
+        ) as prof:
+            self.assertTrue(runner.prepare(inputs, skip_forward_event_sync=False))
+        scopes = {event.key for event in prof.key_averages()}
+        prefix = "cuda_graph.prepareAttentionInputs("
+        self.assertIn(prefix + "fused_d2d_copy)", scopes)
+        self.assertIn(prefix + "wait_forward_event)", scopes)
+        self.assertIn(prefix + "host_mirror_copy)", scopes)
+        self.assertIn(prefix + "prepare_cuda_graph)", scopes)
+        output = runner.forward(inputs).hidden_states.clone()
+        torch.cuda.synchronize()
+        torch.testing.assert_close(output, torch.full_like(output, 5 + 16 * 2))
+        self.assertEqual(sum(h.call_count for h in model.handles), 1)
+
 
 if __name__ == "__main__":
     unittest.main()

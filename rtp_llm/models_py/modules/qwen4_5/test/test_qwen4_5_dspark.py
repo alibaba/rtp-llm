@@ -3506,6 +3506,31 @@ class TestDFlash2Phase2MHAAndTP4(unittest.TestCase):
                     0.9999,
                 )
 
+    def test_dflash2_inherits_kv_cache_dtype_fp8_when_env_and_arg_unset(self) -> None:
+        from rtp_llm.ops import KvCacheDataType
+
+        cfg1, mw_full = _load_dspark_model_weights(MOCK_8L_DFLASH, device="cpu")
+        cfg2, _ = _load_dspark_model_weights(MOCK_8L_DFLASH, device="cpu")
+        pc = ParallelismConfig()
+        pc.tp_size = 1
+        pc.ep_size = 1
+        old_env = os.environ.pop("QWEN4_5_DFLASH_KV_DTYPE", None)
+        try:
+            cfg1.attn_config.kv_cache_dtype = KvCacheDataType.FP8
+            m_auto = Qwen4_5DSparkModel(cfg1, pc, mw_full, max_generate_batch_size=2)
+            self.assertEqual(m_auto.dflash_kv_dtype, "fp8_e4m3")
+            self.assertEqual(m_auto.config.attn_config.dtype, torch.float8_e4m3fn)
+
+            os.environ["QWEN4_5_DFLASH_KV_DTYPE"] = "bf16"
+            cfg2.attn_config.kv_cache_dtype = KvCacheDataType.FP8
+            m_env = Qwen4_5DSparkModel(cfg2, pc, mw_full, max_generate_batch_size=2)
+            self.assertEqual(m_env.dflash_kv_dtype, "bf16")
+        finally:
+            if old_env is not None:
+                os.environ["QWEN4_5_DFLASH_KV_DTYPE"] = old_env
+            else:
+                os.environ.pop("QWEN4_5_DFLASH_KV_DTYPE", None)
+
 
 @torch.no_grad()
 def _dflash2_gloo_tp4_worker(rank: int, world_size: int, port: int, err_q) -> None:

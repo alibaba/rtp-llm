@@ -1129,10 +1129,15 @@ def _probe_cuda_ipc_ple_peers(
     probe_handle = b""
     rt = _get_libcudart()
 
+    reserve_gb_raw = os.environ.get("QWEN4_5_PLE_IPC_RESERVE_GB", "").strip()
+    reserve_bytes = 256 * 1024 * 1024
+    if reserve_gb_raw:
+        reserve_bytes = max(reserve_bytes, int(float(reserve_gb_raw) * (1024**3)))
+
     try:
         with torch.cuda.device(device):
             free_bytes, _ = torch.cuda.mem_get_info(device)
-            if free_bytes > int(local_bytes_needed * 1.08) + 256 * 1024 * 1024:
+            if free_bytes > int(local_bytes_needed * 1.08) + reserve_bytes:
                 p = ctypes.c_void_p()
                 if int(rt.cudaMalloc(ctypes.byref(p), ctypes.c_size_t(4096))) == 0 and p.value:
                     probe_ptr = int(p.value)
@@ -1208,6 +1213,9 @@ def load_qwen4_5_from_checkpoint(
     ep_rank = int(getattr(backbone, "ep_rank", 0) or 0)
     ep_group = getattr(backbone, "ep_group", None)
     raw_ple_mode = str(ple_mode or "gpu_sharded").strip().lower()
+    env_ple_mode = os.environ.get("QWEN4_5_PLE_MODE", "").strip().lower()
+    if env_ple_mode and raw_ple_mode == "gpu_sharded":
+        raw_ple_mode = env_ple_mode
     if raw_ple_mode in ("shm", "mmap", "cpu_uva_shared", "host_shared", "cpu_uva"):
         norm_ple_mode = "cpu_uva"
         force_shared_host = raw_ple_mode in ("shm", "mmap", "cpu_uva_shared", "host_shared")

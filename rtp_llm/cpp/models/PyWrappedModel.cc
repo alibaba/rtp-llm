@@ -344,29 +344,64 @@ std::optional<std::string> PyWrappedModel::takeDeferredHiddenStateCaptureError()
 torch_ext::PyAttentionInputs PyWrappedModel::buildPyAttentionInputs(const GptModelInputs& inputs) {
     RTP_LLM_PROFILE_SCOPE("py_model.buildPyAttentionInputs");
     torch_ext::PyAttentionInputs py_attn_inputs;
-
-    auto normalize_i32 = [this](const torch::Tensor& tensor) -> torch::Tensor {
+    const auto cuda_i32 = torch::TensorOptions(torch::kInt32).device(torch::kCUDA);
+    const auto host_i32 = torch::TensorOptions(torch::kInt32).device(torch::kCPU).pinned_memory(true);
+    auto       ensure_empty_host_i32 = [this, &host_i32]() -> const torch::Tensor& {
+        if (!empty_host_i32_.defined()) {
+            c10::InferenceMode inference_guard(true);
+            empty_host_i32_ = torch::empty({0}, host_i32);
+        }
+        return empty_host_i32_;
+    };
+    auto ensure_empty_cuda_i32 = [this, &cuda_i32]() -> const torch::Tensor& {
+        if (!empty_cuda_i32_.defined()) {
+            c10::InferenceMode inference_guard(true);
+            empty_cuda_i32_ = torch::empty({0}, cuda_i32);
+        }
+        return empty_cuda_i32_;
+    };
+    auto normalize_i32 = [this, &ensure_empty_host_i32, &ensure_empty_cuda_i32](const torch::Tensor& tensor)
+        -> torch::Tensor {
         if (!tensor.defined()) {
             return tensor;
         }
         if (tensor.is_cuda()) {
+            if (tensor.numel() == 0 && tensor.dim() == 1 && tensor.size(0) == 0
+                && tensor.scalar_type() == torch::kInt32) {
+                return ensure_empty_cuda_i32();
+            }
             auto result = tensor.scalar_type() == torch::kInt32 ? tensor : tensor.to(torch::kInt32);
             return result.is_contiguous() ? result : result.contiguous();
         }
-        auto result =
-            tensor.scalar_type() == torch::kInt32 ? tensor.contiguous() : tensor.to(torch::kInt32).contiguous();
-        if (!result.is_pinned()) {
-            result = result.pin_memory();
+        if (tensor.numel() == 0 && tensor.dim() == 1 && tensor.size(0) == 0) {
+            return ensure_empty_host_i32();
+        }
+        const bool converted = (tensor.scalar_type() != torch::kInt32) || !tensor.is_contiguous();
+        auto       result    = converted ? tensor.to(torch::kInt32).contiguous() : tensor;
+        if (converted || pinned_check_remaining_ > 0 || saw_unpinned_host_input_) {
+            if (!result.is_pinned()) {
+                if (!converted) {
+                    saw_unpinned_host_input_ = true;
+                }
+                result = result.pin_memory();
+            }
         }
         buffer_holder_.hold_host(result);
         return result;
     };
-    auto to_device_i32 = [this, &normalize_i32](const torch::Tensor& tensor) -> torch::Tensor {
-        auto normalized = normalize_i32(tensor);
+    auto normalized_host_to_device = [this, &cuda_i32, &ensure_empty_cuda_i32](const torch::Tensor& normalized)
+        -> torch::Tensor {
         if (!normalized.defined() || normalized.is_cuda()) {
             return normalized;
         }
-        return tensorHoldHostAndToCuda(normalized);
+        if (normalized.numel() == 0) {
+            return normalized.dim() == 1 && normalized.size(0) == 0 ?
+                       ensure_empty_cuda_i32() :
+                       torch::empty(normalized.sizes(), cuda_i32);
+        }
+        auto cuda_tensor = torch::empty(normalized.sizes(), cuda_i32);
+        d2d_copies_.add(normalized.data_ptr(), cuda_tensor.data_ptr(), normalized.nbytes());
+        return cuda_tensor;
     };
 
     py_attn_inputs.prefix_lengths   = normalize_i32(inputs.prefix_lengths);
@@ -392,9 +427,9 @@ torch_ext::PyAttentionInputs PyWrappedModel::buildPyAttentionInputs(const GptMod
         && py_attn_inputs.prefix_lengths.defined() && py_attn_inputs.prefix_lengths.is_cuda()) {
         py_attn_inputs.prefix_lengths = normalize_i32(py_attn_inputs.prefix_lengths.cpu());
     }
-    py_attn_inputs.prefix_lengths_device = to_device_i32(py_attn_inputs.prefix_lengths);
-    py_attn_inputs.input_lengths_device  = to_device_i32(py_attn_inputs.input_lengths);
-    py_attn_inputs.mtp_indexer_seed_rows = to_device_i32(inputs.lm_output_indexes);
+    py_attn_inputs.prefix_lengths_device = normalized_host_to_device(py_attn_inputs.prefix_lengths);
+    py_attn_inputs.input_lengths_device  = normalized_host_to_device(py_attn_inputs.input_lengths);
+    py_attn_inputs.mtp_indexer_seed_rows = normalized_host_to_device(normalize_i32(inputs.lm_output_indexes));
 
     if (inputs.combo_position_ids.defined()) {
         py_attn_inputs.combo_position_ids = tensorHoldHostAndToCuda(inputs.combo_position_ids);
@@ -429,9 +464,6 @@ torch_ext::PyAttentionInputs PyWrappedModel::buildPyAttentionInputs(const GptMod
                             "decode batches separate when load_python_model is enabled.",
                             context_batch_size,
                             decode_batch_size);
-
-    const auto cuda_i32 = torch::TensorOptions(torch::kInt32).device(torch::kCUDA);
-    const auto host_i32 = torch::TensorOptions(torch::kInt32).device(torch::kCPU).pinned_memory(true);
 
     if (context_batch_size > 0 && py_attn_inputs.input_lengths.is_cuda()) {
         py_attn_inputs.total_tokens = inputs.combo_tokens.defined() ? static_cast<int>(inputs.combo_tokens.numel()) : 0;
@@ -481,39 +513,76 @@ torch_ext::PyAttentionInputs PyWrappedModel::buildPyAttentionInputs(const GptMod
         py_attn_inputs.cu_seqlens_device       = tensorHoldHostAndToCuda(cu_seqlens);
         py_attn_inputs.cu_kv_seqlens_device    = tensorHoldHostAndToCuda(cu_kv_seqlens);
     } else {
+        const int64_t seq_len_plus_1      = py_attn_inputs.sequence_lengths.size(0) + 1;
+        const int64_t required_decode_len = std::max<int64_t>(static_cast<int64_t>(batch_size) + 1, seq_len_plus_1);
+        if (required_decode_len > decode_meta_capacity_) {
+            c10::InferenceMode inference_guard(true);
+            const int64_t new_cap =
+                std::max<int64_t>(required_decode_len, std::max<int64_t>(128, decode_meta_capacity_ * 2));
+            if (decode_cu_seqlens_zeros_cuda_.defined()) {
+                buffer_holder_.hold(decode_cu_seqlens_zeros_cuda_);
+                buffer_holder_.hold(decode_cu_kv_zeros_cuda_);
+                buffer_holder_.hold(decode_zeros_host_);
+                buffer_holder_.hold(decode_cu_seqlens_host_);
+                buffer_holder_.hold(decode_cu_seqlens_cuda_);
+            }
+            decode_cu_seqlens_zeros_cuda_ = torch::zeros({new_cap}, cuda_i32);
+            decode_cu_kv_zeros_cuda_      = torch::zeros({new_cap}, cuda_i32);
+            decode_zeros_host_            = torch::zeros({new_cap}, host_i32);
+            decode_cu_seqlens_host_       = torch::arange(0, new_cap, 1, host_i32);
+            decode_cu_seqlens_cuda_       = torch::arange(0, new_cap, 1, cuda_i32);
+            decode_meta_capacity_         = new_cap;
+        }
         py_attn_inputs.total_tokens         = 0;
-        py_attn_inputs.cu_seqlens_device    = torch::zeros({batch_size + 1}, cuda_i32);
-        py_attn_inputs.cu_kv_seqlens_device = torch::zeros({batch_size + 1}, cuda_i32);
+        py_attn_inputs.cu_seqlens_device    = decode_cu_seqlens_zeros_cuda_.slice(0, 0, batch_size + 1);
+        py_attn_inputs.cu_kv_seqlens_device = decode_cu_kv_zeros_cuda_.slice(0, 0, batch_size + 1);
         if (py_attn_inputs.sequence_lengths.is_cuda()) {
-            py_attn_inputs.cu_seqlens        = torch::empty({0}, host_i32);
-            py_attn_inputs.decode_cu_seqlens = torch::empty({0}, host_i32);
-            py_attn_inputs.decode_cu_seqlens_device =
-                torch::arange(0, py_attn_inputs.sequence_lengths.size(0) + 1, 1, cuda_i32);
+            py_attn_inputs.cu_seqlens               = ensure_empty_host_i32();
+            py_attn_inputs.decode_cu_seqlens        = ensure_empty_host_i32();
+            py_attn_inputs.decode_cu_seqlens_device = decode_cu_seqlens_cuda_.slice(0, 0, seq_len_plus_1);
         } else {
-            py_attn_inputs.cu_seqlens = torch::zeros({batch_size + 1}, host_i32);
-            auto decode_cu_seqlens    = torch::arange(0, py_attn_inputs.sequence_lengths.size(0) + 1, 1, host_i32);
-            py_attn_inputs.decode_cu_seqlens        = decode_cu_seqlens;
-            py_attn_inputs.decode_cu_seqlens_device = tensorHoldHostAndToCuda(decode_cu_seqlens);
+            py_attn_inputs.cu_seqlens               = decode_zeros_host_.slice(0, 0, batch_size + 1);
+            py_attn_inputs.decode_cu_seqlens        = decode_cu_seqlens_host_.slice(0, 0, seq_len_plus_1);
+            py_attn_inputs.decode_cu_seqlens_device = decode_cu_seqlens_cuda_.slice(0, 0, seq_len_plus_1);
         }
     }
 
-    // NOTE: to_device_i32/tensorHoldHostAndToCuda return *deferred-copy* tensors:
+    // NOTE: normalized_host_to_device/tensorHoldHostAndToCuda return *deferred-copy* tensors:
     // their storage is only filled by the fusedCopy() flush right before forward.
     // CUDA arithmetic on them here would read uninitialized memory, so "+1" must
-    // happen on the host side for host-resident inputs.
-    auto plus_1_to_device = [&](const torch::Tensor& t) -> torch::Tensor {
-        if (t.defined() && t.is_cuda()) {
-            return t.to(torch::kInt32) + 1;
+    // happen on the host side for host-resident inputs (into a pinned host buffer directly).
+    auto plus_1_to_device = [this, &cuda_i32, &host_i32, &ensure_empty_cuda_i32](const torch::Tensor& normalized)
+        -> torch::Tensor {
+        if (!normalized.defined()) {
+            return normalized;
         }
-        auto host_plus_1 = normalize_i32(t) + 1;
-        return to_device_i32(host_plus_1);
+        if (normalized.is_cuda()) {
+            return normalized.to(torch::kInt32) + 1;
+        }
+        const int64_t n = normalized.numel();
+        if (n == 0) {
+            return normalized.dim() == 1 && normalized.size(0) == 0 ?
+                       ensure_empty_cuda_i32() :
+                       torch::empty(normalized.sizes(), cuda_i32);
+        }
+        auto        host_plus_1 = torch::empty(normalized.sizes(), host_i32);
+        const auto* src         = normalized.data_ptr<int32_t>();
+        auto*       dst         = host_plus_1.data_ptr<int32_t>();
+        for (int64_t i = 0; i < n; ++i) {
+            dst[i] = src[i] + 1;
+        }
+        buffer_holder_.hold_host(host_plus_1);
+        auto cuda_tensor = torch::empty(normalized.sizes(), cuda_i32);
+        d2d_copies_.add(host_plus_1.data_ptr(), cuda_tensor.data_ptr(), static_cast<size_t>(n) * sizeof(int32_t));
+        return cuda_tensor;
     };
     if (py_attn_inputs.is_target_verify && inputs.sequence_lengths_plus_1.defined()) {
-        py_attn_inputs.sequence_lengths_plus_1_device = to_device_i32(inputs.sequence_lengths_plus_1);
+        py_attn_inputs.sequence_lengths_plus_1_device =
+            normalized_host_to_device(normalize_i32(inputs.sequence_lengths_plus_1));
     } else if (py_attn_inputs.is_target_verify) {
-        py_attn_inputs.sequence_lengths_plus_1_device = plus_1_to_device(inputs.prefix_lengths);
+        py_attn_inputs.sequence_lengths_plus_1_device = plus_1_to_device(py_attn_inputs.prefix_lengths);
     } else {
-        py_attn_inputs.sequence_lengths_plus_1_device = plus_1_to_device(inputs.sequence_lengths);
+        py_attn_inputs.sequence_lengths_plus_1_device = plus_1_to_device(py_attn_inputs.sequence_lengths);
     }
 
     return py_attn_inputs;
@@ -594,14 +663,34 @@ PyWrappedModel::setupKVCacheForAttentionInputs(torch_ext::PyAttentionInputs& py_
     RTP_LLM_CHECK_WITH_INFO(group_count > 0 && group_tags.size() == group_count && !model_groups.empty(),
                             "KV block table group count=%zu must match payload tags; model groups must not be empty",
                             group_count);
-    std::unordered_set<std::string> seen_tags;
-    for (const auto& tag : group_tags) {
-        RTP_LLM_CHECK_WITH_INFO(
-            !tag.empty() && seen_tags.insert(tag).second, "empty or duplicate KV payload group tag=%s", tag.c_str());
+    bool cache_hit = (cached_kv_payload_tags_.size() == group_count)
+                     && (cached_kv_payload_rows_.size() == model_groups.size())
+                     && std::equal(group_tags.begin(), group_tags.end(), cached_kv_payload_tags_.begin());
+    if (cache_hit) {
+        for (size_t i = 0; i < model_groups.size(); ++i) {
+            const int64_t r = cached_kv_payload_rows_[i];
+            if (r < 0 || static_cast<size_t>(r) >= group_count || group_tags[r] != model_groups[i].tag) {
+                cache_hit = false;
+                break;
+            }
+        }
     }
-    for (const auto& group : model_groups) {
-        RTP_LLM_CHECK_WITH_INFO(
-            seen_tags.count(group.tag) != 0, "KV payload is missing model cache group tag=%s", group.tag.c_str());
+    if (!cache_hit) {
+        std::unordered_set<std::string> seen_tags;
+        seen_tags.reserve(group_count);
+        for (const auto& tag : group_tags) {
+            RTP_LLM_CHECK_WITH_INFO(
+                !tag.empty() && seen_tags.insert(tag).second, "empty or duplicate KV payload group tag=%s", tag.c_str());
+        }
+        std::vector<int64_t> rows;
+        rows.reserve(model_groups.size());
+        for (const auto& group : model_groups) {
+            RTP_LLM_CHECK_WITH_INFO(
+                seen_tags.count(group.tag) != 0, "KV payload is missing model cache group tag=%s", group.tag.c_str());
+            rows.push_back(std::find(group_tags.begin(), group_tags.end(), group.tag) - group_tags.begin());
+        }
+        cached_kv_payload_tags_ = group_tags;
+        cached_kv_payload_rows_ = std::move(rows);
     }
     RTP_LLM_CHECK_WITH_INFO(!inputs.kv_cache_group_types.defined()
                                 || (inputs.kv_cache_group_types.dim() == 1
@@ -615,36 +704,64 @@ PyWrappedModel::setupKVCacheForAttentionInputs(torch_ext::PyAttentionInputs& py_
                             "physical KV block table must match kernel table group and batch dimensions");
 
     /** Match payload rows by tag: a PP stage's local group order can differ from the incoming plan. */
-    torch_ext::AttentionInputsByTag by_tag;
-    for (const auto& group : model_groups) {
-        const auto payload_row  = std::find(group_tags.begin(), group_tags.end(), group.tag) - group_tags.begin();
-        auto       group_inputs = py_attn_inputs;
-        group_inputs.kv_cache_kernel_block_id        = inputs.kv_cache_kernel_block_id[payload_row];
-        group_inputs.kv_cache_kernel_block_id_device = tensorHoldHostAndToCuda(group_inputs.kv_cache_kernel_block_id);
+    const bool    can_coalesce_kernel = model_groups.size() > 1 && inputs.kv_cache_kernel_block_id.is_contiguous();
+    torch::Tensor coalesced_kernel_device;
+    if (can_coalesce_kernel) {
+        coalesced_kernel_device = tensorHoldHostAndToCuda(inputs.kv_cache_kernel_block_id);
+    }
+
+    torch::Tensor coalesced_kv_device;
+    if (inputs.kv_cache_block_id.defined() && model_groups.size() > 1 && inputs.kv_cache_block_id.is_contiguous()) {
+        size_t diff_kv_count = 0;
+        for (const auto& group : model_groups) {
+            if (group.kernelBlocksPerKvBlock() != 1) {
+                ++diff_kv_count;
+            }
+        }
+        if (diff_kv_count > 1) {
+            coalesced_kv_device = tensorHoldHostAndToCuda(inputs.kv_cache_block_id);
+        }
+    }
+
+    auto populate_group_tables = [&](const GroupBase& group, int64_t payload_row, torch_ext::PyAttentionInputs& dst) {
+        dst.kv_cache_kernel_block_id        = inputs.kv_cache_kernel_block_id.select(0, payload_row);
+        dst.kv_cache_kernel_block_id_device = can_coalesce_kernel ?
+                                                  coalesced_kernel_device.select(0, payload_row) :
+                                                  tensorHoldHostAndToCuda(dst.kv_cache_kernel_block_id);
         if (inputs.kv_cache_block_id.defined()) {
-            group_inputs.kv_cache_block_id = inputs.kv_cache_block_id[payload_row];
-            if (group_inputs.cache_store_inputs.has_value()) {
-                group_inputs.cache_store_inputs->host_kv_cache_offset = group_inputs.kv_cache_block_id.is_cuda() ?
-                                                                            group_inputs.kv_cache_block_id.cpu() :
-                                                                            group_inputs.kv_cache_block_id;
+            dst.kv_cache_block_id = inputs.kv_cache_block_id.select(0, payload_row);
+            if (dst.cache_store_inputs.has_value()) {
+                dst.cache_store_inputs->host_kv_cache_offset = dst.kv_cache_block_id.is_cuda() ?
+                                                                   dst.kv_cache_block_id.cpu() :
+                                                                   dst.kv_cache_block_id;
             }
             if (group.kernelBlocksPerKvBlock() == 1) {
                 // Attention needs the cyclic execution IDs; CacheStore keeps the publication table above.
-                group_inputs.kv_cache_block_id        = group_inputs.kv_cache_kernel_block_id;
-                group_inputs.kv_cache_block_id_device = group_inputs.kv_cache_kernel_block_id_device;
+                dst.kv_cache_block_id        = dst.kv_cache_kernel_block_id;
+                dst.kv_cache_block_id_device = dst.kv_cache_kernel_block_id_device;
             } else {
-                group_inputs.kv_cache_block_id_device = tensorHoldHostAndToCuda(group_inputs.kv_cache_block_id);
+                dst.kv_cache_block_id_device = coalesced_kv_device.defined() ?
+                                                   coalesced_kv_device.select(0, payload_row) :
+                                                   tensorHoldHostAndToCuda(dst.kv_cache_block_id);
             }
         }
-        by_tag.emplace(group.tag, std::move(group_inputs));
-    }
+    };
 
     // The model topology, including placeholders, determines the input shape;
     // extra rows in a shared target payload do not make a single-group model tagged.
-    py_attn_inputs = by_tag.at(model_groups.front().tag);
     if (model_groups.size() == 1) {
+        populate_group_tables(model_groups.front(), cached_kv_payload_rows_.front(), py_attn_inputs);
         return {};
     }
+
+    torch_ext::AttentionInputsByTag by_tag;
+    for (size_t i = 0; i < model_groups.size(); ++i) {
+        auto group_inputs = py_attn_inputs;
+        populate_group_tables(model_groups[i], cached_kv_payload_rows_[i], group_inputs);
+        by_tag.emplace(model_groups[i].tag, std::move(group_inputs));
+    }
+
+    py_attn_inputs = by_tag.at(model_groups.front().tag);
     return by_tag;
 }
 

@@ -5132,11 +5132,17 @@ class Qwen4_5DSparkModel(DSparkProposerMixin, GptModelBase):
         self.sp_rank = topo.sp_rank
         self.sp_group = topo.sp_group
         self.dp_attn = topo.dp_attn
-        eff_df_kv = (
-            dflash_kv_dtype
-            if dflash_kv_dtype is not None
-            else os.environ.get("QWEN4_5_DFLASH_KV_DTYPE", "bf16")
-        )
+        if dflash_kv_dtype is not None:
+            eff_df_kv = dflash_kv_dtype
+        elif "QWEN4_5_DFLASH_KV_DTYPE" in os.environ:
+            eff_df_kv = os.environ["QWEN4_5_DFLASH_KV_DTYPE"]
+        else:
+            cfg_kv_dt = getattr(getattr(config, "attn_config", None), "kv_cache_dtype", None)
+            cfg_kv_is_fp8 = (
+                getattr(cfg_kv_dt, "name", "") == "FP8"
+                or str(cfg_kv_dt).upper().endswith("FP8")
+            )
+            eff_df_kv = "fp8_e4m3" if cfg_kv_is_fp8 else "bf16"
         eff_df_backend = (
             dflash_attn_backend
             if dflash_attn_backend is not None

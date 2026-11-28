@@ -803,6 +803,65 @@ class TestQwen4_5E2E(unittest.TestCase):
                 self.assertGreater(_cos_sim(lg_tbo1, ref(toks[2:], state=st_ref1)), 0.9999)
                 del m_alias
 
+            from rtp_llm.models_py.modules.qwen4_5.checkpoint_loader import _probe_cuda_ipc_ple_peers
+            from unittest import mock
+
+            old_ple_env = os.environ.get("QWEN4_5_PLE_MODE")
+            old_res_env = os.environ.get("QWEN4_5_PLE_IPC_RESERVE_GB")
+            try:
+                os.environ["QWEN4_5_PLE_MODE"] = "shm"
+                m_env_shm = Qwen4_5ForCausalLM(cfg, dtype=torch.bfloat16, device=self.device)
+                load_qwen4_5_from_checkpoint(m_env_shm, tmpdir, num_workers=1)
+                _stabilize_router_margins(m_env_shm)
+                m_env_shm.prepare_weights()
+                ple_shm_layer = next(l.ple for l in m_env_shm.model.layers if l.ple is not None)
+                self.assertIsNotNone(ple_shm_layer._ngram_shards)
+                self.assertGreater(len(ple_shm_layer._ngram_shards), 0)
+                self.assertFalse(ple_shm_layer._ngram_shards[0].is_cuda)
+                self.assertTrue(ple_shm_layer._ngram_shards[0].is_pinned())
+                toks_env = torch.randint(10, cfg.vocab_size, (2, 6), device=self.device)
+                st_r_env = ref.create_runtime_state(2, max_seq_len=32, enable_yoco_decode=True)
+                st_m_env = m_env_shm.create_runtime_state(2, max_seq_len=32, enable_yoco_decode=True)
+                self.assertGreater(_cos_sim(m_env_shm(toks_env, state=st_m_env), ref(toks_env, state=st_r_env)), 0.9999)
+                del m_env_shm
+
+                # Explicit non-default ple_mode="gpu_full" must remain unaffected by QWEN4_5_PLE_MODE
+                m_env_exp = Qwen4_5ForCausalLM(cfg, dtype=torch.bfloat16, device=self.device)
+                load_qwen4_5_from_checkpoint(m_env_exp, tmpdir, ple_mode="gpu_full", num_workers=1)
+                ple_exp_layer = next(l.ple for l in m_env_exp.model.layers if l.ple is not None)
+                self.assertIsNotNone(ple_exp_layer._ngram_shards)
+                self.assertTrue(ple_exp_layer._ngram_shards[0].is_cuda)
+                del m_env_exp
+
+                # Excessive QWEN4_5_PLE_IPC_RESERVE_GB must reject CUDA IPC P2P probing cleanly
+                os.environ["QWEN4_5_PLE_IPC_RESERVE_GB"] = "1000000"
+                with (
+                    mock.patch("torch.distributed.is_available", return_value=True),
+                    mock.patch("torch.distributed.is_initialized", return_value=True),
+                    mock.patch("torch.distributed.get_world_size", return_value=2),
+                    mock.patch("torch.distributed.get_rank", return_value=0),
+                    mock.patch("torch.distributed.all_gather_object", side_effect=lambda out, val, group=None: out.__setitem__(0, val) or out.__setitem__(1, val)),
+                    mock.patch("torch.distributed.barrier"),
+                ):
+                    self.assertFalse(
+                        _probe_cuda_ipc_ple_peers(
+                            object(),
+                            self.device,
+                            [0, 1],
+                            ["gpu-0", "gpu-1"],
+                            1024 * 1024,
+                        )
+                    )
+            finally:
+                if old_ple_env is None:
+                    os.environ.pop("QWEN4_5_PLE_MODE", None)
+                else:
+                    os.environ["QWEN4_5_PLE_MODE"] = old_ple_env
+                if old_res_env is None:
+                    os.environ.pop("QWEN4_5_PLE_IPC_RESERVE_GB", None)
+                else:
+                    os.environ["QWEN4_5_PLE_IPC_RESERVE_GB"] = old_res_env
+
             class _ProbeA2A:
                 def __init__(self) -> None:
                     self.tbo_inited = False

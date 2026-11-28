@@ -2423,6 +2423,10 @@ class Qwen4_5TargetVerifyHandle:
         self.page_size = int(page_size)
         self.is_cuda_graph = bool(is_cuda_graph)
 
+    @property
+    def requires_cuda_graph_prepare(self) -> bool:
+        return not self.is_cuda_graph
+
     def support_cuda_graph(self) -> bool:
         return True
 
@@ -2562,6 +2566,10 @@ class Qwen4_5QSADecodeHandle:
         self.page_size = int(page_size)
         self.is_cuda_graph = bool(is_cuda_graph)
 
+    @property
+    def requires_cuda_graph_prepare(self) -> bool:
+        return not self.is_cuda_graph
+
     def support_cuda_graph(self) -> bool:
         return True
 
@@ -2631,6 +2639,10 @@ class Qwen4_5PrefillHandle:
         self.init_bufs: Dict[Any, torch.Tensor] = {}
         self.snap_phys_bufs: Dict[Tuple[int, int, int, int, int], torch.Tensor] = {}
         self.sp_snap_phys_bufs: Dict[Tuple[int, int, int, int, int], torch.Tensor] = {}
+
+    @property
+    def requires_cuda_graph_prepare(self) -> bool:
+        return not self.is_cuda_graph
 
     def support_cuda_graph(self) -> bool:
         return True

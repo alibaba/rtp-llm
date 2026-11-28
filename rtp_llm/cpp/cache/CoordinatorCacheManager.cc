@@ -2091,12 +2091,28 @@ int64_t CoordinatorCacheManager::getMrCostTimeMs() const {
     return total;
 }
 
+namespace {
+
+bool isReserveRatioProtectedGroup(const DeviceBlockPoolPtr&        pool,
+                                  const SingleTypeCacheManagerPtr& group_manager,
+                                  const CacheGroupPolicy&          policy) {
+    // Fixed rolling tail/SWA pools with explicit capacity (`hca_state`, `swa_kv`, etc.)
+    // bound per-request retention to a short rolling window, so reserve_block_ratio must
+    // not reduce their capacity. Explicitly sized FULL/LINEAR pools back sequence growth
+    // and still require reserve_block_ratio protection.
+    return pool && group_manager && group_manager->isReservable()
+           && !(policy.explicit_block_num > 0 && policy.group_type == CacheGroupType::SWA);
+}
+
+}  // namespace
+
 size_t CoordinatorCacheManager::totalReservableFreeBlocks() const {
     size_t      total  = 0;
     const auto& groups = config_.topology().groups();
     for (size_t group_id = 0; group_id < group_block_pools_.size(); ++group_id) {
-        if (!group_block_pools_[group_id] || group_id >= kv_cache_groups_.size() || !kv_cache_groups_[group_id]
-            || !kv_cache_groups_[group_id]->isReservable() || groups[group_id].policy.explicit_block_num > 0) {
+        if (group_id >= kv_cache_groups_.size()
+            || !isReserveRatioProtectedGroup(
+                group_block_pools_[group_id], kv_cache_groups_[group_id], groups[group_id].policy)) {
             continue;
         }
         total += group_block_pools_[group_id]->freeBlocksNum();
@@ -2110,17 +2126,18 @@ size_t CoordinatorCacheManager::reservableFreeBlocksNum() const {
 
 size_t CoordinatorCacheManager::reserveBlocksForPool(size_t group_id) const {
     const auto& groups = config_.topology().groups();
-    if (group_id >= group_block_pools_.size() || group_id >= kv_cache_groups_.size() || !group_block_pools_[group_id]
-        || !kv_cache_groups_[group_id] || !kv_cache_groups_[group_id]->isReservable()
-        || groups[group_id].policy.explicit_block_num > 0) {
+    if (group_id >= group_block_pools_.size() || group_id >= kv_cache_groups_.size()
+        || !isReserveRatioProtectedGroup(
+            group_block_pools_[group_id], kv_cache_groups_[group_id], groups[group_id].policy)) {
         return 0;
     }
 
     size_t total_reservable_blocks = 0;
     for (size_t current_group_id = 0; current_group_id < group_block_pools_.size(); ++current_group_id) {
-        if (!group_block_pools_[current_group_id] || current_group_id >= kv_cache_groups_.size()
-            || !kv_cache_groups_[current_group_id] || !kv_cache_groups_[current_group_id]->isReservable()
-            || groups[current_group_id].policy.explicit_block_num > 0) {
+        if (current_group_id >= kv_cache_groups_.size()
+            || !isReserveRatioProtectedGroup(group_block_pools_[current_group_id],
+                                             kv_cache_groups_[current_group_id],
+                                             groups[current_group_id].policy)) {
             continue;
         }
         total_reservable_blocks += group_block_pools_[current_group_id]->totalBlocksNum();
@@ -2158,8 +2175,9 @@ CoordinatorCacheManager::evaluateInitCapacityImpl(const MallocInfo&             
     {
         const auto& groups = config_.topology().groups();
         for (size_t group_id = 0; group_id < group_block_pools_.size(); ++group_id) {
-            if (!group_block_pools_[group_id] || group_id >= kv_cache_groups_.size() || !kv_cache_groups_[group_id]
-                || !kv_cache_groups_[group_id]->isReservable() || groups[group_id].policy.explicit_block_num > 0) {
+            if (group_id >= kv_cache_groups_.size()
+                || !isReserveRatioProtectedGroup(
+                    group_block_pools_[group_id], kv_cache_groups_[group_id], groups[group_id].policy)) {
                 continue;
             }
             total_reservable_blocks += group_block_pools_[group_id]->totalBlocksNum();
@@ -2192,8 +2210,9 @@ CoordinatorCacheManager::evaluateInitCapacityImpl(const MallocInfo&             
         const size_t total_blocks = pool->totalBlocksNum();
         const auto   demand       = initBlockDemand(malloc_info, planned_blocks, tag);
         const size_t group_reserve_blocks =
-            (!kv_cache_groups_[group_index]->isReservable()
-             || topology_groups[group_index].policy.explicit_block_num > 0 || total_reservable_blocks == 0) ?
+            (!isReserveRatioProtectedGroup(
+                 pool, kv_cache_groups_[group_index], topology_groups[group_index].policy)
+             || total_reservable_blocks == 0) ?
                 0 :
                 reserve_blocks * total_blocks / total_reservable_blocks;
 

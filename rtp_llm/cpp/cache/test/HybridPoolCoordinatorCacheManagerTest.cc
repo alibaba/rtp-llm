@@ -2689,6 +2689,105 @@ TEST_F(HybridPoolCoordinatorCacheManagerTest, DSV4CPShardedEvictionCascadesFromF
     EXPECT_TRUE(after_target_reclaim.keys.empty());
 }
 
+TEST_F(HybridPoolCoordinatorCacheManagerTest, ExplicitFullAndLinearPoolsEnforceReserveRatioWhileSwaRemainsExcluded) {
+    // Reproduce an explicit 4107-usable-block FULL pool alongside a non-explicit
+    // 499-usable-block FULL pool and an explicit rolling SWA pool:
+    // - explicit FULL (and LINEAR) pools must enforce reserve_block_ratio (5% -> 205 blocks),
+    // - explicit rolling SWA pool must retain reserve_blocks == 0 so DSV4 SWA capacity is preserved.
+    CacheConfig config;
+    config.dtype                   = DataType::TYPE_FP16;
+    config.layer_num               = 3;
+    config.seq_size_per_block      = 128;
+    config.reuse_cache_tail_blocks = 2;
+
+    auto explicit_full_spec = makeResolvedMhaSpec(config.dtype, 1, 1, 128, "explicit_full");
+    auto paged_full_spec    = makeResolvedMhaSpec(config.dtype, 1, 1, 128, "paged_full");
+    auto explicit_swa_spec  = makeResolvedMhaSpec(config.dtype, 1, 1, 128, "explicit_swa");
+
+    auto explicit_full_policy               = defaultCacheGroupPolicy(CacheGroupType::FULL);
+    explicit_full_policy.explicit_block_num = 4108;
+    auto paged_full_policy                  = defaultCacheGroupPolicy(CacheGroupType::FULL);
+    auto explicit_swa_policy                = defaultCacheGroupPolicy(CacheGroupType::SWA);
+    explicit_swa_policy.explicit_block_num  = 11;
+    explicit_swa_policy.active_tail_blocks  = 1;
+    explicit_swa_policy.sliding_window_size = 256;
+
+    config.fromGroupedSpecs({explicit_full_spec, paged_full_spec, explicit_swa_spec},
+                            {{0}, {1}, {2}},
+                            {CacheGroupType::FULL, CacheGroupType::FULL, CacheGroupType::SWA},
+                            {"explicit_full", "paged_full", "explicit_swa"},
+                            {explicit_full_policy, paged_full_policy, explicit_swa_policy});
+    config.setGroupBlockLayout({"explicit_full", "paged_full", "explicit_swa"},
+                               {4108, 500, 11},
+                               {explicit_full_spec->block_size_bytes(),
+                                paged_full_spec->block_size_bytes(),
+                                explicit_swa_spec->block_size_bytes()},
+                               {0, 0, 0});
+
+    auto allocator = std::make_shared<TestHybridPoolCoordinatorCacheManager>(
+        config, AllocationType::HOST, nullptr, /*reserve_block_ratio=*/5, RoleType::DECODE);
+    ASSERT_TRUE(allocator->init());
+
+    // Reservable free blocks include explicit_full (4107) + paged_full (499) = 4606,
+    // excluding explicit_swa (10), so 5% = 230 global reserve blocks.
+    EXPECT_EQ(allocator->reservableFreeBlocksNum(), 4606u);
+    EXPECT_EQ(allocator->reserveBlocksNum(), 230u);
+
+    const auto metrics = allocator->poolMetrics();
+    ASSERT_EQ(metrics.size(), 3u);
+    EXPECT_EQ(metrics[0].reserve_blocks, 205u);
+    EXPECT_EQ(metrics[1].reserve_blocks, 24u);
+    EXPECT_EQ(metrics[2].reserve_blocks, 0u);
+
+    // Single explicit 4107-usable-block FULL pool also protects its 5% = 205 blocks
+    // against initMalloc over-admission while honoring reserve on LINEAR explicit pools.
+    CacheConfig single_explicit;
+    single_explicit.dtype                   = DataType::TYPE_FP16;
+    single_explicit.layer_num               = 2;
+    single_explicit.seq_size_per_block      = 128;
+    single_explicit.reuse_cache_tail_blocks = 2;
+
+    auto full_spec = makeResolvedMhaSpec(single_explicit.dtype, 1, 1, 128, "full");
+    auto lin_spec  = makeResolvedLinearSpec(single_explicit.dtype, 1, 1, 1, 1, 2, 128, single_explicit.dtype, single_explicit.dtype, "linear");
+    auto full_pol  = defaultCacheGroupPolicy(CacheGroupType::FULL);
+    full_pol.explicit_block_num = 4108;
+    auto lin_pol   = defaultCacheGroupPolicy(CacheGroupType::LINEAR);
+    lin_pol.explicit_block_num  = 201;
+
+    single_explicit.fromGroupedSpecs({full_spec, lin_spec},
+                                     {{0}, {1}},
+                                     {CacheGroupType::FULL, CacheGroupType::LINEAR},
+                                     {"full", "linear"},
+                                     {full_pol, lin_pol});
+    single_explicit.setGroupBlockLayout(
+        {"full", "linear"}, {4108, 201}, {full_spec->block_size_bytes(), lin_spec->block_size_bytes()}, {0, 0});
+
+    auto single_alloc = std::make_shared<TestHybridPoolCoordinatorCacheManager>(
+        single_explicit, AllocationType::HOST, nullptr, /*reserve_block_ratio=*/5, RoleType::DECODE);
+    ASSERT_TRUE(single_alloc->init());
+    EXPECT_EQ(single_alloc->reservableFreeBlocksNum(), 4307u);
+    EXPECT_EQ(single_alloc->reserveBlocksNum(), 215u);
+
+    const auto single_metrics = single_alloc->poolMetrics();
+    ASSERT_EQ(single_metrics.size(), 2u);
+    EXPECT_EQ(single_metrics[0].reserve_blocks, 205u);
+    EXPECT_EQ(single_metrics[1].reserve_blocks, 9u);
+
+    // Request leaving 204 blocks (< 205 reserve) in the explicit FULL pool must be rejected;
+    // leaving 205 blocks (3902 needed out of 4107 usable) must succeed.
+    auto reject_res = makeBatchResource(1, single_explicit);
+    MallocInfo reject_info{reject_res, makeCompleteTokenIds(1, 3903 * 128, 128)};
+    reject_info.reuse_cache = false;
+    EXPECT_FALSE(single_alloc->initMalloc(reject_info).success);
+
+    auto ok_res = makeBatchResource(1, single_explicit);
+    MallocInfo ok_info{ok_res, makeCompleteTokenIds(1, 3902 * 128, 128)};
+    ok_info.reuse_cache = false;
+    EXPECT_TRUE(single_alloc->initMalloc(ok_info).success);
+    EXPECT_EQ(single_alloc->groupBlockPools()[0]->freeBlocksNum(), 205u);
+    single_alloc->free({ok_res, ok_info.complete_token_ids});
+}
+
 }  // namespace test
 }  // namespace rtp_llm
 

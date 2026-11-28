@@ -74,6 +74,7 @@ public:
 
 public:
     py::object               attn_pyobj_{py::none()};
+    bool                     requires_py_prepare_cuda_graph_{true};
     at::Tensor               decoder_layer_hidden_states_;
     at::Tensor               mtp_target_hidden_states_;
     torch_ext::PyModelInputs py_model_inputs_;

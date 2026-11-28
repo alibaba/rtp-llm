@@ -136,16 +136,85 @@ std::optional<int64_t> parseNonNegativeInt64Env(const char* name) {
     return static_cast<int64_t>(parsed);
 }
 
-int64_t resolveDecodeGrowthHeadroomTokens(size_t default_block_size) {
+}  // namespace
+
+void DecodeRpcServer::addStreamGrowthBudget(const std::vector<GroupBase>& groups,
+                                            const AdmittedStreamEntry&    entry,
+                                            int64_t                       window_tokens,
+                                            size_t&                       total_growth_blocks,
+                                            size_t&                       full_growth_blocks) {
+    const int64_t active_window = std::min<int64_t>(entry.max_remaining_tokens, window_tokens);
+    if (active_window <= 0) {
+        return;
+    }
+    size_t per_stream_max_full = 0;
+    for (const auto& group : groups) {
+        const int64_t block_size = std::max<int64_t>(1, static_cast<int64_t>(group.seqSizePerBlock()));
+        int64_t       blocks     = 0;
+        if (group.policy.group_type == CacheGroupType::LINEAR) {
+            blocks = 1 + std::min<int64_t>(entry.reserve_step, 1 + active_window / block_size);
+        } else {
+            const int64_t tokens = active_window + entry.reserve_step;
+            blocks               = (tokens + block_size - 1) / block_size;
+            if (group.policy.group_type == CacheGroupType::FULL) {
+                blocks = std::max<int64_t>(blocks, 1);
+            }
+            if (group.policy.sliding_window_size > 0) {
+                const int64_t swa_cap = (group.policy.sliding_window_size + block_size - 1) / block_size + 2;
+                blocks                = std::min<int64_t>(blocks, swa_cap);
+            }
+        }
+        const size_t stream_group_blocks = static_cast<size_t>(entry.max_batch_size * blocks);
+        total_growth_blocks += stream_group_blocks;
+        if (group.policy.group_type == CacheGroupType::FULL) {
+            per_stream_max_full = std::max(per_stream_max_full, stream_group_blocks);
+        }
+    }
+    full_growth_blocks += per_stream_max_full;
+}
+
+int64_t DecodeRpcServer::resolveDecodeGrowthHeadroomTokens(const CacheConfig& cache_config) {
     if (const auto env_tokens = parseNonNegativeInt64Env("RTP_LLM_DECODE_GROWTH_HEADROOM_TOKENS");
         env_tokens.has_value()) {
         return *env_tokens;
     }
-    const size_t safe_block_size = std::max<size_t>(1, default_block_size);
-    return static_cast<int64_t>(std::min<size_t>(512, safe_block_size * 4));
-}
+    constexpr size_t kDefaultDecodeGrowthHeadroomTokens = 4096;
+    const size_t     safe_default_block_size            = std::max<size_t>(1, cache_config.seq_size_per_block);
+    const size_t     target_tokens =
+        std::max<size_t>(kDefaultDecodeGrowthHeadroomTokens, safe_default_block_size * 4);
 
-}  // namespace
+    // Cap per-stream default headroom to 25% of usable pool capacity (preferring FULL groups)
+    // so small unit-test pools and low-capacity setups never starve on concurrency while large
+    // production pools retain full ~4K-token growth headroom per active stream.
+    size_t      min_full_cap_tokens = std::numeric_limits<size_t>::max();
+    size_t      min_any_cap_tokens  = std::numeric_limits<size_t>::max();
+    bool        saw_full_group      = false;
+    bool        saw_any_group       = false;
+    const auto& groups              = cache_config.topology().groups();
+    for (const auto& group : groups) {
+        if (group.block_num == 0) {
+            continue;
+        }
+        const size_t usable_blocks = group.block_num > 1 ? group.block_num - 1 : 0;
+        const size_t cap_blocks    = usable_blocks / 4;
+        const size_t seq_per_block = std::max<size_t>(1, group.seqSizePerBlock());
+        const size_t cap_tokens    = cap_blocks > std::numeric_limits<size_t>::max() / seq_per_block ?
+                                         std::numeric_limits<size_t>::max() :
+                                         cap_blocks * seq_per_block;
+        saw_any_group              = true;
+        min_any_cap_tokens         = std::min(min_any_cap_tokens, cap_tokens);
+        if (group.policy.group_type == CacheGroupType::FULL) {
+            saw_full_group      = true;
+            min_full_cap_tokens = std::min(min_full_cap_tokens, cap_tokens);
+        }
+    }
+    if (!saw_any_group) {
+        return static_cast<int64_t>(
+            std::min<size_t>(kDefaultDecodeGrowthHeadroomTokens, safe_default_block_size * 4));
+    }
+    const size_t pool_cap_tokens = saw_full_group ? min_full_cap_tokens : min_any_cap_tokens;
+    return static_cast<int64_t>(std::min(target_tokens, pool_cap_tokens));
+}
 
 DecodeRpcServer::AdmittedStreamEntry DecodeRpcServer::captureAdmittedStreamBudget(
     const std::shared_ptr<GenerateStream>& stream) {
@@ -178,7 +247,8 @@ DecodeRpcServer::DecodeHeadroomBudget DecodeRpcServer::computeDecodeHeadroomBudg
     DecodeHeadroomBudget budget;
     const auto&          groups = cache_config.topology().groups();
     for (const auto& group : groups) {
-        if (group.policy.reservable && group.policy.explicit_block_num == 0) {
+        if (group.policy.reservable
+            && !(group.policy.explicit_block_num > 0 && group.policy.group_type == CacheGroupType::SWA)) {
             budget.total_reservable_blocks += group.block_num;
         }
         if (group.policy.group_type == CacheGroupType::FULL) {
@@ -197,34 +267,7 @@ DecodeRpcServer::DecodeHeadroomBudget DecodeRpcServer::computeDecodeHeadroomBudg
         return budget;
     }
     for (const auto& entry : active_streams) {
-        const int64_t active_window = std::min<int64_t>(entry.max_remaining_tokens, window_tokens);
-        if (active_window <= 0) {
-            continue;
-        }
-        size_t per_stream_max_full = 0;
-        for (const auto& group : groups) {
-            const int64_t block_size = std::max<int64_t>(1, static_cast<int64_t>(group.seqSizePerBlock()));
-            int64_t       blocks     = 0;
-            if (group.policy.group_type == CacheGroupType::LINEAR) {
-                blocks = 1 + std::min<int64_t>(entry.reserve_step, 1 + active_window / block_size);
-            } else {
-                const int64_t tokens = active_window + entry.reserve_step;
-                blocks               = (tokens + block_size - 1) / block_size;
-                if (group.policy.group_type == CacheGroupType::FULL) {
-                    blocks = std::max<int64_t>(blocks, 1);
-                }
-                if (group.policy.sliding_window_size > 0) {
-                    const int64_t swa_cap = (group.policy.sliding_window_size + block_size - 1) / block_size + 2;
-                    blocks                = std::min<int64_t>(blocks, swa_cap);
-                }
-            }
-            const size_t stream_group_blocks = static_cast<size_t>(entry.max_batch_size * blocks);
-            budget.total_growth_blocks += stream_group_blocks;
-            if (group.policy.group_type == CacheGroupType::FULL) {
-                per_stream_max_full = std::max(per_stream_max_full, stream_group_blocks);
-            }
-        }
-        budget.full_growth_blocks += per_stream_max_full;
+        addStreamGrowthBudget(groups, entry, window_tokens, budget.total_growth_blocks, budget.full_growth_blocks);
     }
     return budget;
 }
@@ -301,7 +344,7 @@ int64_t DecodeRpcServer::resolveDecodeMaxInitedStreams() const {
 size_t DecodeRpcServer::activeInitedStreamCount() const {
     std::lock_guard<std::mutex> lock(admission_state_->mutex);
     pruneAdmittedStreamsLocked(*admission_state_);
-    return admission_state_->admitted_streams.size() + admission_state_->inflight_pre_init;
+    return admission_state_->admitted_streams.size() + admission_state_->inflight_streams.size();
 }
 
 void DecodeRpcServer::notifyAdmissionChange() const {
@@ -556,8 +599,7 @@ void DecodeRpcServer::allocateResource(DecodeGenerateContext& decode_context) {
     const auto  cancellation_poll_ms = std::max<int64_t>(pd_config.decode_retry_interval_ms, 50);
     const int64_t max_inited_cap     = resolveDecodeMaxInitedStreams();
     const auto&   cache_config       = cache_manager->cacheConfig();
-    const int64_t growth_window_tokens =
-        resolveDecodeGrowthHeadroomTokens(cache_config.seq_size_per_block);
+    const int64_t growth_window_tokens = resolveDecodeGrowthHeadroomTokens(cache_config);
     const bool is_decode_role = pd_config.role_type == RoleType::DECODE
                                 || engine_->resourceContext().role_type == RoleType::DECODE;
     const bool uses_cache_lookup =
@@ -609,10 +651,21 @@ void DecodeRpcServer::allocateResource(DecodeGenerateContext& decode_context) {
 
         uint64_t     observed_generation    = 0;
         uint64_t     observed_admission_gen = 0;
+        uint64_t     inflight_token         = 0;
         bool         blocked_by_admission   = false;
         bool         holds_inflight_slot    = false;
         bool         inflight_committed     = false;
         absl::Status allocation_status;
+
+        auto erase_inflight_locked = [&]() {
+            auto& inflights = admission_state_->inflight_streams;
+            inflights.erase(std::remove_if(inflights.begin(),
+                                           inflights.end(),
+                                           [inflight_token](const InflightStreamEntry& entry) {
+                                               return entry.token == inflight_token;
+                                           }),
+                            inflights.end());
+        };
 
         {
             std::lock_guard<std::mutex> lock(admission_state_->mutex);
@@ -620,12 +673,30 @@ void DecodeRpcServer::allocateResource(DecodeGenerateContext& decode_context) {
             observed_generation    = cache_manager->allocationGeneration();
             observed_admission_gen = admission_state_->release_generation;
 
-            const size_t active_count = admission_state_->admitted_streams.size() + admission_state_->inflight_pre_init;
+            const size_t active_count =
+                admission_state_->admitted_streams.size() + admission_state_->inflight_streams.size();
             if (max_inited_cap > 0 && active_count >= static_cast<size_t>(max_inited_cap)) {
                 blocked_by_admission = true;
-            } else if (!admission_state_->admitted_streams.empty() || admission_state_->inflight_pre_init > 0) {
-                const auto headroom = computeDecodeHeadroomBudget(
+            } else if (!admission_state_->admitted_streams.empty() || !admission_state_->inflight_streams.empty()) {
+                auto headroom = computeDecodeHeadroomBudget(
                     cache_config, admission_state_->admitted_streams, growth_window_tokens);
+                const auto& groups = cache_config.topology().groups();
+                if (growth_window_tokens > 0) {
+                    for (const auto& inflight : admission_state_->inflight_streams) {
+                        addStreamGrowthBudget(groups,
+                                              inflight.budget,
+                                              growth_window_tokens,
+                                              headroom.total_growth_blocks,
+                                              headroom.full_growth_blocks);
+                    }
+                    // Also reserve growth headroom for the incoming stream when sharing the pool
+                    // so reserve_block_ratio == 0 or concurrent bursts cannot overrun decode blocks.
+                    addStreamGrowthBudget(groups,
+                                          new_budget,
+                                          growth_window_tokens,
+                                          headroom.total_growth_blocks,
+                                          headroom.full_growth_blocks);
+                }
                 const size_t reserve_blocks   = cache_manager->reserveBlocksNum();
                 const size_t available_blocks = cache_manager->availableBlocksNum();
                 const size_t required_total =
@@ -651,7 +722,8 @@ void DecodeRpcServer::allocateResource(DecodeGenerateContext& decode_context) {
             }
 
             if (!blocked_by_admission) {
-                admission_state_->inflight_pre_init += 1;
+                inflight_token = ++admission_state_->next_inflight_token;
+                admission_state_->inflight_streams.push_back(InflightStreamEntry{inflight_token, new_budget});
                 admission_state_->pending_init_blocks += effective_new_blocks;
                 admission_state_->pending_full_init_blocks += effective_new_full_blocks;
                 holds_inflight_slot = true;
@@ -663,7 +735,7 @@ void DecodeRpcServer::allocateResource(DecodeGenerateContext& decode_context) {
                 if (holds_inflight_slot && !inflight_committed) {
                     {
                         std::lock_guard<std::mutex> lock(admission_state_->mutex);
-                        admission_state_->inflight_pre_init -= 1;
+                        erase_inflight_locked();
                         admission_state_->pending_init_blocks -= effective_new_blocks;
                         admission_state_->pending_full_init_blocks -= effective_new_full_blocks;
                         ++admission_state_->release_generation;
@@ -707,7 +779,7 @@ void DecodeRpcServer::allocateResource(DecodeGenerateContext& decode_context) {
                 if (allocation_status.ok()) {
                     {
                         std::lock_guard<std::mutex> lock(admission_state_->mutex);
-                        admission_state_->inflight_pre_init -= 1;
+                        erase_inflight_locked();
                         admission_state_->pending_init_blocks -= effective_new_blocks;
                         admission_state_->pending_full_init_blocks -= effective_new_full_blocks;
                         admission_state_->admitted_streams.push_back(new_budget);
