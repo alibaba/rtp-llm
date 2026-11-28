@@ -126,7 +126,6 @@ def _score_prefill_bq1(
     if row >= M:
         return
     row_i64 = row.to(tl.int64)
-    n_i64 = N.to(tl.int64)
     split_lo = pid_n * SPLIT_KV
     split_hi = tl.minimum(split_lo + SPLIT_KV, N)
 
@@ -140,7 +139,7 @@ def _score_prefill_bq1(
 
     pad_val = -float("inf") if CLEAN else 0.0
     n_base = tl.arange(0, BN)
-    out_row = OUT + row_i64 * n_i64
+    out_row = OUT + row_i64 * N
 
     if (not has_act) or (k_lo >= k_hi):
         _fill_const_1d(out_row, split_lo, split_hi, N, n_base, pad_val, BN)
@@ -215,7 +214,6 @@ def _score_prefill_bq2(
     r1 = r0 + 1
     m0_ok = r0 < M
     m1_ok = r1 < M
-    n_i64 = N.to(tl.int64)
     split_lo = pid_n * SPLIT_KV
     split_hi = tl.minimum(split_lo + SPLIT_KV, N)
 
@@ -237,8 +235,8 @@ def _score_prefill_bq2(
 
     pad_val = -float("inf") if CLEAN else 0.0
     n_base = tl.arange(0, BN)
-    out0 = OUT + r0.to(tl.int64) * n_i64
-    out1 = OUT + r1.to(tl.int64) * n_i64
+    out0 = OUT + r0.to(tl.int64) * N
+    out1 = OUT + r1.to(tl.int64) * N
 
     if (not has_any) or (k_lo >= k_hi):
         if m0_ok:
@@ -425,7 +423,6 @@ def _score_paged_bq1(
     row = tl.program_id(0)
     pid_n = tl.program_id(1)
     row_i64 = row.to(tl.int64)
-    n_i64 = N.to(tl.int64)
     b = row // NEXT_N
     split_lo = pid_n * SPLIT_KV
     split_hi = tl.minimum(split_lo + SPLIT_KV, N)
@@ -433,7 +430,7 @@ def _score_paged_bq1(
     raw_len = tl.load(END + row)
     max_len = tl.maximum(tl.minimum(raw_len, N), 0)
     n_base = tl.arange(0, BN)
-    out_row = OUT + row_i64 * n_i64
+    out_row = OUT + row_i64 * N
 
     if split_lo >= max_len:
         _fill_const_1d(out_row, split_lo, split_hi, N, n_base, 0.0, BN)
@@ -518,7 +515,6 @@ def _score_paged_bq2(
     m1_ok = lm1 < NEXT_N
     r0 = b * NEXT_N + lm0
     r1 = b * NEXT_N + lm1
-    n_i64 = N.to(tl.int64)
     split_lo = pid_n * SPLIT_KV
     split_hi = tl.minimum(split_lo + SPLIT_KV, N)
 
@@ -529,8 +525,8 @@ def _score_paged_bq2(
     max_len = tl.maximum(el0, el1)
 
     n_base = tl.arange(0, BN)
-    out0 = OUT + r0.to(tl.int64) * n_i64
-    out1 = OUT + r1.to(tl.int64) * n_i64
+    out0 = OUT + r0.to(tl.int64) * N
+    out1 = OUT + r1.to(tl.int64) * N
 
     if split_lo >= max_len:
         if m0_ok:

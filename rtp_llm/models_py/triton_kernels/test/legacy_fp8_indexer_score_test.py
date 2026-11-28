@@ -274,6 +274,152 @@ class LegacyFP8IndexerScoreTest(unittest.TestCase):
         zero_out = legacy_fp8_paged_mqa_logits(q_p, packed, w_p, lens, empty_table, 64)
         torch.testing.assert_close(zero_out, torch.zeros_like(zero_out))
 
+    def test_scalar_one_specialization_edge_cases(self):
+        # Guard against Triton specializing runtime scalar ints == 1 into Python ints.
+        for heads, queries, keys, clean in [
+            (1, 1, 1, False),
+            (64, 1, 1, True),
+            (64, 3, 1, False),
+            (64, 3, 1, True),
+        ]:
+            with self.subTest(
+                kernel="prefill_bq1",
+                heads=heads,
+                queries=queries,
+                keys=keys,
+                clean=clean,
+            ):
+                q = torch.randn(queries, heads, 128, device="cuda").to(
+                    torch.float8_e4m3fn
+                )
+                k = torch.randn(keys, 128, device="cuda").to(torch.float8_e4m3fn)
+                scales = torch.rand(keys, device="cuda") * 0.01 + 0.001
+                weights = torch.randn(
+                    queries, heads, device="cuda", dtype=torch.float32
+                )
+                starts = torch.zeros(queries, device="cuda", dtype=torch.int32)
+                ends = torch.ones(queries, device="cuda", dtype=torch.int32)
+                if queries >= 3:
+                    ends[1] = 0
+                actual = legacy_fp8_mqa_logits(
+                    q, (k, scales), weights, starts, ends, clean_logits=clean
+                )
+                expected = self.reference(q, k, scales, weights)
+                cols = torch.arange(keys, device="cuda")
+                pad = float("-inf") if clean else 0.0
+                expected.masked_fill_(
+                    (cols < starts[:, None]) | (cols >= ends[:, None]),
+                    pad,
+                )
+                torch.testing.assert_close(actual, expected, rtol=2e-5, atol=2e-5)
+
+        with mock.patch.object(score_mod, "_get_num_sms", return_value=1):
+            for clean in (False, True):
+                with self.subTest(
+                    kernel="prefill_bq2", heads=64, queries=16, keys=1, clean=clean
+                ):
+                    q = torch.randn(16, 64, 128, device="cuda").to(torch.float8_e4m3fn)
+                    k = torch.randn(1, 128, device="cuda").to(torch.float8_e4m3fn)
+                    scales = torch.rand(1, device="cuda") * 0.01 + 0.001
+                    weights = torch.randn(16, 64, device="cuda", dtype=torch.float32)
+                    starts = torch.zeros(16, device="cuda", dtype=torch.int32)
+                    ends = torch.arange(16, device="cuda", dtype=torch.int32) % 2
+                    ends[0] = 1
+                    actual = legacy_fp8_mqa_logits(
+                        q, (k, scales), weights, starts, ends, clean_logits=clean
+                    )
+                    expected = self.reference(q, k, scales, weights)
+                    cols = torch.arange(1, device="cuda")
+                    pad = float("-inf") if clean else 0.0
+                    expected.masked_fill_(
+                        (cols < starts[:, None]) | (cols >= ends[:, None]),
+                        pad,
+                    )
+                    torch.testing.assert_close(actual, expected, rtol=2e-5, atol=2e-5)
+
+        for batch, next_n, heads, page in [
+            (1, 1, 1, 64),
+            (1, 1, 64, 16),
+        ]:
+            with self.subTest(
+                kernel="paged_bq1", batch=batch, next_n=next_n, heads=heads, page=page
+            ):
+                pages, table_width, max_ctx = 1, 1, 1
+                q = torch.randn(batch, next_n, heads, 128, device="cuda").to(
+                    torch.float8_e4m3fn
+                )
+                keys = torch.randn(pages, page, 128, device="cuda").to(
+                    torch.float8_e4m3fn
+                )
+                scales = torch.rand(pages, page, device="cuda") * 0.01 + 0.001
+                packed = torch.empty(
+                    pages, page * 132, dtype=torch.uint8, device="cuda"
+                )
+                packed[:, : page * 128] = keys.view(torch.uint8).reshape(
+                    pages, page * 128
+                )
+                packed[:, page * 128 :] = scales.view(torch.uint8).reshape(
+                    pages, page * 4
+                )
+                packed = packed.view(pages, page, 1, 132)
+                table = torch.zeros(
+                    (batch, table_width), device="cuda", dtype=torch.int32
+                )
+                weights = torch.randn(
+                    batch * next_n, heads, device="cuda", dtype=torch.float32
+                )
+                for length_val in (1, 0):
+                    lens = torch.full(
+                        (batch, next_n), length_val, device="cuda", dtype=torch.int32
+                    )
+                    actual = legacy_fp8_paged_mqa_logits(
+                        q, packed, weights, lens, table, max_ctx
+                    )
+                    if length_val == 0:
+                        expected = torch.zeros_like(actual)
+                    else:
+                        expected = self.reference(
+                            q[0], keys[0, :1], scales[0, :1], weights
+                        )
+                    torch.testing.assert_close(actual, expected, rtol=2e-5, atol=2e-5)
+
+        with self.subTest(kernel="paged_bq2", batch=16, next_n=2, heads=64, page=64):
+            batch, next_n, heads, page, pages, table_width, max_ctx = (
+                16,
+                2,
+                64,
+                64,
+                1,
+                1,
+                1,
+            )
+            q = torch.randn(batch, next_n, heads, 128, device="cuda").to(
+                torch.float8_e4m3fn
+            )
+            keys = torch.randn(pages, page, 128, device="cuda").to(torch.float8_e4m3fn)
+            scales = torch.rand(pages, page, device="cuda") * 0.01 + 0.001
+            packed = torch.empty(pages, page * 132, dtype=torch.uint8, device="cuda")
+            packed[:, : page * 128] = keys.view(torch.uint8).reshape(pages, page * 128)
+            packed[:, page * 128 :] = scales.view(torch.uint8).reshape(pages, page * 4)
+            packed = packed.view(pages, page, 1, 132)
+            table = torch.zeros((batch, table_width), device="cuda", dtype=torch.int32)
+            lens = torch.randint(
+                0, 2, (batch, next_n), device="cuda", dtype=torch.int32
+            )
+            lens[0, 0] = 1
+            lens[1, 0] = 0
+            weights = torch.randn(
+                batch * next_n, heads, device="cuda", dtype=torch.float32
+            )
+            actual = legacy_fp8_paged_mqa_logits(
+                q, packed, weights, lens, table, max_ctx
+            )
+            expected = self.reference(
+                q.view(batch * next_n, heads, 128), keys[0, :1], scales[0, :1], weights
+            )
+            expected.masked_fill_(lens.reshape(-1, 1) == 0, 0.0)
+            torch.testing.assert_close(actual, expected, rtol=2e-5, atol=2e-5)
+
 
 def _run_benchmarks():
     props = torch.cuda.get_device_properties(0)
