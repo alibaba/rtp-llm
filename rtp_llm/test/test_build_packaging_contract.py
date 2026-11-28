@@ -1345,7 +1345,7 @@ class BuildPackagingContractTest(TestCase):
             "py_ut_l20": 86,
             "py_ut_oss_l20": 84,
             "py_ut_sm100_arm": 103,
-            "py_ut_amd": 412,
+            "py_ut_amd": 413,
             "py_ut_frontend": 79,
         }.items():
             self.assertEqual(profiles[name].get("expected_count"), expected_count)
