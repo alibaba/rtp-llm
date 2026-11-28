@@ -92,12 +92,12 @@ py_test(
     name = "ppu_owned_projection_device_test",
     srcs = ["ppu_owned_projection_device_test.py"],
     deps = [
+        "//rtp_llm:device",
         "//rtp_llm/models_py:new_weight_loader",
         "//rtp_llm/models_py/modules/dsv4/ppu/test:ppu_test_runtime",
     ],
     data = ["//rtp_llm/models_py:ppu_sources"],
-    tags = ["PPU-ZW810E"],
-    exec_properties = {"gpu": "PPU-ZW810E", "gpu_count": "1"},
+    tags = ["manual", "local", "gpu", "M890P"],
     target_compatible_with = select({
         "@//:using_ppu": [],
         "//conditions:default": ["@platforms//:incompatible"],

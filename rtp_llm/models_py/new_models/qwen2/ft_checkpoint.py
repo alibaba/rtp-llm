@@ -33,8 +33,8 @@ def _bias(values):
 
 
 def _validate_cache_reciprocal(value):
-    # Non-MLA, non-per-tensor-FP8 exporters synthesize exactly this FP32 [1]
-    # unit for FP8 KV cache. It is not a learned activation-quantization scale.
+    # Without static activation calibration the exporter may still store
+    # this unit for FP8 KV cache. It is not a learned activation scale.
     if value.shape != (1,) or value.dtype != torch.float32 or value.item() != 1.0:
         raise ValueError(
             "Invalid FT FP8 KV-cache dummy reciprocal: expected FP32 [1.0]"
@@ -195,8 +195,11 @@ def load_gqa_ffn_ft_checkpoint(
         stem = layer_prefix + stems[projection]
         direct, reciprocal = stem + ".static_quant", stem + ".static_quant_reciprocal"
         dynamic = linear.quant_method.quant_config.activation_dynamic
+        # Only attention output has a reciprocal-only KV-cache placeholder.
+        # Its contents are validated below even when activation quantization is dynamic.
         if dynamic and (
-            direct in checkpoint.entries or reciprocal in checkpoint.entries
+            direct in checkpoint.entries
+            or (projection != "out" and reciprocal in checkpoint.entries)
         ):
             raise ValueError(
                 "FP8 FT static source disagrees with dynamic activation configuration"
@@ -406,10 +409,7 @@ def load_gqa_ffn_ft_checkpoint(
         if (
             owned_attention[key] is None
             and cache_unit in checkpoint.entries
-            and not isinstance(
-                layer.self_attn.o_proj.quant_method,
-                (Fp8LinearMethod, PerTensorInt8LinearMethod),
-            )
+            and cache_unit.removesuffix("_reciprocal") not in checkpoint.entries
         ):
             validators[cache_unit] = _validate_cache_reciprocal
         fields = [

@@ -15,7 +15,8 @@ from rtp_llm.models_py.weight_mapper import get_all_weights
 
 class OwnedProjectionDeviceTest(unittest.TestCase):
     def test_prefill_checkpoint_projection(self):
-        self.assertTrue(is_ppu(), "Requires a real allocated PPU worker")
+        self.assertTrue(is_ppu() and torch.cuda.is_available(), "requires a PPU")
+        self.assertEqual(torch.cuda.get_device_capability(), (8, 9), "requires M890P")
         with tempfile.TemporaryDirectory() as tmp:
             file = os.path.join(tmp, "model.pt")
             torch.save(

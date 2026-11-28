@@ -149,7 +149,7 @@ class BaseMoEExperts(RtpModule):
         # unquantized method and must not require quantization auxiliary tensors.
         ignored_by_quant_config = bool(
             quant_config is not None
-            and quant_config.is_moe_layer_ignored(self, self.prefix)
+            and quant_config.is_moe_layer_ignored(self.prefix)
         )
         raw_qt = (
             "none"

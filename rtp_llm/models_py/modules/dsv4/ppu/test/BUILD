@@ -1,7 +1,7 @@
 load("@arch_config//:arch_select.bzl", "triton_deps")
 
 _PPU_CONTRACT_TESTS = [
-    "attention_gemm_config", "mtp_owned_fusion",
+    "attention_gemm_config",
     "mtp_weights", "mtp_hidden", "compressor_norm_dispatch", "mtp_swa_ring_page",
     "chunked_moe", "deepep_graph_dispatch", "ppu_deep_gemm_layout_compat",
     "strategy_select", "tp_norm", "v4_router_contract", "v4_tp_reduce_contract",
@@ -17,8 +17,6 @@ _PPU_CONTRACT_TESTS = [
     exec_properties = {"gpu": "PPU-ZW810E", "gpu_count": "1"},
     data = ["//rtp_llm/models_py:ppu_sources"],
     deps = [":ppu_test_runtime", "//rtp_llm:device"] + ([
-        "//rtp_llm/models_py:new_weight_loader",
-    ] if name == "mtp_owned_fusion" else []) + ([
         "//rtp_llm/model_loader:loader",
     ] if name == "mtp_weights" else []),
     tags = ["PPU-ZW810E"],
@@ -28,6 +26,23 @@ _PPU_CONTRACT_TESTS = [
     }),
     timeout = "moderate",
 ) for name in _PPU_CONTRACT_TESTS]
+
+# This regression launches SDK FP8 GEMMs, unlike the ZW810E contracts above.
+py_test(
+    name = "mtp_owned_fusion",
+    srcs = ["test_mtp_owned_fusion.py", "ppu_test_main.py"],
+    main = "ppu_test_main.py",
+    args = ["--devices", "1", "$(location test_mtp_owned_fusion.py)"],
+    env = {"GPU_COUNT": "1"},
+    data = ["//rtp_llm/models_py:ppu_sources"],
+    deps = [":ppu_test_runtime", "//rtp_llm:device", "//rtp_llm/models_py:new_weight_loader"],
+    tags = ["manual", "local", "gpu", "M890P"],
+    target_compatible_with = select({
+        "@//:using_ppu": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    }),
+    timeout = "moderate",
+)
 
 # PPU operators and JIT sources are packaged only for the PPU build.
 [py_test(

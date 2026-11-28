@@ -332,9 +332,19 @@ class QuantizationConfig:
         for pattern in self.ignored_layers:
             canonical_pattern = ".".join(self._canonical_parts(pattern))
             if pattern.startswith("re:"):
-                if re.search(pattern[3:], prefix) or re.search(
-                    pattern[3:], canonical_prefix
+                candidates = (prefix, canonical_prefix)
+                if (
+                    self.quant_type == "W8A8_INT8_PER_CHANNEL_COMPRESSED"
+                    and prefix_parts[:1] == ["layers"]
                 ):
+                    # The online recipe reads HF names; its owners see names
+                    # without the language wrapper. Match anchored expressions
+                    # against the same spellings on both sides of that boundary.
+                    candidates += tuple(
+                        f"{wrapper}.{canonical_prefix}"
+                        for wrapper in ("model", "language_model", "model.language_model")
+                    )
+                if any(re.search(pattern[3:], path) for path in candidates):
                     return True
             elif "{i}" in canonical_pattern:
                 expression = re.escape(canonical_pattern).replace(
@@ -438,32 +448,31 @@ class QuantizationConfig:
             )
         return method_cls(self)
 
-    def is_moe_layer_ignored(self, layer, prefix: str) -> bool:
+    def is_moe_layer_ignored(self, prefix: str) -> bool:
         if not prefix:
             raise ValueError("MoE quantization requires a stable module prefix")
         # The calibrated INT8 checkpoint format quantizes dense projections,
         # never the routed expert bank. Select a floating executor as well.
         if self.quant_type == "pertensor_quant":
             return True
-        projection_prefixes = [
-            f"{prefix}.{projection}" for projection in layer.PROJ_NAMES
-        ]
-        root_ignored = self.is_layer_ignored(prefix)
-        projection_ignored = [
-            self.is_layer_ignored(candidate) for candidate in projection_prefixes
-        ]
-        if root_ignored or all(projection_ignored):
+        if self.is_layer_ignored(prefix):
             return True
-        if any(projection_ignored):
+        # The checkpoint may call gate + up one projection. Both it and the
+        # runtime allocate one quantization layout for the whole expert bank.
+        gate_up = self.is_fused_layer_ignored(
+            f"{prefix}.gate_up_proj", ("gate_proj", "up_proj")
+        )
+        down = self.is_layer_ignored(f"{prefix}.down_proj")
+        if gate_up != down:
             raise ValueError(
                 f"Quantization exclusions partially match fused MoE layer "
                 f"{prefix!r}; all expert projections must use the same "
                 "quantization layout"
             )
-        return False
+        return down
 
     def get_moe_quant_method(self, layer, prefix: str) -> FusedMoEMethodBase:
-        if self.is_moe_layer_ignored(layer, prefix):
+        if self.is_moe_layer_ignored(prefix):
             from rtp_llm.models_py.quant_methods.unquantized import (
                 UnquantizedFusedMoEMethod,
             )

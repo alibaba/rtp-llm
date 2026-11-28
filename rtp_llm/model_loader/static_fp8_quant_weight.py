@@ -545,11 +545,7 @@ class Fp8PerTensorCompressedWeight(CompositeWeight, QuantWeight):
         kernel_weight = processed_res[self.kernel.name]
         weight_scale_name = self.FP8_SCALE_MAP.get(self.kernel.name)
 
-        input_scale_r_str, _ = self.FP8_ACT_SCALE_MAP.get(self.kernel.name)[1]
-        intput_scale_str, _ = self.FP8_ACT_SCALE_MAP.get(self.kernel.name)[0]
-
         kernel_scale = processed_res.get(weight_scale_name, None)
-        input_scale = processed_res.get(input_scale_r_str, None)
 
         if isinstance(self.kernel, MoeAtomicWeight):
             if self.kernel.name is W.moe_w1:
@@ -583,10 +579,10 @@ class Fp8PerTensorCompressedWeight(CompositeWeight, QuantWeight):
                 processed_res[self.kernel.name] = kernel_weight
                 processed_res[W.moe_s1] = max_kernel_scale
 
-            if input_scale is not None:
-                input_scale = input_scale.max()
-                processed_res[input_scale_r_str] = input_scale
-                processed_res[intput_scale_str] = 1.0 / input_scale
+            if self.act_scale_inv is not None:
+                input_scale = processed_res[self.act_scale_inv.name].max()
+                processed_res[self.act_scale_inv.name] = input_scale
+                processed_res[self.act_scale.name] = 1.0 / input_scale
             return processed_res
 
         # handle qkv_proj quant weight

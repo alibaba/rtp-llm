@@ -20,6 +20,8 @@ from rtp_llm.utils.w8a8_int8_quant import (
 def _is_projection_ignored(runtime, name):
     projection = name.removesuffix(".weight")
     parent, _, leaf = projection.rpartition(".")
+    if name.endswith(STACKED_EXPERT_SUFFIXES):
+        return runtime.is_moe_layer_ignored(parent)
     # Only recipe keys reach here. Resolve the same owner and sibling names
     # as the runtime before synthesizing either the INT8 bytes or their scale.
     for owner, parts in (

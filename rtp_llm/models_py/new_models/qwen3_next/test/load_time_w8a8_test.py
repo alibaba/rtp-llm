@@ -71,6 +71,45 @@ def _checkpoint(linear):
 
 
 class Qwen35LoadTimeW8A8Test(unittest.TestCase):
+    def test_stacked_expert_exclusions_share_one_layout(self):
+        cfg, raw = _checkpoint(False)
+        root = "model.language_model.layers.0.mlp.experts."
+        with tempfile.TemporaryDirectory() as folder:
+            path = str(Path(folder) / "model.safetensors")
+            save_file(raw, path)
+            for patterns, complete in (
+                ([root + p for p in ("gate_up_proj", "down_proj")], True),
+                ([root + p for p in ("gate_proj", "up_proj", "down_proj")], True),
+                ([r"re:^model\.language_model\.layers\.0\.mlp\.experts\.(gate_up_proj|down_proj)$"], True),
+                ([root + "gate_up_proj"], False),
+                ([root + p for p in ("gate_proj", "down_proj")], False),
+            ):
+                with self.subTest(patterns=patterns):
+                    source = CompressedW8A8Int8PerChannelQuantConfig(
+                        is_quanted=False, ignore_patterns=patterns
+                    )
+                    cfg.quant_config = source
+                    quant = QuantizationConfig(source.get_method(), source)
+                    opts = replace(
+                        _load_config(quant_config=quant), compute_dtype=torch.bfloat16
+                    )
+                    if not complete:
+                        with self.assertRaisesRegex(ValueError, "partially match"):
+                            Qwen3NextForCausalLM(cfg, opts)
+                        with self.assertRaisesRegex(ValueError, "partially match"):
+                            W8A8LoadSource.from_files([path], quant)
+                        continue
+                    model = NewModelLoader(cfg, opts, model_path=folder).load()
+                    experts = model.layers[0].mlp.experts
+                    gate, up = raw[root + "gate_up_proj"].chunk(2, dim=1)
+                    torch.testing.assert_close(
+                        experts.w13, torch.cat((up, gate), dim=1), rtol=0, atol=0
+                    )
+                    torch.testing.assert_close(
+                        experts.w2, raw[root + "down_proj"], rtol=0, atol=0
+                    )
+                    self.assertEqual(model.layers[0].self_attn.o_proj.weight.dtype, torch.int8)
+
     def test_fused_exclusions_match_checkpoint_and_runtime_layout(self):
         prefix = "model.language_model.layers.0."
         for linear, parent, owner, parts in (
