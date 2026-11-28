@@ -191,8 +191,12 @@ class TestMultiModalUtil(unittest.TestCase):
         response = _FakeResponse(content=b"payload")
         url = "https://example.com/cache-isolation"
         with patch(
-            "rtp_llm.multimodal.multimodal_util.request_get", return_value=response
-        ):
+            "rtp_llm.multimodal.multimodal_util.REQUEST_GET", return_value=response
+        ), patch(
+            "rtp_llm.multimodal.multimodal_util.record_http_response"
+        ) as record_response, patch(
+            "rtp_llm.multimodal.multimodal_util.record_http_payload"
+        ) as record_payload:
             first = get_bytes_io_from_url(url, max_file_size_kb=1)
         first.read(1)
         second = get_bytes_io_from_url(url, max_file_size_kb=1)
@@ -200,6 +204,27 @@ class TestMultiModalUtil(unittest.TestCase):
         self.assertIsNot(first, second)
         self.assertEqual(second.read(), b"payload")
         self.assertEqual(first.tell(), 1)
+        self.assertTrue(response.closed)
+        record_response.assert_called_once_with(response)
+        record_payload.assert_called_once_with(len(b"payload"), response)
+
+    def test_http_records_failed_response_without_payload(self):
+        response = _FakeResponse(status_code=503)
+        with patch(
+            "rtp_llm.multimodal.multimodal_util.REQUEST_GET", return_value=response
+        ), patch(
+            "rtp_llm.multimodal.multimodal_util.record_http_response"
+        ) as record_response, patch(
+            "rtp_llm.multimodal.multimodal_util.record_http_payload"
+        ) as record_payload:
+            self.assert_mm_error(
+                ExceptionType.MM_DOWNLOAD_FAILED,
+                MMErr.DL_FAILED,
+                lambda: get_bytes_io_from_url("https://example.com/unavailable"),
+            )
+        record_response.assert_called_once_with(response)
+        record_payload.assert_not_called()
+        self.assertFalse(response.content_accessed)
         self.assertTrue(response.closed)
 
     def test_request_get_retries_connect_timeout_twice(self):

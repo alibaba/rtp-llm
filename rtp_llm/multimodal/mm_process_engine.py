@@ -54,6 +54,7 @@ from rtp_llm.multimodal.vit_metrics import (
 from rtp_llm.ops import MMPreprocessConfig, MultimodalInput, get_multimodal_feature_hash
 from rtp_llm.utils.base_model_datatypes import MMUrlType
 from rtp_llm.utils.cuda_graph_gate import cuda_graph_gate
+from rtp_llm.utils.media_download_metrics import use_worker_media_metrics
 from rtp_llm.utils.time_util import Timer, timer_wrapper
 
 _worker_vit_config: Optional[VitConfig] = None
@@ -179,6 +180,7 @@ def _worker_initializer(
     _worker_vit_config = vit_config
     _worker_preprocess_params = preprocess_params
     _worker_preprocess_func = preprocess_func
+    use_worker_media_metrics()
     logging.info(f"Worker process {os.getpid()} initialized.")
 
 

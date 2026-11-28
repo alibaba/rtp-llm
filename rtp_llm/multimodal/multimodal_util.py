@@ -5,6 +5,7 @@ import concurrent.futures
 import contextvars
 import json
 import logging
+import os
 import re
 import threading
 import time
@@ -30,6 +31,10 @@ from rtp_llm.utils.base_model_datatypes import MMUrlType
 from rtp_llm.utils.cuda_graph_gate import cuda_graph_gate
 from rtp_llm.utils.grpc_util import trans_from_tensor, trans_tensor
 from rtp_llm.utils.lru_dict import LruDict
+from rtp_llm.utils.media_download_metrics import (
+    record_http_payload,
+    record_http_response,
+)
 
 download_executor = concurrent.futures.ThreadPoolExecutor()
 
@@ -121,14 +126,11 @@ def request_get(url, headers, timeout=None, *, deadline=None, cancellation_event
         _check_download(deadline, cancellation_event)
         try:
             if deadline is not None:
-                return REQUEST_GET(
-                    url,
-                    headers,
-                    timeout=max(0.001, min(10, deadline - time.monotonic())),
-                )
-            if timeout is not None:
-                return REQUEST_GET(url, headers, timeout=timeout)
-            return REQUEST_GET(url, headers)
+                timeout = max(0.001, min(10, deadline - time.monotonic()))
+            if timeout is None:
+                response = REQUEST_GET(url, headers)
+            else:
+                response = REQUEST_GET(url, headers, timeout=timeout)
         except requests.exceptions.ConnectTimeout:
             if retry_count == CONNECT_TIMEOUT_RETRIES:
                 raise
@@ -137,6 +139,9 @@ def request_get(url, headers, timeout=None, *, deadline=None, cancellation_event
                 retry_count + 1,
                 CONNECT_TIMEOUT_RETRIES,
             )
+        else:
+            record_http_response(response)
+            return response
 
 
 def _get_http_heads(download_headers: str = ""):
@@ -357,6 +362,7 @@ def _download_http_content(
             content.write(chunk)
         _check_download(deadline, cancellation_event)
         content.seek(0)
+        record_http_payload(downloaded_bytes, response)
         return content
     except FtRuntimeException:
         raise
@@ -421,7 +427,7 @@ def get_bytes_io_from_url(
             elif url.startswith("oss"):
                 from rtp_llm.utils.oss_util import get_bytes_io_from_oss_path
 
-                res = get_bytes_io_from_oss_path(url)
+                res = get_bytes_io_from_oss_path(url, os.getenv("OSS_ENDPOINT", ""))
             elif get_base64_prefix(url) > 0:
                 res = BytesIO(base64.b64decode(url[get_base64_prefix(url) :]))
             else:

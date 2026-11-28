@@ -719,6 +719,7 @@ def _prepare_v41_image_request(request, input_ids, processor_config, images=None
         prepare_vl_inputs_from_token_ids,
     )
     from rtp_llm.multimodal.multimodal_util import _get_http_heads, request_get
+    from rtp_llm.utils.media_download_metrics import record_http_payload
 
     # Cache bytes only for this request; a URL may change between requests.
     downloaded = {}
@@ -764,6 +765,7 @@ def _prepare_v41_image_request(request, input_ids, processor_config, images=None
                                 raise ValueError("Multimodal file size is too large")
                             chunks.append(chunk)
                         downloaded[url] = b"".join(chunks)
+                        record_http_payload(size, response)
                     break
                 except Exception as error:
                     # Exception strings and URL query parameters can contain credentials.

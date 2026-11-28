@@ -3,6 +3,7 @@ from io import BytesIO
 import oss2
 from oss2.credentials import EnvironmentVariableCredentialsProvider
 
+from rtp_llm.utils.media_download_metrics import record_oss_payload
 
 
 def get_bytes_io_from_oss_path(url: str, oss_endpoint: str):
@@ -22,5 +23,6 @@ def get_bytes_io_from_oss_path(url: str, oss_endpoint: str):
     # Specify the name of the bucket. Example: examplebucket.
     bucket = oss2.Bucket(auth, oss_endpoint, bucket_name, connect_timeout=100)
     object = bucket.get_object(path)
-    io = BytesIO(object.read())
-    return io
+    payload = object.read()
+    record_oss_payload(len(payload))
+    return BytesIO(payload)
