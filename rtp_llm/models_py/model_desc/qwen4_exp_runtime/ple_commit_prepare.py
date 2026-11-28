@@ -5,7 +5,7 @@ from rtp_llm.models_py.kernels.cuda.qwen4_ple.commit_prepare import (
 )
 
 
-def prepare_commit_values(stage, accepted, state_blocks, ctx_blocks):
+def prepare_commit_values(stage, accepted, state_blocks, ctx_blocks, *, workspace=None):
     return _prepare_commit_values(
         stage.initial_state,
         stage.candidate_state_inputs,
@@ -16,4 +16,5 @@ def prepare_commit_values(stage, accepted, state_blocks, ctx_blocks):
         accepted,
         state_blocks,
         ctx_blocks,
+        workspace=workspace,
     )

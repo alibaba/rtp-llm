@@ -11,6 +11,64 @@ import triton
 import triton.language as tl
 
 
+class CommitValueBuffers:
+    """Four independent outputs owned until the caller releases its transaction.
+
+    Each final or boundary write needs a separate instance. Prefix views may
+    be reused only after the previous values and undo are no longer needed.
+    """
+
+    def __init__(self, initial, context):
+        if (
+            initial.ndim != 3
+            or context.ndim != 2
+            or initial.shape[0] != context.shape[0]
+            or initial.shape[0] <= 0
+        ):
+            raise ValueError(
+                "PLE commit buffers require matching state/context batches"
+            )
+        self._state_shape = initial.shape
+        self._context_shape = context.shape
+        self._state_dtype, self._context_dtype = initial.dtype, context.dtype
+        self._state_device, self._context_device = initial.device, context.device
+        values = torch.empty(initial.shape, dtype=initial.dtype, device=initial.device)
+        ctx_values = torch.empty(
+            context.shape, dtype=context.dtype, device=context.device
+        )
+        self._outputs = (
+            values,
+            ctx_values,
+            torch.empty_like(values),
+            torch.empty_like(ctx_values),
+        )
+        self._views = {initial.shape[0]: self._outputs}
+
+    def get(self, initial, context):
+        """Return cached live-prefix outputs, or None for a different layout."""
+        state_shape, context_shape = initial.shape, context.shape
+        if (
+            len(state_shape) != 3
+            or len(context_shape) != 2
+            or not 0 < state_shape[0] <= self._state_shape[0]
+            or state_shape[0] != context_shape[0]
+            or state_shape[1] != self._state_shape[1]
+            or state_shape[2] != self._state_shape[2]
+            or context_shape[1] != self._context_shape[1]
+            or initial.dtype != self._state_dtype
+            or context.dtype != self._context_dtype
+            or initial.device != self._state_device
+            or context.device != self._context_device
+        ):
+            return None
+        batch = state_shape[0]
+        outputs = self._views.get(batch)
+        if outputs is None:
+            outputs = tuple(value[:batch] for value in self._outputs)
+            self._views[batch] = outputs
+        return outputs
+
+
 @triton.jit
 def _prepare_values_kernel(
     ACCEPT,
@@ -100,11 +158,14 @@ def prepare_commit_values(
     accepted,
     state_blocks,
     ctx_blocks,
+    *,
+    workspace=None,
 ):
     """Return (state, context, undo state, undo context), or None for fallback.
 
     No persistent writes or host synchronization occur here. All four outputs
-    own their storage; undo never aliases either pool or selected values.
+    use independent storage; undo never aliases either pool or selected values.
+    A workspace retains their storage until its transaction owner releases it.
     The transaction owner checks all destinations (including duplicates) before
     calling this function and synchronizes before publishing its prepare plan.
     """
@@ -150,9 +211,20 @@ def prepare_commit_values(
     ):
         return None
     batch, length, width = initial.shape
-    values = torch.empty(initial.shape, dtype=initial.dtype, device=initial.device)
-    ctx_values = torch.empty(context.shape, dtype=context.dtype, device=context.device)
-    undo, ctx_undo = torch.empty_like(values), torch.empty_like(ctx_values)
+    outputs = (
+        workspace.get(initial, context)
+        if isinstance(workspace, CommitValueBuffers)
+        else None
+    )
+    if outputs is None:
+        values = torch.empty(initial.shape, dtype=initial.dtype, device=initial.device)
+        ctx_values = torch.empty(
+            context.shape, dtype=context.dtype, device=context.device
+        )
+        undo, ctx_undo = torch.empty_like(values), torch.empty_like(ctx_values)
+        outputs = values, ctx_values, undo, ctx_undo
+    else:
+        values, ctx_values, undo, ctx_undo = outputs
     _prepare_values_kernel[(batch, triton.cdiv(length * width, 512))](
         accepted,
         initial,
@@ -177,4 +249,4 @@ def prepare_commit_values(
         512,
         num_warps=4,
     )
-    return values, ctx_values, undo, ctx_undo
+    return outputs
