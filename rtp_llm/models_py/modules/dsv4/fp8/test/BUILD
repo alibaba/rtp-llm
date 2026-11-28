@@ -180,10 +180,31 @@ dsv4_py_test(
     ],
 )
 
+dsv4_py_test(
+    name = "test_trackb1_cp_pool_swa_parity",
+    src = "test_trackb1_cp_pool_swa_perf.py",
+    args = [
+        "-k",
+        "test_parity_all_trackb1_ops",
+    ],
+    deps = _DSV4_FP8_TEST_DEPS,
+)
+
+dsv4_py_test(
+    name = "test_trackb1_cp_pool_swa_perf",
+    args = ["-s"],
+    tags = [
+        "manual",
+        "perf",
+    ],
+    deps = _DSV4_FP8_TEST_DEPS,
+)
+
 test_suite(
     name = "dsv4_fp8_cuda13_unit",
     tests = [":" + name for name in _GPU_TESTS + _CONTRACT_TESTS] + [
         ":test_indexer_cp_padded_gather_distributed",
+        ":test_trackb1_cp_pool_swa_parity",
     ],
 )
 

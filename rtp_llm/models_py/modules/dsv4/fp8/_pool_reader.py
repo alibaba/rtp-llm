@@ -34,6 +34,16 @@ from typing import Any, Optional
 
 import torch
 
+try:
+    import triton
+    import triton.language as tl
+
+    _TRITON_AVAILABLE = True
+except Exception:  # pragma: no cover
+    triton = None
+    tl = None
+    _TRITON_AVAILABLE = False
+
 from rtp_llm.models_py.distributed.collective_torch import Group, all_gather
 from rtp_llm.models_py.modules.dsv4._profiler import record_function_range
 from rtp_llm.models_py.modules.dsv4.cp import (
@@ -52,6 +62,130 @@ from rtp_llm.models_py.modules.dsv4.fp8._swa_dequant_triton import (
     try_gather_k_cache_packed_to_flat,
     try_restore_dequantize_scatter_packed_k_cache_flat,
 )
+
+
+if _TRITON_AVAILABLE:
+
+    @triton.jit(
+        do_not_specialize=[
+            "total",
+            "batch_size",
+            "D",
+            "padded_stride0",
+            "padded_stride1",
+            "out_stride0",
+        ]
+    )
+    def _pack_padded_to_flat_kernel(
+        padded_ptr,
+        lens_ptr,
+        out_ptr,
+        total,
+        batch_size,
+        D,
+        padded_stride0,
+        padded_stride1,
+        out_stride0,
+        TILE_M: tl.constexpr,
+        BLOCK_D: tl.constexpr,
+        BATCH_BLOCK: tl.constexpr,
+    ):
+        t_offs = tl.program_id(0).to(tl.int64) * TILE_M + tl.arange(0, TILE_M)
+        t_valid = t_offs < total
+
+        batch_offsets = tl.arange(0, BATCH_BLOCK)
+        batch_mask = batch_offsets < batch_size
+        lens = tl.load(lens_ptr + batch_offsets, mask=batch_mask, other=0).to(tl.int64)
+        ends = tl.cumsum(lens, axis=0)
+        starts = ends - lens
+
+        batch_idx = tl.sum((t_offs[:, None] >= ends[None, :]).to(tl.int32), axis=1)
+        eq_mask = batch_idx[:, None] == batch_offsets[None, :]
+        req_start = tl.sum(tl.where(eq_mask, starts[None, :], 0), axis=1)
+        s_idx = t_offs - req_start
+
+        d_cols = tl.arange(0, BLOCK_D)
+        tile_mask = t_valid[:, None] & (d_cols[None, :] < D)
+        src_ptrs = (
+            padded_ptr
+            + batch_idx.to(tl.int64)[:, None] * padded_stride0.to(tl.int64)
+            + s_idx[:, None] * padded_stride1.to(tl.int64)
+            + d_cols[None, :]
+        )
+        vals = tl.load(src_ptrs, mask=tile_mask, other=0)
+        tl.store(
+            out_ptr + t_offs[:, None] * out_stride0.to(tl.int64) + d_cols[None, :],
+            vals,
+            mask=tile_mask,
+        )
+
+    @triton.jit(
+        do_not_specialize=[
+            "total",
+            "batch_size",
+            "D",
+            "offset",
+            "src_stride0",
+            "out_stride0",
+            "out_stride1",
+        ]
+    )
+    def _scatter_flat_to_workspace_kernel(
+        restored_ptr,
+        out_ptr,
+        seq_lens_ptr,
+        cu_dst_offsets_ptr,
+        total,
+        batch_size,
+        D,
+        offset,
+        src_stride0,
+        out_stride0,
+        out_stride1,
+        TILE_M: tl.constexpr,
+        BLOCK_D: tl.constexpr,
+        BATCH_BLOCK: tl.constexpr,
+        HAS_CU_DST_OFFSETS: tl.constexpr,
+    ):
+        t_offs = tl.program_id(0).to(tl.int64) * TILE_M + tl.arange(0, TILE_M)
+        t_valid = t_offs < total
+
+        batch_offsets = tl.arange(0, BATCH_BLOCK)
+        batch_mask = batch_offsets < batch_size
+        seq_lens = tl.load(seq_lens_ptr + batch_offsets, mask=batch_mask, other=0).to(
+            tl.int64
+        )
+        ends = tl.cumsum(seq_lens, axis=0)
+        starts = ends - seq_lens
+
+        batch_idx = tl.sum((t_offs[:, None] >= ends[None, :]).to(tl.int32), axis=1)
+        valid_batch = t_valid & (batch_idx >= 0) & (batch_idx < batch_size)
+        safe_batch = tl.where(valid_batch, batch_idx, 0).to(tl.int64)
+        eq_mask = batch_idx[:, None] == batch_offsets[None, :]
+        seq_start = tl.sum(tl.where(eq_mask, starts[None, :], 0), axis=1)
+        in_req = t_offs - seq_start
+
+        if HAS_CU_DST_OFFSETS:
+            dst_base = tl.load(
+                cu_dst_offsets_ptr + safe_batch, mask=valid_batch, other=0
+            ).to(tl.int64)
+            out_row_off = (
+                dst_base + offset.to(tl.int64) + in_req
+            ) * out_stride0.to(tl.int64)
+        else:
+            out_row_off = (
+                safe_batch * out_stride0.to(tl.int64)
+                + (offset.to(tl.int64) + in_req) * out_stride1.to(tl.int64)
+            )
+
+        d_cols = tl.arange(0, BLOCK_D)
+        tile_mask = valid_batch[:, None] & (d_cols[None, :] < D)
+        vals = tl.load(
+            restored_ptr + t_offs[:, None] * src_stride0.to(tl.int64) + d_cols[None, :],
+            mask=tile_mask,
+            other=0,
+        )
+        tl.store(out_ptr + out_row_off[:, None] + d_cols[None, :], vals, mask=tile_mask)
 
 
 class CompressedKPoolReader:
@@ -179,17 +313,40 @@ class CPShardConfig:
                 device=device, dtype=torch.int32
             )
 
-        if self.max_local_seq_len_padded == 0 and self.local_seq_lens_padded.numel():
-            if self.local_seq_lens_padded.numel() == 1:
-                self.max_local_seq_len_padded = int(self.total_local_kv)
-            else:
-                self.max_local_seq_len_padded = int(
-                    self.local_seq_lens_padded.max().item()
-                )
-        if self.has_local_seq_len_actual is None and self.local_seq_lens_actual.numel():
-            self.has_local_seq_len_actual = (
-                int(self.local_seq_lens_actual.max().item()) > 0
+        if (
+            self.max_local_seq_len_padded == 0
+            and self.has_local_seq_len_actual is None
+            and self.local_seq_lens_padded.numel() > 1
+            and self.local_seq_lens_padded.is_cuda
+            and self.local_seq_lens_actual.numel() > 0
+            and self.local_seq_lens_actual.is_cuda
+        ):
+            max_pad_v, max_act_v = (
+                int(v)
+                for v in torch.stack(
+                    [
+                        self.local_seq_lens_padded.max().to(torch.int64),
+                        self.local_seq_lens_actual.max().to(torch.int64),
+                    ]
+                ).tolist()
             )
+            self.max_local_seq_len_padded = max_pad_v
+            self.has_local_seq_len_actual = max_act_v > 0
+        else:
+            if self.max_local_seq_len_padded == 0 and self.local_seq_lens_padded.numel():
+                if self.local_seq_lens_padded.numel() == 1:
+                    self.max_local_seq_len_padded = int(self.total_local_kv)
+                else:
+                    self.max_local_seq_len_padded = int(
+                        self.local_seq_lens_padded.max().item()
+                    )
+            if (
+                self.has_local_seq_len_actual is None
+                and self.local_seq_lens_actual.numel()
+            ):
+                self.has_local_seq_len_actual = (
+                    int(self.local_seq_lens_actual.max().item()) > 0
+                )
 
 
 @dataclass
@@ -553,20 +710,42 @@ class CPShardedPoolReader(CompressedKPoolReader):
 def _pack_padded_to_flat(
     padded: torch.Tensor, lens: torch.Tensor, total: int, D: int
 ) -> torch.Tensor:
-    """Drop per-row padding → flat [total, D].
-
-    Vectorized: build per-token ``(b_idx, s_idx)`` via repeat_interleave +
-    arange − cu_starts, then advanced-index in one shot. Replaces a
-    per-request Python loop with B .item() syncs (~B per layer per
-    reader).
-    """
+    """Drop per-row padding → flat [total, D]."""
     if total == 0:
         return torch.empty((0, D), dtype=padded.dtype, device=padded.device)
     device = padded.device
-    lens_l = lens.to(device=device, dtype=torch.int64)
-    B = int(lens_l.shape[0])
+    B = int(lens.shape[0])
     if B == 1:
         return padded[0, :total, :].contiguous()
+    if (
+        _TRITON_AVAILABLE
+        and padded.is_cuda
+        and padded.dim() == 3
+        and int(padded.stride(2)) == 1
+        and B <= 256
+        and 0 < D <= 2048
+    ):
+        lens_d = lens if (lens.device == device and lens.is_contiguous()) else lens.to(device=device).contiguous()
+        out = torch.empty((total, D), dtype=padded.dtype, device=device)
+        tile_m = 8
+        _pack_padded_to_flat_kernel[(triton.cdiv(total, tile_m),)](
+            padded,
+            lens_d,
+            out,
+            total=total,
+            batch_size=B,
+            D=D,
+            padded_stride0=int(padded.stride(0)),
+            padded_stride1=int(padded.stride(1)),
+            out_stride0=int(out.stride(0)),
+            TILE_M=tile_m,
+            BLOCK_D=triton.next_power_of_2(D),
+            BATCH_BLOCK=triton.next_power_of_2(B),
+            num_warps=4,
+        )
+        return out
+
+    lens_l = lens.to(device=device, dtype=torch.int64)
     b_idx = torch.repeat_interleave(
         torch.arange(B, device=device, dtype=torch.int64),
         lens_l,
@@ -588,23 +767,70 @@ def _scatter_flat_to_workspace(
     offset: int,
     cu_dst_offsets: Optional[torch.Tensor] = None,
 ) -> None:
-    """Copy restored[r-th-slice] → workspace rows.
-
-    Vectorized: build per-token workspace coordinates on GPU for a single
-    scatter op, supporting both legacy 3D ``[B, M, D]`` and ragged 2D
-    ``[total_rows, D]`` (with ``cu_dst_offsets``). Replaces a per-request
-    loop with B .item() syncs.
-    """
+    """Copy restored[r-th-slice] → workspace rows."""
     total = int(restored.shape[0])
     if total == 0:
         return
     device = restored.device
+    B = int(seq_lens.shape[0])
+    if cu_dst_offsets is None and B == 1:
+        out[0, offset : offset + total, :].copy_(restored)
+        return
+
+    D = int(restored.shape[1]) if restored.dim() == 2 else 0
+    has_cu = cu_dst_offsets is not None
+    if has_cu:
+        assert out.dim() == 2 and int(cu_dst_offsets.numel()) >= B
+    if (
+        _TRITON_AVAILABLE
+        and restored.is_cuda
+        and out.is_cuda
+        and out.device == device
+        and restored.dtype == out.dtype
+        and restored.dim() == 2
+        and int(restored.stride(1)) == 1
+        and B > 0
+        and B <= 256
+        and 0 < D <= 2048
+        and ((has_cu and int(out.stride(1)) == 1) or (not has_cu and out.dim() == 3 and int(out.stride(2)) == 1))
+    ):
+        seq_lens_d = (
+            seq_lens
+            if (seq_lens.device == device and seq_lens.is_contiguous())
+            else seq_lens.to(device=device).contiguous()
+        )
+        cu_dst_d = (
+            (
+                cu_dst_offsets[:B]
+                if (cu_dst_offsets.device == device and cu_dst_offsets.is_contiguous())
+                else cu_dst_offsets[:B].to(device=device).contiguous()
+            )
+            if has_cu
+            else seq_lens_d
+        )
+        tile_m = 8
+        _scatter_flat_to_workspace_kernel[(triton.cdiv(total, tile_m),)](
+            restored,
+            out,
+            seq_lens_d,
+            cu_dst_d,
+            total=total,
+            batch_size=B,
+            D=D,
+            offset=int(offset),
+            src_stride0=int(restored.stride(0)),
+            out_stride0=int(out.stride(0)),
+            out_stride1=int(out.stride(1)) if not has_cu else 0,
+            TILE_M=tile_m,
+            BLOCK_D=triton.next_power_of_2(D),
+            BATCH_BLOCK=triton.next_power_of_2(B),
+            HAS_CU_DST_OFFSETS=has_cu,
+            num_warps=4,
+        )
+        return
+
     seq_lens_l = seq_lens.to(device=device, dtype=torch.int64)
-    B = int(seq_lens_l.shape[0])
-    if cu_dst_offsets is None:
-        if B == 1:
-            out[0, offset : offset + total, :].copy_(restored)
-            return
+    if not has_cu:
         b_idx = torch.repeat_interleave(
             torch.arange(B, device=device, dtype=torch.int64),
             seq_lens_l,
@@ -621,7 +847,6 @@ def _scatter_flat_to_workspace(
         out.index_put_((b_idx, col_idx), restored, accumulate=False)
         return
 
-    assert out.dim() == 2 and int(cu_dst_offsets.numel()) >= B
     b_idx = torch.repeat_interleave(
         torch.arange(B, device=device, dtype=torch.int64),
         seq_lens_l,
@@ -667,26 +892,28 @@ def make_compressed_k_pool_reader(
             "block_size; got None. Pass torch.zeros(B, dtype=int64) only when "
             "this iteration has no compressed-K rows to restore."
         )
-    if total_kv_len is not None:
-        if int(total_kv_len) <= 0:
-            return LocalPoolReader()
-    elif not torch.any(per_req_total_kv_lens > 0):
+    if total_kv_len is not None and int(total_kv_len) <= 0:
         return LocalPoolReader()
-    # Lazy import to avoid circular: cp.py imports nothing from here.
-    from rtp_llm.models_py.modules.dsv4.cp import build_kv_allgather_restore_indices
 
-    device = per_req_total_kv_lens.device
     owner_bs = int(owner_block_size or block_size)
     if owner_bs <= 0:
         raise ValueError(f"owner_block_size must be positive, got {owner_bs}")
+
+    from rtp_llm.models_py.modules.dsv4.cp import build_kv_allgather_restore_indices
+
+    device = per_req_total_kv_lens.device
     batch_size = int(per_req_total_kv_lens.numel())
+    if batch_size == 0:
+        return LocalPoolReader()
+
     if batch_size == 1 and total_kv_len is not None:
+        total_kv_host = int(total_kv_len)
         total_local = cp_padded_local_kv_len(
-            int(total_kv_len), cp_ctx.cp_size, owner_bs
+            total_kv_host, cp_ctx.cp_size, owner_bs
         )
         max_local = total_local
         actual_local = cp_actual_owned_kv_len(
-            int(total_kv_len),
+            total_kv_host,
             cp_ctx.cp_size,
             owner_bs,
             cp_ctx.cp_rank,
@@ -698,6 +925,24 @@ def make_compressed_k_pool_reader(
         local_actual_lens = torch.full(
             (1,), actual_local, dtype=torch.int32, device=device
         )
+    elif device.type == "cpu":
+        per_req_cpu = per_req_total_kv_lens.to(dtype=torch.int64)
+        total_kv_host = (
+            int(total_kv_len)
+            if total_kv_len is not None
+            else int(per_req_cpu.sum().item())
+        )
+        if total_kv_host <= 0:
+            return LocalPoolReader()
+        local_lens = cp_padded_local_kv_lens(
+            per_req_cpu, cp_ctx.cp_size, owner_bs
+        ).to(dtype=torch.int32)
+        local_actual_lens = cp_actual_owned_kv_lens(
+            per_req_cpu, cp_ctx.cp_size, owner_bs, cp_ctx.cp_rank
+        ).to(dtype=torch.int32)
+        total_local = int(local_lens.sum().item())
+        max_local = int(local_lens.max().item())
+        has_actual = int(local_actual_lens.max().item()) > 0
     else:
         local_lens = cp_padded_local_kv_lens(
             per_req_total_kv_lens, cp_ctx.cp_size, owner_bs
@@ -705,27 +950,40 @@ def make_compressed_k_pool_reader(
         local_actual_lens = cp_actual_owned_kv_lens(
             per_req_total_kv_lens, cp_ctx.cp_size, owner_bs, cp_ctx.cp_rank
         ).to(device=device, dtype=torch.int32)
-        # Host scalars are needed to size the per-layer flat gather buffers. Keep
-        # these syncs in metadata construction; the read/restore hot path below must
-        # stay kernel-only aside from the single NCCL wait.
-        total_local = int(local_lens.sum().item())
-        if not local_lens.numel():
-            max_local = 0
-        elif local_lens.numel() == 1:
-            max_local = total_local
+        if total_kv_len is None:
+            total_kv_host, total_local, max_local, max_actual = (
+                int(v)
+                for v in torch.stack(
+                    [
+                        per_req_total_kv_lens.sum().to(torch.int64),
+                        local_lens.sum().to(torch.int64),
+                        local_lens.max().to(torch.int64),
+                        local_actual_lens.max().to(torch.int64),
+                    ]
+                ).tolist()
+            )
+            if total_kv_host <= 0:
+                return LocalPoolReader()
         else:
-            max_local = int(local_lens.max().item())
-        has_actual = (
-            int(local_actual_lens.max().item()) > 0
-            if local_actual_lens.numel()
-            else False
-        )
+            total_kv_host = int(total_kv_len)
+            total_local, max_local, max_actual = (
+                int(v)
+                for v in torch.stack(
+                    [
+                        local_lens.sum().to(torch.int64),
+                        local_lens.max().to(torch.int64),
+                        local_actual_lens.max().to(torch.int64),
+                    ]
+                ).tolist()
+            )
+        has_actual = max_actual > 0
+
     restore = build_kv_allgather_restore_indices(
         per_req_total_kv_lens,
         cp_ctx.cp_size,
         owner_bs,
         device,
-        total_kv_len=total_kv_len,
+        total_kv_len=total_kv_host,
         total_local_kv=total_local,
     )
     return CPShardedPoolReader(
@@ -736,11 +994,7 @@ def make_compressed_k_pool_reader(
             block_size=block_size,
             total_local_kv=total_local,
             owner_block_size=owner_bs,
-            seq_lens_total=(
-                int(total_kv_len)
-                if total_kv_len is not None
-                else int(restore.numel())
-            ),
+            seq_lens_total=total_kv_host,
             local_seq_lens_padded=local_lens,
             local_seq_lens_actual=local_actual_lens,
             max_local_seq_len_padded=max_local,

@@ -1359,51 +1359,83 @@ def try_gather_k_cache_packed_to_flat(
     return True
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["out_stride0", "n_tokens"])
 def _dequantize_packed_k_cache_flat_kernel(
     out_ptr,
     out_stride0,
     packed_ptr,
     n_tokens,
     fp8_dim: tl.constexpr,
+    fp8_dim_pow2: tl.constexpr,
     bf16_dim: tl.constexpr,
     quant_block: tl.constexpr,
     token_data_size: tl.constexpr,
     entry_bytes: tl.constexpr,
     n_quant_blocks: tl.constexpr,
+    n_scale_groups: tl.constexpr,
+    TILE_T_FLAT: tl.constexpr,
 ):
-    token_idx = tl.program_id(0)
-    if token_idx >= n_tokens:
-        return
+    tile_idx = tl.program_id(0).to(tl.int64)
+    t_offs = tile_idx * TILE_T_FLAT + tl.arange(0, TILE_T_FLAT)
+    row_valid = t_offs < n_tokens
 
-    token_ptr = packed_ptr + token_idx * entry_bytes
-    token_fp8_ptr = token_ptr
-    token_bf16_ptr = token_ptr + fp8_dim
-    token_scale_ptr = token_ptr + token_data_size
-    output_row_ptr = out_ptr + token_idx * out_stride0
+    token_off = t_offs * entry_bytes
+    output_row_off = t_offs * out_stride0.to(tl.int64)
 
-    for qblock_idx in tl.static_range(n_quant_blocks):
-        qblock_start = qblock_idx * quant_block
-        if qblock_start < fp8_dim:
-            offsets = qblock_start + tl.arange(0, quant_block)
-            mask = offsets < fp8_dim
+    fp8_cols = tl.arange(0, fp8_dim_pow2)
+    fp8_mask = row_valid[:, None] & (fp8_cols < fp8_dim)[None, :]
+    x_uint8 = tl.load(
+        packed_ptr + token_off[:, None] + fp8_cols[None, :],
+        mask=fp8_mask,
+        other=0,
+    )
+    x_float = x_uint8.to(tl.float8e4nv, bitcast=True).to(tl.float32)
 
-            x_uint8 = tl.load(token_fp8_ptr + offsets, mask=mask, other=0)
-            x_fp8 = x_uint8.to(tl.float8e4nv, bitcast=True)
-            x_float = x_fp8.to(tl.float32)
-
-            encoded_scale = tl.load(token_scale_ptr + qblock_idx)
-            exponent = encoded_scale.to(tl.float32) - 127.0
-            scale = tl.exp2(exponent)
-            x_dequant = x_float * scale
-            tl.store(output_row_ptr + offsets, x_dequant.to(tl.bfloat16), mask=mask)
+    scale_cols = tl.arange(0, n_scale_groups)
+    scale_mask = row_valid[:, None] & (scale_cols < n_quant_blocks)[None, :]
+    encoded_scale = tl.load(
+        packed_ptr + token_off[:, None] + token_data_size + scale_cols[None, :],
+        mask=scale_mask,
+        other=0,
+    )
+    scale = tl.exp2(encoded_scale.to(tl.float32) - 127.0)
+    x_groups = tl.reshape(x_float, (TILE_T_FLAT, n_scale_groups, quant_block))
+    x_dequant = x_groups * scale[:, :, None]
+    x_out = tl.reshape(x_dequant, (TILE_T_FLAT, fp8_dim_pow2)).to(tl.bfloat16)
+    tl.store(out_ptr + output_row_off[:, None] + fp8_cols[None, :], x_out, mask=fp8_mask)
 
     bf16_output_offset = fp8_dim
-    bf16_cache_ptr = token_bf16_ptr.to(tl.pointer_type(tl.bfloat16))
-    for j in tl.static_range(bf16_dim // 16):
-        chunk_offsets = j * 16 + tl.arange(0, 16)
-        bf16_vals = tl.load(bf16_cache_ptr + chunk_offsets)
-        tl.store(output_row_ptr + bf16_output_offset + chunk_offsets, bf16_vals)
+    if bf16_dim == 64:
+        rope_offsets = tl.arange(0, 64)
+        rope_mask = row_valid[:, None]
+        rope_ptrs = (
+            packed_ptr + token_off[:, None] + fp8_dim + rope_offsets[None, :] * 2
+        ).to(tl.pointer_type(tl.bfloat16))
+        bf16_vals = tl.load(rope_ptrs, mask=rope_mask, other=0)
+        tl.store(
+            out_ptr
+            + output_row_off[:, None]
+            + bf16_output_offset
+            + rope_offsets[None, :],
+            bf16_vals,
+            mask=rope_mask,
+        )
+    else:
+        for j in tl.static_range(bf16_dim // 16):
+            chunk_offsets = j * 16 + tl.arange(0, 16)
+            chunk_mask = row_valid[:, None]
+            chunk_ptrs = (
+                packed_ptr + token_off[:, None] + fp8_dim + chunk_offsets[None, :] * 2
+            ).to(tl.pointer_type(tl.bfloat16))
+            bf16_vals = tl.load(chunk_ptrs, mask=chunk_mask, other=0)
+            tl.store(
+                out_ptr
+                + output_row_off[:, None]
+                + bf16_output_offset
+                + chunk_offsets[None, :],
+                bf16_vals,
+                mask=chunk_mask,
+            )
 
 
 @triton.jit(
@@ -1433,11 +1465,13 @@ def _restore_dequantize_scatter_packed_k_cache_flat_kernel(
     n_tokens,
     offset,
     fp8_dim: tl.constexpr,
+    fp8_dim_pow2: tl.constexpr,
     bf16_dim: tl.constexpr,
     quant_block: tl.constexpr,
     token_data_size: tl.constexpr,
     entry_bytes: tl.constexpr,
     n_quant_blocks: tl.constexpr,
+    n_scale_groups: tl.constexpr,
     BATCH_BLOCK: tl.constexpr,
     HAS_CU_DST_OFFSETS: tl.constexpr,
 ):
@@ -1504,42 +1538,42 @@ def _restore_dequantize_scatter_packed_k_cache_flat_kernel(
     valid_row = valid_destination & valid_restore
     safe_restored_idx = tl.where(valid_restore, restored_idx, 0)
     token_ptr = gathered_ptr + safe_restored_idx * entry_bytes
-    token_fp8_ptr = token_ptr
-    token_bf16_ptr = token_ptr + fp8_dim
-    token_scale_ptr = token_ptr + token_data_size
 
-    for qblock_idx in tl.static_range(n_quant_blocks):
-        qblock_start = qblock_idx * quant_block
-        if qblock_start < fp8_dim:
-            offsets = qblock_start + tl.arange(0, quant_block)
-            element_mask = valid_row & (offsets < fp8_dim)
+    fp8_cols = tl.arange(0, fp8_dim_pow2)
+    fp8_mask = valid_row & (fp8_cols < fp8_dim)
+    x_uint8 = tl.load(token_ptr + fp8_cols, mask=fp8_mask, other=0)
+    x_float = x_uint8.to(tl.float8e4nv, bitcast=True).to(tl.float32)
 
-            x_uint8 = tl.load(token_fp8_ptr + offsets, mask=element_mask, other=0)
-            x_fp8 = x_uint8.to(tl.float8e4nv, bitcast=True)
-            x_float = x_fp8.to(tl.float32)
-
-            encoded_scale = tl.load(
-                token_scale_ptr + qblock_idx, mask=valid_row, other=0
-            )
-            exponent = encoded_scale.to(tl.float32) - 127.0
-            scale = tl.exp2(exponent)
-            x_dequant = x_float * scale
-            tl.store(
-                output_row_ptr + offsets,
-                x_dequant.to(tl.bfloat16),
-                mask=element_mask,
-            )
+    scale_cols = tl.arange(0, n_scale_groups)
+    encoded_scale = tl.load(
+        token_ptr + token_data_size + scale_cols,
+        mask=valid_row & (scale_cols < n_quant_blocks),
+        other=0,
+    )
+    scale = tl.exp2(encoded_scale.to(tl.float32) - 127.0)
+    x_groups = tl.reshape(x_float, (n_scale_groups, quant_block))
+    x_out = tl.reshape(x_groups * scale[:, None], (fp8_dim_pow2,)).to(tl.bfloat16)
+    tl.store(output_row_ptr + fp8_cols, x_out, mask=fp8_mask)
 
     bf16_output_offset = fp8_dim
-    bf16_cache_ptr = token_bf16_ptr.to(tl.pointer_type(tl.bfloat16))
-    for j in tl.static_range(bf16_dim // 16):
-        chunk_offsets = j * 16 + tl.arange(0, 16)
-        bf16_vals = tl.load(bf16_cache_ptr + chunk_offsets, mask=valid_row, other=0)
+    bf16_cache_ptr = (token_ptr + fp8_dim).to(tl.pointer_type(tl.bfloat16))
+    if bf16_dim == 64:
+        rope_offsets = tl.arange(0, 64)
+        bf16_vals = tl.load(bf16_cache_ptr + rope_offsets, mask=valid_row, other=0)
         tl.store(
-            output_row_ptr + bf16_output_offset + chunk_offsets,
+            output_row_ptr + bf16_output_offset + rope_offsets,
             bf16_vals,
             mask=valid_row,
         )
+    else:
+        for j in tl.static_range(bf16_dim // 16):
+            chunk_offsets = j * 16 + tl.arange(0, 16)
+            bf16_vals = tl.load(bf16_cache_ptr + chunk_offsets, mask=valid_row, other=0)
+            tl.store(
+                output_row_ptr + bf16_output_offset + chunk_offsets,
+                bf16_vals,
+                mask=valid_row,
+            )
 
 
 def dequantize_packed_k_cache_flat(out: torch.Tensor, packed: torch.Tensor) -> None:
@@ -1561,17 +1595,22 @@ def dequantize_packed_k_cache_flat(out: torch.Tensor, packed: torch.Tensor) -> N
     ), f"packed must be contiguous [N, {ENTRY_BYTES}]; got {packed.stride()}"
     if packed.numel() == 0:
         return
-    _dequantize_packed_k_cache_flat_kernel[(packed.shape[0],)](
+    n_tokens = int(packed.shape[0])
+    _dequantize_packed_k_cache_flat_kernel[(triton.cdiv(n_tokens, TILE_T),)](
         out,
-        out.stride(0),
+        int(out.stride(0)),
         packed,
-        packed.shape[0],
+        n_tokens,
         fp8_dim=NOPE_DIM,
+        fp8_dim_pow2=FP8_DIM_POW2,
         bf16_dim=ROPE_DIM,
         quant_block=TILE_SIZE,
         token_data_size=TOKEN_DATA_SIZE,
         entry_bytes=ENTRY_BYTES,
         n_quant_blocks=NOPE_TILES,
+        n_scale_groups=N_SCALE_GROUPS,
+        TILE_T_FLAT=TILE_T,
+        num_warps=4,
     )
 
 
@@ -1669,11 +1708,13 @@ def try_restore_dequantize_scatter_packed_k_cache_flat(
         n_tokens,
         int(offset),
         fp8_dim=NOPE_DIM,
+        fp8_dim_pow2=FP8_DIM_POW2,
         bf16_dim=ROPE_DIM,
         quant_block=TILE_SIZE,
         token_data_size=TOKEN_DATA_SIZE,
         entry_bytes=ENTRY_BYTES,
         n_quant_blocks=NOPE_TILES,
+        n_scale_groups=N_SCALE_GROUPS,
         BATCH_BLOCK=batch_block,
         HAS_CU_DST_OFFSETS=has_cu_dst_offsets,
         num_warps=4,
@@ -1929,6 +1970,55 @@ def _validate_runtime_gather_lens(
     return saved
 
 
+@triton.jit(
+    do_not_specialize=[
+        "out_stride0",
+        "src_stride0",
+        "src_stride1",
+        "offset",
+        "batch_size",
+        "width",
+    ]
+)
+def _write_ragged_2d_slices_kernel(
+    out_ptr,
+    out_stride0,
+    src_ptr,
+    src_stride0,
+    src_stride1,
+    cu_dst_offsets_ptr,
+    gather_lens_ptr,
+    offset,
+    batch_size,
+    width,
+    HAS_SRC: tl.constexpr,
+    USE_LENS: tl.constexpr,
+    TILE_W: tl.constexpr,
+    HEAD_D: tl.constexpr,
+):
+    b = tl.program_id(0).to(tl.int64)
+    w_tile = tl.program_id(1).to(tl.int64)
+    if b >= batch_size:
+        return
+    gl = tl.load(gather_lens_ptr + b).to(tl.int64) if USE_LENS else width.to(tl.int64)
+    w_offs = w_tile * TILE_W + tl.arange(0, TILE_W)
+    w_valid = w_offs < gl
+    dst_base = tl.load(cu_dst_offsets_ptr + b).to(tl.int64) + offset.to(tl.int64)
+    d_offs = tl.arange(0, HEAD_D)
+    dst_ptrs = out_ptr + (dst_base + w_offs[:, None]) * out_stride0.to(tl.int64) + d_offs[None, :]
+    if HAS_SRC:
+        src_ptrs = (
+            src_ptr
+            + b * src_stride0.to(tl.int64)
+            + w_offs[:, None] * src_stride1.to(tl.int64)
+            + d_offs[None, :]
+        )
+        vals = tl.load(src_ptrs, mask=w_valid[:, None], other=0)
+    else:
+        vals = tl.zeros((TILE_W, HEAD_D), dtype=tl.bfloat16)
+    tl.store(dst_ptrs, vals, mask=w_valid[:, None])
+
+
 def _write_ragged_2d_slices(
     out: torch.Tensor,
     offset: int,
@@ -1939,14 +2029,44 @@ def _write_ragged_2d_slices(
     cu_dst_offsets: torch.Tensor,
     cu_dst_offsets_cpu: Optional[Tuple[int, ...]],
     src_3d: Optional[torch.Tensor] = None,
+    gather_lens: Optional[torch.Tensor] = None,
 ) -> None:
     """Copy or zero-fill ragged 2D per-request workspace slices."""
+    if batch_size == 0 or width == 0:
+        return
+    use_lens = gather_lens_present and len(gather_lens_cpu) == batch_size
+    if (
+        out.is_cuda
+        and out.dtype == torch.bfloat16
+        and int(out.shape[1]) == HEAD_DIM
+        and out.stride(1) == 1
+        and (src_3d is None or (src_3d.is_cuda and src_3d.dtype == torch.bfloat16 and src_3d.stride(2) == 1))
+        and (not use_lens or (gather_lens is not None and gather_lens.is_cuda and gather_lens.is_contiguous()))
+        and (batch_size > 1 or cu_dst_offsets_cpu is None)
+    ):
+        _write_ragged_2d_slices_kernel[(batch_size, triton.cdiv(width, TILE_T))](
+            out,
+            int(out.stride(0)),
+            src_3d if src_3d is not None else out,
+            int(src_3d.stride(0)) if src_3d is not None else 0,
+            int(src_3d.stride(1)) if src_3d is not None else 0,
+            cu_dst_offsets,
+            gather_lens if use_lens else cu_dst_offsets,
+            int(offset),
+            batch_size,
+            width,
+            HAS_SRC=src_3d is not None,
+            USE_LENS=use_lens,
+            TILE_W=TILE_T,
+            HEAD_D=HEAD_DIM,
+            num_warps=4,
+        )
+        return
     offsets = (
         cu_dst_offsets_cpu
         if (cu_dst_offsets_cpu is not None and len(cu_dst_offsets_cpu) >= batch_size)
         else cu_dst_offsets[:batch_size].tolist()
     )
-    use_lens = gather_lens_present and len(gather_lens_cpu) == batch_size
     for b in range(batch_size):
         gl = int(gather_lens_cpu[b]) if use_lens else width
         if gl > 0:
@@ -2201,6 +2321,7 @@ def prepare_dequantize_and_gather_k_cache_slots_cp_byte_sliced(
                         cu_dst_offsets=cu_dst_offsets_eff,
                         cu_dst_offsets_cpu=cu_dst_offsets_cpu_eff,
                         src_3d=restored_3d,
+                        gather_lens=pending.gather_lens,
                     )
                 elif pending.gather_lens_cpu:
                     # CPU lengths are captured during compaction; avoid per-request
@@ -2375,6 +2496,13 @@ def dequantize_and_gather_k_cache_slots_cp_byte_sliced(
                 cu_dst_offsets=cu_dst_offsets,
             )
         else:
+            gather_lens_arg = (
+                _device_gather_lens(
+                    saved_gather_lens, batch_size=B, max_gather_len=W, device=out.device
+                )
+                if gather_lens is not None
+                else None
+            )
             _write_ragged_2d_slices(
                 out,
                 offset,
@@ -2385,6 +2513,7 @@ def dequantize_and_gather_k_cache_slots_cp_byte_sliced(
                 cu_dst_offsets=cu_dst_offsets,
                 cu_dst_offsets_cpu=cu_dst_offsets_cpu,
                 src_3d=None,
+                gather_lens=gather_lens_arg,
             )
         return
 

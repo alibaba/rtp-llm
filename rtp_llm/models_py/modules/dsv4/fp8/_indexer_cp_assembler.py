@@ -111,31 +111,68 @@ def build_indexer_cp_chunk_plan(
     owner_bs = int(owner_block_size or block_size)
     if owner_bs <= 0:
         raise ValueError(f"owner_block_size must be > 0, got {owner_bs}")
-    per_req = per_req_total_kv_lens.to(device=device, dtype=torch.int64).contiguous()
-    if int(per_req.numel()) == 1 and total_kv_len is not None:
-        total_local = cp_padded_local_kv_len(
-            int(total_kv_len), cp_ctx.cp_size, owner_bs
-        )
-        total_actual = cp_actual_owned_kv_len(
-            int(total_kv_len),
-            cp_ctx.cp_size,
-            owner_bs,
-            cp_ctx.cp_rank,
-        )
-        local_lens = torch.full((1,), total_local, dtype=torch.int64, device=device)
-        actual_lens = torch.full((1,), total_actual, dtype=torch.int64, device=device)
+    if per_req_total_kv_lens.device.type == "cpu":
+        per_req_cpu = per_req_total_kv_lens.to(dtype=torch.int64).contiguous()
+        non_blocking = device.type == "cuda"
+        if int(per_req_cpu.numel()) == 1 and total_kv_len is not None:
+            total_local = cp_padded_local_kv_len(
+                int(total_kv_len), cp_ctx.cp_size, owner_bs
+            )
+            total_actual = cp_actual_owned_kv_len(
+                int(total_kv_len),
+                cp_ctx.cp_size,
+                owner_bs,
+                cp_ctx.cp_rank,
+            )
+            local_lens = torch.full(
+                (1,), total_local, dtype=torch.int64, device=device
+            )
+            actual_lens = torch.full(
+                (1,), total_actual, dtype=torch.int64, device=device
+            )
+        else:
+            local_lens_cpu = cp_padded_local_kv_lens(
+                per_req_cpu, cp_ctx.cp_size, owner_bs
+            ).contiguous()
+            actual_lens_cpu = cp_actual_owned_kv_lens(
+                per_req_cpu, cp_ctx.cp_size, owner_bs, cp_ctx.cp_rank
+            ).contiguous()
+            total_local = int(local_lens_cpu.sum().item())
+            total_actual = int(actual_lens_cpu.sum().item())
+            local_lens = local_lens_cpu.to(device=device, non_blocking=non_blocking)
+            actual_lens = actual_lens_cpu.to(device=device, non_blocking=non_blocking)
+        per_req = per_req_cpu.to(device=device, non_blocking=non_blocking)
     else:
-        local_lens = cp_padded_local_kv_lens(
-            per_req, cp_ctx.cp_size, owner_bs
-        ).contiguous()
-        actual_lens = cp_actual_owned_kv_lens(
-            per_req, cp_ctx.cp_size, owner_bs, cp_ctx.cp_rank
-        ).contiguous()
-        # Host scalars size the rank-local all_gather buffers. Consolidate the
-        # multi-request fallback into one synchronization.
-        total_local, total_actual = (
-            int(v) for v in torch.stack([local_lens.sum(), actual_lens.sum()]).tolist()
-        )
+        per_req = per_req_total_kv_lens.to(device=device, dtype=torch.int64).contiguous()
+        if int(per_req.numel()) == 1 and total_kv_len is not None:
+            total_local = cp_padded_local_kv_len(
+                int(total_kv_len), cp_ctx.cp_size, owner_bs
+            )
+            total_actual = cp_actual_owned_kv_len(
+                int(total_kv_len),
+                cp_ctx.cp_size,
+                owner_bs,
+                cp_ctx.cp_rank,
+            )
+            local_lens = torch.full(
+                (1,), total_local, dtype=torch.int64, device=device
+            )
+            actual_lens = torch.full(
+                (1,), total_actual, dtype=torch.int64, device=device
+            )
+        else:
+            local_lens = cp_padded_local_kv_lens(
+                per_req, cp_ctx.cp_size, owner_bs
+            ).contiguous()
+            actual_lens = cp_actual_owned_kv_lens(
+                per_req, cp_ctx.cp_size, owner_bs, cp_ctx.cp_rank
+            ).contiguous()
+            # Host scalars size the rank-local all_gather buffers. Consolidate the
+            # multi-request fallback into one synchronization.
+            total_local, total_actual = (
+                int(v)
+                for v in torch.stack([local_lens.sum(), actual_lens.sum()]).tolist()
+            )
     restore = build_kv_allgather_restore_indices(
         per_req,
         cp_ctx.cp_size,
@@ -159,12 +196,15 @@ def build_indexer_cp_chunk_plan(
 
 def build_local_cu_kv_seqlens(plan: IndexerCPChunkPlan) -> torch.Tensor:
     """Per-rank cu_kv_seqlens (int32) over padded local lengths."""
-    cu = torch.zeros(
-        plan.per_req_local_kv_lens.numel() + 1,
+    n = int(plan.per_req_local_kv_lens.numel())
+    cu = torch.empty(
+        n + 1,
         dtype=torch.int32,
         device=plan.per_req_local_kv_lens.device,
     )
-    cu[1:] = torch.cumsum(plan.per_req_local_kv_lens, dim=0).to(torch.int32)
+    cu[0] = 0
+    if n > 0:
+        torch.cumsum(plan.per_req_local_kv_lens, dim=0, dtype=torch.int32, out=cu[1:])
     return cu
 
 
@@ -174,12 +214,17 @@ def build_actual_local_cu_kv_seqlens(plan: IndexerCPChunkPlan) -> torch.Tensor:
     This is the length vector that should drive the paged-pool read kernel.
     The padded cu vector is only for NCCL shape/restore layout.
     """
-    cu = torch.zeros(
-        plan.per_req_actual_local_kv_lens.numel() + 1,
+    n = int(plan.per_req_actual_local_kv_lens.numel())
+    cu = torch.empty(
+        n + 1,
         dtype=torch.int32,
         device=plan.per_req_actual_local_kv_lens.device,
     )
-    cu[1:] = torch.cumsum(plan.per_req_actual_local_kv_lens, dim=0).to(torch.int32)
+    cu[0] = 0
+    if n > 0:
+        torch.cumsum(
+            plan.per_req_actual_local_kv_lens, dim=0, dtype=torch.int32, out=cu[1:]
+        )
     return cu
 
 
@@ -224,25 +269,83 @@ def copy_actual_indexer_k_to_padded(
         return
 
     device = padded_k_quant.device
-    if int(plan.per_req_actual_local_kv_lens.numel()) == 1:
+    actual_lens = plan.per_req_actual_local_kv_lens
+    B = int(actual_lens.numel())
+    if B == 1:
         padded_k_quant[:total_actual].copy_(actual_k_quant)
         padded_k_scale[:total_actual].copy_(actual_k_scale)
         return
 
-    actual_lens = plan.per_req_actual_local_kv_lens.to(device=device, dtype=torch.int64)
-    padded_lens = plan.per_req_local_kv_lens.to(device=device, dtype=torch.int64)
-    B = int(actual_lens.shape[0])
+    padded_lens = plan.per_req_local_kv_lens
+    if (
+        _TRITON_AVAILABLE
+        and padded_k_quant.is_cuda
+        and actual_k_quant.is_cuda
+        and actual_k_scale.is_cuda
+        and padded_k_scale.is_cuda
+        and actual_k_quant.dim() == 2
+        and actual_k_scale.dim() == 2
+        and padded_k_quant.dim() == 2
+        and padded_k_scale.dim() == 2
+        and actual_k_quant.is_contiguous()
+        and actual_k_scale.is_contiguous()
+        and padded_k_quant.is_contiguous()
+        and padded_k_scale.is_contiguous()
+        and B <= 256
+    ):
+        aq_bytes = actual_k_quant.view(torch.uint8)
+        as_bytes = actual_k_scale.view(torch.uint8)
+        pq_bytes = padded_k_quant.view(torch.uint8)
+        ps_bytes = padded_k_scale.view(torch.uint8)
+        q_cols = int(aq_bytes.shape[1])
+        s_cols = int(as_bytes.shape[1])
+        if (
+            int(pq_bytes.shape[1]) == q_cols
+            and int(ps_bytes.shape[1]) == s_cols
+            and q_cols > 0
+            and s_cols > 0
+        ):
+            actual_lens_d = actual_lens.to(device=device)
+            padded_lens_d = padded_lens.to(device=device)
+            block_m = 16
+            _copy_actual_indexer_k_to_padded_kernel[
+                (triton.cdiv(total_actual, block_m),)
+            ](
+                aq_bytes,
+                as_bytes,
+                pq_bytes,
+                ps_bytes,
+                actual_lens_d,
+                padded_lens_d,
+                total_actual=total_actual,
+                batch_size=B,
+                q_cols=q_cols,
+                s_cols=s_cols,
+                aq_stride=int(aq_bytes.stride(0)),
+                as_stride=int(as_bytes.stride(0)),
+                pq_stride=int(pq_bytes.stride(0)),
+                ps_stride=int(ps_bytes.stride(0)),
+                BLOCK_M=block_m,
+                BLOCK_K=_next_power_of_2(q_cols),
+                BLOCK_S=_next_power_of_2(s_cols),
+                BATCH_BLOCK=_next_power_of_2(B),
+                num_warps=4,
+            )
+            return
+
+    actual_lens_l = actual_lens.to(device=device, dtype=torch.int64)
+    padded_lens_l = padded_lens.to(device=device, dtype=torch.int64)
     req_ids = torch.repeat_interleave(
         torch.arange(B, device=device, dtype=torch.int64),
-        actual_lens,
+        actual_lens_l,
         output_size=total_actual,
     )
 
     actual_cu = torch.zeros(B, dtype=torch.int64, device=device)
     padded_cu = torch.zeros(B, dtype=torch.int64, device=device)
     if B > 1:
-        actual_cu[1:] = torch.cumsum(actual_lens[:-1], dim=0)
-        padded_cu[1:] = torch.cumsum(padded_lens[:-1], dim=0)
+        actual_cu[1:] = torch.cumsum(actual_lens_l[:-1], dim=0)
+        padded_cu[1:] = torch.cumsum(padded_lens_l[:-1], dim=0)
     in_req_pos = torch.arange(
         total_actual, device=device, dtype=torch.int64
     ) - actual_cu.index_select(0, req_ids)
@@ -255,6 +358,86 @@ def copy_actual_indexer_k_to_padded(
 
 if _TRITON_AVAILABLE:
 
+    @triton.jit(
+        do_not_specialize=[
+            "total_actual",
+            "batch_size",
+            "q_cols",
+            "s_cols",
+            "aq_stride",
+            "as_stride",
+            "pq_stride",
+            "ps_stride",
+        ]
+    )
+    def _copy_actual_indexer_k_to_padded_kernel(
+        actual_q_ptr,
+        actual_s_ptr,
+        padded_q_ptr,
+        padded_s_ptr,
+        actual_lens_ptr,
+        padded_lens_ptr,
+        total_actual,
+        batch_size,
+        q_cols,
+        s_cols,
+        aq_stride,
+        as_stride,
+        pq_stride,
+        ps_stride,
+        BLOCK_M: tl.constexpr,
+        BLOCK_K: tl.constexpr,
+        BLOCK_S: tl.constexpr,
+        BATCH_BLOCK: tl.constexpr,
+    ):
+        pid = tl.program_id(0).to(tl.int64)
+        row_ids = pid * BLOCK_M + tl.arange(0, BLOCK_M)
+        row_mask = row_ids < total_actual
+
+        batch_offsets = tl.arange(0, BATCH_BLOCK)
+        batch_mask = batch_offsets < batch_size
+        actual_lens = tl.load(
+            actual_lens_ptr + batch_offsets, mask=batch_mask, other=0
+        ).to(tl.int64)
+        padded_lens = tl.load(
+            padded_lens_ptr + batch_offsets, mask=batch_mask, other=0
+        ).to(tl.int64)
+        actual_ends = tl.cumsum(actual_lens, axis=0)
+        actual_starts = actual_ends - actual_lens
+        padded_starts = tl.cumsum(padded_lens, axis=0) - padded_lens
+
+        batch_idx = tl.sum((row_ids[:, None] >= actual_ends[None, :]).to(tl.int32), axis=1)
+        eq_mask = batch_idx[:, None] == batch_offsets[None, :]
+        actual_start = tl.sum(tl.where(eq_mask, actual_starts[None, :], 0), axis=1)
+        padded_start = tl.sum(tl.where(eq_mask, padded_starts[None, :], 0), axis=1)
+        dst_rows = padded_start + (row_ids - actual_start)
+
+        k_cols = tl.arange(0, BLOCK_K)
+        k_mask = row_mask[:, None] & (k_cols[None, :] < q_cols)
+        k_vals = tl.load(
+            actual_q_ptr + row_ids[:, None] * aq_stride.to(tl.int64) + k_cols[None, :],
+            mask=k_mask,
+            other=0,
+        )
+        tl.store(
+            padded_q_ptr + dst_rows[:, None] * pq_stride.to(tl.int64) + k_cols[None, :],
+            k_vals,
+            mask=k_mask,
+        )
+
+        s_idx = tl.arange(0, BLOCK_S)
+        s_mask = row_mask[:, None] & (s_idx[None, :] < s_cols)
+        s_vals = tl.load(
+            actual_s_ptr + row_ids[:, None] * as_stride.to(tl.int64) + s_idx[None, :],
+            mask=s_mask,
+            other=0,
+        )
+        tl.store(
+            padded_s_ptr + dst_rows[:, None] * ps_stride.to(tl.int64) + s_idx[None, :],
+            s_vals,
+            mask=s_mask,
+        )
+
     @triton.jit(do_not_specialize=["n_rows", "q_stride", "s_stride", "packed_stride"])
     def _pack_indexer_k_kernel(
         local_q_ptr,
@@ -264,22 +447,39 @@ if _TRITON_AVAILABLE:
         q_stride,
         s_stride,
         packed_stride,
+        BLOCK_M: tl.constexpr,
         BLOCK_K: tl.constexpr,
         BLOCK_S: tl.constexpr,
     ):
-        row_id = tl.program_id(0).to(tl.int64)
-        if row_id >= n_rows:
-            return
+        row_ids = tl.program_id(0).to(tl.int64) * BLOCK_M + tl.arange(0, BLOCK_M)
+        row_mask = row_ids < n_rows
         k_cols = tl.arange(0, BLOCK_K)
-        k_mask = k_cols < q_stride
-        k_vals = tl.load(local_q_ptr + row_id * q_stride + k_cols, mask=k_mask)
-        tl.store(packed_ptr + row_id * packed_stride + k_cols, k_vals, mask=k_mask)
+        k_mask = row_mask[:, None] & (k_cols[None, :] < q_stride)
+        k_vals = tl.load(
+            local_q_ptr + row_ids[:, None] * q_stride.to(tl.int64) + k_cols[None, :],
+            mask=k_mask,
+            other=0,
+        )
+        tl.store(
+            packed_ptr
+            + row_ids[:, None] * packed_stride.to(tl.int64)
+            + k_cols[None, :],
+            k_vals,
+            mask=k_mask,
+        )
 
         s_cols = tl.arange(0, BLOCK_S)
-        s_mask = s_cols < s_stride
-        s_vals = tl.load(local_s_ptr + row_id * s_stride + s_cols, mask=s_mask)
+        s_mask = row_mask[:, None] & (s_cols[None, :] < s_stride)
+        s_vals = tl.load(
+            local_s_ptr + row_ids[:, None] * s_stride.to(tl.int64) + s_cols[None, :],
+            mask=s_mask,
+            other=0,
+        )
         tl.store(
-            packed_ptr + row_id * packed_stride + q_stride + s_cols,
+            packed_ptr
+            + row_ids[:, None] * packed_stride.to(tl.int64)
+            + q_stride.to(tl.int64)
+            + s_cols[None, :],
             s_vals,
             mask=s_mask,
         )
@@ -296,27 +496,44 @@ if _TRITON_AVAILABLE:
         k_stride,
         s_stride,
         n_rows,
+        BLOCK_M: tl.constexpr,
         BLOCK_K: tl.constexpr,
         BLOCK_S: tl.constexpr,
     ):
-        row_id = tl.program_id(0).to(tl.int64)
-        if row_id >= n_rows:
-            return
-        src_row = tl.load(indices_ptr + row_id).to(tl.int64)
+        row_ids = tl.program_id(0).to(tl.int64) * BLOCK_M + tl.arange(0, BLOCK_M)
+        row_mask = row_ids < n_rows
+        src_rows = tl.load(indices_ptr + row_ids, mask=row_mask, other=0).to(tl.int64)
+
         k_cols = tl.arange(0, BLOCK_K)
-        k_mask = k_cols < k_stride
+        k_mask = row_mask[:, None] & (k_cols[None, :] < k_stride)
         k_vals = tl.load(
-            gathered_packed_ptr + src_row * packed_stride + k_cols, mask=k_mask
+            gathered_packed_ptr
+            + src_rows[:, None] * packed_stride.to(tl.int64)
+            + k_cols[None, :],
+            mask=k_mask,
+            other=0,
         )
-        tl.store(out_k_ptr + row_id * k_stride + k_cols, k_vals, mask=k_mask)
+        tl.store(
+            out_k_ptr + row_ids[:, None] * k_stride.to(tl.int64) + k_cols[None, :],
+            k_vals,
+            mask=k_mask,
+        )
 
         s_cols = tl.arange(0, BLOCK_S)
-        s_mask = s_cols < s_stride
+        s_mask = row_mask[:, None] & (s_cols[None, :] < s_stride)
         s_vals = tl.load(
-            gathered_packed_ptr + src_row * packed_stride + k_stride + s_cols,
+            gathered_packed_ptr
+            + src_rows[:, None] * packed_stride.to(tl.int64)
+            + k_stride.to(tl.int64)
+            + s_cols[None, :],
+            mask=s_mask,
+            other=0,
+        )
+        tl.store(
+            out_s_ptr + row_ids[:, None] * s_stride.to(tl.int64) + s_cols[None, :],
+            s_vals,
             mask=s_mask,
         )
-        tl.store(out_s_ptr + row_id * s_stride + s_cols, s_vals, mask=s_mask)
 
     @triton.jit(do_not_specialize=["n_rows", "k_stride", "s_stride"])
     def _restore_separate_indexer_k_kernel(
@@ -328,22 +545,43 @@ if _TRITON_AVAILABLE:
         k_stride,
         s_stride,
         n_rows,
+        BLOCK_M: tl.constexpr,
         BLOCK_K: tl.constexpr,
         BLOCK_S: tl.constexpr,
     ):
-        row_id = tl.program_id(0).to(tl.int64)
-        if row_id >= n_rows:
-            return
-        src_row = tl.load(indices_ptr + row_id).to(tl.int64)
+        row_ids = tl.program_id(0).to(tl.int64) * BLOCK_M + tl.arange(0, BLOCK_M)
+        row_mask = row_ids < n_rows
+        src_rows = tl.load(indices_ptr + row_ids, mask=row_mask, other=0).to(tl.int64)
+
         k_cols = tl.arange(0, BLOCK_K)
-        k_mask = k_cols < k_stride
-        k_vals = tl.load(gathered_k_ptr + src_row * k_stride + k_cols, mask=k_mask)
-        tl.store(out_k_ptr + row_id * k_stride + k_cols, k_vals, mask=k_mask)
+        k_mask = row_mask[:, None] & (k_cols[None, :] < k_stride)
+        k_vals = tl.load(
+            gathered_k_ptr
+            + src_rows[:, None] * k_stride.to(tl.int64)
+            + k_cols[None, :],
+            mask=k_mask,
+            other=0,
+        )
+        tl.store(
+            out_k_ptr + row_ids[:, None] * k_stride.to(tl.int64) + k_cols[None, :],
+            k_vals,
+            mask=k_mask,
+        )
 
         s_cols = tl.arange(0, BLOCK_S)
-        s_mask = s_cols < s_stride
-        s_vals = tl.load(gathered_s_ptr + src_row * s_stride + s_cols, mask=s_mask)
-        tl.store(out_s_ptr + row_id * s_stride + s_cols, s_vals, mask=s_mask)
+        s_mask = row_mask[:, None] & (s_cols[None, :] < s_stride)
+        s_vals = tl.load(
+            gathered_s_ptr
+            + src_rows[:, None] * s_stride.to(tl.int64)
+            + s_cols[None, :],
+            mask=s_mask,
+            other=0,
+        )
+        tl.store(
+            out_s_ptr + row_ids[:, None] * s_stride.to(tl.int64) + s_cols[None, :],
+            s_vals,
+            mask=s_mask,
+        )
 
 
 def _next_power_of_2(n: int) -> int:
@@ -387,7 +625,8 @@ def _pack_indexer_k_payload(
     )
     if rows > 0:
         if _TRITON_AVAILABLE and packed.is_cuda:
-            _pack_indexer_k_kernel[(rows,)](
+            block_m = 16
+            _pack_indexer_k_kernel[(triton.cdiv(rows, block_m),)](
                 local_q_bytes,
                 local_s_bytes,
                 packed,
@@ -395,9 +634,10 @@ def _pack_indexer_k_payload(
                 q_cols,
                 s_cols,
                 q_cols + s_cols,
+                BLOCK_M=block_m,
                 BLOCK_K=_next_power_of_2(q_cols),
                 BLOCK_S=_next_power_of_2(s_cols),
-                num_warps=2 if q_cols <= 128 else 4,
+                num_warps=4,
             )
         else:
             packed[:, :q_cols].copy_(local_q_bytes)
@@ -622,7 +862,8 @@ def _restore_indexer_k_packed(
             and int(out_k_quant.shape[1]) == q_cols
             and int(out_k_scale.shape[1]) == s_cols
         ):
-            _restore_packed_indexer_k_kernel[(chunk_T,)](
+            block_m = 16
+            _restore_packed_indexer_k_kernel[(triton.cdiv(chunk_T, block_m),)](
                 gathered_packed,
                 out_k_quant.view(torch.uint8),
                 out_k_scale.view(torch.uint8),
@@ -631,9 +872,10 @@ def _restore_indexer_k_packed(
                 q_cols,
                 s_cols,
                 chunk_T,
+                BLOCK_M=block_m,
                 BLOCK_K=_next_power_of_2(q_cols),
                 BLOCK_S=_next_power_of_2(s_cols),
-                num_warps=2 if q_cols <= 128 else 4,
+                num_warps=4,
             )
             return
         out_k_quant.view(torch.uint8).copy_(gathered_packed[idx, :q_cols])
@@ -666,7 +908,8 @@ def restore_indexer_k(
         ):
             q_cols = int(out_k_quant.shape[1])
             s_cols = int(out_k_scale.shape[1])
-            _restore_separate_indexer_k_kernel[(chunk_T,)](
+            block_m = 16
+            _restore_separate_indexer_k_kernel[(triton.cdiv(chunk_T, block_m),)](
                 gathered_q.view(torch.uint8),
                 gathered_s.view(torch.uint8),
                 out_k_quant.view(torch.uint8),
@@ -675,9 +918,10 @@ def restore_indexer_k(
                 q_cols,
                 s_cols,
                 chunk_T,
+                BLOCK_M=block_m,
                 BLOCK_K=_next_power_of_2(q_cols),
                 BLOCK_S=_next_power_of_2(s_cols),
-                num_warps=2 if q_cols <= 128 else 4,
+                num_warps=4,
             )
             return
         out_k_quant.copy_(gathered_q[idx])

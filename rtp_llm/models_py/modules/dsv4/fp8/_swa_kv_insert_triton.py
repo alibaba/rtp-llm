@@ -451,6 +451,172 @@ def row_scatter(
     )
 
 
+@triton.jit(
+    do_not_specialize=[
+        "num_rows",
+        "num_cols",
+        "dst_stride0",
+        "num_dst_rows",
+    ]
+)
+def _zero_indexed_rows_kernel(
+    dst_ptr,
+    row_indices_ptr,
+    num_rows,
+    num_cols,
+    dst_stride0,
+    num_dst_rows,
+    BLOCK_C: tl.constexpr,
+    TRAP_INVALID_KV_ACCESS: tl.constexpr,
+):
+    """Zero selected rows of a 2D byte tensor in place without temp allocation."""
+    row_pos = tl.program_id(0).to(tl.int64)
+    col_tile = tl.program_id(1).to(tl.int64)
+    if row_pos >= num_rows:
+        return
+    dst_row = tl.load(row_indices_ptr + row_pos).to(tl.int64)
+    if dst_row < 0 or dst_row >= num_dst_rows:
+        _trap_invalid_kv_access(TRAP_INVALID_KV_ACCESS)
+        return
+    cols = col_tile * BLOCK_C + tl.arange(0, BLOCK_C)
+    mask = cols < num_cols
+    tl.store(
+        dst_ptr + dst_row * dst_stride0.to(tl.int64) + cols,
+        tl.zeros((BLOCK_C,), dtype=tl.uint8),
+        mask=mask,
+    )
+
+
+@triton.jit(
+    do_not_specialize=[
+        "num_tokens",
+        "k_stride0",
+        "k_cache_stride0",
+        "num_pool_blocks",
+        "num_unique_blocks",
+        "cache_block_size",
+        "slice_start",
+        "slice_end",
+    ]
+)
+def _quantize_and_insert_k_cp_byte_sliced_kernel(
+    k_ptr,
+    k_stride0,
+    compact_slots_ptr,
+    unique_blocks_ptr,
+    k_cache_raw_ptr,
+    k_cache_stride0,
+    num_tokens,
+    num_pool_blocks,
+    num_unique_blocks,
+    cache_block_size,
+    slice_start,
+    slice_end,
+    input_dim: tl.constexpr,
+    fp8_dim: tl.constexpr,
+    bf16_dim: tl.constexpr,
+    scale_dim: tl.constexpr,
+    quant_block: tl.constexpr,
+    token_data_size: tl.constexpr,
+    fp8_max: tl.constexpr,
+    n_quant_blocks: tl.constexpr,
+    TRAP_INVALID_KV_ACCESS: tl.constexpr,
+):
+    """Quantize and write only the CP-rank-owned byte slice directly into k_cache_raw."""
+    pid = tl.program_id(0).to(tl.int64)
+    if pid >= num_tokens:
+        return
+
+    slot_idx = tl.load(compact_slots_ptr + pid).to(tl.int64)
+    if slot_idx == -1:
+        return
+
+    blk_idx = slot_idx // cache_block_size
+    pos_in_block = slot_idx % cache_block_size
+    if blk_idx < 0 or blk_idx >= num_unique_blocks:
+        _trap_invalid_kv_access(TRAP_INVALID_KV_ACCESS)
+        return
+
+    phys_blk = tl.load(unique_blocks_ptr + blk_idx).to(tl.int64)
+    if phys_blk < 0 or phys_blk >= num_pool_blocks:
+        _trap_invalid_kv_access(TRAP_INVALID_KV_ACCESS)
+        return
+
+    data_base = pos_in_block * token_data_size
+    scale_base = cache_block_size * token_data_size + pos_in_block * scale_dim
+    data_hits = (data_base + token_data_size > slice_start) & (data_base < slice_end)
+    scale_hits = (scale_base + scale_dim > slice_start) & (scale_base < slice_end)
+    if not (data_hits or scale_hits):
+        return
+
+    input_row_ptr = k_ptr + pid * k_stride0.to(tl.int64)
+    row_offsets = tl.arange(0, input_dim)
+    x_full = tl.load(input_row_ptr + row_offsets)
+    x_groups = tl.reshape(x_full, (n_quant_blocks, quant_block))
+
+    abs_x = tl.abs(x_groups)
+    block_max = tl.max(abs_x, axis=1)
+    block_max = tl.maximum(block_max, 1e-4)
+
+    raw_scale = block_max / fp8_max
+    raw_bits = raw_scale.to(tl.uint32, bitcast=True)
+    rounded_bits = (raw_bits + 0x007FFFFF) & 0xFF800000
+    rounded_scale = tl.maximum(rounded_bits.to(tl.float32, bitcast=True), 1e-30)
+
+    exp_bits = (rounded_bits >> 23) & 0xFF
+    scale_bytes = exp_bits.to(tl.uint8)
+
+    dst_block_ptr = k_cache_raw_ptr + phys_blk * k_cache_stride0.to(tl.int64)
+
+    if data_hits:
+        x_scaled = x_groups.to(tl.float32) / rounded_scale[:, None]
+        x_fp8 = x_scaled.to(tl.float8e4nv)
+        x_u8 = x_fp8.to(tl.uint8, bitcast=True)
+        flat_u8 = tl.reshape(x_u8, (input_dim,))
+        fp8_byte_pos = data_base + row_offsets
+        fp8_mask = (
+            (row_offsets < fp8_dim)
+            & (fp8_byte_pos >= slice_start)
+            & (fp8_byte_pos < slice_end)
+        )
+        tl.store(
+            dst_block_ptr + (fp8_byte_pos - slice_start),
+            flat_u8,
+            mask=fp8_mask,
+        )
+
+        rope_offsets = tl.arange(0, bf16_dim)
+        rope_bf16 = tl.load(input_row_ptr + fp8_dim + rope_offsets)
+        rope_u16 = rope_bf16.to(tl.uint16, bitcast=True)
+        rope_lo = (rope_u16 & 0xFF).to(tl.uint8)
+        rope_hi = ((rope_u16 >> 8) & 0xFF).to(tl.uint8)
+        lo_pos = data_base + fp8_dim + rope_offsets * 2
+        hi_pos = lo_pos + 1
+        lo_mask = (lo_pos >= slice_start) & (lo_pos < slice_end)
+        hi_mask = (hi_pos >= slice_start) & (hi_pos < slice_end)
+        tl.store(
+            dst_block_ptr + tl.where(lo_mask, lo_pos - slice_start, 0),
+            rope_lo,
+            mask=lo_mask,
+        )
+        tl.store(
+            dst_block_ptr + tl.where(hi_mask, hi_pos - slice_start, 0),
+            rope_hi,
+            mask=hi_mask,
+        )
+
+    if scale_hits:
+        q_idx = tl.arange(0, n_quant_blocks)
+        out_scales = tl.where(q_idx < 7, scale_bytes, 0).to(tl.uint8)
+        scale_pos = scale_base + q_idx
+        scale_mask = (scale_pos >= slice_start) & (scale_pos < slice_end)
+        tl.store(
+            dst_block_ptr + tl.where(scale_mask, scale_pos - slice_start, 0),
+            out_scales,
+            mask=scale_mask,
+        )
+
+
 def quantize_and_insert_k_cache_cp_byte_sliced(
     k: torch.Tensor,
     k_cache_raw: torch.Tensor,
@@ -483,7 +649,8 @@ def quantize_and_insert_k_cache_cp_byte_sliced(
     ), "CP byte-sliced SWA insert requires metadata-precomputed compaction"
     unique_blocks = compaction.unique_blocks
     compact_slots = compaction.compact_slots
-    if unique_blocks.numel() == 0:
+    num_unique = int(unique_blocks.numel())
+    if num_unique == 0:
         return
 
     local_slice_bytes = int(k_cache_raw.shape[1])
@@ -491,13 +658,52 @@ def quantize_and_insert_k_cache_cp_byte_sliced(
     slice_start = cp_rank * local_slice_bytes
     slice_end = slice_start + local_slice_bytes
 
+    if k_cache_raw.is_cuda and k.stride(1) == 1:
+        block_c = 2048
+        _zero_indexed_rows_kernel[(num_unique, triton.cdiv(local_slice_bytes, block_c))](
+            k_cache_raw,
+            unique_blocks,
+            num_rows=num_unique,
+            num_cols=local_slice_bytes,
+            dst_stride0=int(k_cache_raw.stride(0)),
+            num_dst_rows=int(k_cache_raw.shape[0]),
+            BLOCK_C=block_c,
+            TRAP_INVALID_KV_ACCESS=True,
+            num_warps=4,
+        )
+        _quantize_and_insert_k_cp_byte_sliced_kernel[(num_tokens,)](
+            k,
+            int(k.stride(0)),
+            compact_slots,
+            unique_blocks,
+            k_cache_raw,
+            int(k_cache_raw.stride(0)),
+            num_tokens=num_tokens,
+            num_pool_blocks=int(k_cache_raw.shape[0]),
+            num_unique_blocks=num_unique,
+            cache_block_size=full_entries_per_block,
+            slice_start=slice_start,
+            slice_end=slice_end,
+            input_dim=_INPUT_DIM,
+            fp8_dim=_TOKEN_FP8_DIM,
+            bf16_dim=_TOKEN_BF16_DIM,
+            scale_dim=_TOKEN_SCALE_DIM,
+            quant_block=_QUANT_BLOCK_SIZE,
+            token_data_size=_TOKEN_DATA_SIZE,
+            fp8_max=_FP8_MAX,
+            n_quant_blocks=8,
+            TRAP_INVALID_KV_ACCESS=True,
+            num_warps=4,
+        )
+        return
+
     full_raw = torch.zeros(
-        (int(unique_blocks.numel()), full_stride_bytes),
+        (num_unique, full_stride_bytes),
         dtype=torch.uint8,
         device=k_cache_raw.device,
     )
     full_view = full_raw.as_strided(
-        (int(unique_blocks.numel()), full_entries_per_block, 584),
+        (num_unique, full_entries_per_block, 584),
         (full_stride_bytes, 584, 1),
     )
     quantize_and_insert_k_cache(

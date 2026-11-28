@@ -529,7 +529,8 @@ class CudaAsyncCPGatherImpl:
             )
         current_stream = torch.cuda.current_stream(handle.gathered.device)
         with record_function_range(f"{handle.profile_name}.wait_host"):
-            current_stream.wait_event(handle.completion_event)
+            if handle.stream != current_stream:
+                current_stream.wait_event(handle.completion_event)
             handle.work.wait()
         return handle.gathered
 
@@ -766,13 +767,28 @@ def build_cp_context(
                     try_build_cp_forward_metadata,
                 )
 
+                dev_is_cuda = torch.device(device).type == "cuda"
+                chunks_t = (
+                    chunks_device.to(
+                        device=device,
+                        non_blocking=(dev_is_cuda and chunks_device.device.type == "cpu"),
+                    ).contiguous()
+                )
+                shuffle_t = (
+                    shuffle_indices.to(
+                        device=device,
+                        non_blocking=(
+                            dev_is_cuda and shuffle_indices.device.type == "cpu"
+                        ),
+                    ).contiguous()
+                )
                 fused_metadata = try_build_cp_forward_metadata(
                     input_lengths_global,
-                    chunks_device.to(device=device).contiguous(),
+                    chunks_t,
                     prefix_lengths,
                     padding_mask,
                     restore_indices,
-                    shuffle_indices.to(device=device).contiguous(),
+                    shuffle_t,
                     cp_size=cp_size,
                     cp_rank=cp_rank,
                     chunk_length=chunk_length,
@@ -1171,7 +1187,17 @@ def cp_all_gather_full_varlen(
 
 if _TRITON_AVAILABLE:
 
-    @triton.jit(do_not_specialize=["T_local", "H", "in_stride", "out_stride"])
+    @triton.jit(
+        do_not_specialize=[
+            "T_local",
+            "H",
+            "in_stride",
+            "out_stride",
+            "req_stride",
+            "gpos_stride",
+            "real_stride",
+        ]
+    )
     def _cp_gather_last_by_request_kernel(
         local_ptr,
         in_stride,
@@ -1179,27 +1205,35 @@ if _TRITON_AVAILABLE:
         out_stride,
         req_ids_ptr,
         gpos_ptr,
-        target_ptr,
+        prefixes_ptr,
+        input_lengths_ptr,
         local_is_real_ptr,
         T_local,
         H,
+        req_stride,
+        gpos_stride,
+        real_stride,
         BLOCK_H: tl.constexpr,
     ):
         t = tl.program_id(0).to(tl.int64)
         if t >= T_local:
             return
-        if tl.load(local_is_real_ptr + t) == 0:
+        if tl.load(local_is_real_ptr + t * real_stride.to(tl.int64)) == 0:
             return
-        gpos = tl.load(gpos_ptr + t)
-        target = tl.load(target_ptr + t)
+        req_id = tl.load(req_ids_ptr + t * req_stride.to(tl.int64)).to(tl.int64)
+        gpos = tl.load(gpos_ptr + t * gpos_stride.to(tl.int64)).to(tl.int64)
+        target = (
+            tl.load(prefixes_ptr + req_id).to(tl.int64)
+            + tl.load(input_lengths_ptr + req_id).to(tl.int64)
+            - 1
+        )
         if gpos != target:
             return
-        req_id = tl.load(req_ids_ptr + t).to(tl.int64)
         col_base = tl.program_id(1).to(tl.int64) * BLOCK_H
         cols = col_base + tl.arange(0, BLOCK_H)
         mask = cols < H
-        vals = tl.load(local_ptr + t * in_stride + cols, mask=mask)
-        tl.store(out_ptr + req_id * out_stride + cols, vals, mask=mask)
+        vals = tl.load(local_ptr + t * in_stride.to(tl.int64) + cols, mask=mask)
+        tl.store(out_ptr + req_id * out_stride.to(tl.int64) + cols, vals, mask=mask)
 
 
 def cp_gather_last_by_request(
@@ -1228,37 +1262,68 @@ def cp_gather_last_by_request(
     B = int(cp_ctx.input_lengths_global.numel())
     H = int(local_2d.size(1))
 
-    req_ids = cp_ctx.req_id_per_token.to(device=device, dtype=torch.long).reshape(-1)
-    prefixes = cp_ctx.prefix_lengths.to(device=device, dtype=torch.long).reshape(-1)[:B]
-    input_lengths = cp_ctx.input_lengths_global.to(
-        device=device, dtype=torch.long
-    ).reshape(-1)[:B]
-    target_positions = prefixes + input_lengths - 1
-    target_per_token = _gather_1d(target_positions, req_ids)
-
-    global_positions = cp_ctx.global_positions.to(device=device, dtype=torch.long)
-    local_is_real = cp_ctx.local_is_real.to(device=device)
-
     local_last = local_2d.new_zeros((B, H))
     T_local = int(local_2d.size(0))
     if T_local > 0 and B > 0 and H > 0:
         if local_2d.is_cuda and _TRITON_AVAILABLE:
+            req_t = cp_ctx.req_id_per_token.reshape(-1)
+            if req_t.device != device or req_t.dtype not in (torch.int32, torch.int64):
+                req_t = req_t.to(device=device, dtype=torch.int64)
+            prefixes_t = cp_ctx.prefix_lengths.reshape(-1)[:B]
+            if prefixes_t.device != device or not prefixes_t.is_contiguous():
+                prefixes_t = prefixes_t.to(device=device).contiguous()
+            lengths_t = cp_ctx.input_lengths_global.reshape(-1)[:B]
+            if lengths_t.device != device or not lengths_t.is_contiguous():
+                lengths_t = lengths_t.to(device=device).contiguous()
+            gpos_t = cp_ctx.global_positions.reshape(-1)
+            if gpos_t.device != device or gpos_t.dtype not in (
+                torch.int32,
+                torch.int64,
+            ):
+                gpos_t = gpos_t.to(device=device, dtype=torch.int64)
+            real_t = cp_ctx.local_is_real.reshape(-1)
+            if real_t.device != device:
+                real_t = real_t.to(device=device)
+            real_u8 = (
+                real_t.view(torch.uint8)
+                if real_t.dtype == torch.bool
+                else real_t.to(torch.uint8)
+            )
             BLOCK_H = 1024
             _cp_gather_last_by_request_kernel[(T_local, triton.cdiv(H, BLOCK_H))](
                 local_2d,
-                local_2d.stride(0),
+                int(local_2d.stride(0)),
                 local_last,
-                local_last.stride(0),
-                req_ids.contiguous(),
-                global_positions.contiguous(),
-                target_per_token.contiguous(),
-                local_is_real.to(torch.uint8).contiguous(),
+                int(local_last.stride(0)),
+                req_t,
+                gpos_t,
+                prefixes_t,
+                lengths_t,
+                real_u8,
                 T_local,
                 H,
+                int(req_t.stride(0)),
+                int(gpos_t.stride(0)),
+                int(real_u8.stride(0)),
                 BLOCK_H=BLOCK_H,
                 num_warps=4,
             )
         else:
+            req_ids = cp_ctx.req_id_per_token.to(device=device, dtype=torch.long).reshape(
+                -1
+            )
+            prefixes = cp_ctx.prefix_lengths.to(device=device, dtype=torch.long).reshape(
+                -1
+            )[:B]
+            input_lengths = cp_ctx.input_lengths_global.to(
+                device=device, dtype=torch.long
+            ).reshape(-1)[:B]
+            target_positions = prefixes + input_lengths - 1
+            target_per_token = _gather_1d(target_positions, req_ids)
+            global_positions = cp_ctx.global_positions.to(
+                device=device, dtype=torch.long
+            )
+            local_is_real = cp_ctx.local_is_real.to(device=device)
             owner_mask = local_is_real & (global_positions == target_per_token)
             local_last_ext = local_2d.new_zeros((B + 1, H))
             dst_row = torch.where(owner_mask, req_ids, B)
@@ -1469,7 +1534,7 @@ def build_cp_full_prefill_positions(
     total = int(cp_ctx.seq_len_full)
     batch_size = int(lengths.numel())
     fused = None
-    if lengths.is_cuda and batch_size > 1:
+    if lengths.is_cuda and batch_size >= 1:
         try:
             from rtp_llm.models_py.modules.dsv4._cp_metadata_triton import (
                 try_build_cp_full_prefill_positions,
@@ -1838,29 +1903,77 @@ def build_kv_allgather_restore_indices(
 
     # Vectorized formulation (mirrors branch
     # ``flashmla_sparse_cp_impl.py:565-572`` plan()).
-    total_kv_lens = per_req_total_kv_lens.to(dtype=torch.int64, device=device)
-    batch_size = int(total_kv_lens.numel())
-    if batch_size == 0:
-        return torch.empty(0, dtype=torch.int64, device=device)
-
-    total_real = (
-        int(total_kv_len)
-        if total_kv_len is not None
-        else int(total_kv_lens.sum().item())
-    )
-    if total_real < 0:
-        raise ValueError(f"total_kv_len must be non-negative, got {total_real}")
-    if total_real == 0:
-        return torch.empty(0, dtype=torch.int64, device=device)
-
-    if total_local_kv is None:
-        if batch_size == 1 and total_kv_len is not None:
-            total_local = cp_padded_local_kv_len(total_real, cp_size, block_size)
+    if per_req_total_kv_lens.device.type == "cpu":
+        per_req_cpu = per_req_total_kv_lens.to(dtype=torch.int64)
+        batch_size = int(per_req_cpu.numel())
+        if batch_size == 0:
+            return torch.empty(0, dtype=torch.int64, device=device)
+        total_real = (
+            int(total_kv_len)
+            if total_kv_len is not None
+            else int(per_req_cpu.sum().item())
+        )
+        if total_real < 0:
+            raise ValueError(f"total_kv_len must be non-negative, got {total_real}")
+        if total_real == 0:
+            return torch.empty(0, dtype=torch.int64, device=device)
+        if total_local_kv is None:
+            if batch_size == 1:
+                total_local = cp_padded_local_kv_len(total_real, cp_size, block_size)
+            else:
+                local_per_req_cpu = cp_padded_local_kv_lens(
+                    per_req_cpu, cp_size, block_size
+                )
+                total_local = int(local_per_req_cpu.sum().item())
         else:
-            local_per_req = cp_padded_local_kv_lens(total_kv_lens, cp_size, block_size)
-            total_local = int(local_per_req.sum().item())
+            total_local = int(total_local_kv)
+        total_kv_lens = per_req_cpu.to(
+            device=device,
+            non_blocking=(torch.device(device).type == "cuda"),
+        )
     else:
-        total_local = int(total_local_kv)
+        total_kv_lens = per_req_total_kv_lens.to(dtype=torch.int64, device=device)
+        batch_size = int(total_kv_lens.numel())
+        if batch_size == 0:
+            return torch.empty(0, dtype=torch.int64, device=device)
+
+        if total_kv_len is None and total_local_kv is None:
+            if batch_size == 1:
+                total_real = int(total_kv_lens.sum().item())
+                total_local = cp_padded_local_kv_len(total_real, cp_size, block_size)
+            else:
+                local_per_req = cp_padded_local_kv_lens(
+                    total_kv_lens, cp_size, block_size
+                )
+                total_real, total_local = (
+                    int(v)
+                    for v in torch.stack(
+                        [total_kv_lens.sum(), local_per_req.sum()]
+                    ).tolist()
+                )
+        else:
+            total_real = (
+                int(total_kv_len)
+                if total_kv_len is not None
+                else int(total_kv_lens.sum().item())
+            )
+            if total_local_kv is None:
+                if batch_size == 1 and total_kv_len is not None:
+                    total_local = cp_padded_local_kv_len(
+                        total_real, cp_size, block_size
+                    )
+                else:
+                    local_per_req = cp_padded_local_kv_lens(
+                        total_kv_lens, cp_size, block_size
+                    )
+                    total_local = int(local_per_req.sum().item())
+            else:
+                total_local = int(total_local_kv)
+
+        if total_real < 0:
+            raise ValueError(f"total_kv_len must be non-negative, got {total_real}")
+        if total_real == 0:
+            return torch.empty(0, dtype=torch.int64, device=device)
 
     if total_kv_lens.is_cuda:
         from rtp_llm.models_py.modules.dsv4._cp_metadata_triton import (

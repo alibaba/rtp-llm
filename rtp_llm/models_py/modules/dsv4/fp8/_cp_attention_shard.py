@@ -13,7 +13,191 @@ from typing import Optional
 
 import torch
 
+try:
+    import triton
+    import triton.language as tl
+
+    _TRITON_AVAILABLE = True
+except Exception:  # pragma: no cover
+    triton = None
+    tl = None
+    _TRITON_AVAILABLE = False
+
 from rtp_llm.models_py.modules.dsv4.cp import cp_padded_local_kv_lens
+
+
+if _TRITON_AVAILABLE:
+
+    @triton.jit(
+        do_not_specialize=[
+            "T",
+            "K",
+            "in_stride0",
+            "in_stride1",
+            "out_stride0",
+            "out_stride1",
+            "req_stride",
+            "per_req_stride",
+            "cu_cmp_stride",
+            "cp_size",
+            "cp_rank",
+            "block_size",
+        ]
+    )
+    def _remap_topk_to_cp_local_kernel(
+        topk_ptr,
+        per_req_ptr,
+        req_ptr,
+        cu_cmp_ptr,
+        out_ptr,
+        T,
+        K,
+        in_stride0,
+        in_stride1,
+        out_stride0,
+        out_stride1,
+        req_stride,
+        per_req_stride,
+        cu_cmp_stride,
+        cp_size,
+        cp_rank,
+        block_size,
+        BLOCK_M: tl.constexpr,
+        BLOCK_K: tl.constexpr,
+        HAS_REQ_IDS: tl.constexpr,
+        HAS_CU_CMP: tl.constexpr,
+    ):
+        """Fused CP top-k ownership filtering and local workspace index remap."""
+        pid_m = tl.program_id(0).to(tl.int64)
+        pid_k = tl.program_id(1).to(tl.int64)
+
+        row_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
+        m_mask = row_m < T
+        if HAS_REQ_IDS:
+            req = tl.load(req_ptr + row_m * req_stride, mask=m_mask, other=0).to(
+                tl.int64
+            )
+        else:
+            req = tl.zeros((BLOCK_M,), dtype=tl.int64)
+        req_len = tl.load(per_req_ptr + req * per_req_stride, mask=m_mask, other=0).to(
+            tl.int64
+        )
+        if HAS_CU_CMP:
+            req_base = tl.load(
+                cu_cmp_ptr + req * cu_cmp_stride, mask=m_mask, other=0
+            ).to(tl.int64)
+        else:
+            req_base = tl.zeros((BLOCK_M,), dtype=tl.int64)
+
+        col_k = pid_k * BLOCK_K + tl.arange(0, BLOCK_K)
+        k_mask = col_k < K
+        tile_mask = m_mask[:, None] & k_mask[None, :]
+        idx = tl.load(
+            topk_ptr
+            + row_m[:, None] * in_stride0.to(tl.int64)
+            + col_k[None, :] * in_stride1.to(tl.int64),
+            mask=tile_mask,
+            other=-1,
+        ).to(tl.int64)
+        valid = idx >= 0
+        safe_idx = tl.where(valid, idx, 0)
+        block = safe_idx // block_size
+        token_in_block = safe_idx % block_size
+        owner = block % cp_size
+        local_block = block // cp_size
+        local_pos = local_block * block_size + token_in_block
+        owned = valid & (owner == cp_rank) & (safe_idx < req_len[:, None])
+        out_val = tl.where(owned, req_base[:, None] + local_pos, -1).to(tl.int32)
+        tl.store(
+            out_ptr
+            + row_m[:, None] * out_stride0.to(tl.int64)
+            + col_k[None, :] * out_stride1.to(tl.int64),
+            out_val,
+            mask=tile_mask,
+        )
+
+    @triton.jit(
+        do_not_specialize=[
+            "T",
+            "window",
+            "M",
+            "N",
+            "gp_stride",
+            "req_stride",
+            "prefix_stride",
+            "cu_swa_stride",
+            "out_stride0",
+            "cp_size",
+            "cp_rank",
+            "owner_chunk_size",
+        ]
+    )
+    def _build_swa_cp_local_indices_kernel(
+        gp_ptr,
+        req_ptr,
+        prefix_ptr,
+        cu_swa_ptr,
+        indices_ptr,
+        lens_ptr,
+        T,
+        window,
+        M,
+        N,
+        gp_stride,
+        req_stride,
+        prefix_stride,
+        cu_swa_stride,
+        out_stride0,
+        cp_size,
+        cp_rank,
+        owner_chunk_size,
+        BLOCK_W: tl.constexpr,
+        HAS_REQ_IDS: tl.constexpr,
+        HAS_CU_SWA: tl.constexpr,
+    ):
+        """Single-pass compact CP-owned SWA workspace indices without D2H sync."""
+        t = tl.program_id(0).to(tl.int64)
+        if t >= T:
+            return
+        if HAS_REQ_IDS:
+            req = tl.load(req_ptr + t * req_stride).to(tl.int64)
+        else:
+            req = tl.zeros((), dtype=tl.int64)
+        gp = tl.load(gp_ptr + t * gp_stride).to(tl.int64)
+        prefix = tl.load(prefix_ptr + req * prefix_stride).to(tl.int64)
+        p_row = tl.minimum(prefix, window - 1)
+        gather_start = prefix - p_row
+        swa_len = tl.minimum(gp + 1, window)
+        key_start = gp - swa_len + 1
+        if HAS_CU_SWA:
+            ws_base = tl.load(cu_swa_ptr + req * cu_swa_stride).to(tl.int64)
+        else:
+            ws_base = req * M.to(tl.int64) + N.to(tl.int64)
+
+        out_row_ptr = indices_ptr + t * out_stride0.to(tl.int64)
+        write_col = tl.zeros((), dtype=tl.int32)
+        for w_start in range(0, window, BLOCK_W):
+            col_offset = w_start + tl.arange(0, BLOCK_W)
+            valid = col_offset < swa_len
+            key_pos = key_start + col_offset
+            owned = (
+                valid
+                & (key_pos >= 0)
+                & (((key_pos // owner_chunk_size) % cp_size) == cp_rank)
+            )
+            owned_i32 = owned.to(tl.int32)
+            local_ranks = tl.cumsum(owned_i32, axis=0) - 1
+            dst_col = write_col + local_ranks
+            target_val = (ws_base + (key_pos - gather_start)).to(tl.int32)
+            tl.store(out_row_ptr + dst_col, target_val, mask=owned)
+            write_col += tl.sum(owned_i32, axis=0)
+
+        for w_start in range(0, window, BLOCK_W):
+            col_offset = w_start + tl.arange(0, BLOCK_W)
+            tail_mask = (col_offset >= write_col) & (col_offset < window)
+            tl.store(out_row_ptr + col_offset, -1, mask=tail_mask)
+
+        tl.store(lens_ptr + t, write_col)
 
 
 @dataclass(frozen=True)
@@ -186,9 +370,90 @@ def remap_topk_to_cp_local(
         )
 
     device = topk_indices.device
-    per_req = per_req_total_kv_lens.to(device=device, dtype=torch.int64).contiguous()
-    B = int(per_req.numel())
+    B = int(per_req_total_kv_lens.numel())
     T = int(topk_indices.shape[0])
+    K = int(topk_indices.shape[1])
+
+    if topk_indices.is_cuda and _TRITON_AVAILABLE:
+        if req_id_per_token is None:
+            if B != 1:
+                raise ValueError("req_id_per_token is required when B > 1")
+            has_req_ids = False
+            req_t = topk_indices
+        else:
+            req_t = req_id_per_token.reshape(-1)
+            if int(req_t.numel()) != T:
+                raise ValueError(
+                    f"req_id_per_token length {int(req_t.numel())} != topk rows {T}"
+                )
+            if req_t.device != device or req_t.dtype not in (torch.int32, torch.int64):
+                req_t = req_t.to(device=device, dtype=torch.int64)
+            has_req_ids = True
+
+        per_req_t = per_req_total_kv_lens
+        if per_req_t.device != device or per_req_t.dtype not in (
+            torch.int32,
+            torch.int64,
+        ):
+            per_req_t = per_req_t.to(device=device, dtype=torch.int64)
+
+        if cu_cmp_offsets is not None:
+            cu_cmp_t = cu_cmp_offsets.reshape(-1)
+            if int(cu_cmp_t.numel()) < B:
+                raise ValueError(
+                    f"cu_cmp_offsets length {int(cu_cmp_t.numel())} < batch size {B}"
+                )
+            if cu_cmp_t.device != device or cu_cmp_t.dtype not in (
+                torch.int32,
+                torch.int64,
+            ):
+                cu_cmp_t = cu_cmp_t.to(device=device, dtype=torch.int64)
+            has_cu_cmp = True
+        elif B == 1:
+            cu_cmp_t = per_req_t
+            has_cu_cmp = False
+        else:
+            local_lens = cp_padded_local_kv_lens(per_req_t, cp_size, block_size)
+            cu_cmp_t = torch.empty(B + 1, dtype=torch.int64, device=device)
+            cu_cmp_t[0] = 0
+            cu_cmp_t[1:] = torch.cumsum(local_lens, dim=0)
+            has_cu_cmp = True
+
+        if T == 0 or K == 0:
+            return torch.empty((T, K), dtype=torch.int32, device=device)
+
+        out = torch.empty((T, K), dtype=torch.int32, device=device)
+        block_m = 4
+        block_k = 256
+        _remap_topk_to_cp_local_kernel[
+            (triton.cdiv(T, block_m), triton.cdiv(K, block_k))
+        ](
+            topk_indices,
+            per_req_t,
+            req_t if has_req_ids else per_req_t,
+            cu_cmp_t,
+            out,
+            T=T,
+            K=K,
+            in_stride0=int(topk_indices.stride(0)),
+            in_stride1=int(topk_indices.stride(1)),
+            out_stride0=int(out.stride(0)),
+            out_stride1=int(out.stride(1)),
+            req_stride=int(req_t.stride(0)) if has_req_ids else 1,
+            per_req_stride=int(per_req_t.stride(0)),
+            cu_cmp_stride=int(cu_cmp_t.stride(0)),
+            cp_size=int(cp_size),
+            cp_rank=int(cp_rank),
+            block_size=int(block_size),
+            BLOCK_M=block_m,
+            BLOCK_K=block_k,
+            HAS_REQ_IDS=has_req_ids,
+            HAS_CU_CMP=has_cu_cmp,
+            num_warps=4,
+        )
+        return out
+
+    per_req = per_req_total_kv_lens.to(device=device, dtype=torch.int64).contiguous()
     if req_id_per_token is None:
         if B != 1:
             raise ValueError("req_id_per_token is required when B > 1")
@@ -289,14 +554,89 @@ def build_swa_cp_local_indices(
     device = global_positions.device
     T = int(global_positions.numel())
     B = int(prefix_lengths.numel())
+    window = int(window_size)
     if cu_swa_offsets is not None:
-        cu_swa = cu_swa_offsets.to(device=device, dtype=torch.int64).reshape(-1)
+        cu_swa = cu_swa_offsets.reshape(-1)
         if int(cu_swa.numel()) < B:
             raise ValueError(
                 f"cu_swa_offsets length {int(cu_swa.numel())} < batch size {B}"
             )
     else:
         cu_swa = None
+
+    if global_positions.is_cuda and _TRITON_AVAILABLE:
+        if req_id_per_token is None:
+            if B != 1:
+                raise ValueError("req_id_per_token is required when B > 1")
+            has_req_ids = False
+            req_t = global_positions
+        else:
+            req_t = req_id_per_token.reshape(-1)
+            if int(req_t.numel()) != T:
+                raise ValueError(
+                    f"req_id_per_token length {int(req_t.numel())} != positions {T}"
+                )
+            if req_t.device != device or req_t.dtype not in (torch.int32, torch.int64):
+                req_t = req_t.to(device=device, dtype=torch.int64)
+            has_req_ids = True
+
+        if T == 0:
+            return (
+                torch.empty((0, window), dtype=torch.int32, device=device),
+                torch.empty((0,), dtype=torch.int32, device=device),
+            )
+
+        gp_t = global_positions.reshape(-1)
+        if gp_t.device != device or gp_t.dtype not in (torch.int32, torch.int64):
+            gp_t = gp_t.to(device=device, dtype=torch.int64)
+        prefix_t = prefix_lengths.reshape(-1)
+        if prefix_t.device != device or prefix_t.dtype not in (
+            torch.int32,
+            torch.int64,
+        ):
+            prefix_t = prefix_t.to(device=device, dtype=torch.int64)
+        if cu_swa is not None:
+            if cu_swa.device != device or cu_swa.dtype not in (
+                torch.int32,
+                torch.int64,
+            ):
+                cu_swa = cu_swa.to(device=device, dtype=torch.int64)
+            has_cu_swa = True
+        else:
+            cu_swa = gp_t
+            has_cu_swa = False
+
+        indices = torch.empty((T, window), dtype=torch.int32, device=device)
+        lens = torch.empty((T,), dtype=torch.int32, device=device)
+        block_w = 512 if window > 256 else 256
+        _build_swa_cp_local_indices_kernel[(T,)](
+            gp_t,
+            req_t if has_req_ids else gp_t,
+            prefix_t,
+            cu_swa,
+            indices,
+            lens,
+            T=T,
+            window=window,
+            M=int(M),
+            N=int(N),
+            gp_stride=int(gp_t.stride(0)),
+            req_stride=int(req_t.stride(0)) if has_req_ids else 1,
+            prefix_stride=int(prefix_t.stride(0)),
+            cu_swa_stride=int(cu_swa.stride(0)),
+            out_stride0=int(indices.stride(0)),
+            cp_size=int(cp_size),
+            cp_rank=int(cp_rank),
+            owner_chunk_size=int(owner_chunk_size),
+            BLOCK_W=block_w,
+            HAS_REQ_IDS=has_req_ids,
+            HAS_CU_SWA=has_cu_swa,
+            num_warps=4,
+        )
+        return indices, lens
+
+    if cu_swa is not None:
+        cu_swa = cu_swa.to(device=device, dtype=torch.int64)
     if req_id_per_token is None:
         if B != 1:
             raise ValueError("req_id_per_token is required when B > 1")
@@ -311,16 +651,6 @@ def build_swa_cp_local_indices(
     gp = global_positions.to(device=device, dtype=torch.int64).reshape(-1)
     prefix = prefix_lengths.to(device=device, dtype=torch.int64).reshape(-1)
 
-    # Vectorized SWA owner-partition + compact. Replaces the per-row /
-    # per-key Python double loop (O(T × window_size) at host speed →
-    # catastrophic at long context) with O(T × window_size) GPU ops.
-    #
-    # Memory cost: builds intermediate [T, window_size] int64 grids. At
-    # T=1M and window_size=2048 each grid is ~16 GB. Production typical
-    # is T≤64k and window_size≤2048 → ~1 GB per grid, fits comfortably.
-    # If long-ctx call sites exceed VRAM, switch to a row-chunked driver
-    # around this body (chunk_size = 64k rows works for most configs).
-    window = int(window_size)
     prefix_per_row = prefix.index_select(0, req)  # [T]
     p_per_row = torch.clamp(prefix_per_row, max=window - 1)  # [T]
     gather_start_per_row = prefix_per_row - p_per_row  # [T]
