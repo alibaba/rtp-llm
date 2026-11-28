@@ -126,15 +126,18 @@ class OwnedV4ModelMixin:
         # V4's layer/role geometry comes from the same validated runtime config.
         # The optional LM head also remembers whether it was explicitly supplied.
         head = getattr(self.v4, "head", None)
-        return {
+        state = {
             name: getattr(head, name) for name in (
                 "_explicit_checkpoint_loaded", "_tied_checkpoint_loaded",
                 "_tied_checkpoint_source_rows",
             ) if hasattr(head, name)
         }
+        state["_ft_unknown_tied_vocab"] = getattr(self, "_ft_unknown_tied_vocab", False)
+        return state
 
     def prepare_resident_checkpoint_restore(self, state, values):
         head = getattr(self.v4, "head", None)
+        self._ft_unknown_tied_vocab = state.get("_ft_unknown_tied_vocab", False)
         for key in ("_explicit_checkpoint_loaded", "_tied_checkpoint_loaded", "_tied_checkpoint_source_rows"):
             if key in state and hasattr(head, key):
                 setattr(head, key, state[key])

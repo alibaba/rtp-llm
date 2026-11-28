@@ -1252,14 +1252,30 @@ class NewModelLoader:
                     raise
 
     @staticmethod
-    def _run_post_load_hooks(model: nn.Module) -> None:
-        for module in model.modules():
-            if getattr(module, "_rtp_borrowed_parameter_names", ()):
-                # The owning model already postprocessed this storage.
-                continue
-            hook = getattr(module, "process_weights_after_loading", None)
-            if callable(hook):
-                hook()
+    def _run_post_load_hooks(model: nn.Module, *, local_phase=None) -> None:
+        executors = []
+        with (local_phase if local_phase is not None else nullcontext()):
+            for module in model.modules():
+                if getattr(module, "_rtp_borrowed_parameter_names", ()):
+                    # The owning model already postprocessed this storage.
+                    continue
+                hook = getattr(module, "process_weights_after_loading", None)
+                if not callable(hook):
+                    continue
+                if (
+                    local_phase is not None
+                    and isinstance(module, RtpModule)
+                    and type(module).process_weights_during_staged_load
+                    is not RtpModule.process_weights_during_staged_load
+                ):
+                    # Expert packing is local; its executor can enter MegaMoE
+                    # collectives. Finish *all* local layouts before any build.
+                    module.process_weights_during_staged_load()
+                    executors.append(hook)
+                else:
+                    hook()
+        for build in executors:
+            build()
 
     @staticmethod
     def _prepare_model_for_fastsafetensors(
@@ -2101,17 +2117,17 @@ class NewModelLoader:
 
     @contextmanager
     def _checkpoint_preflight(
-        self, model, requested, *, isolated=False, coordinated_resident=False
+        self, model, requested, *, isolated=False, coordinated=False
     ):
         # Scratch and isolated owners need no reader vote. A coordinated
-        # resident startup can still enter a stage collective in its runtime hooks.
+        # runtime startup can still enter a stage collective in its hooks.
         independent_reader = (
             requested == NewLoaderLoadMethod.SCRATCH
             or isolated
             or getattr(model, "fastsafetensors_load_isolated", False)
         )
         if not torch.distributed.is_initialized() or (
-            independent_reader and not coordinated_resident
+            independent_reader and not coordinated
         ):
             yield
             return
@@ -2329,14 +2345,15 @@ class NewModelLoader:
         use_nogds, use_shm = NewModelLoader._fastsafetensors_backend_options(
             target_device, checkpoint_files
         )
-        from rtp_llm.models_py.v41_fst_file_pool import v41_file_staging_loader
+        from rtp_llm.models_py.v41_fst_file_pool import cuda_file_loader
 
-        ParallelLoader = v41_file_staging_loader(
+        ParallelLoader = cuda_file_loader(
             ParallelLoader,
             self._model_type(),
             torch.device(loader_device),
             cuda_backend=self._accelerator_backend_name(),
             use_shm=use_shm,
+            nogds=use_nogds,
         )
         bbuf_size_kb = NewModelLoader._fastsafetensors_bbuf_size_kb(
             checkpoint_files, use_host_staging=use_nogds or use_shm
@@ -2593,7 +2610,11 @@ class NewModelLoader:
                 self._bind_resident_runtime(model)
 
         def activate():
-            self._run_post_load_hooks(model)
+            phase = (
+                self._checkpoint_preflight(model, method, coordinated=True)
+                if defer_runtime else None
+            )
+            self._run_post_load_hooks(model, local_phase=phase)
             if finish_lora is not None:
                 finish_lora()
             if snapshot_after:
@@ -2621,35 +2642,44 @@ class NewModelLoader:
     ) -> nn.Module:
         # Only a complete load publishes a backend, including on retry.
         self._selected_load_method = None
-        distributed_cold = (
-            resident is not None and restored is None and torch.distributed.is_initialized()
-        )
-        # FST already checks prerequisites at each stage. Scratch/isolated
-        # readers can fail at any earlier local step (even opening the shard);
-        # when the service agreed on residency they need one vote covering the
-        # entire local phase, not one nested inside another loader's collective.
-        independent = distributed_cold and (
-            self.load_config.load_method == NewLoaderLoadMethod.SCRATCH
-            or uses_isolated_checkpoint_load(self._model_type())
-        )
-        coordinated_cold = distributed_cold and (coordinated_resident_load or not independent)
+        requested = self.load_config.load_method
+        coordinated = False
+        independent = False
+        world_size = torch.distributed.get_world_size() if torch.distributed.is_initialized() else 1
+        if world_size > 1:
+            isolated = uses_isolated_checkpoint_load(self._model_type())
+            independent = requested == NewLoaderLoadMethod.SCRATCH or isolated
+            # A direct scratch caller can read a standalone model while a
+            # larger, unrelated WORLD exists. Only join its declared peers.
+            scratch_world = getattr(
+                self.load_config.parallelism_config, "world_size",
+                max(self.load_config.tp_size, self.load_config.ep_size),
+            )
+            coordinated = coordinated_resident_load or (
+                not isolated and (
+                    requested != NewLoaderLoadMethod.SCRATCH
+                    or scratch_world == world_size
+                )
+            )
+        # FST votes at reader boundaries. Independent readers need one vote
+        # covering the whole local phase, including source discovery and .to().
         guard = (
-            self._checkpoint_preflight(None, self.load_config.load_method, coordinated_resident=True)
-            if independent and coordinated_cold else nullcontext()
+            self._checkpoint_preflight(None, requested, coordinated=True)
+            if independent and coordinated else nullcontext()
         )
         with guard:
             model, method, activate = self._load_owner(
-                startup_lora, prepare_loans, resident, restored, coordinated_resident_load, coordinated_cold
+                startup_lora, prepare_loans, resident, restored, coordinated
             )
         if activate is not None:
-            with self._checkpoint_preflight(model, self.load_config.load_method):
+            with self._checkpoint_preflight(model, requested, coordinated=coordinated):
                 activate()
         self._selected_load_method = method
         return model
 
     def _load_owner(
         self, startup_lora, prepare_loans, resident, restored,
-        coordinated_resident_load: bool, defer_runtime: bool,
+        defer_runtime: bool,
     ) -> Tuple[nn.Module, NewLoaderLoadMethod, Optional[Callable[[], None]]]:
         """Build the parameter owner, optionally leaving collective startup to the caller."""
         self._eplb_ft_checkpoint = None
@@ -2675,10 +2705,7 @@ class NewModelLoader:
             else:
                 isolated = isolated or getattr(owner, "fastsafetensors_load_isolated", False)
         warm_replay = resident is not None and restored is not None
-        with self._checkpoint_preflight(
-            owner, requested_method, isolated=isolated,
-            coordinated_resident=warm_replay and coordinated_resident_load,
-        ):
+        with self._checkpoint_preflight(owner, requested_method, isolated=isolated):
             if lookup_error is not None:
                 raise lookup_error
             if prepare_loans is not None:
@@ -2725,12 +2752,16 @@ class NewModelLoader:
         if warm_replay:
             # No peer may enter a collective executor constructor while another
             # is still rejecting a rank-local resident tensor or resolving a loan.
-            with self._checkpoint_preflight(owner, requested_method, isolated=isolated):
+            def activate_replay():
                 if not getattr(model, "resident_after_post_load", False):
-                    self._run_post_load_hooks(model)
+                    phase = (
+                        self._checkpoint_preflight(model, requested_method, coordinated=True)
+                        if defer_runtime else None
+                    )
+                    self._run_post_load_hooks(model, local_phase=phase)
                 validate_borrowed_parameters(model)
                 model.eval()
-            return model, method, None
+            return model, method, activate_replay
         if distributed_load and not isolated:
             route = ("meta" if meta_checkpoint is not None else "ft" if ft_checkpoint is not None
                      else "w8a8" if self._w8a8_source is not None else "hf")
@@ -2844,7 +2875,7 @@ class NewModelLoader:
                 if meta_checkpoint is not None:
                     # Raw Meta tensors, unlike FT snapshots, still need the same
                     # bounded layer-at-a-time conversion as a floating HF checkpoint.
-                    self._finalize_host_staged_modules(model, defer_executor=resident is not None)
+                    self._finalize_host_staged_modules(model, defer_executor=resident is not None or defer_runtime)
                 model.to(self.load_config.device)
                 self._validate_loaded_weights(model)
                 activate = self._finish_checkpoint(
@@ -2949,8 +2980,15 @@ class NewModelLoader:
         streamed_scratch = self._arm_streamed_scratch(
             model, method
         ) or self._ppu_streamed_scratch(model, method)
+        # Explicit distributed scratch already has a single enclosing vote.
+        # Nesting a vote here could pair with an earlier source-open failure
+        # on another rank. AUTO fallback still has its FST phase votes.
+        scratch_votes = streamed_scratch and not (
+            requested_method == NewLoaderLoadMethod.SCRATCH and defer_runtime
+        )
         if streamed_scratch:
-            with self._scratch_stage("destination allocation"):
+            allocation = self._scratch_stage("destination allocation") if scratch_votes else nullcontext()
+            with allocation:
                 self._prepare_streamed_scratch(model)
         if accelerator_fst:
             with self._checkpoint_preflight(model, requested_method):
@@ -3056,7 +3094,7 @@ class NewModelLoader:
         )
         model._rtp_checkpoint_load_plan = checkpoint_load_plan
         dispatch_context = (
-            self._scratch_stage("checkpoint dispatch") if streamed_scratch else nullcontext()
+            self._scratch_stage("checkpoint dispatch") if scratch_votes else nullcontext()
         )
         def checked_weights():
             sources = {}
@@ -3094,7 +3132,7 @@ class NewModelLoader:
 
         with self._checkpoint_preflight(model, requested_method):
             if not accelerator_fst:
-                self._finalize_host_staged_modules(model, defer_executor=resident is not None)
+                self._finalize_host_staged_modules(model, defer_executor=resident is not None or defer_runtime)
             validate_borrowed_parameters(model, self.load_config.device)
             model.to(self.load_config.device)
             self._validate_loaded_weights(model)

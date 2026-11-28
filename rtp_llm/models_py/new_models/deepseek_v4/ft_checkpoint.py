@@ -11,6 +11,7 @@ import re
 import torch
 
 from rtp_llm.models_py.expert_placement import ExpertPlacement
+from rtp_llm.models_py.ft_checkpoint import ft_lm_head_source
 
 
 def _vocab(checkpoint, model, name):
@@ -216,4 +217,18 @@ def _source_values(model, checkpoint):
 
 
 def load_v4_ft_checkpoint(model, checkpoint):
+    # FT usually serializes the head even when it was derived from embedding.
+    # Keep the serialized bytes; recover who may write them from export metadata.
+    serialized_tied_head = (
+        getattr(model, "tied_target_vocabulary", False)
+        and "global.lm_head" in checkpoint.entries
+    )
+    source = ft_lm_head_source(checkpoint) if serialized_tied_head else None
     model.load_weights(_source_values(model, checkpoint))
+    if serialized_tied_head:
+        model._ft_unknown_tied_vocab = source is None
+        if source == "embedding":
+            head = model.v4.head
+            head._explicit_checkpoint_loaded = False
+            head._tied_checkpoint_loaded = True
+            head._tied_checkpoint_source_rows = model._v4_args.vocab_size

@@ -648,7 +648,7 @@ class DeepSeekV32ForCausalLM(ResidentDecoderOwner, DecoderHandlerOwner, MlaRunti
             return owner
         if model_config.model_type not in {
             "deepseek2", "deepseek3", "deepseek_v31", "deepseek_v32",
-            "kimi_k2", "glm4_moe_lite", "glm_5",
+            "kimi_k2", "kimi_k25", "glm4_moe_lite", "glm_5",
         } or task not in {
             TaskType.DENSE_EMBEDDING, TaskType.ALL_EMBEDDING,
             TaskType.SPARSE_EMBEDDING, TaskType.COLBERT_EMBEDDING,

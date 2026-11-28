@@ -129,10 +129,11 @@ def install_part(layer, name, value):
                 raise RuntimeError(f"Duplicate pure TP expert scale: {name}")
             if not tensor.is_floating_point():
                 raise TypeError(f"FP8 MoE {suffix} must be floating point")
+            w13_scale, w2_scale = layer.quant_method.block_checkpoint_scales(layer)
             target = (
-                layer.w2_scale[slot]
+                w2_scale[slot]
                 if proj == "down_proj"
-                else layer.w13_scale[slot].chunk(2, dim=0)[int(proj == "gate_proj")]
+                else w13_scale[slot].chunk(2, dim=0)[int(proj == "gate_proj")]
             )
             # The ordinary FP8 loader decodes any floating scale into FP32.
             copy_weight_(target, tensor.float(), name)

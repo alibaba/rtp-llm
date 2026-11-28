@@ -103,6 +103,122 @@ def source_weights():
 
 
 class CpuFp8LoadTest(unittest.TestCase):
+    def test_custom_block_expert_resident_replay(self):
+        from safetensors import safe_open
+
+        from rtp_llm.config.quant_config import Fp8BlockWiseQuantConfig
+        from rtp_llm.models_py import resident_checkpoint
+        from rtp_llm.models_py.new_models.resident_decoder import ResidentDecoderOwner
+        from rtp_llm.models_py.scratch_moe_tp import read_parts
+        from rtp_llm.resident_weights import GLOBAL_SCOPE
+
+        class Decoder(ResidentDecoderOwner, RtpModule):
+            def __init__(self, tp, m):
+                super().__init__()
+                source = Fp8BlockWiseQuantConfig(group_size=64, is_quanted=True)
+                cfg = types.SimpleNamespace(
+                    activation_type="SiGLU", quant_config=source
+                )
+                self.experts = BaseMoEExperts(
+                    num_experts=1,
+                    top_k=1,
+                    hidden_size=128,
+                    moe_intermediate_size=m,
+                    tp_size=tp,
+                    tp_rank=tp - 1,
+                    ep_size=1,
+                    ep_rank=0,
+                    params_dtype=torch.bfloat16,
+                    model_config=cfg,
+                    parallelism_config=types.SimpleNamespace(dp_size=1, dp_rank=0),
+                    moe_config=None,
+                    quant_config=QuantizationConfig("fp8_block", source),
+                    layer_idx=0,
+                )
+
+        # TP1 ends both source and destination tiles mid-projection. TP2 reads
+        # only this rank's scale rows/columns through the scratch fast path.
+        for tp, m in ((1, 160), (2, 384)):
+            with self.subTest(tp=tp), tempfile.TemporaryDirectory() as root:
+                model = Decoder(tp, m)
+                leaf = model.experts
+                hf, expected = {}, {}
+                for i, p in enumerate(leaf.PROJ_NAMES):
+                    n, k = (128, m) if p == "down_proj" else (m, 128)
+                    nr, nc = math.ceil(n / 64), math.ceil(k / 64)
+                    scale = 2.0 ** ((torch.arange(nr * nc).reshape(nr, nc) % 4) + i)
+                    hf[f"0.{p}.weight_scale_inv"] = scale
+                    hf[f"0.{p}.weight"] = torch.ones(n, k).to(torch.float8_e4m3fn)
+                    decoded = scale.repeat_interleave(64, 0).repeat_interleave(64, 1)
+                    expected[p] = decoded[:n, :k].chunk(tp, int(p == "down_proj"))[-1]
+                path = f"{root}/model.safetensors"
+                save_file(hf, path)
+                with safe_open(path, framework="pt", device="cpu") as file:
+                    for key in file.keys():
+                        parts = read_parts(leaf, key, key, file.get_slice(key))
+                        self.assertEqual(parts is None, tp == 1)
+                        leaf.load_weights(dict(parts or [(key, file.get_tensor(key))]))
+                leaf.validate_weights_loaded()
+                # Exercise the real transform on CPU; do not probe ROCm devices.
+                with mock.patch(
+                    "rtp_llm.models_py.quant_methods.fp8_moe._runtime_fp8_dtype",
+                    return_value=torch.float8_e4m3fn,
+                ):
+                    leaf.quant_method.process_weights_after_loading(leaf)
+                leaf._expert_layout_ready = True
+                state = model.resident_constructor_state()
+                manager = mock.Mock()
+                manager.init_scalar.side_effect = lambda scope, name, build: (
+                    "[]" if name == "native.consumed" else "{}"
+                )
+                resident_checkpoint.record(
+                    model, manager, types.SimpleNamespace(value="scratch")
+                )
+                entries = [
+                    types.SimpleNamespace(
+                        scope=GLOBAL_SCOPE, name=name, tensor=value.clone()
+                    )
+                    for name, value in model._resident_bank.global_weights.items()
+                ]
+                self.assertEqual(
+                    {entry.name for entry in entries},
+                    {"experts." + n for n in ("w13", "w2", "w13_scale", "w2_scale")},
+                )
+
+                def check_layout(owner):
+                    self.assertFalse(hasattr(owner, "_fp8_source_grids"))
+                    owner.validate_weights_loaded()
+                    for weight, scales, reference in (
+                        (
+                            owner.w13,
+                            owner.w13_scale,
+                            torch.cat((expected["up_proj"], expected["gate_proj"])),
+                        ),
+                        (owner.w2, owner.w2_scale, expected["down_proj"]),
+                    ):
+                        n, k = reference.shape
+                        grid = scales[0].repeat_interleave(128, 0).repeat_interleave(
+                            128, 1
+                        )
+                        torch.testing.assert_close(
+                            weight[0].float() * grid[:n, :k], reference
+                        )
+
+                with self.subTest(worker="cold"):
+                    check_layout(leaf)
+                with self.subTest(worker="warm"):
+                    warm = Decoder(tp, m)
+                    resident_checkpoint.restore(
+                        warm, manager, entries, "cpu", construction=state
+                    )
+                    for entry in entries:
+                        name = entry.name.split(".")[-1]
+                        self.assertEqual(
+                            getattr(warm.experts, name).data_ptr(),
+                            entry.tensor.data_ptr(),
+                        )
+                    check_layout(warm.experts)
+
     def test_online_moe_block_fnuz_preserves_extrema_and_scales(self):
         from rtp_llm.models_py.quant_methods import fp8_moe
 

@@ -12,6 +12,7 @@ import torch.distributed as dist
 import torch.multiprocessing as mp
 from safetensors.torch import save_file
 
+from rtp_llm.models_py.checkpoint_reader_test_support import checkpoint_readers
 from rtp_llm.models_py.model_loader import NewLoaderConfig, NewModelLoader
 from rtp_llm.models_py.module_base import RtpModule
 from rtp_llm.models_py.registry import register_model
@@ -52,6 +53,60 @@ class _ColdOwner(_Owner):
 
     def resident_constructor_state(self):
         return {}
+
+
+class _Executor(RtpModule):
+    def __init__(self, config):
+        super().__init__()
+        self.config = config
+        self.packed = False
+
+    def requires_staged_device_postprocess(self):
+        return self.config.staged
+
+    def process_weights_during_staged_load(self):
+        if not self.packed:
+            self.config.events.append("pack")
+            self.packed = True
+
+    def process_weights_after_loading(self):
+        self.config.events.append("build")
+        dist.barrier(group=self.config.stage)
+
+
+class _LaterLayout(RtpModule):
+    def __init__(self, config):
+        super().__init__()
+        self.config = config
+
+    def process_weights_after_loading(self):
+        if self.config.fault == "layout":
+            raise ValueError("invalid later local layout")
+
+
+@register_model("_direct_collective")
+class _DirectOwner(RtpModule):
+    def __init__(self, config, load):
+        super().__init__()
+        self.weight = torch.nn.Parameter(torch.empty(2))
+        self.expert = _Executor(config)
+        self.later = _LaterLayout(config)
+        if config.fault in ("move", "staged_move"):
+            # A real Tensor.to failure after valid checkpoint dispatch; no GPU
+            # or unreliable OOM injection is needed to exercise this boundary.
+            self.register_buffer("cache", torch.empty(1, device="meta"), persistent=False)
+
+
+@register_model("_standalone_scratch")
+class _StandaloneOwner(RtpModule):
+    def __init__(self, config, load):
+        super().__init__()
+        self.weight = torch.nn.Parameter(torch.empty(2))
+
+
+@register_model("_direct_isolated")
+class _IsolatedDirect(_StandaloneOwner):
+    fastsafetensors_load_isolated = True
 
 
 class _Record:
@@ -152,10 +207,50 @@ def _check_replay(rank, stage, parallel, method, owner, fault, expected):
             torch.testing.assert_close(model.weight, weight)
 
 
+def _check_direct(stage, parallel, root, method, fault):
+    config = SimpleNamespace(
+        model_type="_direct_collective", is_mtp=parallel.pp_size > 1, stage=stage,
+        events=[], fault=fault if parallel.tp_rank == 1 else None, staged=fault == "staged_move",
+    )
+    loader = NewModelLoader(
+        config, NewLoaderConfig(
+            device="cpu", load_method=method, force_cpu_load_weights=True,
+            parallelism_config=parallel, tp_size=2, tp_rank=parallel.tp_rank,
+        ), model_path=str(root),
+    )
+    with patch.object(loader, "_runtime_checkpoint_group", return_value=stage):
+        if fault:
+            expected = "invalid later local layout" if fault == "layout" else "meta tensor"
+            with unittest.TestCase().assertRaisesRegex(RuntimeError, expected):
+                loader.load()
+            assert "build" not in config.events, config.events
+            assert loader.loaded_method is None
+        else:
+            model = loader.load()
+            assert config.events == ["pack", "build"], config.events
+            torch.testing.assert_close(model.weight, torch.arange(2).float())
+
+
+def _direct_world(rank, rendezvous):
+    dist.init_process_group(
+        "gloo", init_method="file://" + rendezvous, rank=rank, world_size=2,
+        timeout=datetime.timedelta(seconds=10),
+    )
+    try:
+        parallel = SimpleNamespace(
+            world_size=2, world_rank=rank, pp_size=1, pp_rank=0,
+            dp_size=1, dp_rank=0, tp_size=2, tp_rank=rank,
+        )
+        _check_direct(dist.group.WORLD, parallel, Path(rendezvous).parent, "auto", "move")
+    finally:
+        dist.destroy_process_group()
+
+
 def _worker(rank, rendezvous):
     timeout = datetime.timedelta(seconds=10)
     dist.init_process_group(
-        "gloo", init_method="file://" + rendezvous, rank=rank, world_size=4, timeout=timeout
+        "gloo", init_method="file://" + rendezvous, rank=rank, world_size=4,
+        timeout=datetime.timedelta(seconds=60),
     )
     try:
         stage = dist.new_group([2, 3], timeout=timeout)
@@ -182,6 +277,22 @@ def _worker(rank, rendezvous):
             for method in ("scratch", "auto"):
                 for fault in ("publish", "source", None):
                     _check_cold(rank, stage, parallel, Path(rendezvous).parent, method, fault)
+            for method in ("auto", *checkpoint_readers("scratch", "fastsafetensors")):
+                for fault in ("move", "staged_move", "layout", None):
+                    _check_direct(stage, parallel, Path(rendezvous).parent, method, fault)
+        if rank == 0:
+            # No other rank joins this auxiliary owner's standalone load.
+            for owner, method in (
+                ("_direct_isolated", "auto"),
+                ("_direct_isolated", "scratch"),
+                ("_standalone_scratch", "scratch"),
+            ):
+                loader = NewModelLoader(
+                    SimpleNamespace(model_type=owner),
+                    NewLoaderConfig(device="cpu", load_method=method),
+                    model_path=str(Path(rendezvous).parent),
+                )
+                torch.testing.assert_close(loader.load().weight, torch.arange(2).float())
         # The first PP stage never calls the draft loader.
         dist.barrier()
     finally:
@@ -189,6 +300,13 @@ def _worker(rank, rendezvous):
 
 
 class ResidentReplayCollectiveTest(unittest.TestCase):
+    def test_direct_move_error_before_executor_world_barrier(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            save_file({"weight": torch.arange(2).float()}, str(Path(tmp) / "model.safetensors"))
+            mp.start_processes(
+                _direct_world, args=(tmp + "/gloo",), nprocs=2, start_method="fork"
+            )
+
     def test_local_replay_agrees_before_executor_stage_barrier(self):
         with tempfile.TemporaryDirectory() as tmp:
             save_file({"weight": torch.arange(2).float()}, str(Path(tmp) / "model.safetensors"))

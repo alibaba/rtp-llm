@@ -103,6 +103,19 @@ def ft_layer_bindings(model):
     return tuple((index, key, child) for index, (key, child) in zip(ids, children))
 
 
+def ft_lm_head_source(checkpoint):
+    """Provenance of a serialized output head; a later vocabulary patch invalidates it."""
+    source = checkpoint.index_metadata.get("ft_lm_head_source")
+    if source not in (None, "embedding", "lm_head"):
+        raise ValueError("Invalid FT LM-head provenance")
+    if any(
+        key.endswith((".global.embedding", ".global.lm_head"))
+        for key in getattr(checkpoint, "_overlay", {})
+    ):
+        return None
+    return source
+
+
 class FTCheckpoint:
     def __init__(
         self,

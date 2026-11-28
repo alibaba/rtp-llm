@@ -147,13 +147,24 @@ class NewLoaderWeightManager:
             for device in devices:
                 torch.cuda.synchronize(device)
             groups = {}
-            output_head = getattr(self._model, "lm_head", None)
-            tied_output = getattr(
-                self._model, "tie_word_embeddings", False
+            vocab_paths = getattr(self._model, "runtime_parameter_paths", {})
+            embedding_path = vocab_paths.get("embedding", "embed_tokens.weight")
+            head_path = vocab_paths.get("lm_head", "lm_head.weight")
+            modules = dict(self._model.named_modules())
+            embedding = modules.get(embedding_path.rpartition(".")[0])
+            output_head = modules.get(head_path.rpartition(".")[0])
+            # The checkpoint may have supplied a distinct explicit head even
+            # when the config permits tying. PP stages need the config fallback
+            # because they may not own the head at all.
+            tied_output = (
+                getattr(output_head, "_tied_checkpoint_loaded", False)
+                or getattr(self._model, "tie_word_embeddings", False)
             ) and not getattr(output_head, "_explicit_checkpoint_loaded", False)
             for name, canonical, tensor in self._local_checkpoint_tensors(weights):
                 mapped = self._loader._mapped_checkpoint_name(self._model, canonical)
-                if canonical in self._runtime_contract:
+                if canonical in vocab_paths.values():
+                    mapped = canonical
+                elif canonical in self._runtime_contract:
                     # Old RPC clients may pass a published global view name.
                     # Resolve it by the tensor already exported by this model;
                     # do not introduce a parallel name→parameter registry.
@@ -169,20 +180,20 @@ class NewLoaderWeightManager:
                         )
                     mapped = paths[0]
                 if (
-                    mapped in ("embed_tokens.weight", "lm_head.weight")
+                    mapped in (embedding_path, head_path)
                     and getattr(self._model, "_ft_unknown_tied_vocab", False)
                 ):
                     raise ValueError(
                         "Cannot update tied vocabulary: FT LM-head provenance is unknown; "
                         "re-export the original checkpoint to record its source"
                     )
-                if mapped == "lm_head.weight" and tied_output:
+                if mapped == head_path and tied_output:
                     raise ValueError(
-                        "Tied LM head is a non-owning alias; update model.embed_tokens.weight"
+                        "Tied LM head is a non-owning alias; update the embedding instead"
                     )
                 if (
-                    mapped == "embed_tokens.weight"
-                    and getattr(self._model, "embed_tokens", None) is None
+                    mapped == embedding_path
+                    and embedding is None
                     and getattr(output_head, "_explicit_checkpoint_loaded", False)
                 ):
                     # An explicit head supersedes the tied checkpoint on this
@@ -227,7 +238,7 @@ class NewLoaderWeightManager:
                 )
                 expected_dtype = param.dtype if param is not None else None
                 if (
-                    mapped == "embed_tokens.weight"
+                    mapped == embedding_path
                     and tied_output
                     and target.module is output_head
                 ):
@@ -254,19 +265,17 @@ class NewLoaderWeightManager:
                     raise ValueError(f"Duplicate mapped checkpoint tensor {mapped!r}")
                 group[target.name] = tensor.detach().to(device="cpu", copy=True)
                 if (
-                    mapped == "embed_tokens.weight"
+                    mapped == embedding_path
                     and tied_output
                     and output_head is not None
                 ):
-                    groups.setdefault(self._model.lm_head, {})["weight"] = group[
+                    groups.setdefault(output_head, {})["weight"] = group[
                         target.name
                     ]
 
             if not groups:
                 return  # PP client broadcasts global requests to every rank.
-            module_names = {
-                module: name for name, module in self._model.named_modules()
-            }
+            module_names = {module: name for name, module in modules.items()}
             # Validate ownership and quantized-target capability for the entire
             # request before even running private conversion of another leaf.
             for module, incoming in groups.items():

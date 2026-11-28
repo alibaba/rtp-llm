@@ -439,8 +439,17 @@ py_test(
 py_test(
     name = "resident_replay_collective_test",
     srcs = ["resident_replay_collective_test.py"],
-    env = {"CUDA_VISIBLE_DEVICES": "", "HIP_VISIBLE_DEVICES": "", "OMP_NUM_THREADS": "1"},
-    deps = [":new_loader_core", "//rtp_llm:safetensors_torch", "//rtp_llm/resident_weights"],
+    env = checkpoint_reader_test_env({"CUDA_VISIBLE_DEVICES": "", "HIP_VISIBLE_DEVICES": "", "OMP_NUM_THREADS": "1"}),
+    deps = [
+        ":checkpoint_reader_test_support",
+        ":new_loader_core",
+        "//rtp_llm:fastsafetensors",
+        "//rtp_llm:safetensors_torch",
+        "//rtp_llm/resident_weights",
+    ] + select({
+        "@//:using_rocm": ["//rtp_llm:fast-safetensors"],
+        "//conditions:default": [],
+    }),
 )
 
 py_test(

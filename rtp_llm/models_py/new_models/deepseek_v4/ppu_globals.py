@@ -6,9 +6,15 @@ from torch.nn import functional as F
 
 from rtp_llm.models_py.module_base import RtpModule, copy_weight_
 from rtp_llm.models_py.read_spec import make_sharded_read_spec, unwrap_checkpoint_tensor
+from rtp_llm.models_py.runtime_weight_update import prepare_leaf_weight_updates
 
 
 class PpuHiddenShardEmbedding(RtpModule):
+    supports_independent_weight_updates = True
+
+    def prepare_weight_updates(self, weights):
+        return prepare_leaf_weight_updates(self, weights)
+
     def __init__(self, vocab_size, dim, tp_size, tp_rank, *, dtype=torch.bfloat16):
         super().__init__()
         if any(type(v) is not int or v <= 0 for v in (vocab_size, dim, tp_size)):

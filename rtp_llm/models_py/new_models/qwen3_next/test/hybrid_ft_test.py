@@ -1,6 +1,7 @@
 """Producer descriptors → rank-local files → real text owners, no golden tensors."""
 
 import json
+import shutil
 import tempfile
 import unittest
 from dataclasses import replace
@@ -103,7 +104,11 @@ class HybridFTRoundTrip(unittest.TestCase):
             )
             archive = source / task.name
             _export_ft(source, archive, cfg, wrapper, handler=module)
+            # The converter copies config.json beside the rank-local files.
+            # Reload the archive using its own config, including Kimi's nested text config.
+            shutil.copyfile(config_path, archive / "config.json")
             for path in (source, archive):
+                cfg.ckpt_path = str(path)
                 for reader in checkpoint_readers("scratch", "fastsafetensors"):
                     with self.subTest(
                         model=cfg.model_type, task=task, path=path.name, reader=reader
@@ -247,7 +252,7 @@ class HybridFTRoundTrip(unittest.TestCase):
             with self.subTest(name=name):
                 torch.testing.assert_close(actual[name], expected[name], rtol=0, atol=0)
         if not stage_only and config.model_type in (
-            "qwen3_next", "qwen35_dense", "qwen35_moe", "kimi_linear"
+            "qwen3_next", "qwen35_dense", "qwen35_moe", "kimi_linear", "kimi_k25"
         ):
             self._check_decoder_handler(source, ft, config, wrapper, weights)
 

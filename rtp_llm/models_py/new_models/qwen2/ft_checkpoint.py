@@ -9,6 +9,7 @@ import torch
 from rtp_llm.models_py.ft_checkpoint import (
     RuntimeTensorBinding,
     ft_layer_bindings,
+    ft_lm_head_source,
     validate_format_parameter_ownership,
 )
 from rtp_llm.models_py.quant_methods.unquantized import UnquantizedLinearMethod
@@ -234,15 +235,7 @@ def load_gqa_ffn_ft_checkpoint(
     embedding = model.embed_tokens
     head = model.lm_head
     preserved = validate_format_parameter_ownership(model, ft=True)
-    head_source = checkpoint.index_metadata.get("ft_lm_head_source")
-    if head_source not in (None, "embedding", "lm_head"):
-        raise ValueError("Invalid FT LM-head provenance")
-    if any(
-        key.endswith((".global.embedding", ".global.lm_head"))
-        for key in getattr(checkpoint, "_overlay", {})
-    ):
-        # This patch is outside the exporter's recorded source decision.
-        head_source = None
+    head_source = ft_lm_head_source(checkpoint)
     if head is None and "global.lm_head" in checkpoint.entries:
         # A generation FT archive is also a valid source for a non-generation
         # deployment of this backbone. Only exclude the unused *projection*;

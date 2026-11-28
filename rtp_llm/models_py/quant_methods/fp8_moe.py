@@ -330,14 +330,11 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                     torch.zeros(E, h_nb, k_nb, dtype=torch.float32),
                 )
             else:
-                # Keep custom source scales on CPU and move one expert at a
-                # time during conversion to bound accelerator peak memory.
-                layer.w13_scale = torch.zeros(
-                    E, 2 * nb, hb, dtype=torch.float32, device="cpu"
-                )
-                layer.w2_scale = torch.zeros(
-                    E, h_nb, k_nb, dtype=torch.float32, device="cpu"
-                )
+                # These names belong to the final runtime grids, including on
+                # resident replay where no checkpoint scale will be read.
+                layer.register_buffer("w13_scale", None)
+                layer.register_buffer("w2_scale", None)
+                layer._fp8_source_grid_shapes = ((E, 2 * nb, hb), (E, h_nb, k_nb))
 
         elif qf in (
             "fp8_per_tensor_online",
@@ -485,6 +482,19 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                 )
             layer._down_ch_scales.data[expert_id].copy_(scale)
 
+    @staticmethod
+    def block_checkpoint_scales(layer):
+        if not hasattr(layer, "_fp8_source_grid_shapes"):
+            return layer.w13_scale, layer.w2_scale
+        # Source-only: keep these off the accelerator during module migration,
+        # and allocate nothing for a warm owner that attaches the final grids.
+        if not hasattr(layer, "_fp8_source_grids"):
+            layer._fp8_source_grids = tuple(
+                torch.zeros(shape, dtype=torch.float32, device="cpu")
+                for shape in layer._fp8_source_grid_shapes
+            )
+        return layer._fp8_source_grids
+
     def _copy_block_scale(self, layer, expert_id, proj, tensor):
         block_n, block_k = getattr(
             layer, "_fp8_moe_weight_block_size", [layer._FP8_BLOCK_SIZE] * 2
@@ -511,7 +521,8 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                 )
             sliced = tensor.narrow(0, start_block, nb).contiguous()
             row_start = nb if proj == "gate_proj" else 0
-            layer.w13_scale.data[expert_id, row_start : row_start + nb].copy_(sliced)
+            w13_scale, _ = self.block_checkpoint_scales(layer)
+            w13_scale[expert_id, row_start : row_start + nb].copy_(sliced)
         elif proj == "down_proj":
             if layer.moe_expert_tp_size > 1:
                 self._check_block_aligned(
@@ -532,7 +543,8 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                     f"{tuple(tensor.shape)}"
                 )
             sliced = tensor.narrow(1, start_block, k_nb).contiguous()
-            layer.w2_scale.data[expert_id].copy_(sliced)
+            _, w2_scale = self.block_checkpoint_scales(layer)
+            w2_scale[expert_id].copy_(sliced)
 
     @staticmethod
     def _check_block_aligned(start: int, size: int, block: int, what: str):
@@ -614,7 +626,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             self._requant_per_block_if_needed(layer)
         elif qf == "fp8_per_block":
             self._validate_positive_finite_scales(
-                (layer.w13_scale, layer.w2_scale), "per-block"
+                self.block_checkpoint_scales(layer), "per-block"
             )
             self._requant_per_block_if_needed(layer)
 
@@ -823,23 +835,24 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             )
             return
 
-        def requant_weight_fp8_block_float(weight, weight_scale):
+        def dequantize(weight, weight_scale):
             block_n, block_k = block_size
             expanded = weight_scale.float().repeat_interleave(block_n, dim=0)
             expanded = expanded.repeat_interleave(block_k, dim=1)
-            weight_dequant = (
+            return (
                 weight.float() * expanded[: weight.shape[0], : weight.shape[1]]
-            )
+            ).to(torch.bfloat16)
+
+        def requantize(weight_dequant):
             quantized, scale = per_block_quant_like_legacy(
-                weight_dequant.to(torch.bfloat16), layer._FP8_BLOCK_SIZE
+                weight_dequant, layer._FP8_BLOCK_SIZE
             )
             quantized, scale = self._requant_block_to_runtime_fp8(
                 quantized.unsqueeze(0), scale.unsqueeze(0), [layer._FP8_BLOCK_SIZE] * 2
             )
             return quantized.squeeze(0), scale.squeeze(0)
 
-        src_w13_scale = layer.w13_scale
-        src_w2_scale = layer.w2_scale
+        src_w13_scale, src_w2_scale = self.block_checkpoint_scales(layer)
         if src_w13_scale.is_meta or src_w2_scale.is_meta:
             raise RuntimeError(
                 "FP8 MoE custom block source scales must be materialized before "
@@ -851,11 +864,22 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         runtime_dtype = _runtime_fp8_dtype(device)
         new_w13 = torch.empty_like(layer.w13.data, dtype=runtime_dtype)
         new_w2 = torch.empty_like(layer.w2.data, dtype=runtime_dtype)
+        layer._fp8_gate_first = torch.version.hip is not None and device.type == "cuda"
         for e in range(layer.num_local_experts):
-            w, s = requant_weight_fp8_block_float(
-                layer.w13.data[e].contiguous(),
-                src_w13_scale[e].to(device, non_blocking=True).contiguous(),
-            )
+            # The source grids restart at each projection, even if the last
+            # source tile of 'up' is partial. Quantize the joined matrix in
+            # executor order: a final 128-row tile may span that same boundary.
+            fused = torch.empty_like(layer.w13[e], dtype=torch.bfloat16)
+            destinations = fused.chunk(2)
+            for i, (source, grid) in enumerate(
+                zip(layer.w13[e].chunk(2), src_w13_scale[e].chunk(2))
+            ):
+                destinations[1 - i if layer._fp8_gate_first else i].copy_(
+                    dequantize(source, grid.to(device, non_blocking=True))
+                )
+            del destinations
+            w, s = requantize(fused)
+            del fused
             if w.dtype != runtime_dtype:
                 raise TypeError(
                     f"MoE FP8 block quantizer returned {w.dtype}, expected "
@@ -864,9 +888,8 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             new_w13[e].copy_(w)
             new_w13_scale.append(s)
             del w
-            w, s = requant_weight_fp8_block_float(
-                layer.w2.data[e].contiguous(),
-                src_w2_scale[e].to(device, non_blocking=True).contiguous(),
+            w, s = requantize(
+                dequantize(layer.w2[e], src_w2_scale[e].to(device, non_blocking=True))
             )
             if w.dtype != runtime_dtype:
                 raise TypeError(
@@ -879,12 +902,9 @@ class Fp8MoEMethod(FusedMoEMethodBase):
 
         layer.w13 = nn.Parameter(new_w13.contiguous(), requires_grad=False)
         layer.w2 = nn.Parameter(new_w2.contiguous(), requires_grad=False)
-        del layer.w13_scale
-        del layer.w2_scale
-        layer.register_buffer(
-            "w13_scale", torch.stack(new_w13_scale, dim=0).contiguous()
-        )
-        layer.register_buffer("w2_scale", torch.stack(new_w2_scale, dim=0).contiguous())
+        layer.w13_scale = torch.stack(new_w13_scale, dim=0).contiguous()
+        layer.w2_scale = torch.stack(new_w2_scale, dim=0).contiguous()
+        del layer._fp8_source_grids
         logger.info(
             "[Fp8MoEMethod] requantized MoE fp8 block scales from %s to [128, 128]: "
             "w13=%s w13_scale=%s w2=%s w2_scale=%s",
