@@ -30,7 +30,7 @@ py_test(
         "eplb_py_wrapper_test.py",
     ],
     data = [
-        ":th_eplb_py_wrapper_test",
+        "//rtp_llm/libs:eplb_test_runfile",
     ],
     deps = [
         "//rtp_llm:torch",

@@ -46,7 +46,7 @@ py_test(
         "context_parallel_py_wrapper_test.py",
     ],
     data = [
-        ":th_context_parallel_py_wrapper_test",
+        "//rtp_llm/libs:context_parallel_test_runfile",
     ],
     deps = [
         "//rtp_llm:torch",

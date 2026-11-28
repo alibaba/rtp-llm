@@ -17,7 +17,12 @@ py_library(
         "diff_util.py",
         "coredump_util.py",
     ],
-    deps = [],
+    # Native pytest GPU marks are imported even by the Bazel unittest entry points.
+    deps = select({
+        "//:using_cuda13_x86": ["@pip_dsv4_test_pytest//:pkg"],
+        "//:using_cuda13_arm": ["@pip_dsv4_test_pytest//:pkg"],
+        "//conditions:default": [],
+    }),
 )
 
 py_library(
@@ -89,6 +94,7 @@ py_test(
 py_test(
     name = "device_resource_test",
     srcs = ["device_resource_test.py"],
+    data = ["test_device_detection.py"],
     env = {"GPU_COUNT": "0"},
     deps = [":device_resource"],
 )

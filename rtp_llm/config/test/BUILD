@@ -33,7 +33,7 @@ py_library(
 py_test(
     name = "model_config_override_test",
     srcs = ["model_config_override_test.py"],
-    data = ["//:th_transformer_config"],
+    data = ["//rtp_llm/libs:libth_transformer_config_so"],
     deps = [
         "//rtp_llm:config",
         "//rtp_llm:config_ops",
@@ -61,7 +61,7 @@ py_test(
         "kv_cache_config_pickle_test.py",
     ],
     data = [
-        "//:th_transformer_config",
+        "//rtp_llm/libs:libth_transformer_config_so",
     ],
     deps = [
         ":kv_cache_event_test_values",
@@ -97,7 +97,7 @@ py_test(
         "engine_config_test.py",
     ],
     data = [
-        "//:th_transformer_config",
+        "//rtp_llm/libs:libth_transformer_config_so",
     ],
     deps = [
         "//rtp_llm:config_ops",

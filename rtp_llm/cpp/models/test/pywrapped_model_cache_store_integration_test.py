@@ -51,6 +51,10 @@ def _install_single_rank_rocm_graph_capture_stub() -> None:
 
 
 _TEST_LIB_DIR = Path(__file__).resolve().parents[3] / "libs" / "test"
+if os.environ.get("TEST_SRCDIR") and os.environ.get("TEST_WORKSPACE"):
+    _TEST_LIB_DIR = (
+        Path(os.environ["TEST_SRCDIR"]) / os.environ["TEST_WORKSPACE"] / "rtp_llm/libs/test"
+    )
 _extension = None
 _IN_NATIVE_TEST = False
 PyModelInputs = None

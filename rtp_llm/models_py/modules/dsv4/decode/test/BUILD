@@ -5,7 +5,7 @@ py_test_deps = [
 py_test(
     name = "decode_attn_metadata_test",
     srcs = ["decode_attn_metadata_test.py"],
-    deps = ["//rtp_llm/models_py:dsv4_decode_cpu"],
+    deps = ["//rtp_llm/models_py:dsv4_decode_cpu", "@pip_dsv4_test_pytest//:pkg"],
     tags = [
         "open_skip",
     ],
@@ -28,7 +28,7 @@ py_test(
 py_test(
     name = "kv_write_decode_test",
     srcs = ["kv_write_decode_test.py"],
-    deps = ["//rtp_llm/models_py:dsv4_decode_cpu"],
+    deps = ["//rtp_llm/models_py:dsv4_decode_cpu", "@pip_dsv4_test_pytest//:pkg"],
     tags = [
         "open_skip",
     ],

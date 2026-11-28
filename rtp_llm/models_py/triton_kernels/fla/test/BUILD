@@ -45,6 +45,7 @@ py_test(
         "test_gdn_block_prefill.py",
     ],
     deps = [
+        "@pip_dsv4_test_pytest//:pkg",
         "//rtp_llm/models_py/triton_kernels:fla",
         "//rtp_llm/models_py/triton_kernels:causal_conv1d",
     ] + [
@@ -65,6 +66,7 @@ py_test(
         "test_gdn_decode.py",
     ],
     deps = [
+        "@pip_dsv4_test_pytest//:pkg",
         "//rtp_llm/models_py/triton_kernels:fla",
     ] + [
         ":einops",
@@ -119,6 +121,7 @@ py_test(
         "test_chunk_prefill.py",
     ],
     deps = [
+        "@pip_dsv4_test_pytest//:pkg",
         "//rtp_llm/models_py/triton_kernels:fla",
     ] + [
         ":einops",
@@ -166,6 +169,7 @@ py_test(
         "test_l2norm.py",
     ],
     deps = [
+        "@pip_dsv4_test_pytest//:pkg",
         "//rtp_llm/models_py/triton_kernels:fla",
     ] + [
         ":einops",

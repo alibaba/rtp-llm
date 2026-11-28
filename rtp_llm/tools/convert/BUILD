@@ -23,7 +23,7 @@ py_test(
         "weights_convert_utils.py",
     ],
     data = [
-        "//rtp_llm/cpp/cache/test:cache_config_creator_py_test",
+        "//rtp_llm/libs:cache_config_creator_test_runfile",
     ],
     deps = [
         "//rtp_llm:testlib",

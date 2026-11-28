@@ -1,5 +1,6 @@
 load("@pip_gpu_rocm_torch//:requirements.bzl", requirement_gpu_rocm = "requirement")
 load("//:def.bzl", "cc_test_wrapper", "copts")
+load("//bazel:defs.bzl", "runfiles_alias")
 load("@arch_config//:arch_select.bzl", "torch_deps")
 
 cc_test = cc_test_wrapper
@@ -105,14 +106,21 @@ cc_binary(
 )
 
 pywrapped_model_test_deps = [
+    "@pip_dsv4_test_pytest//:pkg",
     "//rtp_llm:config",
     "//rtp_llm:torch",
 ]
 
+runfiles_alias(
+    name = "pywrapped_cache_store_test_runfile",
+    src = ":th_pywrapped_model_cache_store_integration_test",
+    runfile_path = "rtp_llm/libs/test/libth_pywrapped_model_cache_store_integration_test.so",
+)
+
 py_test(
     name = "pywrapped_model_cache_store_integration_test",
     srcs = ["pywrapped_model_cache_store_integration_test.py"],
-    data = [":th_pywrapped_model_cache_store_integration_test"],
+    data = [":pywrapped_cache_store_test_runfile"],
     deps = pywrapped_model_test_deps,
     env = {"TEST_USING_DEVICE": "CUDA"},
     exec_properties = {"gpu": "L20_CU13"},

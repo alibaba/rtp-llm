@@ -159,7 +159,7 @@ def h20_oss_suites():
     )
 
     # H20 Dense (Qwen2.5/Qwen3 dense)
-    flashinfer_decode_base_args = "--disable_flashinfer_native 0 --act_type BF16 --reserver_runtime_mem_mb 8192 --tp_size 1 --warm_up 0 --seq_size_per_block 64 --enable_xqa 0 --enable_flashinfer_trtllm_gen 0 --enable_flashinfer_trt_fmha_v2 0 --enable_paged_flashinfer_trt_fmha_v2 0"
+    flashinfer_decode_base_args = "--prefill_attn_backend py_flashinfer,py_flashinfer_paged --decode_attn_backend py_flashinfer --act_type BF16 --reserver_runtime_mem_mb 8192 --tp_size 1 --warm_up 0 --seq_size_per_block 64"
     native.test_suite(
         name = "smoke_h20_dense",
         tests = [
@@ -226,7 +226,7 @@ def h20_oss_suites():
                 name = "dense_fp8pb_dynamic",
                 task_info = "data/model/qwen3/q_r_h20.json",
                 # The existing 497-token prompt exercises eight 64-token prefill chunks.
-                smoke_args = "--disable_flashinfer_native 1 --quantization FP8_PER_BLOCK --act_type BF16 --warm_up 0 --seq_size_per_block 64 --prefill_chunk_size 64",
+                smoke_args = "--disable_flash_infer 1 --quantization FP8_PER_BLOCK --act_type BF16 --warm_up 0 --seq_size_per_block 64 --prefill_chunk_size 64",
                 gpu_type = ["H20_CU13"],
             ),
             smoke_test(
@@ -543,7 +543,7 @@ def h20_oss_suites():
                 # Force FlashInfer native paged prefill for the existing MTP
                 # graph owner: 16 decode buckets and prefill share its C++ pool.
                 # This does not enable generation-prefill graphs for MTP.
-                smoke_args = "--max_seq_len 16384 --ft_disable_custom_ar 1 --eplb_mode NONE --redundant_expert 0 --act_type FP16 --concurrency_limit 16 --frontend_server_count 1 --warm_up 0 --reserver_runtime_mem_mb 42000 --seq_size_per_block 64 --enable_xqa 1 --disable_flashinfer_native 0 --disable_flashinfer_hybrid_prefill 1 --enable_flashinfer_trt_fmha_v2 0 --enable_paged_flashinfer_trt_fmha_v2 0 --enable_flashinfer_trtllm_gen 0 --sp_type eagle --gen_num_per_cycle 4 --sp_model_type qwen_2-mtp --sp_checkpoint_path /mnt/nas1/mtp_reg/qwen2_14b_draft/ --sp_act_type FP16 --decode_capture_config '1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16' --prefill_capture_config '80:1' --enable_cuda_graph 1 --tp_size 2",
+                smoke_args = "--max_seq_len 16384 --ft_disable_custom_ar 1 --eplb_mode NONE --redundant_expert 0 --act_type FP16 --concurrency_limit 16 --frontend_server_count 1 --warm_up 0 --reserver_runtime_mem_mb 42000 --seq_size_per_block 64 --prefill_attn_backend py_flashinfer_paged,py_flashinfer --decode_attn_backend xqa,py_flashinfer --sp_type eagle --gen_num_per_cycle 4 --sp_model_type qwen_2-mtp --sp_checkpoint_path /mnt/nas1/mtp_reg/qwen2_14b_draft/ --sp_act_type FP16 --decode_capture_config '1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16' --prefill_capture_config '80:1' --enable_cuda_graph 1 --tp_size 2",
                 envs = ["NCCL_DISABLE_ABORT=1", "NCCL_DEBUG=INFO", "LOG_LEVEL=INFO"],
                 gpu_type = ["H20_CU13"],
                 concurrency_test = True,

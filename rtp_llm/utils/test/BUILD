@@ -72,7 +72,7 @@ py_test(
         "jit_cache_manager_test.py",
     ],
     data = [
-        "//:th_transformer_config",
+        "//rtp_llm/libs:libth_transformer_config_so",
     ],
     deps = [
         "//rtp_llm:config_ops",
@@ -134,6 +134,7 @@ py_test(
         "ckpt_database_test.py",
     ],
     deps = [
+        "@pip_dsv4_test_pytest//:pkg",
         "//rtp_llm:_ft_pickler",
         "//rtp_llm:config",
         "//rtp_llm:lora",
@@ -209,6 +210,7 @@ py_test(
         "process_manager_test.py",
     ],
     deps = [
+        "@pip_dsv4_test_pytest//:pkg",
         "//rtp_llm:utils",
     ],
 )
@@ -226,6 +228,7 @@ py_test(
         "grpc_host_channel_pool_test.py",
     ],
     deps = [
+        "@pip_dsv4_test_pytest//:pkg",
         ":grpcio",
         "//rtp_llm:utils",
     ],
