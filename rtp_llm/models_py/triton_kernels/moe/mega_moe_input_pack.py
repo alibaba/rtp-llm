@@ -114,37 +114,34 @@ if triton is not None:
         pid_blk = tl.program_id(1)
 
         offs_m = pid_m_blk * BLOCK_M + tl.arange(0, BLOCK_M).to(tl.int64)
-        offs_32 = tl.arange(0, 32)
         row_mask = offs_m < M
-        packed = tl.zeros((BLOCK_M,), dtype=tl.int32)
+        cols = pid_blk * 128 + tl.arange(0, 128)
+        mask = row_mask[:, None] & (cols[None, :] < N)
+        x = tl.load(
+            x_ptr + offs_m[:, None] * x_stride_m + cols[None, :],
+            mask=mask,
+            other=0.0,
+        ).to(tl.float32)
+        if SANITIZE_NON_FINITE:
+            x_is_finite = tl.abs(x) < float("inf")
+            x = tl.where(x_is_finite, x, 0.0)
 
-        for pack_idx in tl.static_range(4):
-            cols = pid_blk * 128 + pack_idx * 32 + offs_32
-            mask = row_mask[:, None] & (cols[None, :] < N)
-            x = tl.load(
-                x_ptr + offs_m[:, None] * x_stride_m + cols[None, :],
-                mask=mask,
-                other=0.0,
-            ).to(tl.float32)
-            if SANITIZE_NON_FINITE:
-                x_is_finite = tl.abs(x) < float("inf")
-                x = tl.where(x_is_finite, x, 0.0)
+        x_g = tl.reshape(x, (BLOCK_M, 4, 32))
+        block_absmax = tl.maximum(tl.max(tl.abs(x_g), axis=2), eps)
+        scale_raw = block_absmax / fp8_max
+        scale_raw_bits = scale_raw.to(tl.int32, bitcast=True)
+        exp = ((scale_raw_bits >> 23) & 0xFF) + ((scale_raw_bits & 0x7FFFFF) != 0)
+        exp = tl.minimum(tl.maximum(exp, 1), 254)
+        scale = (exp << 23).to(tl.float32, bitcast=True)
 
-            block_absmax = tl.maximum(tl.max(tl.abs(x), axis=1), eps)
-            scale_raw = block_absmax / fp8_max
-            scale_raw_bits = scale_raw.to(tl.int32, bitcast=True)
-            exp = ((scale_raw_bits >> 23) & 0xFF) + ((scale_raw_bits & 0x7FFFFF) != 0)
-            exp = tl.minimum(tl.maximum(exp, 1), 254)
-            scale_bits = exp << 23
-            scale = scale_bits.to(tl.float32, bitcast=True)
-
-            q = tl.clamp(x / scale[:, None], -fp8_max, fp8_max).to(tl.float8e4nv)
-            tl.store(
-                out_fp8_ptr + offs_m[:, None] * out_stride_m + cols[None, :],
-                q,
-                mask=mask,
-            )
-            packed = packed | (exp << (pack_idx * 8))
+        q = tl.clamp(x_g / scale[:, :, None], -fp8_max, fp8_max).to(tl.float8e4nv)
+        tl.store(
+            out_fp8_ptr + offs_m[:, None] * out_stride_m + cols[None, :],
+            tl.reshape(q, (BLOCK_M, 128)),
+            mask=mask,
+        )
+        pack_shifts = tl.arange(0, 4)[None, :] * 8
+        packed = tl.sum(exp << pack_shifts, axis=1)
 
         tl.store(
             out_sf_ptr + offs_m * sf_stride_m + pid_blk,
@@ -268,31 +265,36 @@ if triton is not None:
             mask=row_mask,
         )
 
-        # Clear padding/hole rows in [0, required_destination_rows) so reused
-        # buffers across CUDA Graph replays contain no stale scales.
+        # Clear padding/hole rows in [0, required_destination_rows) only for
+        # active destination tiles that actually contain holes or tail padding.
         req_rows = required_destination_rows.to(tl.int64)
-        grid_m_i64 = grid_m.to(tl.int64)
-        M_i64 = M.to(tl.int64)
-        n_chunks = tl.cdiv(req_rows, grid_m_i64 * 128)
-        offs_128 = tl.arange(0, 128).to(tl.int64)
-        zero_128 = tl.zeros((128,), dtype=tl.int32)
-        for chunk_idx in range(n_chunks):
-            d_row = (pid_m_blk + chunk_idx.to(tl.int64) * grid_m_i64) * 128 + offs_128
-            valid_dest = d_row < req_rows
-            local_dest = d_row % se_aligned_blk
-            row_in_128 = local_dest % 128
-            row_in_block = (
-                (local_dest // 128) * 128 + (row_in_128 % 4) * 32 + (row_in_128 // 4)
-            )
-            src_row = (d_row // se_aligned_blk) * se_blk + row_in_block
-            is_hole_or_tail = valid_dest & (
-                (row_in_block >= se_blk) | (src_row >= M_i64)
-            )
-            tl.store(
-                out_shared_l1_sf_ptr + d_row * s_m + col_offset,
-                zero_128,
-                mask=is_hole_or_tail,
-            )
+        num_dest_tiles = req_rows // 128
+        if pid_m_blk < num_dest_tiles:
+            grid_m_i64 = grid_m.to(tl.int64)
+            M_i64 = M.to(tl.int64)
+            tiles_per_se_blk = se_aligned_blk // 128
+            n_chunks = tl.cdiv(num_dest_tiles, grid_m_i64)
+            offs_128 = tl.arange(0, 128).to(tl.int64)
+            perm_in_128 = (offs_128 % 4) * 32 + (offs_128 // 4)
+            zero_128 = tl.zeros((128,), dtype=tl.int32)
+            for chunk_idx in range(n_chunks):
+                tile_id = pid_m_blk + chunk_idx.to(tl.int64) * grid_m_i64
+                if tile_id < num_dest_tiles:
+                    se_blk_idx = tile_id // tiles_per_se_blk
+                    sub_tile = tile_id % tiles_per_se_blk
+                    full_tile = ((sub_tile + 1) * 128 <= se_blk) & (
+                        (se_blk_idx + 1) * se_blk <= M_i64
+                    )
+                    if not full_tile:
+                        row_in_block = sub_tile * 128 + perm_in_128
+                        src_row = se_blk_idx * se_blk + row_in_block
+                        is_hole_or_tail = (row_in_block >= se_blk) | (src_row >= M_i64)
+                        d_row = tile_id * 128 + offs_128
+                        tl.store(
+                            out_shared_l1_sf_ptr + d_row * s_m + col_offset,
+                            zero_128,
+                            mask=is_hole_or_tail,
+                        )
 
     @triton.jit
     def _gate_pack_nonhash_row(
@@ -830,7 +832,7 @@ def fused_pack_mega_moe_inputs_optimized(
         return
     fp8_max = torch.finfo(torch.float8_e4m3fn).max
     block_k = triton.next_power_of_2(topk)
-    block_m = 8 if T >= 2048 else 2
+    block_m = 16 if T >= 512 else (8 if T > 32 else (4 if T > 4 else 1))
     grid = (triton.cdiv(T, block_m), triton.cdiv(D, 128))
     _pack_mega_moe_inputs_optimized_kernel[grid](
         x,
@@ -983,9 +985,7 @@ def _validate_tensor_specs(
 ) -> None:
     for name, tensor, expected_shape, expected_dtype in specs:
         if not tensor.is_cuda:
-            raise RuntimeError(
-                f"{cuda_error_prefix}; {name} is on {tensor.device}"
-            )
+            raise RuntimeError(f"{cuda_error_prefix}; {name} is on {tensor.device}")
         if tensor.device != device:
             raise ValueError(f"{name} must be on {device}, got {tensor.device}")
         if tuple(tensor.shape) != expected_shape:
@@ -1000,6 +1000,26 @@ def _validate_tensor_specs(
                 f"{name} must be contiguous in its last dimension; "
                 f"got stride={tensor.stride()}"
             )
+
+
+def _x_pack_launch_config(tokens: int) -> tuple[int, int, int]:
+    """Select (BLOCK_M, BLOCK_K, num_warps) for fused_pack_mega_moe_x_inputs.
+
+    dim is validated to be a positive multiple of 512.
+    - Decode tiny M <= 4: keep 1 row per CTA with 128 cols to spread across SMs.
+    - Small batch 4 < M <= 32: (4, 256, 4) for coalesced 128-bit loads/stores.
+    - Medium batch 32 < M < 256: (8, 256, 4).
+    - Prefill M >= 256: (16, 512, 8) packs 4 UE8M0 int32s per row per CTA so all
+      256 threads execute coalesced 128-bit vector loads/stores and reduce CTAs by
+      >30x vs BLOCK_M=2, BLOCK_K=128.
+    """
+    if tokens <= 4:
+        return 1, 128, 2
+    if tokens <= 32:
+        return 4, 256, 4
+    if tokens < 256:
+        return 8, 256, 4
+    return 16, 512, 8
 
 
 @triton.jit(
@@ -1032,44 +1052,103 @@ def _pack_mega_moe_x_kernel(
     eps: tl.constexpr,
     fp8_max: tl.constexpr,
     BLOCK_M: tl.constexpr,
+    BLOCK_K: tl.constexpr,
     STAGE_SHARED_SF: tl.constexpr,
 ):
+    PACKS: tl.constexpr = BLOCK_K // 128
+    GROUPS: tl.constexpr = BLOCK_K // 32
+
     pid_m_blk = tl.program_id(0).to(tl.int64)
-    pid_blk = tl.program_id(1)
+    pid_k = tl.program_id(1)
     offs_m = pid_m_blk * BLOCK_M + tl.arange(0, BLOCK_M).to(tl.int64)
     row_mask = offs_m < M
+    offs_k = pid_k * BLOCK_K + tl.arange(0, BLOCK_K)
+    io_mask = row_mask[:, None]
 
-    packed = _pack_x_block(
-        x_ptr,
-        out_fp8_ptr,
-        out_sf_ptr,
-        offs_m,
-        pid_blk,
-        M,
-        N,
-        x_stride_m,
-        out_stride_m,
-        sf_stride_m,
-        eps,
-        fp8_max,
-        BLOCK_M,
+    x = tl.load(
+        x_ptr + offs_m[:, None] * x_stride_m + offs_k[None, :],
+        mask=io_mask,
+        other=0.0,
+    ).to(tl.float32)
+    x = tl.where(tl.abs(x) < float("inf"), x, 0.0)
+
+    x_g = tl.reshape(x, (BLOCK_M, GROUPS, 32))
+    block_absmax = tl.maximum(tl.max(tl.abs(x_g), axis=2), eps)
+    scale_raw = block_absmax / fp8_max
+    scale_raw_bits = scale_raw.to(tl.int32, bitcast=True)
+    exp = ((scale_raw_bits >> 23) & 0xFF) + ((scale_raw_bits & 0x7FFFFF) != 0)
+    exp = tl.minimum(tl.maximum(exp, 1), 254)
+    scale = (exp << 23).to(tl.float32, bitcast=True)
+
+    q = tl.clamp(x_g / scale[:, :, None], -fp8_max, fp8_max).to(tl.float8e4nv)
+    tl.store(
+        out_fp8_ptr + offs_m[:, None] * out_stride_m + offs_k[None, :],
+        tl.reshape(q, (BLOCK_M, BLOCK_K)),
+        mask=io_mask,
     )
+
+    exp_packed = tl.reshape(exp, (BLOCK_M, PACKS, 4))
+    pack_shifts = tl.arange(0, 4)[None, None, :] * 8
+    packed = tl.sum(exp_packed << pack_shifts, axis=2)
+
+    offs_p = pid_k * PACKS + tl.arange(0, PACKS)
+    tl.store(
+        out_sf_ptr + offs_m[:, None] * sf_stride_m + offs_p[None, :],
+        packed,
+        mask=row_mask[:, None],
+    )
+
     if STAGE_SHARED_SF:
-        _stage_shared_l1_sf_block(
-            packed,
-            out_shared_l1_sf_ptr,
-            offs_m,
-            row_mask,
-            pid_m_blk,
-            pid_blk,
-            M,
-            se_block_m,
-            se_aligned_block_m,
-            required_destination_rows,
-            grid_m,
-            shared_sf_stride_m,
-            shared_sf_stride_k,
+        se_blk = se_block_m.to(tl.int64)
+        se_aligned_blk = se_aligned_block_m.to(tl.int64)
+        s_m = shared_sf_stride_m.to(tl.int64)
+        s_k = shared_sf_stride_k.to(tl.int64)
+
+        within_block = offs_m % se_blk
+        dest_rows = (
+            (offs_m // se_blk) * se_aligned_blk
+            + (within_block // 128) * 128
+            + (within_block % 32) * 4
+            + (within_block % 128) // 32
         )
+        tl.store(
+            out_shared_l1_sf_ptr + dest_rows[:, None] * s_m + offs_p[None, :] * s_k,
+            packed,
+            mask=row_mask[:, None],
+        )
+
+        # Clear holes and tail rows in [0, required_destination_rows) only on
+        # active destination tiles that actually contain padding.
+        req_rows = required_destination_rows.to(tl.int64)
+        num_dest_tiles = req_rows // 128
+        if pid_m_blk < num_dest_tiles:
+            grid_m_i64 = grid_m.to(tl.int64)
+            M_i64 = M.to(tl.int64)
+            tiles_per_se_blk = se_aligned_blk // 128
+            n_chunks = tl.cdiv(num_dest_tiles, grid_m_i64)
+            offs_128 = tl.arange(0, 128).to(tl.int64)
+            perm_in_128 = (offs_128 % 4) * 32 + (offs_128 // 4)
+            zero_128 = tl.zeros((128,), dtype=tl.int32)
+            for chunk_idx in range(n_chunks):
+                tile_id = pid_m_blk + chunk_idx.to(tl.int64) * grid_m_i64
+                if tile_id < num_dest_tiles:
+                    se_blk_idx = tile_id // tiles_per_se_blk
+                    sub_tile = tile_id % tiles_per_se_blk
+                    full_tile = ((sub_tile + 1) * 128 <= se_blk) & (
+                        (se_blk_idx + 1) * se_blk <= M_i64
+                    )
+                    if not full_tile:
+                        row_in_block = sub_tile * 128 + perm_in_128
+                        src_row = se_blk_idx * se_blk + row_in_block
+                        is_hole_or_tail = (row_in_block >= se_blk) | (src_row >= M_i64)
+                        d_row = tile_id * 128 + offs_128
+                        for p_idx in tl.static_range(PACKS):
+                            col_p = pid_k * PACKS + p_idx
+                            tl.store(
+                                out_shared_l1_sf_ptr + d_row * s_m + col_p * s_k,
+                                zero_128,
+                                mask=is_hole_or_tail,
+                            )
 
 
 def fused_pack_mega_moe_x_inputs(
@@ -1122,11 +1201,11 @@ def fused_pack_mega_moe_x_inputs(
         return
     shared_sf_ptr = out_shared_l1_sf if stage_shared_sf else out_sf
     assert shared_sf_ptr is not None
-    block_m = _gate_pack_block_m(tokens)
+    block_m, block_k, num_warps = _x_pack_launch_config(tokens)
     fp8_max = torch.finfo(torch.float8_e4m3fn).max
-    num_k_blocks = triton.cdiv(dim, 128)
     grid_m = triton.cdiv(tokens, block_m)
-    _pack_mega_moe_x_kernel[(grid_m, num_k_blocks)](
+    grid_k = triton.cdiv(dim, block_k)
+    _pack_mega_moe_x_kernel[(grid_m, grid_k)](
         x,
         out_fp8,
         out_sf,
@@ -1145,8 +1224,9 @@ def fused_pack_mega_moe_x_inputs(
         1.0e-4,
         fp8_max,
         BLOCK_M=block_m,
+        BLOCK_K=block_k,
         STAGE_SHARED_SF=stage_shared_sf,
-        num_warps=4,
+        num_warps=num_warps,
     )
 
 

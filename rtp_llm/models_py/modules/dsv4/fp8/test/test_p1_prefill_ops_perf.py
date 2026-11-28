@@ -25,6 +25,7 @@ from rtp_llm.models_py.modules.dsv4._fused_rmsnorm_fp8_quant_triton import (
 )
 from rtp_llm.models_py.modules.dsv4.fp8._compressor_vllm_triton import (
     run_fused_compress_kv_write,
+    run_save_partial_states,
 )
 from rtp_llm.models_py.modules.dsv4.fp8._fused_qnorm_quant_triton import (
     fused_rmsnorm_fp8_ue8m0_quant,
@@ -812,6 +813,132 @@ class P1PrefillOpsPerfTest(unittest.TestCase):
                         "attn_norm_new_kern_us": an_new.kernel_sum_us,
                     }
                 )
+
+        # ------------------------------------------------------------------
+        # 4. _save_partial_states_kernel (HCA tail32 / CP8 & CSA sparse / full)
+        # ------------------------------------------------------------------
+        print("\n--- 4. save_partial_states (N=2227, active_indices=None) ---")
+        print(
+            "  {:>22} | {:>10} {:>10} {:>10}".format(
+                "case", "kern_sum", "kern_span", "e2e_us"
+            )
+        )
+        n_save = 2227
+        state_page_save = 256
+        report["save_partial_states"] = []
+        save_cases = [
+            ("hca_tail32", 512, 128, "tail32"),
+            ("hca_cp8_32of256", 512, 128, "cp8"),
+            ("hca_full", 512, 128, "full"),
+            ("csa_sparse4", 1024, 4, "sparse4"),
+            ("csa_tail32", 1024, 4, "tail32"),
+            ("csa_cp8_32of256", 1024, 4, "cp8"),
+            ("csa_full", 1024, 4, "full"),
+        ]
+        for cname, h_size, ratio_s, pattern in save_cases:
+            kv_s = torch.randn(n_save, h_size, dtype=torch.float32, device=device) * 0.1
+            sc_s = torch.randn(n_save, h_size, dtype=torch.float32, device=device) * 0.1
+            ape_s = (
+                torch.randn(ratio_s, h_size, dtype=torch.float32, device=device) * 0.1
+            )
+            pos_s = torch.arange(n_save, dtype=torch.int64, device=device)
+            n_blks = (n_save + state_page_save - 1) // state_page_save + 2
+            slots_s = torch.full((n_save,), -1, dtype=torch.int64, device=device)
+            if pattern == "tail32":
+                t_idx = torch.arange(
+                    n_save - 32, n_save, dtype=torch.int64, device=device
+                )
+                slots_s[t_idx] = (t_idx // state_page_save) * state_page_save + (
+                    t_idx % state_page_save
+                )
+            elif pattern == "cp8":
+                mask_p = (pos_s % state_page_save) < 32
+                slots_s[mask_p] = (
+                    pos_s[mask_p] // state_page_save
+                ) * state_page_save + (pos_s[mask_p] % state_page_save)
+            elif pattern == "sparse4":
+                mask_p = (pos_s % 32) < 4
+                slots_s[mask_p] = (
+                    pos_s[mask_p] // state_page_save
+                ) * state_page_save + (pos_s[mask_p] % state_page_save)
+            else:
+                slots_s = (pos_s // state_page_save) * state_page_save + (
+                    pos_s % state_page_save
+                )
+
+            st_cache = torch.zeros(
+                (n_blks, state_page_save, 2 * h_size),
+                dtype=torch.float32,
+                device=device,
+            )
+            st_ref = torch.zeros_like(st_cache)
+            active_idx = (
+                torch.nonzero(slots_s >= 0).squeeze(-1).to(torch.int32).contiguous()
+            )
+            run_save_partial_states(
+                kv_s,
+                sc_s,
+                ape_s,
+                pos_s,
+                st_ref,
+                slots_s,
+                ratio_s,
+                active_indices=active_idx,
+            )
+            run_save_partial_states(
+                kv_s,
+                sc_s,
+                ape_s,
+                pos_s,
+                st_cache,
+                slots_s,
+                ratio_s,
+                active_indices=None,
+            )
+            torch.cuda.synchronize()
+            self.assertTrue(
+                torch.equal(st_cache, st_ref),
+                f"save_partial_states mismatch for {cname}",
+            )
+            m_save = measure_kernel(
+                lambda: run_save_partial_states(
+                    kv_s,
+                    sc_s,
+                    ape_s,
+                    pos_s,
+                    st_cache,
+                    slots_s,
+                    ratio_s,
+                    active_indices=None,
+                ),
+                label=f"save_{cname}",
+                trace_dir=trace_dir,
+                warmup=10,
+                iters=100,
+                profile_iters=20,
+            )
+            print(
+                f"  {cname:>22} | {m_save.kernel_sum_us:10.2f} "
+                f"{m_save.kernel_span_us:10.2f} {m_save.event_us:10.2f}"
+            )
+            report["save_partial_states"].append(
+                {
+                    "case": cname,
+                    "N": n_save,
+                    "head_size": h_size,
+                    "active": int(active_idx.numel()),
+                    "kern_sum_us": m_save.kernel_sum_us,
+                    "kern_span_us": m_save.kernel_span_us,
+                    "e2e_us": m_save.event_us,
+                }
+            )
+            del kv_s, sc_s, st_cache, st_ref
+
+        kobj_save = getattr(_cvt, "_save_partial_states_kernel", None)
+        if kobj_save is not None:
+            report["triton_regs"]["_save_partial_states_kernel"] = _inspect_triton_regs(
+                kobj_save
+            )
 
         print("\nTriton registers:", json.dumps(report["triton_regs"]))
         undeclared_dir = os.environ.get("TEST_UNDECLARED_OUTPUTS_DIR")

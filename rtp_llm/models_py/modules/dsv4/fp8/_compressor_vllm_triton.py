@@ -76,7 +76,7 @@ def _trap_invalid_kv_access(TRAP_INVALID_KV_ACCESS: tl.constexpr) -> None:
 # =============================================================================
 # Per-token state-cache writer (fp32). ape is added to score in-kernel.
 # =============================================================================
-_SAVE_STATES_TOKENS_PER_CTA = 32
+_SAVE_STATES_TOKENS_PER_CTA = 1
 
 
 @triton.jit(
@@ -115,14 +115,39 @@ def _save_partial_states_kernel(
     TRAP_INVALID_KV_ACCESS: tl.constexpr,
     USE_UNPAD_RESTORE: tl.constexpr,
     USE_ACTIVE_INDICES: tl.constexpr,
-    TOKENS_PER_CTA: tl.constexpr,
     ALIGN4: tl.constexpr,
 ):
+    idx = tl.program_id(0).to(tl.int64)
+    if idx >= N:
+        return
+    if USE_ACTIVE_INDICES:
+        token_idx = tl.load(active_indices_ptr + idx).to(tl.int64)
+    else:
+        token_idx = idx
+    slot_id = tl.load(slot_mapping_ptr + token_idx)
+    if slot_id < 0:
+        return
+
+    block_idx = (slot_id // block_size).to(tl.int64)
+    pos_in_block = slot_id % block_size
+    if block_idx < 0:
+        _trap_invalid_kv_access(TRAP_INVALID_KV_ACCESS)
+    if block_idx >= num_state_blocks:
+        _trap_invalid_kv_access(TRAP_INVALID_KV_ACCESS)
+
+    position = tl.load(positions_ptr + token_idx)
+    if USE_UNPAD_RESTORE:
+        raw_row_idx = tl.load(unpad_restore_ptr + token_idx).to(tl.int64)
+    else:
+        raw_row_idx = token_idx
+
     block = tl.arange(0, TRITON_BLOCK_SIZE)
     if ALIGN4:
         block = tl.multiple_of(block, 4)
-    mask = block < HEAD_SIZE
-    kv_s = tl.multiple_of(kv_stride.to(tl.int64), 4) if ALIGN4 else kv_stride.to(tl.int64)
+    mask = None if HEAD_SIZE == TRITON_BLOCK_SIZE else (block < HEAD_SIZE)
+    kv_s = (
+        tl.multiple_of(kv_stride.to(tl.int64), 4) if ALIGN4 else kv_stride.to(tl.int64)
+    )
     sc_s = (
         tl.multiple_of(score_stride.to(tl.int64), 4)
         if ALIGN4
@@ -144,72 +169,13 @@ def _save_partial_states_kernel(
         else state_cache_stride1.to(tl.int64)
     )
 
-    if USE_ACTIVE_INDICES:
-        idx = tl.program_id(0).to(tl.int64)
-        if idx >= N:
-            return
-        token_idx = tl.load(active_indices_ptr + idx).to(tl.int64)
-        slot_id = tl.load(slot_mapping_ptr + token_idx)
-        if slot_id < 0:
-            return
-        block_idx = (slot_id // block_size).to(tl.int64)
-        pos_in_block = slot_id % block_size
-        if block_idx < 0:
-            _trap_invalid_kv_access(TRAP_INVALID_KV_ACCESS)
-        if block_idx >= num_state_blocks:
-            _trap_invalid_kv_access(TRAP_INVALID_KV_ACCESS)
-        base_ptr = state_cache_ptr + block_idx * st_s0 + pos_in_block * st_s1
-        if USE_UNPAD_RESTORE:
-            raw_row_idx = tl.load(unpad_restore_ptr + token_idx).to(tl.int64)
-        else:
-            raw_row_idx = token_idx
-        kv = tl.load(kv_ptr + raw_row_idx * kv_s + block, mask=mask)
-        tl.store(base_ptr + block, kv, mask=mask)
-
-        position = tl.load(positions_ptr + token_idx)
-        ape_row = position % COMPRESS_RATIO
-        ape = tl.load(ape_ptr + ape_row * ap_s + block, mask=mask)
-        score = tl.load(score_ptr + raw_row_idx * sc_s + block, mask=mask)
-        tl.store(base_ptr + STATE_WIDTH + block, score + ape, mask=mask)
-        return
-
-    # Uncompacted fallback (direct tests / CUDA Graph capture): scan TOKENS_PER_CTA
-    # slots in one coalesced vector and exit immediately if none are active.
-    cta_start = tl.program_id(0).to(tl.int64) * TOKENS_PER_CTA
-    offs = cta_start + tl.arange(0, TOKENS_PER_CTA)
-    in_bounds = offs < N
-    slots = tl.load(slot_mapping_ptr + offs, mask=in_bounds, other=-1)
-    if tl.max((slots >= 0).to(tl.int32), axis=0) == 0:
-        return
-
-    for i in tl.range(0, TOKENS_PER_CTA):
-        token_idx = cta_start + i
-        if token_idx < N:
-            slot_id = tl.load(slot_mapping_ptr + token_idx)
-            if slot_id >= 0:
-                block_idx = (slot_id // block_size).to(tl.int64)
-                pos_in_block = slot_id % block_size
-                if block_idx < 0:
-                    _trap_invalid_kv_access(TRAP_INVALID_KV_ACCESS)
-                if block_idx >= num_state_blocks:
-                    _trap_invalid_kv_access(TRAP_INVALID_KV_ACCESS)
-                base_ptr = (
-                    state_cache_ptr + block_idx * st_s0 + pos_in_block * st_s1
-                )
-                if USE_UNPAD_RESTORE:
-                    raw_row_idx = tl.load(
-                        unpad_restore_ptr + token_idx
-                    ).to(tl.int64)
-                else:
-                    raw_row_idx = token_idx
-                kv = tl.load(kv_ptr + raw_row_idx * kv_s + block, mask=mask)
-                tl.store(base_ptr + block, kv, mask=mask)
-
-                position = tl.load(positions_ptr + token_idx)
-                ape_row = position % COMPRESS_RATIO
-                ape = tl.load(ape_ptr + ape_row * ap_s + block, mask=mask)
-                score = tl.load(score_ptr + raw_row_idx * sc_s + block, mask=mask)
-                tl.store(base_ptr + STATE_WIDTH + block, score + ape, mask=mask)
+    base_ptr = state_cache_ptr + block_idx * st_s0 + pos_in_block * st_s1
+    ape_row = position % COMPRESS_RATIO
+    kv = tl.load(kv_ptr + raw_row_idx * kv_s + block, mask=mask)
+    ape = tl.load(ape_ptr + ape_row * ap_s + block, mask=mask)
+    score = tl.load(score_ptr + raw_row_idx * sc_s + block, mask=mask)
+    tl.store(base_ptr + block, kv, mask=mask)
+    tl.store(base_ptr + STATE_WIDTH + block, score + ape, mask=mask)
 
 
 # =============================================================================
@@ -397,10 +363,7 @@ def _load_kv_tile(
             else state_cache_stride1.to(tl.int64)
         )
         cache_base = (
-            state_cache_ptr
-            + block_numbers_i64 * st_s0
-            + block_offsets * st_s1
-            + h_off
+            state_cache_ptr + block_numbers_i64 * st_s0 + block_offsets * st_s1 + h_off
         )
         load_mask = (use_raw | valid_block)[:, None] & mask[None, :]
         row_base = tl.where(use_raw, raw_base, cache_base)
@@ -609,9 +572,7 @@ def _compress_and_rmsnorm(
             m_new = tl.maximum(m_i, tile_max)
             m_new_safe = tl.where(m_new > float("-inf"), m_new, 0.0)
             alpha = tl.where(m_i > float("-inf"), tl.exp(m_i - m_new_safe), 0.0)
-            p_t = tl.where(
-                combined_mask_t, tl.exp(score_t - m_new_safe[None, :]), 0.0
-            )
+            p_t = tl.where(combined_mask_t, tl.exp(score_t - m_new_safe[None, :]), 0.0)
             d_i = d_i * alpha + tl.sum(p_t, axis=0)
 
             kv_t = _load_kv_tile(
@@ -873,13 +834,21 @@ def _hca_compress_split_stage1_kernel(
     else:
         raw_row_idx = flat_idx_safe
 
-    kv_s = tl.multiple_of(kv_raw_stride.to(tl.int64), 4) if ALIGN4 else kv_raw_stride.to(tl.int64)
+    kv_s = (
+        tl.multiple_of(kv_raw_stride.to(tl.int64), 4)
+        if ALIGN4
+        else kv_raw_stride.to(tl.int64)
+    )
     sc_s = (
         tl.multiple_of(score_raw_stride.to(tl.int64), 4)
         if ALIGN4
         else score_raw_stride.to(tl.int64)
     )
-    ap_s = tl.multiple_of(ape_stride.to(tl.int64), 4) if ALIGN4 else ape_stride.to(tl.int64)
+    ap_s = (
+        tl.multiple_of(ape_stride.to(tl.int64), 4)
+        if ALIGN4
+        else ape_stride.to(tl.int64)
+    )
 
     raw_score_ptrs = score_raw_ptr + raw_row_idx * sc_s
     raw_kv_ptrs = kv_raw_ptr + raw_row_idx * kv_s
@@ -1328,9 +1297,9 @@ def _fused_kv_compress_norm_rope_insert_indexer_attn(
     else:
         token_idx = row_offsets
 
-    kv_slot_idx = tl.load(
-        kv_slot_mapping_ptr + token_idx, mask=tok_valid, other=-1
-    ).to(tl.int64)
+    kv_slot_idx = tl.load(kv_slot_mapping_ptr + token_idx, mask=tok_valid, other=-1).to(
+        tl.int64
+    )
     position = tl.load(positions_ptr + token_idx, mask=tok_valid, other=0).to(tl.int64)
     row_active = (
         tok_valid & (kv_slot_idx >= 0) & (((position + 1) % COMPRESS_RATIO) == 0)
@@ -1340,9 +1309,7 @@ def _fused_kv_compress_norm_rope_insert_indexer_attn(
 
     kv_block_idx = tl.where(row_active, kv_slot_idx // kv_cache_block_size, 0)
     kv_pos_in_block = tl.where(row_active, kv_slot_idx % kv_cache_block_size, 0)
-    bad_kv_block = row_active & (
-        (kv_block_idx < 0) | (kv_block_idx >= NUM_KV_BLOCKS)
-    )
+    bad_kv_block = row_active & ((kv_block_idx < 0) | (kv_block_idx >= NUM_KV_BLOCKS))
     if tl.max(bad_kv_block.to(tl.int32), axis=0) != 0:
         _trap_invalid_kv_access(TRAP_INVALID_KV_ACCESS)
 
@@ -1353,9 +1320,9 @@ def _fused_kv_compress_norm_rope_insert_indexer_attn(
         req_seq_start = tl.load(
             seq_start_per_req_ptr + req_idx, mask=row_active, other=0
         ).to(tl.int64)
-        req_cu_lo = tl.load(
-            cu_seq_per_req_ptr + req_idx, mask=row_active, other=0
-        ).to(tl.int64)
+        req_cu_lo = tl.load(cu_seq_per_req_ptr + req_idx, mask=row_active, other=0).to(
+            tl.int64
+        )
         req_cu_hi = tl.load(
             cu_seq_per_req_ptr + req_idx + 1, mask=row_active, other=0
         ).to(tl.int64)
@@ -1422,9 +1389,7 @@ def _fused_kv_compress_norm_rope_insert_indexer_attn(
         raw_kv_base = kv_raw_ptr + raw_row_idx * kv_s + head_offset
         if MAY_USE_CACHE:
             use_cache = mask_pos & ~use_raw
-            block_indices = (cur_pos // block_size) % tl.maximum(
-                block_table_stride, 1
-            )
+            block_indices = (cur_pos // block_size) % tl.maximum(block_table_stride, 1)
             block_indices_safe = tl.where(use_cache, block_indices, 0)
             block_numbers = tl.load(
                 block_table_ptr + req_idx * block_table_stride + block_indices_safe,
@@ -1663,9 +1628,8 @@ def run_save_partial_states(
         TRAP_INVALID_KV_ACCESS=True,
         USE_UNPAD_RESTORE=use_unpad_restore,
         USE_ACTIVE_INDICES=use_active,
-        TOKENS_PER_CTA=_SAVE_STATES_TOKENS_PER_CTA,
         ALIGN4=align4,
-        num_warps=2 if head_size <= 256 else 4,
+        num_warps=1 if head_size <= 256 else (2 if head_size <= 512 else 4),
     )
 
 
