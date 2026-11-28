@@ -153,25 +153,13 @@ class Qwen3NextGdnParameters(RtpModule):
         # These projections are already rank-local after the model-specific
         # Q/K/V/Z transform. The common Linear layer still owns quantization,
         # completeness validation, backend preflight and the post-load hook.
-        qkvz_config = quant_config
-        if quant_config is not None and quant_config.quant_type in ("awq", "gptq"):
-            split_ignored = [
-                quant_config.is_layer_ignored(f"{prefix}.in_proj_{part}")
-                for part in ("qkv", "z")
-            ]
-            if not quant_config.is_layer_ignored(f"{prefix}.in_proj_qkvz"):
-                if all(split_ignored):
-                    qkvz_config = None
-                elif any(split_ignored):
-                    raise ValueError(
-                        "Partially excluded GDN QKV/Z cannot share one grouped projection"
-                    )
         self.in_proj_qkvz = ColumnParallelLinear(
             input_size=hidden_size,
             output_size=self.qkvz_size,
             tp_size=1,
             tp_rank=0,
-            quant_config=qkvz_config,
+            quant_config=quant_config,
+            quantization_aliases=("in_proj_qkv", "in_proj_z"),
             prefix=f"{prefix}.in_proj_qkvz",
             bias=False,
             params_dtype=params_dtype,

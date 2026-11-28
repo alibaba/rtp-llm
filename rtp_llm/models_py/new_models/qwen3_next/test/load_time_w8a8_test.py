@@ -71,6 +71,51 @@ def _checkpoint(linear):
 
 
 class Qwen35LoadTimeW8A8Test(unittest.TestCase):
+    def test_fused_exclusions_match_checkpoint_and_runtime_layout(self):
+        prefix = "model.language_model.layers.0."
+        for linear, parent, owner, parts in (
+            (False, "mlp.shared_expert", "gate_up_proj", ("gate_proj", "up_proj")),
+            (True, "linear_attn", "in_proj_qkvz", ("in_proj_qkv", "in_proj_z")),
+        ):
+            cfg, raw = _checkpoint(linear)
+            # Make a swap of equally shaped pieces observable.
+            raw[f"{prefix}{parent}.{parts[1]}.weight"] += 64
+            names = [f"{prefix}{parent}.{key}.weight" for key in parts]
+            expected = torch.cat([raw[name] for name in names], dim=0)
+            with tempfile.TemporaryDirectory() as folder:
+                path = str(Path(folder) / "model.safetensors")
+                save_file(raw, path)
+                for keys in ((owner,), parts, parts[:1]):
+                    with self.subTest(owner=owner, keys=keys):
+                        source = CompressedW8A8Int8PerChannelQuantConfig(
+                            is_quanted=False,
+                            ignore_patterns=[f"layers.{{i}}.{parent}.{key}" for key in keys],
+                        )
+                        cfg.quant_config = source
+                        quant = QuantizationConfig(source.get_method(), source)
+                        opts = replace(_load_config(quant_config=quant), compute_dtype=torch.bfloat16)
+                        if keys == parts[:1]:
+                            for prepare in (
+                                lambda: W8A8LoadSource.from_files([path], quant),
+                                lambda: Qwen3NextForCausalLM(cfg, opts),
+                            ):
+                                with self.assertRaisesRegex(ValueError, "partially match fused layer"):
+                                    prepare()
+                            continue
+                        if linear:  # CPU can stage GDN weights, but not execute its forward.
+                            model = Qwen3NextForCausalLM(cfg, opts)
+                            view = W8A8LoadSource.from_files([path], quant)
+                            model.load_weights(get_all_weights([path], w8a8_source=view))
+                            NewModelLoader._validate_loaded_weights(model)
+                        else:
+                            model = NewModelLoader(cfg, opts, model_path=folder).load()
+                        proj = model.get_submodule(f"layers.0.{parent}.{owner}")
+                        torch.testing.assert_close(proj.weight, expected, rtol=0, atol=0)
+                        self.assertFalse(hasattr(proj, "weight_scale"))
+                        sibling = "out_proj" if linear else "down_proj"
+                        other = model.get_submodule(f"layers.0.{parent}.{sibling}")
+                        self.assertEqual(other.weight.dtype, torch.int8)
+
     def test_float_qkv_exception_in_online_and_prequantized_checkpoints(self):
         cfg, raw = _checkpoint(False)
         prefix = "model.language_model.layers.0.self_attn."

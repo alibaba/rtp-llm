@@ -99,7 +99,7 @@ class GdnGroupwiseTest(unittest.TestCase):
         m = owner("awq", 4, 2, 1, ("in_proj_z", "in_proj_qkv"))
         self.assertTrue(hasattr(m.in_proj_qkvz, "weight"))
         self.assertTrue(hasattr(m.out_proj, "qweight"))
-        with self.assertRaisesRegex(ValueError, "Partially excluded"):
+        with self.assertRaisesRegex(ValueError, "partially match fused layer.*in_proj_qkvz"):
             owner("awq", 4, 2, 1, ("in_proj_z",))
 
 

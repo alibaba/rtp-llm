@@ -60,6 +60,7 @@ class LinearBase(RtpModule):
         bias: bool = False,
         bias_as_matrix: bool = False,
         params_dtype: torch.dtype = torch.float16,
+        quantization_aliases=(),
         **kwargs,
     ):
         super().__init__()
@@ -77,6 +78,7 @@ class LinearBase(RtpModule):
         self.tp_size = tp_size
         self.tp_rank = tp_rank
         self.prefix = prefix
+        self.quantization_aliases = quantization_aliases
         self.params_dtype = params_dtype
         self.bias_as_matrix = bias_as_matrix
         self._main_weight_loaded = False

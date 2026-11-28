@@ -19,16 +19,17 @@ from rtp_llm.utils.w8a8_int8_quant import (
 
 def _is_projection_ignored(runtime, name):
     projection = name.removesuffix(".weight")
-    if runtime.is_layer_ignored(projection):
-        return True
     parent, _, leaf = projection.rpartition(".")
-    # A single excluded runtime QKV owner consumes all three floating HF
-    # projections. Don't synthesize INT8 values or scales for its inputs.
-    return (
-        parent.endswith(".self_attn")
-        and leaf in ("q_proj", "k_proj", "v_proj")
-        and runtime.is_layer_ignored(f"{parent}.qkv_proj")
-    )
+    # Only recipe keys reach here. Resolve the same owner and sibling names
+    # as the runtime before synthesizing either the INT8 bytes or their scale.
+    for owner, parts in (
+        ("qkv_proj", ("q_proj", "k_proj", "v_proj")),
+        ("gate_up_proj", ("gate_proj", "up_proj")),
+        ("in_proj_qkvz", ("in_proj_qkv", "in_proj_z")),
+    ):
+        if leaf in parts:
+            return runtime.is_fused_layer_ignored(f"{parent}.{owner}", parts)
+    return runtime.is_layer_ignored(projection)
 
 
 class W8A8LoadSource:

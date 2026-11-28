@@ -348,32 +348,40 @@ class QuantizationConfig:
                     return True
         return False
 
+    def is_fused_layer_ignored(self, prefix, shard_names=()) -> bool:
+        """Resolve one exclusion for both a fused owner and its checkpoint inputs."""
+        if self.is_layer_ignored(prefix):
+            return True
+        if not self.ignored_layers or not prefix or not shard_names:
+            return False
+        parent, separator, _ = prefix.rpartition(".")
+        ignored = [
+            self.is_layer_ignored(f"{parent}{separator}{name}") for name in shard_names
+        ]
+        if all(ignored):
+            return True
+        if any(ignored):
+            raise ValueError(
+                f"Quantization exclusions partially match fused layer {prefix!r}; "
+                "all fused projections must use the same quantization layout"
+            )
+        return False
+
     def get_quant_method(self, layer, prefix: str = "") -> QuantizeMethodBase:
         if self.ignored_layers and not prefix:
             raise ValueError(
                 "A stable module prefix is required when quantization exclusions "
                 "are configured"
             )
-        ignore_prefixes = [prefix]
-        shard_names = getattr(layer, "shard_names", ())
-        if prefix and shard_names:
-            parent, separator, _ = prefix.rpartition(".")
-            ignore_prefixes.extend(
-                f"{parent}{separator}{name}" if separator else name
-                for name in shard_names
-            )
-        ignored = [self.is_layer_ignored(candidate) for candidate in ignore_prefixes]
-        if ignored[0] or (len(ignored) > 1 and all(ignored[1:])):
+        components = getattr(layer, "quantization_aliases", ()) or getattr(
+            layer, "shard_names", ()
+        )
+        if self.is_fused_layer_ignored(prefix, components):
             from rtp_llm.models_py.quant_methods.unquantized import (
                 UnquantizedLinearMethod,
             )
 
             return UnquantizedLinearMethod(self)
-        if len(ignored) > 1 and any(ignored[1:]):
-            raise ValueError(
-                f"Quantization exclusions partially match fused layer {prefix!r}; "
-                "all fused projections must use the same quantization layout"
-            )
 
         # Online ModelOpt quantizes routed experts only. Mixed-attention
         # checkpoints retain their attention projections in the compute dtype.
