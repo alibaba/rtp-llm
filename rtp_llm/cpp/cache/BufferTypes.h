@@ -17,6 +17,8 @@ namespace rtp_llm {
 struct BlockBufferPtrInfo {
     torch::Tensor kv_addr;
     torch::Tensor kv_scale_addr;
+    torch::Tensor kv_host_addr;
+    uint32_t      logical_device_blocks = 0;
 };
 
 // Dense, immutable all-layer view for one cache group. A group that does not
@@ -26,7 +28,14 @@ class CacheLayerLayout {
 public:
     CacheLayerLayout() = default;
 
-    explicit CacheLayerLayout(std::vector<BlockBufferPtrInfo> layers): layers_(std::move(layers)) {
+    explicit CacheLayerLayout(std::vector<BlockBufferPtrInfo> layers,
+                              uint32_t                        staging_blocks    = 0,
+                              uint32_t                        staging_layers    = 0,
+                              torch::Tensor                   block_generations = {}):
+        layers_(std::move(layers)),
+        staging_blocks_(staging_blocks),
+        staging_layers_(staging_layers),
+        block_generations_(std::move(block_generations)) {
         for (const auto& layer : layers_) {
             active_layer_count_ += layer.kv_addr.defined() ? 1 : 0;
         }
@@ -60,9 +69,24 @@ public:
         return layers_;
     }
 
+    uint32_t stagingBlocks() const {
+        return staging_blocks_;
+    }
+
+    uint32_t stagingLayers() const {
+        return staging_layers_;
+    }
+
+    const torch::Tensor& blockGenerations() const {
+        return block_generations_;
+    }
+
 private:
     std::vector<BlockBufferPtrInfo> layers_;
     size_t                          active_layer_count_ = 0;
+    uint32_t                        staging_blocks_     = 0;
+    uint32_t                        staging_layers_     = 0;
+    torch::Tensor                   block_generations_;
 };
 
 // Canonical KV-cache buffer layout: semantic group tag -> dense all-layer

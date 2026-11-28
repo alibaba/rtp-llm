@@ -45,3 +45,28 @@ py_test(
     ],
     exec_properties = {"gpu": "H20_CU13"},
 )
+
+py_test(
+    name = "layered_prefill_cache_test",
+    srcs = ["layered_prefill_cache_test.py"],
+    deps = ["//rtp_llm/models_py/standalone:py_standalone_testlib"],
+    tags = ["H20_CU13", "manual"],
+    exec_properties = {"gpu": "H20_CU13"},
+)
+
+py_test(
+    name = "pinned_mla_cache_test",
+    srcs = ["pinned_mla_cache_test.py"],
+    deps = ["//rtp_llm/models_py/standalone:py_standalone_testlib"],
+    tags = ["SM103_CU13", "manual"],
+    exec_properties = {"gpu": "SM103_CU13", "gpu_count": "1"},
+)
+
+py_test(
+    name = "glm5_cp_kv_prefetch_test",
+    srcs = ["cp_kv_prefetch_test.py"],
+    deps = ["//rtp_llm/models_py/standalone:py_standalone_testlib"],
+    env = {"GPU_COUNT": "2"},
+    tags = ["SM103_CU13", "manual"],
+    exec_properties = {"gpu": "SM103_CU13", "gpu_count": "2"},
+)

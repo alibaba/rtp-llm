@@ -561,6 +561,161 @@ void CacheConfigCreator::configureLinearReplay(CacheConfig&                     
                                                     layer_count);
 }
 
+MlaHostCachePlan CacheConfigCreator::planMlaHostCache(const CacheConfig&                 config,
+                                                      const ModelConfig&                 model_config,
+                                                      const RuntimeConfig&               runtime_config,
+                                                      const KVCacheConfig&               kv_cache_config,
+                                                      const ParallelismConfig&           parallelism_config,
+                                                      const std::optional<WarmUpResult>& warm_up_result,
+                                                      const std::optional<SpeculativeExecutionConfig>& sp_config,
+                                                      bool               prefill_cuda_graph_requested,
+                                                      const ModelConfig* draft_model_config) {
+    const bool prefill           = parallelism_config.role_type == RoleType::PREFILL;
+    const bool explicit_prefill  = prefill && kv_cache_config.dsa_prefill_layout == 1;
+    const bool requested_prefill = prefill && kv_cache_config.dsa_prefill_layout != 0
+                                   && (explicit_prefill || kv_cache_config.memory_cache_size_mb > 0);
+    const bool requested_decode = kv_cache_config.dsa_mla_host_cache_mb > 0;
+    RTP_LLM_CHECK_WITH_INFO(kv_cache_config.dsa_mla_host_cache_mb >= 0,
+                            "GLM5 decode host KV capacity must be nonnegative");
+    if (!requested_prefill && !requested_decode) {
+        return {};
+    }
+
+    const bool  explicit_request = explicit_prefill || requested_decode;
+    const auto& groups           = config.groups();
+    const auto  mla =
+        std::find_if(groups.begin(), groups.end(), [](const GroupBase& group) { return group.tag == "default"; });
+    const bool has_indexer =
+        std::any_of(groups.begin(), groups.end(), [](const GroupBase& group) { return group.tag == "indexer_kv"; });
+#if USING_CUDA && !defined(USE_PPU)
+    constexpr bool cuda_host_backing_supported = true;
+#else
+    constexpr bool cuda_host_backing_supported = false;
+#endif
+    const bool compatible =
+        cuda_host_backing_supported && model_config.model_type == "glm_5" && config.use_mla && config.is_sparse
+        && has_indexer && mla != groups.end() && mla->kvScaleStrideBytes() == 0 && mla->seqSizePerBlock() > 0
+        && config.blockWeight("default") == 1 && parallelism_config.pp_size == 1 && !kv_cache_config.enable_disk_cache
+        && !kv_cache_config.enable_remote_cache
+        && (!requested_prefill
+            || (!prefill_cuda_graph_requested && kv_cache_config.memory_cache_size_mb > 0 && config.layer_num > 1))
+        && (!requested_decode
+            || (parallelism_config.role_type == RoleType::DECODE && !kv_cache_config.enable_memory_cache));
+    if (!compatible) {
+        RTP_LLM_CHECK_WITH_INFO(!explicit_request,
+                                "GLM5 host MLA requires tagged CUDA MLA, PP1 and no disk or remote cache; "
+                                "use eager prefill or decode without a secondary memory cache");
+        return {};
+    }
+
+    const auto budget = blockBudgetForConfig(config);
+    RTP_LLM_CHECK_WITH_INFO(budget.explicit_pool_reserve_bytes == 0 && budget.swa_block_bytes == 0,
+                            "GLM5 host MLA requires full groups without fixed device reservations");
+    const size_t page_tokens = mla->seqSizePerBlock();
+    const auto   max_blocks  = static_cast<uint32_t>(
+        std::min<size_t>(budget.max_baseline_block_num, std::numeric_limits<int32_t>::max() / page_tokens));
+    const auto logical_limit = kv_cache_config.test_block_num > 0 ?
+                                   std::min(max_blocks, static_cast<uint32_t>(kv_cache_config.test_block_num)) :
+                                   max_blocks;
+    size_t     device_bytes  = 0;
+    if (kv_cache_config.test_block_num > 0) {
+        addBudgetBytes(device_bytes, budget.paged_block_bytes, kv_cache_config.test_block_num);
+    } else {
+        device_bytes = MemoryEvaluationHelper::getKVCacheMemorySize(
+            runtime_config, kv_cache_config, model_config, parallelism_config, warm_up_result, sp_config, 0);
+    }
+    MlaHostCachePlan result;
+    if (requested_prefill) {
+        size_t host_bytes = 0;
+        addBudgetBytes(host_bytes, 1024 * 1024, kv_cache_config.memory_cache_size_mb);
+        // Token admission can batch several short chunks with long reused
+        // prefixes. Staging must fit every distinct live logical page.
+        const uint32_t staging_layers =
+            kv_cache_config.dsa_prefill_staging_layers ? kv_cache_config.dsa_prefill_staging_layers : 4;
+        RTP_LLM_CHECK_WITH_INFO(staging_layers <= 64, "GLM5 prefill staging layers must not exceed 64");
+        result = planLayeredMlaPrefill({device_bytes,
+                                        host_bytes,
+                                        budget.paged_block_bytes,
+                                        mla->kvBlockStrideBytes(),
+                                        config.layer_num,
+                                        logical_limit,
+                                        logical_limit,
+                                        staging_layers});
+    } else {
+        const auto hbm_share_denominator = kv_cache_config.dsa_mla_hbm_share_denominator;
+        RTP_LLM_CHECK_WITH_INFO(hbm_share_denominator != 1, "GLM5 HBM share denominator must be zero or at least two");
+        PinnedMlaDecodeBudget input;
+        input.device_bytes = device_bytes;
+        addBudgetBytes(input.host_bytes, 1024 * 1024, kv_cache_config.dsa_mla_host_cache_mb);
+        input.mla_bytes_per_block = config.blockSizeBytesForGroup("default");
+        RTP_LLM_CHECK_WITH_INFO(input.mla_bytes_per_block <= budget.paged_block_bytes,
+                                "GLM5 MLA bytes exceed the device block budget");
+        input.device_metadata_bytes_per_block = budget.paged_block_bytes - input.mla_bytes_per_block;
+        const size_t indexer_states           = config.layerIdsForGroup("indexer_kv").size();
+        size_t       mapping_bytes            = 0;
+        addBudgetBytes(mapping_bytes, 2 * sizeof(int32_t), page_tokens);
+        addBudgetBytes(mapping_bytes, sizeof(int64_t));
+        addBudgetBytes(input.device_metadata_bytes_per_block, mapping_bytes, indexer_states);
+
+        const bool allows_split_draft =
+            !draft_model_config
+            || (draft_model_config->model_type == "glm_5_mtp" && draft_model_config->attn_config.is_sparse
+                && draft_model_config->attn_config.indexer_topk > 0);
+        RTP_LLM_CHECK_WITH_INFO(allows_split_draft,
+                                "GLM5 pinned decode requires a sparse glm_5_mtp draft with positive Indexer TopK");
+        RTP_LLM_CHECK_WITH_INFO(model_config.attn_config.indexer_topk > 0 && runtime_config.max_generate_batch_size > 0,
+                                "GLM5 pinned decode requires positive Indexer TopK and batch size");
+        const size_t query_tokens =
+            sp_config && sp_config->gen_num_per_cycle > 0 ? static_cast<size_t>(sp_config->gen_num_per_cycle) + 1 : 1;
+        const auto draft_topk      = draft_model_config ? draft_model_config->attn_config.indexer_topk : 0;
+        const auto selected_tokens = pinnedMlaRequiredTokenSlots(
+            model_config.attn_config.indexer_topk, draft_topk, query_tokens, runtime_config.max_generate_batch_size);
+        RTP_LLM_CHECK_WITH_INFO(selected_tokens > 0, "GLM5 pinned decode working-set size exceeds size_t range");
+        const size_t configured = kv_cache_config.dsa_mla_resident_tokens;
+        RTP_LLM_CHECK_WITH_INFO(!configured || (configured >= selected_tokens && configured % page_tokens == 0),
+                                "GLM5 resident token override must cover %zu selected tokens and align to %zu",
+                                selected_tokens,
+                                page_tokens);
+        const size_t resident_blocks = configured ?
+                                           configured / page_tokens :
+                                           selected_tokens / page_tokens + (selected_tokens % page_tokens != 0);
+        RTP_LLM_CHECK_WITH_INFO(resident_blocks <= max_blocks, "GLM5 MLA working-set token count exceeds int32");
+        input.resident_blocks = static_cast<uint32_t>(resident_blocks);
+        addBudgetBytes(input.resident_workspace_bytes, input.mla_bytes_per_block, resident_blocks);
+        size_t working_set_bytes = 4096;
+        addBudgetBytes(working_set_bytes, 20, resident_blocks * page_tokens);
+        addBudgetBytes(input.resident_workspace_bytes, working_set_bytes, indexer_states);
+        // A Decode-role system prompt runs ordinary eager attention before
+        // serving traffic. Its compact staging holds only one live MLA layer.
+        size_t context_tokens = 0;
+        for (const auto& prompt : kv_cache_config.multi_task_prompt_tokens) {
+            context_tokens = std::max(context_tokens, prompt.second.size());
+        }
+        const size_t context_blocks = context_tokens / page_tokens + (context_tokens % page_tokens != 0);
+        if (context_blocks > 0) {
+            const auto reserve_context_layer = [&](const GroupBase& group) {
+                auto layer_block_bytes = group.kvBlockStrideBytes();
+                // Page zero stays reserved, including in the compact CUDA staging tensor.
+                addBudgetBytes(input.context_workspace_bytes, layer_block_bytes / group.kernelBlocksPerKvBlock());
+                // Remapped page table and dirty host-slot tensor.
+                addBudgetBytes(layer_block_bytes, 2 * sizeof(int32_t), page_tokens);
+                addBudgetBytes(input.context_workspace_bytes, layer_block_bytes, context_blocks);
+            };
+            reserve_context_layer(*mla);
+            for (const auto& draft : config.mtp_sub_configs) {
+                reserve_context_layer(draft->group("default"));
+            }
+        }
+        input.max_logical_blocks    = logical_limit;
+        input.max_device_blocks     = max_blocks - input.resident_blocks;
+        input.hbm_share_denominator = hbm_share_denominator;
+        result                      = planPinnedMlaDecode(input);
+    }
+    RTP_LLM_CHECK_WITH_INFO(result.logical_blocks != 0 || !explicit_request,
+                            "insufficient HBM or host backing for requested GLM5 MLA placement");
+    return result;
+}
+
 uint32_t CacheConfigCreator::computeLocalBlockNum(const CacheConfig&                               config,
                                                   const ModelConfig&                               model_config,
                                                   const RuntimeConfig&                             runtime_config,
@@ -568,7 +723,8 @@ uint32_t CacheConfigCreator::computeLocalBlockNum(const CacheConfig&            
                                                   const ParallelismConfig&                         parallelism_config,
                                                   const std::optional<WarmUpResult>&               warm_up_result,
                                                   const std::optional<SpeculativeExecutionConfig>& sp_config,
-                                                  BlockTreeCrcWorkspacePlan*                       crc_plan) {
+                                                  BlockTreeCrcWorkspacePlan*                       crc_plan,
+                                                  bool                                             allow_unavailable) {
     if (crc_plan)
         *crc_plan = {};
     uint32_t block_num = 0;
@@ -593,22 +749,30 @@ uint32_t CacheConfigCreator::computeLocalBlockNum(const CacheConfig&            
                 addBudgetBytes(requested_kv_bytes, 1024 * 1024, kv_cache_config.kv_cache_mem_mb);
             }
             const auto reserved_kv_bytes = std::max(minimum_kv_bytes, requested_kv_bytes);
-            RTP_LLM_CHECK_WITH_INFO(
-                available_bytes > reserved_kv_bytes,
-                "available cache memory %zu bytes cannot fit KV cache (%zu bytes) and CRC workspaces",
-                available_bytes,
-                reserved_kv_bytes);
+            if (available_bytes <= reserved_kv_bytes) {
+                if (allow_unavailable) {
+                    return 0;
+                }
+                RTP_LLM_FAIL("available cache memory %zu bytes cannot fit KV cache (%zu bytes) and CRC workspaces",
+                             available_bytes,
+                             reserved_kv_bytes);
+            }
             const auto hard_limit = available_bytes - reserved_kv_bytes;
             // Ordinary sizing leaves most of the cache budget to KV pools.
             // An explicit pool budget takes priority over CRC concurrency.
             constexpr size_t kAutomaticCrcBudgetDivisor = 8;
             const auto       preferred_limit =
                 explicit_kv_budget ? hard_limit : std::min(hard_limit, available_bytes / kAutomaticCrcBudgetDivisor);
-            *crc_plan = planBlockTreeCrcWorkspaces(config, kv_cache_config, preferred_limit);
-            RTP_LLM_CHECK_WITH_INFO(crc_plan->device_bytes <= hard_limit,
-                                    "minimum CRC workspace needs %zu bytes, only %zu bytes remain after KV reservation",
-                                    crc_plan->device_bytes,
-                                    hard_limit);
+            const auto workspaces = planBlockTreeCrcWorkspaces(config, kv_cache_config, preferred_limit);
+            if (workspaces.device_bytes > hard_limit) {
+                if (allow_unavailable) {
+                    return 0;
+                }
+                RTP_LLM_FAIL("minimum CRC workspace needs %zu bytes, only %zu bytes remain after KV reservation",
+                             workspaces.device_bytes,
+                             hard_limit);
+            }
+            *crc_plan         = workspaces;
             kv_cache_mem_size = explicit_kv_budget ? requested_kv_bytes : available_bytes - crc_plan->device_bytes;
             RTP_LLM_LOG_INFO("CRC transfer plan: batch=%zu slots_per_work_loop=%zu device_bytes=%zu kv_bytes=%zu",
                              crc_plan->batch_size,
@@ -635,6 +799,9 @@ uint32_t CacheConfigCreator::computeLocalBlockNum(const CacheConfig&            
                              block_budget.explicit_pool_reserve_bytes / 1024 / 1024);
         }
         block_num = maxKVCacheBlockNumForBudget(kv_cache_mem_size, block_budget);
+    }
+    if (block_num == 0 && allow_unavailable) {
+        return 0;
     }
     RTP_LLM_CHECK_WITH_INFO(block_num > 0, "kv cache needs at least one baseline block, got %u", block_num);
     RTP_LLM_CHECK_WITH_INFO(block_num <= config.maxBaselineBlockNum(),
@@ -695,7 +862,9 @@ CacheConfigCreator::sizingSignature(const CacheConfig& config, uint32_t baseline
             value >>= 8;
         }
     };
-    number(1);  // Signature format version.
+    number(4);  // Sizing protocol includes the stage-wide prefill staging depth.
+    number(config.mla_host_cache.layeredPrefill());
+    number(config.mla_host_cache.pinnedDecode());
     // Main #1574's tail-retention knob replaces the old linear_step sizing
     // input in the cross-rank sizing signature.
     number(static_cast<uint64_t>(config.reuse_cache_tail_blocks));
@@ -762,14 +931,41 @@ void CacheConfigCreator::validateSizingSignatures(const int32_t* signatures, siz
 
 uint32_t CacheConfigCreator::synchronizeBlockNum(uint32_t                 candidate_block_num,
                                                  const ParallelismConfig& parallelism_config,
-                                                 const CacheConfig&       config) {
+                                                 CacheConfig&             config,
+                                                 const MlaHostCachePlan&  automatic_prefill) {
     // Main retired the DP_AND_TP collective scope: the sizing agreement runs
     // over the same stage-scoped lane as the block-num confirmation below
     // (all TP/DP ranks of the current PP stage).
-    const auto layout     = RankLayout::fromParallelismConfig(parallelism_config);
-    const auto group_size = static_cast<size_t>(layout.laneStride());
+    const auto     layout         = RankLayout::fromParallelismConfig(parallelism_config);
+    const auto     group_size     = static_cast<size_t>(layout.laneStride());
+    const auto     layered_blocks = automatic_prefill.logical_blocks;
+    const auto     staging_layers = automatic_prefill.layeredPrefill() ? automatic_prefill.prefill_staging_layers :
+                                                                         config.mla_host_cache.prefill_staging_layers;
+    constexpr auto max_candidate  = static_cast<uint32_t>(std::numeric_limits<int32_t>::max());
+    RTP_LLM_CHECK_WITH_INFO(candidate_block_num <= max_candidate && layered_blocks <= max_candidate
+                                && staging_layers <= max_candidate,
+                            "candidate cache capacity exceeds collective int32 range");
+    const std::array<int32_t, MlaPrefillCapacities::candidate_width> local_candidates{
+        static_cast<int32_t>(candidate_block_num),
+        static_cast<int32_t>(layered_blocks),
+        static_cast<int32_t>(staging_layers)};
+    const auto select = [&](const int32_t* candidates, size_t rank_count) {
+        const auto capacities            = minimumMlaPrefillCapacities(candidates, rank_count);
+        const bool use_automatic_prefill = capacities.useLayered();
+        if (use_automatic_prefill) {
+            config.mla_host_cache = automatic_prefill;
+        }
+        const auto confirmed = use_automatic_prefill ? capacities.layered_blocks : capacities.ordinary_blocks;
+        RTP_LLM_CHECK_WITH_INFO(confirmed > 0, "cross-rank cache block count must be positive");
+        if (config.mla_host_cache.layeredPrefill()) {
+            // CP ranks must use the same depth to issue the same KV collectives.
+            RTP_LLM_CHECK_WITH_INFO(capacities.staging_layers > 0, "cross-rank MLA staging depth must be positive");
+            config.mla_host_cache.prefill_staging_layers = static_cast<uint32_t>(capacities.staging_layers);
+        }
+        return static_cast<uint32_t>(confirmed);
+    };
     if (group_size <= 1) {
-        return candidate_block_num;
+        return select(local_candidates.data(), 1);
     }
     const size_t     local_rank = static_cast<size_t>(layout.stageRank());
     constexpr size_t width      = std::tuple_size<SizingSignature>::value;
@@ -788,7 +984,16 @@ uint32_t CacheConfigCreator::synchronizeBlockNum(uint32_t                 candid
         validateSizingSignatures(data, group_size);
     };
     agree(0);
-    const auto confirmed = synchronizeBlockNum(candidate_block_num, parallelism_config);
+    // Reduce capacities and staging depth across the stage before choosing
+    // a placement so different memory budgets cannot split the CP ranks.
+    auto candidates =
+        torch::empty({static_cast<int64_t>(group_size * local_candidates.size())}, torch::kInt32).pin_memory();
+    auto* data = candidates.data_ptr<int32_t>();
+    std::copy(local_candidates.begin(), local_candidates.end(), data + local_rank * local_candidates.size());
+    execAllGather({{candidates}, ParallelMode::STAGE});
+    execSyncCommunication(false);
+    cudaSyncAndCheck();
+    const auto confirmed = select(data, group_size);
     agree(confirmed);
     return confirmed;
 }

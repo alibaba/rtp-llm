@@ -3497,6 +3497,26 @@ TEST_F(BlockTreeCacheFactoryTest, Qwen7bBlock64FitsCrcToAutomaticAndExplicitKvBu
     const WarmUpResult too_small{measured.device_reserved_bytes - 1, 0};
     EXPECT_ANY_THROW(CacheConfigCreator::computeLocalBlockNum(
         config, model, runtime, options, {}, too_small, std::nullopt, &explicit_plan));
+    EXPECT_EQ(CacheConfigCreator::computeLocalBlockNum(
+                  config, model, runtime, options, {}, too_small, std::nullopt, &explicit_plan, true),
+              0u);
+    EXPECT_EQ(explicit_plan.device_bytes, 0u);
+
+    auto ordinary_disabled                = options;
+    ordinary_disabled.enable_memory_cache = false;
+    ordinary_disabled.kv_cache_mem_mb     = 1;
+    EXPECT_EQ(CacheConfigCreator::computeLocalBlockNum(
+                  config, model, runtime, ordinary_disabled, {}, measured, std::nullopt, nullptr, true),
+              0u);
+    EXPECT_ANY_THROW(CacheConfigCreator::computeLocalBlockNum(config, model, runtime, ordinary_disabled, {}));
+
+    MlaHostCachePlan layered;
+    layered.logical_blocks         = 4;
+    layered.prefill_staging_layers = 1;
+    auto alternative_config        = config;
+    EXPECT_EQ(CacheConfigCreator::synchronizeBlockNum(0, {}, alternative_config, layered), 4u);
+    EXPECT_TRUE(alternative_config.mla_host_cache.layeredPrefill());
+    EXPECT_ANY_THROW(CacheConfigCreator::synchronizeBlockNum(0, {}, alternative_config));
 
     config.finalizeBlockNums(blocks, runtime);
     auto allocator = initAllocator<CoordinatorCacheManager>(config);

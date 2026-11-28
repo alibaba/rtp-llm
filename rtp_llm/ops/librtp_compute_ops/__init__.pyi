@@ -175,6 +175,14 @@ class LayerKVCache:
         """Physical cache group index, or -1 for a standalone view."""
 
     @property
+    def kv_host_base(self) -> torch.Tensor | None:
+        """Pinned MLA logical suffix, when present."""
+        ...
+    @property
+    def logical_device_blocks(self) -> int:
+        """Number of logical MLA blocks backed by HBM in split layouts."""
+        ...
+    @property
     def layer_id(self) -> int:
         """
         Model-local (stage-local) layer id
@@ -217,6 +225,9 @@ class KVCache:
         """Return the kernel sequence size per block for a cache tag."""
         ...
 
+    def get_prefill_staging_blocks(self, arg0: str) -> int: ...
+    def get_prefill_staging_layers(self, arg0: str) -> int: ...
+    def get_block_generations(self, arg0: str) -> torch.Tensor | None: ...
     def get_entries_per_block(self, arg0: str) -> int:
         """Opaque logical entries per layer-cache block, excluding padding; zero for other specs."""
         ...

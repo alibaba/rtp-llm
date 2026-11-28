@@ -85,8 +85,8 @@ class KVCacheConfigPickleTest(TestCase):
         config.reserve_block_ratio = 9
         config.kv_cache_event_instance_group = "weighted-pools"
         state = config.__getstate__()
-        self.assertEqual(state[:2], ("KVCacheConfig", 25))
-        self.assertEqual(len(state), 81)
+        self.assertEqual(state[:2], ("KVCacheConfig", 26))
+        self.assertEqual(len(state), 86)
         self.assertEqual(state[80], config.kv_cache_pool_block_weights)
         self.assertTrue(state[79])
 
@@ -98,6 +98,23 @@ class KVCacheConfigPickleTest(TestCase):
         self.assertTrue(restored.enable_linear_cache_reclaim)
         self.assertEqual(restored.reserve_block_ratio, 9)
         self.assertEqual(restored.kv_cache_event_instance_group, "weighted-pools")
+
+    def test_glm_host_cache_options_round_trip_and_v25_keeps_defaults(self):
+        config = KVCacheConfig()
+        config.dsa_prefill_layout = 1
+        config.dsa_prefill_staging_layers = 3
+        config.dsa_mla_host_cache_mb = 16384
+        config.dsa_mla_resident_tokens = 8192
+        config.dsa_mla_hbm_share_denominator = 6
+        state = config.__getstate__()
+        self.assertEqual(state[81:], (1, 3, 16384, 8192, 6))
+        self.assertEqual(pickle.loads(pickle.dumps(config)).__getstate__(), state)
+
+        v25 = (state[0], 25, *state[2:81])
+        old = KVCacheConfig.__new__(KVCacheConfig)
+        old.__setstate__(v25)
+        self.assertEqual(old.__getstate__()[81:], (-1, 4, 0, 0, 3))
+        self.assertEqual(old.__getstate__()[2:81], v25[2:])
 
     def test_version_nine_state_keeps_reclaim_and_defaults_pool_weights_empty(self):
         config = KVCacheConfig()
@@ -149,8 +166,8 @@ class KVCacheConfigPickleTest(TestCase):
                 config.kv_cache_pool_block_weights = '{"full":7,"linear":2}'
                 state = config.__getstate__()
                 v22_state = _version_twenty_two_state(config)
-                self.assertEqual(len(state), 81)
-                self.assertEqual(state[:2], ("KVCacheConfig", 25))
+                self.assertEqual(len(state), 86)
+                self.assertEqual(state[:2], ("KVCacheConfig", 26))
                 self.assertEqual(state[63:68], tuple(BASE_EVENT_FIELD_VALUES.values()))
                 self.assertIs(state[68], enable_crc)
                 self.assertEqual(state[77], 6)
@@ -168,7 +185,9 @@ class KVCacheConfigPickleTest(TestCase):
                 self.assertIs(restored.enable_crc, enable_crc)
                 self.assertEqual(restored.block_tree_task_pool_size, 6)
                 self.assertTrue(restored.enable_linear_cache_reclaim)
-                self.assertEqual(restored.kv_cache_pool_block_weights, '{"full":7,"linear":2}')
+                self.assertEqual(
+                    restored.kv_cache_pool_block_weights, '{"full":7,"linear":2}'
+                )
                 self.assertEqual(restored.block_tree_transfer_worker_count, 7)
                 self.assertEqual(
                     restored.disk_cache_evict_max_pending_bytes, 80 * 1024 * 1024
@@ -411,17 +430,20 @@ class KVCacheConfigPickleTest(TestCase):
                 for _ in range(2):
                     config = pickle.loads(pickle.dumps(config))
                     self.assertEqual(getattr(config, name), timeout)
-                    # v25 keeps frozen timeout at index 78; the v24/v25 tail
-                    # flags follow it.
+                    # Appended pickle fields must keep the existing indices.
                     self.assertEqual(config.__getstate__()[78], timeout)
                     self.assertIn(f"{name}: {timeout}\n", config.to_string())
-        for timeout in (-1, 2**31):
-            with self.subTest(timeout=timeout), self.assertRaisesRegex(
-                RuntimeError, "invalid KVCacheConfig frozen recovery timing"
-            ):
-                state = KVCacheConfig().__getstate__()
-                restored = KVCacheConfig.__new__(KVCacheConfig)
-                restored.__setstate__((*state[:78], timeout, state[79], state[80]))
+        current_state = KVCacheConfig().__getstate__()
+        legacy_state = (current_state[0], 25, *current_state[2:81])
+        for state in (legacy_state, current_state):
+            for timeout in (-1, 2**31):
+                with self.subTest(
+                    version=state[1], timeout=timeout
+                ), self.assertRaisesRegex(
+                    RuntimeError, "invalid KVCacheConfig frozen recovery timing"
+                ):
+                    restored = KVCacheConfig.__new__(KVCacheConfig)
+                    restored.__setstate__((*state[:78], timeout, *state[79:]))
 
     def test_previous_versions_use_default_frozen_force_release_timeout(self):
         source = KVCacheConfig()

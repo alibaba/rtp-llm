@@ -14,6 +14,7 @@
 #include <limits>
 #include <set>
 #include <thread>
+#include <unordered_set>
 
 namespace rtp_llm {
 
@@ -420,6 +421,23 @@ ErrorInfo P2PWorkerDecodeRead::read(int64_t                   request_id,
                             ErrorCodeToString(recv_result.error_code).c_str(),
                             recv_result.error_msg.c_str());
         return ErrorInfo(recv_result.error_code, recv_result.error_msg);
+    }
+
+    if (layer_block_converter_->tracksWriteGenerations()) {
+        // Every local receiver, including TP replicas, has its own pinned arena.
+        // Publish the logical generation only after all layer copies are complete.
+        std::unordered_set<int32_t> blocks;
+        for (const auto& route : worker_plan.routes) {
+            if (route.cache_tag != "default") {
+                continue;
+            }
+            for (const auto& layer : route.layer_buffers) {
+                for (const auto& entry : layer->blockIdMap()) {
+                    blocks.insert(entry.second);
+                }
+            }
+        }
+        layer_block_converter_->notifyCacheBlocksWritten(std::vector<int32_t>(blocks.begin(), blocks.end()));
     }
 
     if (physical_completion_time_us && !task_group->tasks.empty()) {

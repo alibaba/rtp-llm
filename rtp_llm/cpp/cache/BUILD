@@ -102,6 +102,12 @@ alias(
 )
 
 cc_library(
+    name = "mla_host_cache_budget",
+    hdrs = ["MlaHostCacheBudget.h"],
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
     name = "cache_config",
     srcs = [
         "CacheConfig.cc",
@@ -117,6 +123,7 @@ cc_library(
     deps = [
         ":cache_group_type",
         ":kv_cache_specs",
+        ":mla_host_cache_budget",
         "//rtp_llm/cpp/config:config_modules",
         "//rtp_llm/cpp/utils:core_utils",
         "//rtp_llm/models_py/bindings/core:types",

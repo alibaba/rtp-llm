@@ -24,6 +24,18 @@ cc_library(
     alwayslink = 1,
 )
 
+cc_test(
+    name = "kv_cache_layer_layout_test",
+    srcs = ["KVCacheLayerLayoutTest.cc"],
+    copts = copts(),
+    deps = [
+        ":op_defs",
+        "//rtp_llm/cpp/cache:kv_cache_specs",
+        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
+    ] + torch_deps(),
+)
+
 py_test(
     name = "py_model_inputs_compat_test",
     srcs = ["py_model_inputs_compat_test.py"],

@@ -15,7 +15,8 @@ from rtp_llm.models_py.model_desc.glm5 import (
     Glm5MoeModel,
 )
 from rtp_llm.models_py.model_desc.module_base import GptModelBase
-from rtp_llm.models_py.modules import MlaAttention
+from rtp_llm.models_py.modules import AttnImplFactory, MlaAttention
+from rtp_llm.models_py.modules.factory.attention import attn_factory
 from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.glm53_prefill_workspace import (
     Glm53PrefillWorkspace,
 )
@@ -591,6 +592,123 @@ class Glm5FmhaDispatchTest(unittest.TestCase):
         self.assertEqual(clone.layer_idx, 7)
         self.assertTrue(clone.use_ep_shared_allreduce)
         self.assertFalse(clone.use_unified_tp_allreduce)
+
+    def test_layered_glm5_keeps_both_routes_sparse_for_short_non_cp_prefill(self):
+        model = Glm5MoeModel.__new__(Glm5MoeModel)
+        nn.Module.__init__(model)
+        model._layered_prefill_cache = object()
+        model.config = object()
+        model.parallelism_config = SimpleNamespace(
+            prefill_cp_config=SimpleNamespace(is_enabled=lambda: False)
+        )
+        model.weight, model.fmha_config, model.py_hw_kernel_config = (
+            object(),
+            None,
+            None,
+        )
+        routes = {
+            tag: SimpleNamespace(is_prefill=True) for tag in ("default", "indexer_kv")
+        }
+        with patch.object(
+            AttnImplFactory, "get_fmha_impl", side_effect=lambda **kw: kw
+        ):
+            implementations = model.prepare_fmha_impl(
+                SimpleNamespace(attention_inputs=routes)
+            )
+        for tag, implementation in implementations.items():
+            self.assertIs(implementation["attn_inputs"], routes[tag])
+            self.assertTrue(implementation["force_sparse_prefill"])
+
+        class Candidate:
+            @staticmethod
+            def support(config, inputs):
+                return True
+
+            @staticmethod
+            def support_parallelism_config(config):
+                return True
+
+            def __init__(self, *_args, **_kwargs):
+                pass
+
+        class Dense(Candidate):
+            is_sparse = staticmethod(lambda: False)
+
+        class Sparse(Candidate):
+            is_sparse = staticmethod(lambda: True)
+
+        short_inputs = SimpleNamespace(
+            is_prefill=True, cu_kv_seqlens_device=torch.tensor([0, 4])
+        )
+        config = SimpleNamespace(is_sparse=True, indexer_topk=8)
+        weight = SimpleNamespace(weights=[], get_global_weight_or_none=lambda _: None)
+        with patch.object(attn_factory, "PREFILL_MLA_IMPS", [Dense, Sparse]):
+            self.assertIsInstance(
+                attn_factory.get_mla_impl(
+                    config,
+                    weight,
+                    short_inputs,
+                    parallelism_config=model.parallelism_config,
+                ),
+                Dense,
+            )
+            self.assertIsInstance(
+                attn_factory.get_mla_impl(
+                    config,
+                    weight,
+                    short_inputs,
+                    parallelism_config=model.parallelism_config,
+                    force_sparse_prefill=True,
+                ),
+                Sparse,
+            )
+
+    def test_pinned_decode_context_keeps_main_eager_attention_selection(self):
+        model = Glm5MoeModel.__new__(Glm5MoeModel)
+        nn.Module.__init__(model)
+        working = SimpleNamespace(
+            backing=[torch.empty((2, 4, 1))], hbm_tokens=16, device=torch.device("cpu")
+        )
+        model._pinned_mla_state = (None, {0: (working, 0)})
+        indexer = SimpleNamespace(is_prefill=True)
+        primary = SimpleNamespace(
+            is_prefill=True,
+            is_target_verify=False,
+            is_draft_extend=False,
+            kv_cache_kernel_block_id=torch.tensor([[1, 2, 5]], dtype=torch.int32),
+            prefix_lengths=torch.tensor([0]),
+            input_lengths=torch.tensor([4]),
+        )
+        model_inputs = SimpleNamespace(
+            attention_inputs={"default": primary, "indexer_kv": indexer}
+        )
+        with patch.object(GenericMoeModel, "prepare_fmha_impl", return_value="dense"):
+            self.assertEqual(model.prepare_fmha_impl(model_inputs), "dense")
+        with self.assertRaisesRegex(RuntimeError, "requires eager execution"):
+            model.prepare_fmha_impl(model_inputs, is_cuda_graph=True)
+
+        model.config = model.parallelism_config = model.weight = object()
+        model.fmha_config = model.py_hw_kernel_config = None
+        primary.input_lengths[0] = 12
+        writer = object()
+        with patch.object(
+            AttnImplFactory,
+            "get_fmha_impl",
+            side_effect=lambda **kwargs: SimpleNamespace(
+                write_cache_store_impl=writer, **kwargs
+            ),
+        ):
+            routes = model.prepare_fmha_impl(model_inputs)
+        default = routes["default"]
+        self.assertFalse(default.force_sparse_prefill)
+        self.assertIs(default.pinned_mla_context.writer, writer)
+        self.assertIsNone(default.write_cache_store_impl)
+        # Compact page 0 is reserved for invalid entries.
+        self.assertEqual(
+            default.attn_inputs.kv_cache_kernel_block_id.tolist(), [[1, 2, 3]]
+        )
+        self.assertEqual(primary.kv_cache_kernel_block_id.tolist(), [[1, 2, 5]])
+        self.assertIs(routes["indexer_kv"].attn_inputs, indexer)
 
     def test_specialized_models_delegate_main_fmha_with_valid_super_dispatch(self):
         sentinel = object()

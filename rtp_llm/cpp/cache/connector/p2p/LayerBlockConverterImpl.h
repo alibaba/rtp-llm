@@ -23,6 +23,14 @@ public:
             coordinator_manager_->convertIndexToBuffer(layer_id, tag, block_id, partition_count, partition_id));
     }
 
+    bool tracksWriteGenerations() const override {
+        return coordinator_manager_->tracksWriteGenerations();
+    }
+
+    void notifyCacheBlocksWritten(const std::vector<int32_t>& blocks) const override {
+        coordinator_manager_->notifyCacheBlocksWritten(blocks);
+    }
+
     std::vector<std::pair<BlockInfo, size_t>> getAllBuffers() const override {
         const auto                                layout = coordinator_manager_->allLayerCacheBase();
         std::vector<std::pair<BlockInfo, size_t>> result;
@@ -57,7 +65,14 @@ public:
                 continue;
             }
             for (const auto& layer : group_layout.layers()) {
-                append_tensor(layer.kv_addr);
+                if (layer.kv_host_addr.defined()) {
+                    // Only the logical HBM prefix participates in transfers.
+                    // The rest of the device view is decode scratch.
+                    append_tensor(layer.kv_addr.narrow(0, 0, layer.logical_device_blocks));
+                    append_tensor(layer.kv_host_addr);
+                } else {
+                    append_tensor(layer.kv_addr);
+                }
                 append_tensor(layer.kv_scale_addr);
             }
         }

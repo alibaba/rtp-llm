@@ -12,6 +12,7 @@
 #include "rtp_llm/models_py/bindings/cuda/PerTokenGroupQuantFp8.h"
 #include "rtp_llm/models_py/bindings/cuda/TrtFp8QuantOp.h"
 #include "rtp_llm/models_py/bindings/cuda/ReuseKVCacheOp.h"
+#include "rtp_llm/models_py/bindings/cuda/PagedKvCacheCopy.h"
 #include "rtp_llm/models_py/bindings/cuda/MlaKMergeOp.h"
 #include "rtp_llm/models_py/bindings/cuda/FastTopkOp.h"
 #include "rtp_llm/models_py/bindings/cuda/DebugKernelOp.h"
@@ -32,6 +33,10 @@ using namespace rtp_llm;
 namespace torch_ext {
 
 void registerBasicCudaOps(py::module& rtp_ops_m) {
+    rtp_ops_m.def("copy_paged_kv_cache_async",
+                  &copyPagedKvCacheAsync,
+                  "Queue sorted disjoint page copies between pinned host memory and the current CUDA stream");
+
     rtp_ops_m.def("debug_kernel",
                   &debugKernel,
                   "Debug kernel to print 2D data blocks from GPU tensor",

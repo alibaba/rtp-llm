@@ -1,19 +1,25 @@
 from collections.abc import Mapping
+from contextlib import nullcontext
 from dataclasses import dataclass
 from typing import Any, Dict, Optional
 
 import torch
 from torch import nn
 
+from rtp_llm.config.cuda_graph import GenerationPrefillCudaGraphUnsupportedBackend
 from rtp_llm.config.mega_moe import MEGA_MOE_STRATEGIES, MegaMoeExecutionPolicy
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.model_loader.model_weight_info import ModelWeights
-from rtp_llm.models_py.model_desc.block_map import get_layer_caches_for_groups
+from rtp_llm.models_py.model_desc.block_map import (
+    get_attention_inputs_value,
+    get_layer_caches_for_groups,
+)
 from rtp_llm.models_py.model_desc.cp_mtp_hidden_handoff import CpMtpHiddenHandoff
 from rtp_llm.models_py.model_desc.generic_moe import GenericMoeLayer, GenericMoeModel
 from rtp_llm.models_py.model_desc.hidden_state_capture import CaptureContext
 from rtp_llm.models_py.model_desc.module_base import GptModelBase
 from rtp_llm.models_py.modules import (
+    AttnImplFactory,
     CausalAttention,
     DenseMLP,
     Embedding,
@@ -37,7 +43,12 @@ from rtp_llm.models_py.modules.hybrid.glm5_cmp import (
     should_enable_glm5_cmp,
 )
 from rtp_llm.ops import HWKernelConfig, MoeConfig, ParallelismConfig, RoleType
-from rtp_llm.ops.compute_ops import LayerKVCache, PyModelInputs, PyModelOutputs
+from rtp_llm.ops.compute_ops import (
+    LayerKVCache,
+    PyModelInitResources,
+    PyModelInputs,
+    PyModelOutputs,
+)
 from rtp_llm.utils.dsa_indexing import dsa_layer_has_indexer, dsa_layer_skips_topk
 from rtp_llm.utils.model_weight import W
 
@@ -203,6 +214,10 @@ class Glm5MoeDecoderLayer(nn.Module):
     ):
         super().__init__()
         self.layer_idx = layer_idx
+        self._drain_kv_prefetch_before_moe = (
+            layer_idx in config.moe_layer_index
+            and moe_config.moe_strategy in MEGA_MOE_STRATEGIES
+        )
 
         # Get quant_config from model_config
         quant_config = config.quant_config
@@ -353,6 +368,7 @@ class Glm5MoeDecoderLayer(nn.Module):
         clone = object.__new__(type(self))
         nn.Module.__init__(clone)
         clone.layer_idx = self.layer_idx
+        clone._drain_kv_prefetch_before_moe = self._drain_kv_prefetch_before_moe
         clone.self_attn = self.self_attn
         if share_mega_buf:
             if not isinstance(self.mlp, Glm5MoeLayer):
@@ -377,6 +393,18 @@ class Glm5MoeDecoderLayer(nn.Module):
             )
         )
         return clone
+
+    def _wait_kv_prefetch_before_moe(self, fmha_impl) -> None:
+        if not getattr(self, "_drain_kv_prefetch_before_moe", False):
+            return
+        default = fmha_impl["default"] if isinstance(fmha_impl, Mapping) else fmha_impl
+        wait_cp_overlap = getattr(default, "wait_kv_overlap_before_moe", None)
+        if wait_cp_overlap is not None:
+            wait_cp_overlap()
+        entry = getattr(default, "pinned_mla_groups", {}).get(self.layer_idx)
+        if entry is not None:
+            working, _ = entry
+            working.wait_prefetch_complete()
 
     def _fwd_mlp_or_moe(
         self,
@@ -469,6 +497,7 @@ class Glm5MoeDecoderLayer(nn.Module):
             routed_indices=routed_indices,
             routed_weights=routed_weights,
         )
+        self._wait_kv_prefetch_before_moe(default_fmha)
         if moe_activation is not None:
             moe_hidden_states, output_residual, routed_indices, routed_weights = (
                 mla_post
@@ -540,6 +569,7 @@ class Glm5MoeDecoderLayer(nn.Module):
                 **quantized_input,
             )
 
+        self._wait_kv_prefetch_before_moe(fmha_impl)
         hidden_states, residual = self._fwd_mlp_or_moe(hidden_states, residual)
 
         return DecodeLayerOutput(hidden_states, residual, topk_indices)
@@ -594,6 +624,91 @@ class Glm5ModelBase(CpMtpHiddenHandoff, GenericMoeModel):
             for idx in range(self.layer_num)
         )
 
+    def initialize(self, init_resource) -> bool:
+        initialized = super().initialize(init_resource)
+        cache = self.kv_cache
+        layer = (
+            cache.get_layer_cache(0, "default")
+            if cache is not None and getattr(cache, "layer_count", 0)
+            else None
+        )
+        if (
+            getattr(layer, "kv_host_base", None) is None
+            or layer.kv_host_base.numel() == 0
+        ):
+            self._pinned_mla_state = None
+            return initialized
+
+        from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.pinned_mla_cache import (
+            make_working_sets,
+        )
+
+        self._pinned_mla_state = make_working_sets(
+            self.kv_cache, self.config, getattr(self, "_pinned_mla_state", None)
+        )
+        return initialized
+
+    def prepare_fmha_impl(
+        self, inputs, is_cuda_graph: bool = False, cuda_graph_selection_mode=None
+    ):
+        state = getattr(self, "_pinned_mla_state", None)
+        if state is None:
+            return super().prepare_fmha_impl(
+                inputs, is_cuda_graph, cuda_graph_selection_mode
+            )
+        attention = get_attention_inputs_value(inputs)
+        default_inputs = attention["default"]
+        if (
+            default_inputs.is_prefill
+            and not default_inputs.is_target_verify
+            and not default_inputs.is_draft_extend
+        ):
+            if is_cuda_graph:
+                raise GenerationPrefillCudaGraphUnsupportedBackend(
+                    "tiered MLA decode requires eager execution for context"
+                )
+            from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.pinned_mla_cache import (
+                PinnedMlaContextCache,
+            )
+
+            staging = PinnedMlaContextCache.from_attention(
+                default_inputs, state[1][0][0]
+            )
+            if staging is None:
+                return super().prepare_fmha_impl(inputs)
+            fmha = self._create_tagged_fmha(
+                {"default": staging.inputs, "indexer_kv": attention["indexer_kv"]}
+            )
+            default = fmha["default"]
+            staging.writer = default.write_cache_store_impl
+            default.write_cache_store_impl = None
+            default.pinned_mla_context = staging
+            return fmha
+
+        fmha = super().prepare_fmha_impl(
+            inputs, is_cuda_graph, cuda_graph_selection_mode
+        )
+        default = fmha["default"] if isinstance(fmha, Mapping) else fmha
+        if not hasattr(default, "prefetch_kv"):
+            raise RuntimeError("tiered MLA decode requires the sparse MLA backend")
+        default.pinned_mla_groups = state[1]
+        return fmha
+
+    def _create_tagged_fmha(self, attention_inputs, *, force_sparse_prefill=False):
+        return {
+            tag: AttnImplFactory.get_fmha_impl(
+                model_config=self.config,
+                parallelism_config=self.parallelism_config,
+                weight=self.weight,
+                attn_inputs=attention_inputs[tag],
+                fmha_config=self.fmha_config,
+                hw_kernel_config=self.py_hw_kernel_config,
+                force_sparse_prefill=force_sparse_prefill
+                and attention_inputs[tag].is_prefill,
+            )
+            for tag in ("default", "indexer_kv")
+        }
+
     def prepare_moe_forward(self, tokens: int, is_prefill: bool) -> bool:
         """Called by the engine before graph selection for non-MTP PDFUSION DP."""
         self._moe_forward_plan = None
@@ -634,20 +749,30 @@ class Glm5ModelBase(CpMtpHiddenHandoff, GenericMoeModel):
             # Decode attention stays decode; only the MoE invocation count
             # follows the EP-wide plan when a peer is processing prefill.
             is_decode = not forward_plan[1]
-        with synchronized_moe_chunk_plan(
+        layered_cache = getattr(self, "_layered_prefill_cache", None)
+        staging = (
+            layered_cache.forward(default_fmha) if layered_cache else nullcontext()
+        )
+        with staging, synchronized_moe_chunk_plan(
             self.layers[: self.layer_num],
             hidden_states.size(0),
             hidden_states.device,
             is_decode_forward=is_decode,
             synchronized_tokens=forward_plan[0] if forward_plan is not None else None,
         ):
-            enable_cmp = should_enable_glm5_cmp(
-                self.layers,
-                self.layer_num,
-                hidden_states,
-                default_fmha,
-                self.kv_cache,
-                force_reuse_topk_indices=force_reuse_topk_indices,
+            # CMP bypasses the standard MLA staging and writeback context.
+            pinned_context = getattr(default_fmha, "pinned_mla_context", None)
+            enable_cmp = (
+                layered_cache is None
+                and pinned_context is None
+                and should_enable_glm5_cmp(
+                    self.layers,
+                    self.layer_num,
+                    hidden_states,
+                    default_fmha,
+                    self.kv_cache,
+                    force_reuse_topk_indices=force_reuse_topk_indices,
+                )
             )
             residual = torch.zeros_like(hidden_states)
             for idx, layer in enumerate(self.layers[: self.layer_num]):
@@ -660,15 +785,25 @@ class Glm5ModelBase(CpMtpHiddenHandoff, GenericMoeModel):
                         else ("default",)
                     )
                     caches = get_layer_caches_for_groups(self.kv_cache, idx, tags)
-                result = layer(
-                    hidden_states,
-                    residual,
-                    fmha_impl,
-                    kv_cache=caches,
-                    prev_topk_indices=prev_topk_indices,
-                    enable_cmp=enable_cmp,
-                    force_reuse_topk_indices=force_reuse_topk_indices,
+                context = (
+                    pinned_context.attention(
+                        caches["default"], self._pinned_mla_state[1][idx]
+                    )
+                    if pinned_context is not None
+                    else nullcontext(None)
                 )
+                with context as staged_cache:
+                    if staged_cache is not None:
+                        caches["default"] = staged_cache
+                    result = layer(
+                        hidden_states,
+                        residual,
+                        fmha_impl,
+                        kv_cache=caches,
+                        prev_topk_indices=prev_topk_indices,
+                        enable_cmp=enable_cmp,
+                        force_reuse_topk_indices=force_reuse_topk_indices,
+                    )
                 hidden_states, residual = result.hidden_states, result.residual
                 prev_topk_indices = result.topk_indices
                 if capture is not None:
@@ -706,6 +841,44 @@ class Glm5MoeModel(Glm5ModelBase):
             self._capture_canonical_layer,
             self._capture_canonical_final,
         )
+
+    def initialize(self, init_resource: PyModelInitResources) -> bool:
+        initialized = super().initialize(init_resource)
+        if initialized:
+            from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.layered_prefill_cache import (
+                ContiguousPrefillCache,
+            )
+
+            self._layered_prefill_cache = ContiguousPrefillCache.from_kv_cache(
+                self.kv_cache, self.layer_num
+            )
+        return initialized
+
+    def prepare_fmha_impl(
+        self,
+        inputs: PyModelInputs,
+        is_cuda_graph: bool = False,
+        cuda_graph_selection_mode: Optional[str] = None,
+    ) -> Any:
+        if getattr(self, "_layered_prefill_cache", None) is None:
+            return super().prepare_fmha_impl(
+                inputs, is_cuda_graph, cuda_graph_selection_mode
+            )
+        attention_inputs = get_attention_inputs_value(inputs)
+        if not isinstance(attention_inputs, Mapping) or set(attention_inputs) != {
+            "default",
+            "indexer_kv",
+        }:
+            raise RuntimeError(
+                "layered GLM5 requires default and indexer_kv cache inputs"
+            )
+        if is_cuda_graph:
+            raise GenerationPrefillCudaGraphUnsupportedBackend(
+                "layered GLM5 requires eager attention"
+            )
+        # The dense short-prefill route has no sparse page-table remap. Sparse
+        # TopK covers every valid token when the sequence is shorter than TopK.
+        return self._create_tagged_fmha(attention_inputs, force_sparse_prefill=True)
 
     def _capture_canonical_final(
         self, hidden_states: torch.Tensor, residual: torch.Tensor | None

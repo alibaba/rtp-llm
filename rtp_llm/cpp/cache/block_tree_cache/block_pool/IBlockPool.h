@@ -106,6 +106,7 @@ protected:
     void markInitialized();
     bool initialized() const;
 
+    virtual void onBlockAllocatedNoLock(BlockIdxType) noexcept {}
     virtual void onFirstTreeRefNoLock(BlockIdxType) {}
     virtual bool onLastTreeRefNoLock(BlockIdxType) {
         return true;
@@ -143,15 +144,14 @@ protected:
     }
 
     // Helpers for derived-pool transactions; the caller holds mutex_.
-    std::optional<BlockIdList> mallocNoLock(size_t n);
-    size_t                     availableFreeBlocksNoLock() const;
-    TreeReferenceStats         treeReferenceStatsNoLock() const;
-    void                       reserveReleasedBlocksNoLock(size_t additional) {
-        released_blocks_.reserve(released_blocks_.size() + additional);
-    }
-    void reserveAllReleasedBlocksNoLock() {
-        released_blocks_.reserve(totalBlocksNumNoLock());
-    }
+    std::optional<BlockIdList> mallocNoLock(size_t n, bool prefer_upper_range = false);
+    size_t                     lowerRangeFreeBlocksNoLock() const;
+    // The initializer sets this once, before any allocation. ID zero remains invalid.
+    void                  splitFreeRanges(BlockIdxType upper_range_begin);
+    size_t                availableFreeBlocksNoLock() const;
+    TreeReferenceStats    treeReferenceStatsNoLock() const;
+    void                  reserveReleasedBlocksNoLock(size_t additional);
+    void                  reserveAllReleasedBlocksNoLock();
     std::function<void()> capacityChangeCallbackNoLock() const {
         return capacity_change_callback_;
     }
@@ -182,10 +182,19 @@ private:
     void          decTreeRefNoLock(BlockIdxType block, size_t ref_type_index);
     void          releaseFrozenReferences(const BlockIdList& blocks, const std::function<void()>& notify) noexcept;
 
-    size_t       totalBlocksNumNoLock() const;
-    void         refillAscendingFreeBlocksNoLock();
-    BlockIdxType popFreeBlockNoLock();
-    void         pushFreeBlockNoLock(BlockIdxType block);
+    size_t totalBlocksNumNoLock() const;
+    struct FreeBlockRange {
+        BlockIdList pending;
+        BlockIdList released;
+        size_t      head     = 0;
+        size_t      capacity = 0;
+
+        size_t available() const;
+        void   prepareTake(size_t count);
+        void   take(size_t count, BlockIdList& out);
+        void   reserveReleased(size_t additional);
+    };
+    void pushFreeBlockNoLock(BlockIdxType block);
 
 private:
     std::shared_ptr<const BlockPoolConfigBase>                config_;
@@ -195,9 +204,9 @@ private:
     std::vector<uint32_t>                                     tree_refcounts_;
     std::array<std::vector<uint32_t>, kBlockTreeRefTypeCount> tree_refcounts_by_type_;
     std::array<size_t, kBlockTreeRefTypeCount>                tree_referenced_block_counts_{};
-    std::vector<BlockIdxType>                                 free_blocks_;
-    std::vector<BlockIdxType>                                 released_blocks_;
-    size_t                                                    free_head_{0};
+    FreeBlockRange                                            lower_free_;
+    FreeBlockRange                                            upper_free_;
+    BlockIdxType                                              upper_range_begin_{0};
     size_t                                                    active_blocks_num_{0};
     size_t                                                    available_blocks_num_{0};
 };

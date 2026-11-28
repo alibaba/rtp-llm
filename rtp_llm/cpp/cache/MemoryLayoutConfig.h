@@ -44,6 +44,17 @@ struct MemoryLayoutConfig {
 
     bool enable_kv_scale         = false;
 
+    // Optional physical placement. The allocator still owns block_num logical
+    // IDs (including reserved ID zero). GPU scratch follows the HBM prefix and
+    // has no logical block ID. A zero triple keeps the pool-wide placement.
+    uint32_t device_block_count  = 0;
+    uint32_t device_spare_blocks = 0;
+    uint32_t host_block_count    = 0;
+
+    bool hasExplicitBacking() const {
+        return device_block_count || device_spare_blocks || host_block_count;
+    }
+
     bool hasScale() const {
         return enable_kv_scale && kv_scale_pool_size_bytes > 0;
     }

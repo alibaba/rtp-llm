@@ -72,6 +72,10 @@ public:
     virtual std::shared_ptr<KVCacheResource>
     incrKVCacheRef(const KVCacheResource& kvcache_resource, const CacheKeysType& cache_keys, bool is_connector = false);
     virtual GroupedCacheLayerLayout allLayerCacheBase() const;
+    bool                            tracksWriteGenerations() const {
+        return config_.mla_host_cache.pinnedDecode();
+    }
+    void                            notifyCacheBlocksWritten(const BlockIdList& blocks) const;
     virtual bool                    updateKVBlock(const BatchKVCacheResourcePtr&  batch_kv_cache_resource,
                                                   const std::vector<int>&         block_src_batch,
                                                   bool                            copy_last_block,

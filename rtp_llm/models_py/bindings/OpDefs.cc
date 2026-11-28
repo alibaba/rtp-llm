@@ -82,6 +82,8 @@ void registerPyOpDefs(pybind11::module& m) {
         .def_readwrite("kv_cache_base", &LayerKVCache::kv_cache_base, "Key/value cache tensor (per-layer view)")
         .def_readwrite("kv_scale_base", &LayerKVCache::kv_scale_base, "Key/value cache scale tensor")
         .def_readwrite("linear_replay", &LayerKVCache::linear_replay)
+        .def_readonly("kv_host_base", &LayerKVCache::kv_host_base, "Pinned MLA logical suffix")
+        .def_readonly("logical_device_blocks", &LayerKVCache::logical_device_blocks, "MLA logical HBM prefix")
         .def_readonly("seq_size_per_block", &LayerKVCache::seq_size_per_block, "Sequence size per block")
         .def_readonly("layer_id", &LayerKVCache::layer_id, "Model-local (stage-local) layer id")
         .def_readonly("group_id", &LayerKVCache::group_id, "Physical cache group index")
@@ -105,6 +107,9 @@ void registerPyOpDefs(pybind11::module& m) {
         .def("get_kernel_seq_size_per_block",
              &KVCache::getKernelSeqSizePerBlock,
              "Return the kernel sequence size per block for a cache tag")
+        .def("get_prefill_staging_blocks", &KVCache::getPrefillStagingBlocks)
+        .def("get_prefill_staging_layers", &KVCache::getPrefillStagingLayers)
+        .def("get_block_generations", &KVCache::getBlockGenerations)
         .def("get_entries_per_block",
              &KVCache::getEntriesPerBlock,
              "Return opaque logical entries per layer-cache block, excluding padding; zero for other specs");

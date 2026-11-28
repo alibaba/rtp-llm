@@ -13,6 +13,7 @@
 
 #include "rtp_llm/cpp/cache/CacheGroupType.h"
 #include "rtp_llm/cpp/cache/KVCacheSpec.h"
+#include "rtp_llm/cpp/cache/MlaHostCacheBudget.h"
 #include "rtp_llm/cpp/cache/CacheTopology.h"
 #include "rtp_llm/cpp/cache/LinearReplayPlan.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
@@ -46,6 +47,8 @@ public:
     int maxPrefixReuseTokens(int prompt_tokens) const {
         return std::max(0, prompt_tokens - std::max(1, cache_min_replay_tokens));
     }
+
+    MlaHostCachePlan mla_host_cache;
 
     bool use_typed_cache_regions                  = false;
     bool use_opaque_kv_cache_store                = false;
