@@ -1635,7 +1635,12 @@ class TestFp8AlreadyQuantizedForward(unittest.TestCase):
                     prefix="proj", bias=True,
                 ).cuda()
                 g = torch.Generator(device="cuda").manual_seed(728)
-                w = torch.randn(32, 64, generator=g, device="cuda").half()
+                # A maximum code of 7 encodes to 448, so every integer code
+                # below encodes exactly. Use a different real scale per row.
+                codes = torch.randint(-7, 8, (32, 64), generator=g, device="cuda")
+                codes[:, 0] = 7
+                factors = (1 + torch.arange(32, device="cuda") % 7)[:, None] / 8
+                w = (codes * factors).half()
                 bias = torch.linspace(-1.5, 2.5, 32, device="cuda").half()
                 values = {"proj.weight": w, "proj.bias": bias}
                 if method == "fp8_per_channel":
@@ -1644,11 +1649,25 @@ class TestFp8AlreadyQuantizedForward(unittest.TestCase):
                     )
                 layer.load_weights(values)
                 layer.process_weights_after_loading()
+                codes = torch.randint(-7, 8, (32, 64), generator=g, device="cuda")
+                codes[:, 0] = 7
+                x = (codes * factors.flip(0)).half().view(4, 8, 64)
+                expected = (x.float() @ w.float().T + bias).half()
+                torch.testing.assert_close(layer(x), expected, rtol=0, atol=0)
+
+                # For mixed exponents Hopper's FP8 tensor-core dot product
+                # can differ from a dense FP32 GEMM even with FP32 output.
+                # Check the scales, bias and final rounding against that GEMM.
                 x = torch.randn(4, 8, 64, generator=g, device="cuda").half()
                 qx, sx = scaled_fp8_per_token_quant(x.view(-1, 64))
-                accum = qx.float() @ layer.weight.float().T
+                unit = sx.new_ones(1)
+                accum = torch._scaled_mm(
+                    qx, layer.weight.T, scale_a=unit, scale_b=unit, out_dtype=torch.float32
+                )
+                if isinstance(accum, tuple):
+                    accum = accum[0]
                 expected = (accum * sx * layer.weight_scale + bias).half()
-                torch.testing.assert_close(layer(x), expected.view(4, 8, 32))
+                torch.testing.assert_close(layer(x), expected.view(4, 8, 32), rtol=0, atol=0)
 
     def test_cuda_quant_helpers_validate_native_layout_contract(self):
         empty_group_input = torch.empty(0, 128, device="cuda")
