@@ -567,7 +567,7 @@ class IndexerFP8OverlapEntryPointsTest(unittest.TestCase):
 
         compute_q_calls = []
 
-        def fake_compute_q(qr_in, freqs, *, apply_rope):
+        def fake_compute_q(qr_in, freqs, *, apply_rope, qr_quant=None):
             compute_q_calls.append((qr_in, freqs))
             self.assertFalse(apply_rope)
             return torch.zeros(
