@@ -113,6 +113,8 @@ class MediaNetwork:
         ranges = config.mm_download_range_config
         if ranges["enable"]:
             policy.range_chunk_bytes = ranges["chunk_size_bytes"]
+        if os.getenv("MM_VIT_DOWNLOAD_FAST_PATH") == "1":
+            policy.reserve_response_body = True
         self.pool = native.Network(concurrency, max(0, config.url_cache_item_num), policy)
         self.pending = {}
         self.lock = threading.Lock()

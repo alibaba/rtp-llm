@@ -71,6 +71,7 @@ struct Policy {
     bool                            rewrite_oss = false;
     std::string                     ca;
     size_t                          range_chunk_bytes = 0;
+    bool                            reserve_response_body = false;
 };
 struct Endpoint {
     std::string origin, host;
@@ -220,6 +221,7 @@ struct Transfer {
     bool                                            has_encoding_header = false;
     bool                                            headers_complete    = false;
     size_t                                          content_length      = 0;
+    bool                                            reserve_response_body = false;
     std::unique_ptr<rtp_llm::media::ContentDecoder> decoder;
 
     size_t                  range_chunk_bytes = 0;
@@ -262,8 +264,20 @@ size_t write_body(char* data, size_t sz, size_t n, void* ptr) noexcept {
     try {
         if (t.decoder)
             t.decoder->write({data, count});
-        else
+        else {
+            constexpr size_t reserve_after = 128 * 1024;
+            constexpr size_t max_reserve    = 16 * 1024 * 1024;
+            if (t.reserve_response_body && t.status == 200 && t.content_length <= max_reserve
+                && t.content_length > t.body.capacity() && t.body.size() < reserve_after
+                && count >= reserve_after - t.body.size()) {
+                try {
+                    t.body.reserve(t.content_length);
+                } catch (const std::bad_alloc&) {
+                    // The existing incremental path can still complete.
+                }
+            }
             t.append({data, count});
+        }
     } catch (...) {
         return 0;
     }
@@ -354,7 +368,8 @@ size_t read_header(char* bytes, size_t size, size_t count, void* ptr) noexcept {
                 auto value                   = line.find_first_not_of(" \t", 17);
                 if (value != line.npos)
                     transfer.content_encoding.append(line.substr(value));
-            } else if ((transfer.job.req.limit || transfer.range_chunk_bytes) && line.size() >= 15
+            } else if ((transfer.job.req.limit || transfer.range_chunk_bytes || transfer.reserve_response_body)
+                       && line.size() >= 15
                        && !strncasecmp(bytes, "Content-Length:", 15)) {
                 auto pos = line.find_first_not_of(" \t", 15);
                 if (pos != line.npos)
@@ -607,6 +622,7 @@ void configure_transfer(CURL*              curl,
         throw Failure("cancelled");
     if (ms <= 0)
         throw Failure("timeout");
+    transfer.reserve_response_body = policy.reserve_response_body && req.media;
     curl_easy_reset(curl);
     for (const auto& [name, value] : (proxy.empty() ? req.headers : req.proxy_headers)) {
         if (name.empty() || name.find_first_of(" :\r\n\t") != std::string::npos || name.find('\0') != std::string::npos
@@ -1509,7 +1525,8 @@ PYBIND11_MODULE(_media_network, m) {
         .def_readwrite("internal", &Policy::internal)
         .def_readwrite("rewrite_oss", &Policy::rewrite_oss)
         .def_readwrite("ca", &Policy::ca)
-        .def_readwrite("range_chunk_bytes", &Policy::range_chunk_bytes);
+        .def_readwrite("range_chunk_bytes", &Policy::range_chunk_bytes)
+        .def_readwrite("reserve_response_body", &Policy::reserve_response_body);
     py::class_<Request>(m, "Request")
         .def(py::init<>())
         .def_readwrite("url", &Request::url)

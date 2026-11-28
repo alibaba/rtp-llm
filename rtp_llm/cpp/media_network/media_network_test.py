@@ -116,6 +116,26 @@ class MediaNetworkTest(unittest.TestCase):
         self.assertEqual(self.fetch("/binary", cache_key="b")[1], "")
         self.assertFalse(self.fetch("/redirect", cache_key="a")[3])
 
+    def test_large_body_reservation_preserves_bytes_cache_and_size_limit(self):
+        body = bytes(range(256)) * 4096
+        self.server.encoded = {"/large": (None, body), "/oversize": (None, body)}
+        policy = native.Policy()
+        policy.reserve_response_body = True
+        self.net = native.Network(2, 1, policy)
+        self.addCleanup(self.net.close)
+
+        self.assertEqual(
+            self.fetch("/large", cache_key="large", limit=len(body))[:4],
+            (200, "", body, False),
+        )
+        self.assertEqual(
+            self.fetch("/large", cache_key="large", limit=len(body))[:4],
+            (200, "", body, True),
+        )
+        self.assertEqual(
+            self.fetch("/oversize", limit=len(body) - 1)[1:3], ("too_large", b"")
+        )
+
     def test_cached_image_completes_while_all_network_workers_are_occupied(self):
         self.fetch("/binary", cache_key="warm")
         busy = []
