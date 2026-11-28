@@ -41,6 +41,7 @@
 #include "rtp_llm/cpp/config/RoleTypes.h"
 #include "rtp_llm/cpp/utils/TimeUtil.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
+#include "rtp_llm/cpp/utils/test/DecodePublicationTestStartup.h"
 
 #include <algorithm>
 #include <chrono>
@@ -213,6 +214,15 @@ public:
         std::lock_guard<std::mutex> lock(mutex_);
         return match_calls_;
     }
+
+    std::function<void(const BatchKVCacheResource&, size_t, bool)> observe_completed_decode;
+    bool captureCompletedDecode(const BatchKVCacheResource& resource, size_t computed_end, bool finished) override {
+        if (observe_completed_decode) observe_completed_decode(resource, computed_end, finished);
+        decode_publications.push_back(computed_end);
+        return true;
+    }
+
+    std::vector<size_t> decode_publications;
 
 protected:
     bool initImpl() override {
@@ -408,7 +418,9 @@ protected:
                                   bool                      seed_host     = false,
                                   RoleType                  role_type     = RoleType::PDFUSION,
                                   bool                      seed_resident = false,
-                                  std::chrono::milliseconds timeout       = std::chrono::seconds(10)) {
+                                  std::chrono::milliseconds timeout       = std::chrono::seconds(10),
+                                  int                      num_return_sequences = 2,
+                                  const std::vector<int>& input_tokens = {1, 2, 3, 4, 5, 6}) {
         KVCacheConfig kv_cache_config;
         kv_cache_config.enable_remote_cache   = true;
         kv_cache_config.enable_memory_cache   = seed_host;
@@ -418,7 +430,8 @@ protected:
         // replaces its BlockTreeCache with the controllable fake backend.
         manager_kv_cache_config.enable_remote_cache = false;
         prepareResourceWithCacheConfig(
-            init_config(), {1, 2, 3, 4, 5, 6}, /*reuse_cache=*/true, role_type, manager_kv_cache_config);
+            init_config(), input_tokens, /*reuse_cache=*/true, role_type,
+            manager_kv_cache_config, num_return_sequences);
 
         auto backend = std::make_shared<StreamReadStorageBackend>(timeout);
         if (block_matches) {
@@ -1879,6 +1892,37 @@ TEST_F(StreamCacheResourceTest, testInsertTargetPreservesReuseCacheOverride) {
 
     deployment.enable_remote_cache = false;
     EXPECT_EQ(resource.insertTarget(), Tier::NONE);
+}
+
+TEST_F(StreamCacheResourceTest, DecodePublicationRequiresGenerateDone) {
+    autil::EnvGuard feature("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", "1");
+    test::withDecodePublicationStartup([&] {
+        auto backend = prepareStorageBackendResource(false, false, RoleType::DECODE, false,
+                                                     std::chrono::seconds(10), /*num_return_sequences=*/1);
+        auto& resource = stream_->streamCacheResource();
+        resource.resource_context_.enable_remote_cache = false;
+        ASSERT_TRUE(resource.initKVBlock().ok());
+        resource.resource_context_.enable_remote_cache = true;
+        ASSERT_TRUE(cache_manager_->remoteCacheEnabled());
+        ASSERT_TRUE(resource.reuseCache());
+
+        const size_t end = 4;
+        auto& kv = resource.kvCacheMutable();
+        kv.decode_endpoint = cache_manager_->retainDecodeEndpoint(kv, end, nullptr);
+        ASSERT_TRUE(kv.decode_endpoint);
+        ASSERT_FALSE(stream_->hasEvent(StreamEvents::GenerateDone));
+        const auto publish = [&] {
+            std::lock_guard<std::mutex> lock(*stream_->mutex_);
+            resource.publishCompletedDecode(end);
+        };
+        publish();
+        EXPECT_TRUE(backend->decode_publications.empty());
+
+        stream_->reportEvent(StreamEvents::GenerateDone);
+        ASSERT_TRUE(stream_->hasEvent(StreamEvents::GenerateDone));
+        publish();
+        EXPECT_EQ(backend->decode_publications, std::vector<size_t>{end});
+    });
 }
 
 TEST_F(StreamCacheResourceTest, testDecodeInitKVBlock_DisablesDeviceCacheOnlyForFirstMalloc) {
@@ -4227,6 +4271,59 @@ TEST_F(StreamCacheResourceTest, testFailedP2PLoadRetainsPhysicalLeaseProof) {
     EXPECT_TRUE(stream_->streamCacheResource().p2pReleasePending());
     context->lease_hold_pending_.store(false);
     EXPECT_FALSE(stream_->streamCacheResource().p2pReleasePending());
+}
+
+TEST_F(StreamCacheResourceTest, CompletedPublicationKeepsRemoteAndLocalKeysIndependent) {
+    autil::EnvGuard feature("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", "1");
+    ::rtp_llm::test::withDecodePublicationStartup([&] {
+        auto backend = prepareStorageBackendResource(false, false, RoleType::DECODE, false,
+                                                       std::chrono::seconds(10), 1, {1, 2, 3, 4, 5});
+        auto& resource = stream_->streamCacheResource();
+        ASSERT_TRUE(resource.initKVBlock().ok());
+        ASSERT_TRUE(resource.waitForAllocatorLoad().ok());
+        const auto original_keys = resource.cacheKeys(0);
+        ASSERT_EQ(original_keys.size(), 3u);
+        EXPECT_FALSE(resource.kvCache().lastBlockAligned());
+
+        std::shared_ptr<const CacheKeysType> remote_keys;
+        int captures = 0;
+        backend->observe_completed_decode = [&](const BatchKVCacheResource& cache, size_t end, bool finished) {
+            EXPECT_EQ(end, 6u);
+            EXPECT_TRUE(finished);
+            EXPECT_EQ(cache.cacheKeys(0), original_keys);
+            remote_keys = cache.decode_publication_keys;
+            ++captures;
+            cache.decodeCompletionSubmitted() = true;
+        };
+        stream_->vocab_size_ = 1000;
+        stream_->reportEventWithoutLock(StreamEvents::GenerateDone);
+        stream_->generate_status_->status = StreamState::FINISHED;
+        stream_->fillSubGenerateStatus(StreamState::FINISHED);
+        StreamUpdateInfo update{torch::tensor(std::vector<int32_t>{7, 8}, torch::kInt32).reshape({1, 2}), 2};
+        update.force_update_info = true;
+        stream_->update(update);
+        ASSERT_EQ(stream_->seqLength(), 7);
+        resource.publishCompletedDecode(6);
+        ASSERT_TRUE(remote_keys);
+        ASSERT_EQ(remote_keys->size(), 3u);
+        EXPECT_EQ(captures, 1);
+        EXPECT_EQ(resource.cacheKeys(0), original_keys);
+        EXPECT_FALSE(resource.kvCache().lastBlockAligned());
+        EXPECT_FALSE(resource.kvCache().decode_publication_keys);
+
+        auto expected = std::make_shared<BatchKVCacheResource>();
+        expected->resetBatchSize(1);
+        initCacheKeys(expected, stream_->completeTokenIdsPtr(), 2, cache_manager_->cacheConfig().cache_key_hash_seed);
+        EXPECT_EQ(*remote_keys, CacheKeysType(expected->cacheKeys().begin(), expected->cacheKeys().begin() + 3));
+        EXPECT_NE(remote_keys->back(), original_keys.back());
+
+        stream_->releaseResource();
+        backend->shutdown();
+        EXPECT_EQ(captures, 1);
+        EXPECT_THAT(cache_manager_->blockTreeCache()->getKeySnapshot().keys,
+                    ::testing::UnorderedElementsAre(original_keys[0], original_keys[1]));
+        EXPECT_EQ(remote_keys->size(), 3u);
+    }, [&] { TearDown(); stream_.reset(); cache_manager_.reset(); });
 }
 
 }  // namespace rtp_llm

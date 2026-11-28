@@ -201,6 +201,12 @@ public:
     std::string registerInstanceRequest() const;
     const std::string& instance_group() const { return instance_group_; }
     const std::string& instance_id() const { return instance_id_; }
+    int32_t blockSize() const { return block_size_; }
+    const auto& locationSpecSizes() const { return location_spec_info_map_; }
+    bool hasLocationSpec(const std::string& name) const {
+        return location_spec_info_map_ && location_spec_info_map_->count(name);
+    }
+    std::shared_ptr<const LocationSpecGroups> locationSpecGroups() const { return location_spec_groups_; }
     inline bool enable_vipserver() const {
         return enable_vipserver_;
     }
@@ -215,6 +221,9 @@ public:
     }
     inline const auto& meta_channel_config() const {
         return meta_channel_config_;
+    }
+    const auto& sdk_wrapper_config() const {
+        return sdk_wrapper_config_;
     }
     int32_t default_query_type() const {
         return default_query_type_;

@@ -55,6 +55,18 @@ std::function<void()> DeviceBlockPool::pinForStorageIo(BlockIdxType block) {
     std::lock_guard<std::mutex> lock(mutex_);
     checkInitializedNoLock();
     checkAllocatedNoLock(block);
+    return pinForStorageIoNoLock(block);
+}
+
+std::function<void()> DeviceBlockPool::tryPinForStorageIo(BlockIdxType block) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    checkInitializedNoLock();
+    if (!isAllocatedNoLock(block))
+        return {};
+    return pinForStorageIoNoLock(block);
+}
+
+std::function<void()> DeviceBlockPool::pinForStorageIoNoLock(BlockIdxType block) {
     // At most all usable block IDs can be returned to the free list.
     // Reserve before pin acquisition so release never allocates.
     reserveAllReleasedBlocksNoLock();
@@ -82,17 +94,8 @@ void DeviceBlockPool::releaseStorageIoPin(BlockIdxType block, const std::functio
         const auto type = static_cast<size_t>(DeviceBlockRefType::REMOTE_CONNECTOR);
         RTP_LLM_CHECK(refcounts_by_type_[type][block] > 0);
         const auto free_before = availableFreeBlocksNoLock();
-        const bool was_active = isActiveNoLock(block);
         const bool was_available = isAvailableNoLock(block);
-        --refcounts_[block];
-        if (--refcounts_by_type_[type][block] == 0) {
-            --referenced_block_counts_[type];
-        }
-        if (refcounts_[block] == 0) {
-            freeAllocatedBlockNoLock(block);
-        }
-        updateActiveBlocksNumNoLock(block, was_active);
-        updateAvailableBlocksNumNoLock(block, was_available);
+        decRefNoLock(block, type);
         capacity_grew = availableFreeBlocksNoLock() > free_before || (!was_available && isAvailableNoLock(block));
     }
     // The callback was snapshotted before pin acquisition. Notification cannot
@@ -140,19 +143,44 @@ void DeviceBlockPool::decRef(const BlockIdList& blocks, DeviceBlockRefType ref_t
                                     poolName().c_str(),
                                     type_index);
         },
-        [this, type_index](BlockIdxType block) {
-            const bool was_active    = isActiveNoLock(block);
-            const bool was_available = isAvailableNoLock(block);
-            --refcounts_[block];
-            if (--refcounts_by_type_[type_index][block] == 0) {
-                --referenced_block_counts_[type_index];
-            }
-            if (refcounts_[block] == 0) {
-                freeAllocatedBlockNoLock(block);
-            }
-            updateActiveBlocksNumNoLock(block, was_active);
-            updateAvailableBlocksNumNoLock(block, was_available);
-        });
+        [this, type_index](BlockIdxType block) { decRefNoLock(block, type_index); });
+}
+
+void DeviceBlockPool::decRefNoLock(BlockIdxType block, size_t type_index) {
+    const bool was_active    = isActiveNoLock(block);
+    const bool was_available = isAvailableNoLock(block);
+    --refcounts_[block];
+    if (--refcounts_by_type_[type_index][block] == 0) {
+        --referenced_block_counts_[type_index];
+    }
+    if (refcounts_[block] == 0) {
+        freeAllocatedBlockNoLock(block);
+    }
+    updateActiveBlocksNumNoLock(block, was_active);
+    updateAvailableBlocksNumNoLock(block, was_available);
+}
+
+void DeviceBlockPool::prepareDeferredRequestRelease() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    checkInitializedNoLock();
+    reserveAllReleasedBlocksNoLock();
+}
+
+bool DeviceBlockPool::releaseDeferredRequestReferences(const BlockIdList& blocks) noexcept {
+    std::lock_guard<std::mutex> lock(mutex_);
+    checkInitializedNoLock();
+    constexpr auto type = static_cast<size_t>(DeviceBlockRefType::REQUEST);
+    const auto free_before = availableFreeBlocksNoLock();
+    bool capacity_grew = false;
+    for (const auto block : blocks) {
+        if (isNullBlockIdx(block)) continue;
+        checkAllocatedNoLock(block);
+        RTP_LLM_CHECK(refcounts_by_type_[type][block] > 0);
+        const bool was_available = isAvailableNoLock(block);
+        decRefNoLock(block, type);
+        capacity_grew |= !was_available && isAvailableNoLock(block);
+    }
+    return capacity_grew || availableFreeBlocksNoLock() > free_before;
 }
 
 bool DeviceBlockPool::tryReplaceRequestReferences(const std::vector<RequestReferenceUpdate>& reference_updates,

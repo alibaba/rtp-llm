@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import unittest
+from types import MethodType, SimpleNamespace
 from unittest.mock import patch
 
 import torch
@@ -225,6 +226,121 @@ def _check_unallocated_table_rows(logical, ratio):
 
 
 class V41DecodeIndexerTest(unittest.TestCase):
+    def test_decode_pool_specs_skip_nonowners_and_restore_bindings(self):
+        from rtp_llm.models_py.modules.dsv41 import attn_type
+        from rtp_llm.models_py.modules.dsv41.decode.forward import (
+            build_paged_pool_specs,
+        )
+        from rtp_llm.models_py.modules.dsv41.fp8.attention_v41 import AttentionV41FP8
+
+        for bounded, compact, fault in (
+            (True, True, None),
+            (True, False, None),
+            (False, True, None),
+            (False, False, None),
+            (True, False, "lookup"),
+            (True, False, "groups"),
+            (True, False, "runtime"),
+            (True, True, "lookup"),
+            (True, True, "groups"),
+            (True, True, "runtime"),
+        ):
+            with self.subTest(bounded=bounded, compact=compact, fault=fault):
+                if compact and not hasattr(attn_type, "INDEXER_KV_C2"):
+                    self.skipTest("This main baseline exposes only the shared indexer_kv group")
+                index_tag = "indexer_kv_c2" if compact else "indexer_kv"
+                tail_tag = "decoder_swa_kv" if bounded else "swa_kv"
+                owned = {
+                    0: ("swa_kv",),
+                    1: ("swa_kv", "csa_kv", index_tag, "csa_state"),
+                    2: ("swa_kv", "hca_kv", "indexer_kv"),
+                    3: (tail_tag,),
+                }
+                # Small equivalent of separate CSA and HCA producer layers.
+                geometry = {
+                    "swa_kv": (torch.uint8, 528, 128),
+                    "decoder_swa_kv": (torch.uint8, 528, 128),
+                    "csa_kv": (torch.uint8, 288, 64),
+                    "hca_kv": (torch.uint8, 288, 128),
+                    "indexer_kv_c2": (torch.uint8, 68, 64),
+                    "indexer_kv": (torch.uint8, 68, 128),
+                    "csa_state": (torch.float32, 1024, 2),
+                }
+                pools = {
+                    tag: torch.empty(3, width * entries, dtype=dtype)
+                    for tag, (dtype, width, entries) in geometry.items()
+                }
+                lookups = []
+
+                def lookup(layer, tag):
+                    self.assertIn(tag, owned[layer], "non-owner pool lookup")
+                    lookups.append((layer, tag))
+                    if (layer, tag) == (2, "hca_kv"):
+                        if fault == "lookup":
+                            raise AssertionError("injected owner lookup failure")
+                        if fault == "runtime":
+                            raise RuntimeError("injected unavailable owner pool")
+                    return SimpleNamespace(kv_cache_base=pools[tag])
+
+                def groups(layer):
+                    if fault == "groups" and layer == 2:
+                        raise ValueError("injected ownership failure")
+                    return [SimpleNamespace(tag=tag) for tag in owned[layer]]
+
+                cache = SimpleNamespace(
+                    group_tags=sorted(
+                        {tag for tags in owned.values() for tag in tags}
+                    ),
+                    get_layer_cache=lookup,
+                    get_layer_cache_groups=groups,
+                    get_entries_per_block=lambda tag: geometry[tag][2],
+                    get_kernel_seq_size_per_block=lambda tag: 128,
+                    get_seq_size_per_block=lambda tag: 256,
+                )
+                previous_cache = object()
+                owners = [
+                    SimpleNamespace(
+                        layer_id=layer,
+                        _kv_cache=previous_cache,
+                        _swa_cache_region="swa_kv",
+                        _pool_spec={tag: (g[0], g[1]) for tag, g in geometry.items()},
+                    )
+                    for layer in owned
+                ]
+                for owner in owners:
+                    owner._pool_entries_per_block = MethodType(
+                        AttentionV41FP8._pool_entries_per_block, owner
+                    )
+                model = SimpleNamespace(
+                    layers=[SimpleNamespace(attn=a) for a in owners]
+                )
+                if fault in ("lookup", "groups"):
+                    error = AssertionError if fault == "lookup" else ValueError
+                    with self.assertRaisesRegex(error, "injected"):
+                        build_paged_pool_specs(cache, model, max_seq_len=512)
+                else:
+                    specs = build_paged_pool_specs(cache, model, max_seq_len=512)
+                    expected = {
+                        "swa_kv": (128, 256, 5),
+                        "csa_kv": (64, 128, 5),
+                        "csa_state": (2, 256, 5),
+                        "hca_kv": (128, 128, 5),
+                        "indexer_kv": (128, 128, 5),
+                    }
+                    if compact:
+                        expected[index_tag] = (64, 128, 5)
+                    if bounded:
+                        expected[tail_tag] = (128, 256, 5)
+                    if fault == "runtime":
+                        # Preserve the helper's existing RuntimeError -> 0 fallback.
+                        del expected["hca_kv"]
+                    self.assertEqual(specs, expected)
+                    self.assertIn((2, "hca_kv"), lookups)
+                    self.assertIn((2 if compact else 1, "indexer_kv"), lookups)
+                for owner in owners:
+                    self.assertIs(owner._kv_cache, previous_cache)
+                    self.assertEqual(owner._swa_cache_region, "swa_kv")
+
     def test_paged_owner_layout_and_speculative_lengths(self):
         for physical, logical, ratio, b, s in [
             (64, 64, 1, 1, 1),

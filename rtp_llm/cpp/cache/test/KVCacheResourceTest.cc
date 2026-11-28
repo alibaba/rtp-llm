@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <chrono>
 #include <string>
 
 #include "rtp_llm/cpp/cache/BatchKVCacheResource.h"
@@ -580,4 +581,28 @@ TEST(BatchKVCacheResourceTest, BasicBatchOperations_WorkAsExpected) {
 }
 
 }  // namespace test
+TEST(BatchKVCacheResourcePublicationTest, ResourceOwnsFixedDeadlineOnceAndFallbackState) {
+    BatchKVCacheResource resource;
+    using Clock = BatchKVCacheResource::DecodePublicationClock;
+    const auto eos = Clock::now();
+    resource.recordDecodePublicationEos(eos);
+    resource.recordDecodePublicationEos(eos + std::chrono::seconds(1));
+    EXPECT_EQ(resource.decodePublicationEos(), eos);
+    const auto deadline = resource.decodePublicationDeadline(std::chrono::seconds(2), eos);
+    EXPECT_EQ(deadline, eos + std::chrono::seconds(2));
+    EXPECT_TRUE(resource.beginDecodePublication(eos));
+    EXPECT_FALSE(resource.beginDecodePublication(eos)); // Reentry cannot submit twice.
+    resource.endDecodePublication(); // Real capture uses ScopeRollback on exceptions too.
+    EXPECT_TRUE(resource.beginDecodePublication(eos + std::chrono::seconds(1)));
+    resource.endDecodePublication();
+    EXPECT_FALSE(resource.beginDecodePublication(eos + std::chrono::seconds(1)));
+    EXPECT_EQ(resource.decodePublicationDeadline(std::chrono::seconds(99)), deadline);
+    resource.clearBlocks();
+    EXPECT_FALSE(resource.recordPrefillComputedEnd(-1));
+    EXPECT_TRUE(resource.recordPrefillComputedEnd(0));
+    EXPECT_FALSE(resource.recordPrefillComputedEnd(1));
+    resource.decodeCompletionSubmitted() = true;
+    EXPECT_FALSE(resource.beginDecodePublication()); // UNKNOWN cannot reopen an admitted request.
+}
+
 }  // namespace rtp_llm

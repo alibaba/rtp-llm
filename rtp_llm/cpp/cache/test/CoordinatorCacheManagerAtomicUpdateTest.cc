@@ -1,4 +1,6 @@
 #include <gtest/gtest.h>
+#include "autil/EnvUtil.h"
+#include "rtp_llm/cpp/utils/test/DecodePublicationTestStartup.h"
 
 #include <array>
 #include <future>
@@ -550,6 +552,93 @@ TEST_F(CoordinatorCacheManagerAtomicUpdateTest, RetainedBeamsMoveBlockViewsAndMe
     EXPECT_EQ(pool->freeBlocksNum(), 0u);
     allocator_->free(FreeInfo{resource, nullptr});
     EXPECT_EQ(pool->freeBlocksNum(), 4u);
+}
+
+TEST_F(CoordinatorCacheManagerAtomicUpdateTest, SingleFullRemapPreservesDecodePublicationSettlement) {
+    auto config = createSingleTypeTestConfig(2, 5, 4);
+    allocator_ = std::make_shared<TestAllocator>(config, AllocationType::HOST);
+    ASSERT_TRUE(allocator_->init());
+    const auto pool = allocator_->groupBlockPools().front();
+    auto resource = createBatchKVCacheResource(1, config);
+    const auto blocks = allocateRequestBlocks(pool, 2);
+    ASSERT_EQ(blocks.size(), 2u);
+    resource->setBatchBlocks(0, "default", blocks);
+    auto endpoint = std::make_shared<DecodeEndpoint>();
+    endpoint->end = 4;
+    resource->decode_endpoint = endpoint;
+    resource->decode_provisional_endpoints = {endpoint};
+    const auto eos = BatchKVCacheResource::DecodePublicationClock::now();
+    resource->recordDecodePublicationEos(eos);
+    ASSERT_TRUE(resource->recordPrefillComputedEnd(2));
+    ASSERT_TRUE(resource->beginDecodePublication(eos));
+    resource->endDecodePublication();
+    resource->decodeCompletionSubmitted() = true;
+
+    std::vector<TaggedBlockIdPair> mapping;
+    ASSERT_TRUE(allocator_->updateKVBlock(resource, {0}, true, mapping));
+    EXPECT_TRUE(mapping.empty());
+    EXPECT_EQ(resource->blocks(0, "default"), blocks);
+    EXPECT_EQ(resource->decode_endpoint, endpoint);
+    ASSERT_EQ(resource->decode_provisional_endpoints.size(), 1u);
+    EXPECT_EQ(resource->decode_provisional_endpoints.front(), endpoint);
+    EXPECT_EQ(resource->decodePublicationEos(), eos);
+    EXPECT_EQ(resource->prefillComputedEnd(), 2);
+    EXPECT_EQ(resource->decodePublicationAttempts(), 1u);
+    EXPECT_TRUE(resource->decodeCompletionSubmitted());
+    allocator_->free(FreeInfo{resource, nullptr});
+}
+
+class InactiveDecodeStorageBackend final: public StorageBackend {
+protected:
+    bool initImpl() override { return true; }
+    StorageMatchResult matchImpl(const StorageRequest& request) override {
+        return {request.local_matched_blocks_num, nullptr};
+    }
+    void readImpl(const StorageRequest&, const std::shared_ptr<StorageBackendMatchMeta>&) override {}
+    void writeImpl(const StorageRequest&) override {}
+};
+
+TEST_F(CoordinatorCacheManagerAtomicUpdateTest, LocalOnlyDecodeInsertsWithoutRemoteEndpoint) {
+    autil::EnvGuard feature("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", "1");
+    withDecodePublicationStartup([&] {
+        for (const bool attached_backend : {false, true}) {
+            SCOPED_TRACE(attached_backend);
+            auto config = createSingleTypeTestConfig(2, 5, 4);
+            const auto draft = createSingleTypeTestConfig(1, 5, 4);
+            config.mtp_sub_configs.push_back(config.mergeMTPModule(draft, 0, config.layer_num));
+            config.finalizeBlockNums(5, RuntimeConfig{});
+            allocator_ = std::make_shared<TestAllocator>(config, AllocationType::HOST, nullptr, 0, RoleType::DECODE);
+            if (attached_backend) {
+                auto backend = std::make_shared<InactiveDecodeStorageBackend>();
+                KVCacheConfig settings;
+                settings.enable_remote_cache = true;
+                allocator_->setBlockTreeCacheConfigForTest(settings);
+                allocator_->setStorageBackendForTest(backend);
+            }
+            ASSERT_TRUE(allocator_->init());
+            auto cache = allocator_->blockTreeCacheOwner();
+            ASSERT_EQ(static_cast<bool>(cache->storageBackend()), attached_backend);
+            if (attached_backend) {
+                ASSERT_TRUE(cache->remoteCacheEnabled());
+                cache->storageBackend()->setRemoteCacheEnabled(false);
+            }
+            ASSERT_FALSE(cache->remoteCacheEnabled());
+            auto resource = createBatchKVCacheResource(1, config);
+            for (size_t i = 0; i < config.groupTags().size(); ++i) {
+                const auto blocks = allocateRequestBlocks(allocator_->groupBlockPools().at(i), 1);
+                ASSERT_EQ(blocks.size(), 1u);
+                resource->setBatchBlocks(0, config.groupTags().at(i), blocks);
+            }
+            resource->setBatchCacheKeys(0, {100});
+            ASSERT_FALSE(resource->decode_endpoint);
+
+            size_t resident = 0;
+            allocator_->insertIntoCache(InsertInfo{resource, nullptr, false}, resident);
+            EXPECT_EQ(cache->getKeySnapshot().keys, CacheKeysType{100});
+            allocator_->free(FreeInfo{resource, nullptr});
+            allocator_.reset();
+        }
+    });
 }
 
 TEST_F(CoordinatorCacheManagerAtomicUpdateTest, WeightedExchangePreservesOwnersAndReleasesSurplus) {

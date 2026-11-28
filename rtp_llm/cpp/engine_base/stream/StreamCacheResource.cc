@@ -1,4 +1,5 @@
 #include "rtp_llm/cpp/engine_base/stream/StreamCacheResource.h"
+#include "rtp_llm/cpp/utils/RemoteCacheConfig.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateStream.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
@@ -7,6 +8,7 @@
 #include "rtp_llm/cpp/cache/CacheTopology.h"
 #include "rtp_llm/cpp/cache/KVCacheHashUtil.h"
 #include "rtp_llm/cpp/cache/MHAKVCacheSpec.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/ScopeRollback.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/load/LoadAsyncContext.h"
 #include "rtp_llm/cpp/cache/connector/Meta.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorAsyncContext.h"
@@ -156,6 +158,11 @@ void applyP2PSideChannel(const P2PSideChannelPayload& payload, GenerateStream* s
                 prompt_logits->target_logprobs = TensorPbConvert::pbToTorch(pb.target_logprobs());
             prompt_logits->start_pos = pb.start_pos();
             prompt_logits->end_pos   = pb.end_pos();
+        }
+        // A completed P2P load with a first token covers the prompt already in
+        // the Decode stream. The first sampled token itself has no KV yet.
+        if (remoteCacheDecodePublicationEnabled() && stream->resourceContext().role_type == RoleType::DECODE) {
+            (void)stream->kvCache().recordPrefillComputedEnd(stream->seqLength());
         }
         stream->setIsContextStream(false);
         stream->step();
@@ -399,6 +406,10 @@ void StreamCacheResource::releaseResource() {
     }
     allocator_load_error_ = absl::OkStatus();
     p2p_cancel_requested_ = false;
+    if (remoteCacheDecodePublicationEnabled() && resource_context_.role_type == RoleType::DECODE
+        && stream_->seqLength() > 0) {
+        publishCompletedDecode(stream_->seqLength() - 1);
+    }
     // do not reuse cache from stopped beam search streams, whose states are likely corrupted
     if (!need_release_resource_ && (!stream_->hasNumBeams() || !stream_->hasErrorWithoutLock())) {
         return;
@@ -410,6 +421,32 @@ void StreamCacheResource::releaseResource() {
     linear_replay_.lease.reset();
     linear_replay_.clearInitialState();
     resource_released_ = true;
+}
+
+void StreamCacheResource::publishCompletedDecode(size_t computed_end) {
+    if (!remoteCacheDecodePublicationEnabled() || resource_context_.role_type != RoleType::DECODE
+        || !resource_context_.cache_manager || !reuseCache() || stream_->hasErrorWithoutLock() || !computed_end
+        || !stream_->hasEventWithoutLock(StreamEvents::GenerateDone)) return;
+    auto& resource = *batch_kv_cache_resource_;
+    if (resource.batchSize() != 1 || resource.dspark_decode_publication_unit
+        || !resource.mayAttemptDecodePublication()) return;
+
+    auto& manager = *resource_context_.cache_manager;
+    const auto& config = manager.cacheConfig();
+    try {
+        // The storage plan owns its finalized keys. Local insertion still sees
+        // the allocator's original keys and block rows, including its tail policy.
+        const auto* append_only_source = stream_->maxBatchSize() == 1 && !stream_->hasNumBeams() ? &resource : nullptr;
+        block_tree_cache_detail::ScopeRollback clear_keys([&resource] { resource.decode_publication_keys.reset(); });
+        resource.decode_publication_keys = std::make_shared<const CacheKeysType>(buildDecodePublicationKeys(
+            *stream_->completeTokenIdsPtr(), config.seq_size_per_block, computed_end,
+            config.cache_key_hash_seed, append_only_source));
+        (void)manager.captureCompletedDecode(resource, computed_end, true);
+    } catch (const std::exception& error) {
+        RTP_LLM_LOG_WARNING("optional D publication failed before submission: %s", error.what());
+    } catch (...) {
+        RTP_LLM_LOG_WARNING("optional D publication failed before submission");
+    }
 }
 
 int StreamCacheResource::tryReleaseKVBlock(size_t nums) {
@@ -431,6 +468,7 @@ int StreamCacheResource::tryReleaseKVBlock(size_t nums) {
     RTP_LLM_CHECK(nums == total_blocks);
 
     if (total_blocks > 0) {
+        FreeInfo free_info{batch_kv_cache_resource_, stream_->completeTokenIdsPtr(), stream_->streamId()};
         const bool side_channel_only = resource_context_.role_type == RoleType::DECODE && stream_->queryPdSep()
                                        && !stream_->needsDecodeAfterPrefill();
         if (!side_channel_only && reuseCache() && !stream_->hasErrorWithoutLock()
@@ -440,12 +478,31 @@ int StreamCacheResource::tryReleaseKVBlock(size_t nums) {
                               stream_->streamId(),
                               total_blocks,
                               tierName(target_tier));
+            const bool dspark_publication = batch_kv_cache_resource_->dspark_decode_publication_unit != 0;
+            if (!dspark_publication && free_info.complete_token_ids->seqLength() > 0) {
+                publishCompletedDecode(free_info.complete_token_ids->seqLength() - 1);
+            }
             if (target_tier != Tier::NONE) {
                 InsertInfo insert_info{
                     batch_kv_cache_resource_, stream_->completeTokenIdsPtr(), false, target_tier, stream_->streamId()};
                 insert_info.pd_decode_linear_tail_only = pd_decode_linear_tail_only_;
                 size_t resident_prefix_length = 0;
                 resource_context_.cache_manager->insertIntoCache(insert_info, resident_prefix_length);
+            }
+            if (dspark_publication && remoteCacheDecodePublicationEnabled()
+                && resource_context_.role_type == RoleType::DECODE
+                && stream_->hasEventWithoutLock(StreamEvents::GenerateDone)) {
+                try {
+                    if (resource_context_.cache_manager->tryDeferDSparkPublication(
+                            free_info, stream_->maxBatchSize() == 1 && !stream_->hasNumBeams(),
+                            remoteCacheDecodePublishAllResidentState())) {
+                        return total_blocks;
+                    }
+                } catch (const std::exception& error) {
+                    RTP_LLM_LOG_WARNING("optional DSpark publication handoff failed: %s", error.what());
+                } catch (...) {
+                    RTP_LLM_LOG_WARNING("optional DSpark publication handoff failed");
+                }
             }
         } else {
             RTP_LLM_LOG_DEBUG(
@@ -455,9 +512,6 @@ int StreamCacheResource::tryReleaseKVBlock(size_t nums) {
                 stream_->hasErrorWithoutLock(),
                 StreamStateToString(stream_->getStatus()).c_str());
         }
-
-        FreeInfo free_info{batch_kv_cache_resource_, stream_->completeTokenIdsPtr()};
-        free_info.request_id = stream_->streamId();
 
         resource_context_.cache_manager->free(free_info);
     }

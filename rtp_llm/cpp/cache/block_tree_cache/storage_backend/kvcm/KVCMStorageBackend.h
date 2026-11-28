@@ -59,12 +59,18 @@ public:
     };
     // Immutable snapshot of the effective SDK registration, available after init.
     std::optional<ControlConfig> controlConfig() const;
+    StorageWriteTask prepareWrite(StorageRequest) override;
 
     // Returns whether the request was handled and response is valid. Transfer
     // success, failure, and timeout are carried by response.transfer_status().
     bool execute(const RemoteOperationRequestPB& request, RemoteOperationResponsePB& response);
     bool executeRemoteRequest(const RemoteOperationRequestPB& request, FunctionResponsePB& response) override;
     void setReclaimer(std::shared_ptr<BlockTreeReclaimer> reclaimer) override;
+    bool captureCompletedDecode(const BatchKVCacheResource& resource, size_t computed_end, bool finished = true) override;
+    bool enqueueCompletedDecode(const BatchKVCacheResource& resource, size_t computed_end,
+                                DecodePublicationPrepare prepare_source) override;
+    std::shared_ptr<StorageCompletionAdmission> reserveDecodePublication(size_t bytes) override;
+    bool canStartDecodePublication(const BatchKVCacheResource& resource) const override;
 
 protected:
     bool               initImpl() override;
@@ -80,6 +86,11 @@ protected:
     void onRemoteCacheSkipped(const char* stage) noexcept override;
 
 private:
+    BlockTreeReclaimer* writeSourceReclaimer() const noexcept override;
+
+    StorageWriteTask prepareCompletedDecodeWrite(const BatchKVCacheResource& source, size_t end,
+                                                 std::chrono::steady_clock::time_point deadline,
+                                                 std::shared_ptr<StorageCompletionAdmission> admission = {});
     class Impl;
     std::shared_ptr<Impl> impl_;
 };

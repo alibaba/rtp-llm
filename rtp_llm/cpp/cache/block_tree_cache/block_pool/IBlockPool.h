@@ -158,6 +158,7 @@ protected:
 
     void     checkInitializedNoLock() const;
     void     checkAllocatedNoLock(BlockIdxType block) const;
+    bool     isAllocatedNoLock(BlockIdxType block) const;
     uint32_t treeRefCountNoLock(BlockIdxType block) const;
     uint32_t treeRefCountNoLock(BlockIdxType block, BlockTreeRefType ref_type) const;
     bool     isActiveNoLock(BlockIdxType block) const;

@@ -110,6 +110,7 @@ public:
     void reportMallocRetry() const;
     bool isContextStream() const;
 
+    void publishCompletedDecode(size_t computed_end);
     const BatchKVCacheResource& kvCache() const;
     BatchKVCacheResource&       kvCacheMutable();
     void                        setKVCache(const BatchKVCacheResource& kv_cache_resource);

@@ -1,4 +1,5 @@
 load("//:def.bzl", "copts")
+load("//bazel:arch_select.bzl", "torch_deps")
 
 config_setting(
     name = "KVCM_INTERNAL",
@@ -25,13 +26,14 @@ cc_library(
 cc_library(
     name = "kvcm_storage_backend",
     srcs = ["KVCMStorageBackend.cc"],
-    hdrs = ["KVCMStorageBackend.h"],
+    hdrs = ["KVCMStorageBackend.h", "DtopCompletionBridge.inc", "PayloadDispatchProof.h", "PublicationSettlement.h"],
     copts = copts(),
     visibility = ["//visibility:public"],
     deps = [
         ":client",
         ":group_policy",
         ":worker_payload_proof",
+        "//rtp_llm/cpp/cache:cp_slot_mapper",
         "//rtp_llm/cpp/cache/block_tree_cache",
         "//rtp_llm/cpp/cache/block_tree_cache:block_tree_task_pool",
         "//rtp_llm/cpp/cache/block_tree_cache:transfer_common",
@@ -45,7 +47,7 @@ cc_library(
         "@havenask//aios/autil:json",
         "@local_config_cuda//cuda:cuda_headers",
         "@local_config_cuda//cuda:cudart",
-    ],
+    ] + torch_deps(),
 )
 
 cc_library(

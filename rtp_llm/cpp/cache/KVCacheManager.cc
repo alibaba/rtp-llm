@@ -1,4 +1,5 @@
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
+#include "rtp_llm/cpp/utils/RemoteCacheConfig.h"
 #include "rtp_llm/cpp/cache/connector/Meta.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorResourceStore.h"
 #include "rtp_llm/cpp/cache/events/KVCMPublisher.h"
@@ -11,8 +12,14 @@
 #include <numeric>
 #include <optional>
 #include <pthread.h>
+#include <shared_mutex>
 #include <sstream>
 #include <unordered_set>
+
+#if USING_CUDA
+#include <ATen/cuda/CUDAContext.h>
+#include "rtp_llm/models_py/bindings/cuda/cuda_host_utils.h"
+#endif
 
 #include "rtp_llm/cpp/cache/BatchKVCacheResource.h"
 #include "rtp_llm/cpp/cache/CPSlotMapper.h"
@@ -29,6 +36,9 @@
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnector.h"
 #include "rtp_llm/cpp/cache/connector/p2p/plan/PipelineLayoutCodec.h"
 #include "rtp_llm/cpp/cache/connector/p2p/plan/ShardLayoutFactory.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/ScopeRollback.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/StorageCompletionAdmission.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/transfer/BlockTransferRequestConverter.h"
 #include "rtp_llm/cpp/cache/KVCacheHashUtil.h"
 #include "rtp_llm/cpp/cache/metrics/CachePoolMetrics.h"
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
@@ -51,7 +61,38 @@ public:
     std::condition_variable cv;
 };
 
+// Storage work never owns the KVCacheManager. Only an active page scan borrows
+// it; stopping the manager invalidates that borrow before tearing down pools.
+class DSparkPublicationManagerAccess {
+public:
+    explicit DSparkPublicationManagerAccess(const KVCacheManager* manager): manager(manager) {}
+    std::shared_mutex mutex;
+    const KVCacheManager* manager;
+};
+
 namespace {
+
+using DecodeFrozenPages = std::unordered_map<DeviceBlockPool*, std::unordered_set<BlockIdxType>>;
+
+void freezeDecodePage(DecodeFrozenPages& frozen, const DeviceBlockPoolPtr& pool, BlockIdxType block) {
+    // Ordinary request/endpoint pins still own these allocations. Failure to
+    // acquire native custody must not unwind and release uncovered pages.
+    if (pool && pool->isAllocated(block) && frozen[pool.get()].insert(block).second)
+        pool->freezeBlock(block);
+}
+
+void freezeDecodeEndpointPages(DecodeFrozenPages& frozen,
+                               const std::shared_ptr<const DecodeEndpoint>& endpoint) {
+    if (!endpoint) return;
+    for (const auto& [tag, pages] : endpoint->pages)
+        for (const auto& page : pages)
+            if (page && page->pin) freezeDecodePage(frozen, page->pool, page->block);
+    for (const auto& entry : endpoint->full_prefixes) {
+        for (auto segment = entry.second.get(); segment; segment = segment->previous.get())
+            for (const auto& page : segment->suffix)
+                freezeDecodePage(frozen, page->pool, page->block);
+    }
+}
 
 void notifyAllocationChangeState(const std::shared_ptr<KVCacheAllocationWaitState>& state) {
     if (!state) {
@@ -216,6 +257,44 @@ void reportCacheOperation(const kmonitor::MetricsReporterPtr&          metrics_r
     metrics_reporter->report<RtpLLMCacheOperationMetrics, RtpLLMCacheOperationMetricsCollector>(nullptr, &collector);
 }
 
+struct DSparkPublicationWork {
+    struct Row {
+        DeviceBlockPoolPtr pool;
+        const BlockIndicesType* blocks;
+    };
+    // Destroy last so the budget covers both canceled REQUEST references and
+    // any endpoint pins still owned by resource after planning fails.
+    std::shared_ptr<StorageCompletionAdmission> admission;
+    BatchKVCacheResourcePtr resource;
+    std::vector<Row> rows;
+    std::shared_ptr<KVCacheAllocationWaitState> allocation_wait_state;
+    kmonitor::MetricsReporterPtr metrics_reporter;
+    std::function<void()> cache_capacity_changed;
+    std::atomic<bool> owns_request_pages{false};
+
+    ~DSparkPublicationWork() {
+        releaseRequestPages();
+    }
+
+    void releaseRequestPages() noexcept {
+        if (!owns_request_pages.exchange(false)) return;
+        const int64_t begin_time_us = metrics_reporter == nullptr ? 0 : currentTimeUs();
+        bool capacity_grew = false;
+        for (const auto& row : rows) {
+            capacity_grew |= row.pool->releaseDeferredRequestReferences(*row.blocks);
+        }
+        if (capacity_grew) {
+            notifyAllocationChangeState(allocation_wait_state);
+            try { if (cache_capacity_changed) cache_capacity_changed(); } catch (...) {}
+        }
+        try {
+            reportCacheOperation(metrics_reporter, RtpLLMCacheOperationMetricsCollector::OpType::FREE, begin_time_us);
+        } catch (...) {
+            // Metrics must not interfere with retiring the detached references.
+        }
+    }
+};
+
 }  // namespace
 
 KVCacheManager::KVCacheManager(const CacheConfig&                 config,
@@ -276,6 +355,12 @@ KVCacheManager::KVCacheManager(const CacheConfig&                 config,
 }
 
 KVCacheManager::~KVCacheManager() {
+    // Wait only for scans already using the allocator. Queued storage work
+    // releases its own pages even after the manager can no longer be borrowed.
+    if (dspark_publication_access_) {
+        std::unique_lock lock(dspark_publication_access_->mutex);
+        dspark_publication_access_->manager = nullptr;
+    }
     {
         std::lock_guard<std::mutex> lock(allocation_wait_state_->mutex);
         allocation_wait_state_->stopped.store(true, std::memory_order_release);
@@ -355,13 +440,18 @@ bool KVCacheManager::init() {
     std::shared_ptr<StorageBackend> storage_backend;
     if (kv_cache_config_.enable_remote_cache) {
 #ifdef RTP_LLM_USE_REMOTE_KV_CACHE
+        const bool decode_publication =
+            parallelism_config_.role_type == RoleType::DECODE && remoteCacheDecodePublicationEnabled();
+        // Preserve the main branch's registration for existing read/write
+        // traffic. A publishing Decode endpoint can explicitly select staging.
+        const bool use_gdr_registration = !decode_publication || remoteCacheGdrEnabled();
         storage_backend = std::make_shared<KVCMStorageBackend>(config_,
                                                                kv_cache_config_,
                                                                runtime_config_,
                                                                parallelism_config_,
                                                                sp_config_,
                                                                broadcast_manager,
-                                                               nullptr,
+                                                               use_gdr_registration,
                                                                metrics_reporter_);
 #else
         RTP_LLM_LOG_ERROR("remote cache was requested, but this build does not include the KVCM client");
@@ -382,6 +472,12 @@ bool KVCacheManager::init() {
         return false;
     }
     coordinator_manager_->attachBlockTreeCache(block_tree_cache_);
+#ifdef RTP_LLM_USE_REMOTE_KV_CACHE
+    if (kv_cache_config_.enable_remote_cache && remoteCacheDecodePublicationEnabled()
+        && pd_sep_config_.role_type == RoleType::DECODE && isAllocatorOwner() && sp_config_.type == SP_TYPE_DSPARK) {
+        initDSparkPublicationHandoff();
+    }
+#endif
     const auto notify_cache = block_tree_cache_->capacityChangeCallback();
     for (const auto& pool : coordinator_manager_->groupBlockPools()) {
         pool->setCapacityChangeCallback([capacity_changed, notify_cache] {
@@ -401,6 +497,13 @@ bool KVCacheManager::init() {
     }
 
     return true;
+}
+
+void KVCacheManager::initDSparkPublicationHandoff() {
+    for (const auto& pool : coordinator_manager_->groupBlockPools()) {
+        pool->prepareDeferredRequestRelease();
+    }
+    dspark_publication_access_ = std::make_shared<DSparkPublicationManagerAccess>(this);
 }
 
 std::shared_ptr<BroadcastManager> KVCacheManager::createMultiRankBlockTransferManager() const {
@@ -571,6 +674,500 @@ void KVCacheManager::reclaimLinearHistory(const BatchKVCacheResourcePtr& resourc
     if (config_.enable_linear_cache_reclaim && coordinator_manager_) {
         coordinator_manager_->reclaimLinearHistory(resource, committed_tokens, reuse_cache);
     }
+}
+
+bool KVCacheManager::freezeUnknownDecodeWriter(
+    const BatchKVCacheResource& resource,
+    const std::vector<std::shared_ptr<const DecodeEndpoint>>& unpublished) const noexcept {
+    const auto retain_candidates = [&]() noexcept {
+        if (resource.decode_endpoint) resource.decode_endpoint->retainOnFreezeFailure(resource.decode_endpoint);
+        for (const auto& endpoint : resource.decode_provisional_endpoints)
+            if (endpoint) endpoint->retainOnFreezeFailure(endpoint);
+        for (const auto& endpoint : unpublished)
+            if (endpoint) endpoint->retainOnFreezeFailure(endpoint);
+    };
+    if (!isAllocatorOwner() || !coordinator_manager_) {
+        retain_candidates();
+        return false;
+    }
+    try {
+        DecodeFrozenPages frozen;
+        const auto& pools = coordinator_manager_->groupBlockPools();
+        const auto& tags = config_.groupTags();
+        for (size_t group = 0; group < tags.size() && group < pools.size(); ++group) {
+            const auto& pool = pools[group];
+            if (!pool) continue;
+            for (int batch = 0; batch < resource.batchSize(); ++batch) {
+                for (auto block : resource.blocks(batch, tags[group])) {
+                    // Own a frozen reference even if another operation already
+                    // froze this page: its later recovery must not hide our hold.
+                    freezeDecodePage(frozen, pool, block);
+                }
+            }
+        }
+        // Endpoint STATE/SWA pages may have left the current table. Their ordinary
+        // connector pins must also be replaceable by native frozen references.
+        freezeDecodeEndpointPages(frozen, resource.decode_endpoint);
+        for (const auto& endpoint : resource.decode_provisional_endpoints)
+            freezeDecodeEndpointPages(frozen, endpoint);
+        for (const auto& endpoint : unpublished)
+            freezeDecodeEndpointPages(frozen, endpoint);
+        return true;
+    } catch (...) {
+        // Never drop the last pin of a candidate outside the REQUEST table.
+        retain_candidates();
+        // The caller keeps REQUEST/tensor custody when native freezing is partial.
+        return false;
+    }
+}
+
+size_t KVCacheManager::decodePublicationUnit() const {
+    const auto& cp = parallelism_config_.prefill_cp_config;
+    size_t unit = config_.seq_size_per_block * (cp.kv_cache_sharded ? cp.prefill_cp_size : 1);
+    for (const auto& group : config_.topology().groups()) {
+        if (!group.policy.enable_prefix_reuse || group.policy.group_type == CacheGroupType::FULL) continue;
+        if (group.policy.group_type == CacheGroupType::LINEAR) return 0;
+        const auto span = group.seqSizePerBlock();
+        if (!unit || !span) return 0;
+        const auto multiplier = span / std::gcd(unit, span);
+        if (multiplier > std::numeric_limits<size_t>::max() / unit) return 0;
+        unit *= multiplier;
+    }
+    return unit;
+}
+
+std::shared_ptr<const DecodeEndpoint> KVCacheManager::retainDecodeEndpoint(
+    const torch::Tensor& physical_ids, const std::vector<std::string>& tags, size_t row, size_t end,
+    const std::shared_ptr<const DecodeEndpoint>& previous, bool defer_writer_wait,
+    const torch::Tensor& writer_kernel_ids) const {
+    if (!physical_ids.defined() || physical_ids.dim() != 3 || !physical_ids.is_cpu() || physical_ids.scalar_type() != torch::kInt32
+        || row >= static_cast<size_t>(physical_ids.size(1))
+        || tags.size() != static_cast<size_t>(physical_ids.size(0))) return {};
+    const bool exact_writer_row = writer_kernel_ids.defined();
+    if (exact_writer_row && (!writer_kernel_ids.is_cpu() || writer_kernel_ids.scalar_type() != torch::kInt32
+        || writer_kernel_ids.dim() != 3 || writer_kernel_ids.size(0) != physical_ids.size(0)
+        || writer_kernel_ids.size(1) != physical_ids.size(1))) return {};
+    return retainDecodeEndpointPages(end, previous, [&](const std::string& tag) {
+        const auto it = std::find(tags.begin(), tags.end(), tag);
+        const auto input = it == tags.end() ? torch::Tensor{} :
+            physical_ids.select(0, it - tags.begin()).select(0, row);
+        const auto kernel = exact_writer_row && it != tags.end() ?
+            writer_kernel_ids.select(0, it - tags.begin()).select(0, row) : torch::Tensor{};
+        return [input, kernel, exact_writer_row](size_t slot, bool full) -> BlockIdxType {
+            if (!input.defined() || !input.numel()
+                || ((full || exact_writer_row) && slot >= static_cast<size_t>(input.numel()))) {
+                return NULL_BLOCK_IDX;
+            }
+            const auto source = input.accessor<int32_t, 1>()[slot % input.numel()];
+            // These native STATE/SWA pages have identical physical and kernel IDs.
+            // A missing column must never wrap to a page from an earlier endpoint.
+            if (exact_writer_row && !full
+                && (slot >= static_cast<size_t>(kernel.numel()) || kernel.accessor<int32_t, 1>()[slot] != source)) {
+                return NULL_BLOCK_IDX;
+            }
+            return source;
+        };
+    }, defer_writer_wait, /*share_full_prefix=*/exact_writer_row);
+}
+
+std::shared_ptr<const DecodeEndpoint> KVCacheManager::retainDecodeEndpoint(
+    const BatchKVCacheResource& resource, size_t end,
+    const std::shared_ptr<const DecodeEndpoint>& previous) const {
+    if (resource.batchSize() != 1) return {};
+    return retainDecodeEndpointPages(end, previous, [&](const std::string& tag) {
+        const auto* blocks = &resource.blocks(0, tag);
+        return [blocks](size_t slot, bool) -> BlockIdxType {
+            // Host BlockIds retain logical positions: removed old SWA slots
+            // become NULL, not a compact ring that may wrap to a newer page.
+            if (slot >= blocks->size()) return NULL_BLOCK_IDX;
+            return (*blocks)[slot];
+        };
+    }, /*defer_writer_wait=*/true);
+}
+
+template<typename ReadGroup>
+std::shared_ptr<const DecodeEndpoint> KVCacheManager::retainDecodeEndpointPages(
+    size_t end, const std::shared_ptr<const DecodeEndpoint>& previous,
+    ReadGroup&& read_group, bool defer_writer_wait, bool share_full_prefix,
+    const std::unordered_map<std::string, std::vector<size_t>>* release_state_slots) const {
+    // Decode owns the native pages locally; the existing D->P projection
+    // performs the actual target-CP slicing at publication time.
+    if (decode_capture_stopped_.load() || !isAllocatorOwner() || !coordinator_manager_ || !end) return {};
+    const auto unit = decodePublicationUnit();
+    if (!unit || end % unit) return {};
+    auto endpoint = std::make_shared<DecodeEndpoint>();
+    endpoint->end = end;
+    endpoint->release_snapshot = release_state_slots != nullptr;
+    const auto& pools = coordinator_manager_->groupBlockPools();
+    const size_t canonical = config_.seq_size_per_block *
+        (parallelism_config_.prefill_cp_config.kv_cache_sharded ? parallelism_config_.prefill_cp_config.prefill_cp_size : 1);
+    for (size_t group_id = 0; group_id < config_.groupTags().size(); ++group_id) {
+        const auto& tag = config_.groupTags()[group_id];
+        const auto& group = config_.topology().group(tag);
+        if (!group.policy.enable_prefix_reuse) continue;
+        if (group.policy.group_type != CacheGroupType::FULL && group.policy.group_type != CacheGroupType::SWA)
+            throw std::runtime_error("DSV4.1 endpoint requires native FULL/SWA pages");
+        if (group_id >= pools.size()) return {};
+        const auto& pool = pools[group_id];
+        if (!pool || pool->where() != MemoryType::MEMORY_GPU) return {};
+        const size_t count = end / group.seqSizePerBlock();
+        if (!count) return {};
+        const bool full = group.policy.group_type == CacheGroupType::FULL;
+        const size_t first = full ? 0 : count - std::min(count, group.reuseBlockCount(end / canonical));
+        const auto* selected_slots = release_state_slots && !full ? &release_state_slots->at(tag) : nullptr;
+        if (share_full_prefix) {
+            const size_t bytes = pool->blockSizeBytes();
+            const size_t retained = selected_slots ? selected_slots->size() : count - first;
+            if (bytes && retained > (std::numeric_limits<size_t>::max() - endpoint->retained_page_bytes) / bytes)
+                return {};
+            endpoint->retained_page_bytes += retained * bytes;
+        }
+        auto source_at = read_group(tag);
+        auto pin = [&](BlockIdxType block) -> std::shared_ptr<const DecodeEndpoint::PageHold> {
+            auto hold = std::make_shared<DecodeEndpoint::PageHold>();
+            hold->pool = pool;
+            hold->block = block;
+            hold->pin = pool->tryPinForStorageIo(block);
+            if (!hold->pin) return {};
+            return hold;
+        };
+        if (share_full_prefix && full) {
+            auto segment = std::make_shared<DecodeEndpoint::FullPrefix>();
+            if (previous && previous->end <= end) {
+                const auto prior = previous->full_prefixes.find(tag);
+                if (prior != previous->full_prefixes.end()) {
+                    segment->previous = prior->second;
+                    segment->first = previous->end / group.seqSizePerBlock();
+                }
+            }
+            // Share continuously held allocations only when the current
+            // writer names the same pages at those absolute slots.
+            for (auto prefix = segment->previous.get(); prefix; prefix = prefix->previous.get()) {
+                bool matches = true;
+                for (size_t i = 0; i < prefix->suffix.size(); ++i) {
+                    const auto& held = prefix->suffix[i];
+                    if (held->pool.get() != pool.get() || source_at(prefix->first + i, true) != held->block) {
+                        matches = false;
+                        break;
+                    }
+                }
+                if (!matches) {
+                    segment->previous.reset();
+                    segment->first = 0;
+                    break;
+                }
+            }
+            segment->suffix.reserve(count - segment->first);
+            for (size_t slot = segment->first; slot < count; ++slot) {
+                const auto source = source_at(slot, true);
+                if (isNullBlockIdx(source)) return {};
+                auto held = pin(source);
+                if (!held) return {};
+                segment->suffix.push_back(std::move(held));
+            }
+            endpoint->full_prefixes.emplace(tag, std::move(segment));
+            continue;
+        }
+        auto& blocks = endpoint->blocks[tag]; blocks.assign(count, NULL_BLOCK_IDX);
+        auto& holds = endpoint->pages[tag];
+        if (selected_slots) {
+            holds.reserve(selected_slots->size());
+            for (size_t slot : *selected_slots) {
+                const auto source = source_at(slot, false);
+                if (isNullBlockIdx(source)) return {};
+                auto held = pin(source);
+                if (!held) return {};
+                blocks.at(slot) = source;
+                holds.push_back(std::move(held));
+            }
+            continue;
+        }
+        holds.reserve(count - first);
+        const DecodeEndpoint::PageHolds* prior = nullptr;
+        if (group.policy.group_type == CacheGroupType::FULL && previous && previous->end <= end) {
+            const auto found = previous->pages.find(tag);
+            if (found != previous->pages.end()) prior = &found->second;
+        }
+        for (size_t slot = first; slot < count; ++slot) {
+            const auto source = source_at(slot, group.policy.group_type == CacheGroupType::FULL);
+            if (isNullBlockIdx(source)) return {};
+            const auto* held = prior && slot < prior->size() ? (*prior)[slot].get() : nullptr;
+            if (held && held->pool.get() == pool.get() && held->block == source
+                && held->pin) {
+                // This exact page's live connector pin already proves allocation.
+                holds.push_back((*prior)[slot]); // Share this FULL page, never the old endpoint's owner.
+            } else {
+                auto held = pin(source);
+                if (!held) return {};
+                holds.push_back(std::move(held));
+            }
+            blocks[slot] = source; // Actual DSV4.1 STATE/SWA use position-based pages, not LINEAR accept swaps.
+        }
+    }
+    try {
+#if USING_CUDA
+        // Production speculative captures remain pending until specUpdate,
+        // after the original final draft_event host wait. Other callers keep
+        // the synchronous capture contract; pin alone is not readiness.
+        if (!defer_writer_wait)
+            check_cuda_value(cudaStreamSynchronize(at::cuda::getCurrentCUDAStream().stream()));
+#endif
+    } catch (...) {
+#if USING_CUDA
+        if (cudaDeviceSynchronize() != cudaSuccess) {
+            // Keep the original device-health stop. Native frozen references
+            // protect every actual page after this temporary endpoint unwinds.
+            decode_capture_stopped_.store(true);
+            try {
+                DecodeFrozenPages frozen;
+                freezeDecodeEndpointPages(frozen, endpoint);
+            } catch (...) {
+                endpoint->retainOnFreezeFailure(endpoint);
+            }
+        }
+#endif
+        throw;
+    }
+    RTP_LLM_LOG_DEBUG("DSV41_NATIVE_ENDPOINT H=%zu state_copies=0 source=original_pages writer_wait_deferred=%d",
+                      end, static_cast<int>(defer_writer_wait));
+    return endpoint;
+}
+
+std::shared_ptr<const DecodeEndpoint> KVCacheManager::retainReleasedDSparkPages(
+    const BatchKVCacheResource& resource, const torch::Tensor& physical_ids, const torch::Tensor& kernel_ids,
+    bool all_resident_state, std::shared_ptr<StorageCompletionAdmission>* admission) const {
+    const auto unit = resource.dspark_decode_publication_unit;
+    const auto& tags = config_.groupTags();
+    const auto valid_table = [&tags](const torch::Tensor& table) {
+        return table.defined() && table.is_cpu() && table.scalar_type() == torch::kInt32 && table.dim() == 3
+               && static_cast<size_t>(table.size(0)) == tags.size() && table.size(1) == 1;
+    };
+    if (!unit || unit != decodePublicationUnit() || !coordinator_manager_ || resource.batchSize() != 1
+        || resource.dspark_release_provenance_lost
+        || !valid_table(physical_ids) || !valid_table(kernel_ids)) return {};
+    if (admission && !coordinator_manager_->canStartDecodePublication(resource)) return {};
+
+    const auto physical = physical_ids.accessor<int32_t, 3>();
+    const auto kernel = kernel_ids.accessor<int32_t, 3>();
+    const auto source_at = [&](size_t group, size_t slot) -> BlockIdxType {
+        const auto& row = *resource.groupBlockIds(0, tags[group]);
+        const size_t stride = row.kernelBlocksPerKvBlock();
+        if (slot >= row.blocksNum() || slot >= static_cast<size_t>(physical_ids.size(2))
+            || slot >= static_cast<size_t>(kernel_ids.size(2)) / stride) return NULL_BLOCK_IDX;
+        const auto block = row.blocks()[slot];
+        if (block <= 0 || physical[group][0][slot] != block) return NULL_BLOCK_IDX;
+        for (size_t at = slot * stride; at < (slot + 1) * stride; ++at)
+            if (kernel[group][0][at] != row.kernelBlocks()[at]) return NULL_BLOCK_IDX;
+        return block;
+    };
+
+    const size_t latest = resource.dspark_release_computed_end.value_or(0) / unit * unit;
+    size_t end = latest;
+    const size_t canonical = config_.seq_size_per_block * (parallelism_config_.prefill_cp_config.kv_cache_sharded
+        ? parallelism_config_.prefill_cp_config.prefill_cp_size : 1);
+    std::unordered_map<std::string, std::vector<size_t>> state_slots;
+    std::vector<std::unordered_set<BlockIdxType>> aliased_state(tags.size());
+    for (size_t group = 0; group < tags.size(); ++group) {
+        const auto& spec = config_.topology().group(tags[group]);
+        if (!spec.policy.enable_prefix_reuse) continue;
+        if (spec.policy.group_type == CacheGroupType::FULL) {
+            const auto span = spec.seqSizePerBlock();
+            size_t complete = 0;
+            while (complete < end / span && !isNullBlockIdx(source_at(group, complete))) ++complete;
+            end = std::min(end, complete * span / unit * unit);
+        } else if (spec.policy.group_type == CacheGroupType::SWA) {
+            state_slots.try_emplace(tags[group]);
+            std::unordered_set<BlockIdxType> seen;
+            for (int64_t slot = 0; slot < physical_ids.size(2); ++slot) {
+                const auto block = physical[group][0][slot];
+                if (block > 0 && !seen.insert(block).second) aliased_state[group].insert(block);
+            }
+        } else {
+            return {};
+        }
+    }
+    if (!end || !canonical || end <= resource.dspark_decode_start) return {};
+
+    std::vector<std::pair<size_t, size_t>> candidate;
+    // A clipped prefix before the newly computed decode span does not prove a
+    // source checkpoint. Every attached state slot must cover accepted rows.
+    for (size_t h = end; h > resource.dspark_decode_start; h -= unit) {
+        if (!all_resident_state && h != latest) break;
+        candidate.clear();
+        bool complete = true;
+        for (size_t group = 0; group < tags.size() && complete; ++group) {
+            const auto& tag = tags[group];
+            if (!state_slots.count(tag)) continue;
+            const auto& spec = config_.topology().group(tag);
+            const auto span = spec.seqSizePerBlock();
+            const size_t count = h / canonical;
+            const size_t required = std::min(count, spec.reuseBlockCount(count));
+            const auto backfills = resource.dspark_state_backfills.find(tag);
+            for (size_t key = count - required; key < count; ++key) {
+                const size_t checkpoint = (key + 1) * canonical;
+                if (checkpoint % span) {
+                    complete = false;
+                    break;
+                }
+                const size_t slot = checkpoint / span - 1;
+                const auto block = source_at(group, slot);
+                if (isNullBlockIdx(block) || aliased_state[group].count(block)) {
+                    complete = false;
+                    break;
+                }
+                const size_t window = spec.policy.sliding_window_size > 0
+                    ? std::min(span, static_cast<size_t>(spec.policy.sliding_window_size)) : span;
+                if (checkpoint - window < resource.dspark_decode_start) {
+                    const auto handoff = resource.prefillComputedEnd();
+                    if (!handoff || static_cast<size_t>(*handoff) < resource.dspark_decode_start) {
+                        complete = false;
+                        break;
+                    }
+                }
+                if (backfills != resource.dspark_state_backfills.end()) {
+                    const auto replacement = backfills->second.find(slot);
+                    if (replacement != backfills->second.end() && replacement->second > checkpoint - window) {
+                        complete = false;
+                        break;
+                    }
+                }
+                candidate.emplace_back(group, slot);
+            }
+        }
+        if (complete)
+            for (const auto& [group, slot] : candidate) state_slots.at(tags[group]).push_back(slot);
+        if (!all_resident_state) break;
+    }
+    for (auto& [tag, slots] : state_slots) {
+        std::sort(slots.begin(), slots.end());
+        slots.erase(std::unique(slots.begin(), slots.end()), slots.end());
+    }
+
+    std::shared_ptr<StorageCompletionAdmission> reservation;
+    if (admission) {
+        if (!coordinator_manager_->canStartDecodePublication(resource)) return {};
+        reservation = *admission;
+        if (!reservation) {
+            size_t bytes = 0;
+            const auto& pools = coordinator_manager_->groupBlockPools();
+            for (size_t group = 0; group < tags.size(); ++group) {
+                const auto& spec = config_.topology().group(tags[group]);
+                if (!spec.policy.enable_prefix_reuse) continue;
+                const auto& pool = pools.at(group);
+                if (!pool || pool->where() != MemoryType::MEMORY_GPU) return {};
+                const auto count = spec.policy.group_type == CacheGroupType::FULL ? end / spec.seqSizePerBlock()
+                    : state_slots.at(tags[group]).size();
+                const auto size = pool->blockSizeBytes();
+                if (size && count > (std::numeric_limits<size_t>::max() - bytes) / size) return {};
+                bytes += count * size;
+            }
+            reservation = coordinator_manager_->reserveDecodePublication(bytes);
+            if (!reservation) {
+                RTP_LLM_LOG_DEBUG("DTOP_GPU release admission=rejected retained_bytes=%zu", bytes);
+                return {};
+            }
+        }
+    }
+    auto endpoint = retainDecodeEndpointPages(end, {}, [&](const std::string& tag) {
+        const auto group = std::distance(tags.begin(), std::find(tags.begin(), tags.end(), tag));
+        return [&, group](size_t slot, bool) { return source_at(group, slot); };
+    }, /*defer_writer_wait=*/true, /*share_full_prefix=*/true, &state_slots);
+    if (endpoint && admission) *admission = std::move(reservation);
+    return endpoint;
+}
+
+bool KVCacheManager::tryDeferDSparkPublication(const FreeInfo& free_info, bool append_only, bool all_resident_state) {
+    auto& source = *free_info.batch_kv_cache_resource;
+    const auto computed_end = source.dspark_release_computed_end.value_or(0);
+    const auto unit = source.dspark_decode_publication_unit;
+    if (!dspark_publication_access_ || !unit || source.batchSize() != 1
+        || computed_end / unit <= source.dspark_decode_start / unit
+        || source.dspark_release_provenance_lost
+        || !source.dspark_release_writer_tables[0].defined() || !source.dspark_release_writer_tables[1].defined()) {
+        return false;
+    }
+    const auto backend = block_tree_cache_->storageBackend();
+    if (!backend || !backend->canStartDecodePublication(source)) return false;
+
+    // Charge all still-owned slots, including draft pages and holes, without
+    // walking any page IDs. The same budget applies in the storage queue.
+    size_t queued_bytes = 0;
+    const auto& tags = config_.groupTags();
+    const auto& pools = coordinator_manager_->groupBlockPools();
+    auto work = std::make_shared<DSparkPublicationWork>();
+    work->rows.reserve(tags.size());
+    for (size_t group = 0; group < tags.size(); ++group) {
+        // Resolve tags before detaching. The row owners move with the resource
+        // and cleanup can use these rows without allocating.
+        const auto& row = source.blocks(0, tags[group]);
+        work->rows.push_back({pools[group], &row});
+        const auto bytes = pools[group]->blockSizeBytes();
+        if (bytes && row.size() > (std::numeric_limits<size_t>::max() - queued_bytes) / bytes) return false;
+        queued_bytes += row.size() * bytes;
+    }
+    work->admission = backend->reserveDecodePublication(queued_bytes);
+    if (!work->admission) {
+        RTP_LLM_LOG_DEBUG("DTOP_GPU preparation admission=rejected queued_bytes=%zu", queued_bytes);
+        return false;
+    }
+
+    // CompleteTokenIds belongs to the live stream. Freeze only the CPU keys
+    // and move the remaining request references and writer tables as-is.
+    auto keys = std::make_shared<const CacheKeysType>(buildDecodePublicationKeys(
+        *free_info.complete_token_ids, config_.seq_size_per_block, computed_end, config_.cache_key_hash_seed,
+        append_only ? &source : nullptr));
+    work->resource = std::make_shared<BatchKVCacheResource>();
+    work->resource->resetBatchSize(1);
+    work->resource->initGroups(config_.topologyPtr());
+    work->cache_capacity_changed = block_tree_cache_->capacityChangeCallback();
+    work->allocation_wait_state = allocation_wait_state_;
+    work->metrics_reporter = metrics_reporter_;
+
+    auto& detached = *work->resource;
+    source.swap(detached);
+    work->owns_request_pages.store(true);
+    block_tree_cache_detail::ScopeRollback restore([&] {
+        work->owns_request_pages.store(false);
+        source.swap(detached);
+    });
+    const bool queued = backend->enqueueCompletedDecode(
+        detached, computed_end,
+        [access = dspark_publication_access_, work, keys = std::move(keys),
+         queued_bytes, all_resident_state]() -> std::shared_ptr<const BatchKVCacheResource> {
+            block_tree_cache_detail::ScopeRollback release([&] { work->releaseRequestPages(); });
+            RTP_LLM_PROFILE_SCOPE("cache.dspark.prepare_publication");
+            auto& resource = *work->resource;
+            std::shared_ptr<const DecodeEndpoint> endpoint;
+            {
+                std::shared_lock lock(access->mutex);
+                if (!access->manager) return {};
+                const auto& tables = resource.dspark_release_writer_tables;
+                resource.dspark_release_admission = work->admission;
+                endpoint = access->manager->retainReleasedDSparkPages(
+                    resource, tables[0], tables[1], all_resident_state, &resource.dspark_release_admission);
+            }
+            if (!endpoint) return {};
+            if (endpoint->retained_page_bytes > queued_bytes) {
+                RTP_LLM_LOG_ERROR("DSpark publication pinned more bytes than its preparation reservation");
+                return {};
+            }
+            const auto pinned_bytes = endpoint->retained_page_bytes;
+            resource.decode_endpoint = std::move(endpoint);
+            resource.decode_publication_keys = keys;
+            // Keep only the pinned endpoint for planning and I/O in this same
+            // storage job. Return the rest before reducing the shared budget.
+            release.run();
+            work->admission->reduceTo(pinned_bytes);
+            return work->resource;
+        });
+    if (queued) restore.dismiss();
+    return queued;
+}
+
+bool KVCacheManager::captureCompletedDecode(const BatchKVCacheResource& resource,
+                                            size_t                      computed_end,
+                                            bool                        finished) const {
+    return coordinator_manager_ && coordinator_manager_->captureCompletedDecode(resource, computed_end, finished);
 }
 
 void KVCacheManager::insertIntoCache(const InsertInfo& insert_info, size_t& resident_prefix_length) {

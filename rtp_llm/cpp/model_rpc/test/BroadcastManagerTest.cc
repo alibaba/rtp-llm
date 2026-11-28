@@ -1105,6 +1105,45 @@ TEST_F(BroadcastManagerTest, WorkerNum) {
     EXPECT_EQ(manager_->workerNum(), 2u);
 }
 
+TEST(BroadcastDiagnosticsTest, LocalWorkersReuseCompletionWithoutFabricatingRpcEvidence) {
+    using Result = BroadcastResult<FunctionRequestPB, FunctionResponsePB>;
+    auto first = std::make_shared<Result::WorkerRpcContext>();
+    auto second = std::make_shared<Result::WorkerRpcContext>();
+    first->status = grpc::Status(grpc::StatusCode::UNAVAILABLE, "not an RPC");
+    second->status = first->status;
+    first->response.mutable_remote_response()->set_payload_buffer_safe(true);
+    second->response.mutable_remote_response()->set_payload_buffer_safe(false);
+    Result result({first, second});
+    size_t callbacks = 0;
+    result.finishLocalRank(0);
+    EXPECT_FALSE(result.done());
+    result.finishLocalRank(0);
+    EXPECT_FALSE(result.done());
+    result.finishLocalRank(1); // Both finish inline before driver registration.
+    result.onDone([&] { ++callbacks; });
+    EXPECT_EQ(callbacks, 1u);
+    EXPECT_TRUE(result.done());
+    EXPECT_TRUE(result.success()); // Delivery only; payload proof remains separate.
+    ASSERT_EQ(result.responses().size(), 2u);
+    EXPECT_FALSE(result.responses()[1].remote_response().payload_buffer_safe());
+    for (const auto& rank : result.rankSnapshots()) {
+        EXPECT_EQ(rank.dispatch_state, BroadcastDispatchState::LOCAL_COMPLETED);
+        EXPECT_FALSE(rank.cq_received);
+        EXPECT_FALSE(rank.cq_ok);
+        EXPECT_FALSE(rank.grpc_code);
+        EXPECT_TRUE(rank.response);
+        EXPECT_FALSE(result.rpcSucceeded(rank.rank));
+    }
+    result.finishLocalRank(1);
+    EXPECT_EQ(callbacks, 1u);
+    auto owned = std::make_shared<Result>(std::vector<std::shared_ptr<Result::WorkerRpcContext>>{first});
+    const std::weak_ptr<Result> lifetime = owned;
+    owned->onDone([owned] {}); // Same result/callback cycle as the actual payload collector.
+    owned->finishLocalRank(0);
+    owned.reset();
+    EXPECT_TRUE(lifetime.expired()); // finishLocked swaps out callbacks before invoking them.
+}
+
 }  // namespace rtp_llm::test
 
 int main(int argc, char** argv) {

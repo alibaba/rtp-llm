@@ -880,13 +880,14 @@ absl::Status MtpBatchStreamProcessor::dispatchDecode(const StreamGroups&        
 absl::Status MtpBatchStreamProcessor::dispatchDecode(const StreamGroups&                          stream_groups,
                                                      const speculative::SpeculativeSamplerOutput& spec_decode_output,
                                                      const MergedOutput&                          draft_prefill_output,
-                                                     MtpTargetLogprobs target_logprobs) const {
+                                                     MtpTargetLogprobs target_logprobs,
+                                                     const std::vector<DecodeWriterTables>& writer_tables) const {
     RTP_LLM_LOG_DEBUG(__PRETTY_FUNCTION__);
 
     std::vector<StreamSpecUpdateInfo> spec_update_infos;
 
     prepareDecodeSpecUpdateInfo(
-        stream_groups, spec_decode_output, draft_prefill_output, target_logprobs, spec_update_infos);
+        stream_groups, spec_decode_output, draft_prefill_output, target_logprobs, spec_update_infos, writer_tables);
 
     if (target_logprobs.defined()) {
         stageMtpLogprobsToCpu(spec_update_infos);
@@ -904,13 +905,15 @@ absl::Status MtpBatchStreamProcessor::dispatchDecode(const StreamGroups&        
     return absl::OkStatus();
 }
 
-absl::StatusOr<GptModelInputs> MtpBatchStreamProcessor::gatherDecodeModelInput(const StreamGroups& stream_groups,
-                                                                               TensorHolder&       host_holder) const {
-    auto model_input = NormalBatchStreamProcessor::gatherModelInput(stream_groups, host_holder);
+absl::StatusOr<GptModelInputs> MtpBatchStreamProcessor::gatherDecodeModelInput(
+    const StreamGroups& stream_groups, TensorHolder& host_holder, MtpWriterHostRows* writer_host_rows) const {
+    DecodeWriterTables gathered_host_tables;
+    auto model_input = model_input_gatherer_->gather(
+        stream_groups, host_holder, /*record_lengths=*/false, writer_host_rows ? &gathered_host_tables : nullptr);
 
     RTP_LLM_CHECK(model_input.ok());
 
-    overlayMtpCacheSnapshots(stream_groups, model_input.value(), host_holder);
+    overlayMtpCacheSnapshots(stream_groups, model_input.value(), host_holder, writer_host_rows, &gathered_host_tables);
     // Empty decode rounds are valid after prefill and on non-leader TP ranks.
     // Their allocated [0, 4] history is defined, but torch::cat rejects an
     // empty tensor list; leave that empty history intact until TP sync/skip.
@@ -1041,16 +1044,25 @@ MtpBatchStreamProcessor::gatherLinearReplayInputs(const StreamGroups&           
     return absl::OkStatus();
 }
 
-void MtpBatchStreamProcessor::overlayMtpCacheSnapshots(const StreamGroups& stream_groups,
-                                                       GptModelInputs&     model_input,
-                                                       TensorHolder&       host_holder) const {
+void MtpBatchStreamProcessor::overlayMtpCacheSnapshots(
+    const StreamGroups& stream_groups, GptModelInputs& model_input, TensorHolder& host_holder,
+    MtpWriterHostRows* writer_host_rows, const DecodeWriterTables* gathered_host_tables) const {
     struct SnapshotBucket {
         std::vector<torch::Tensor> physical_tables;
         std::vector<torch::Tensor> kernel_tables;
         std::vector<int64_t>       rows;
     };
 
+    const auto& gathered_physical = gathered_host_tables ? (*gathered_host_tables)[0] : model_input.kv_cache_block_id;
+    const auto& gathered_kernel = gathered_host_tables ? (*gathered_host_tables)[1] : model_input.kv_cache_kernel_block_id;
+    const bool has_host_rows = writer_host_rows && gathered_physical.defined() && gathered_physical.is_cpu()
+        && gathered_physical.dim() == 3 && gathered_kernel.defined() && gathered_kernel.is_cpu()
+        && gathered_kernel.dim() == 3 && gathered_physical.size(1) == gathered_kernel.size(1);
+    if (writer_host_rows) {
+        writer_host_rows->assign(stream_groups.decodeStreams().size(), MtpWriterHostRow{});
+    }
     std::map<std::pair<int64_t, int64_t>, SnapshotBucket> buckets;
+    size_t                                                stream_index = 0;
     int64_t                                               row = 0;
     for (const auto& stream : stream_groups.decodeStreams()) {
         const auto state        = stream->getMtpAsyncDeviceState();
@@ -1075,7 +1087,23 @@ void MtpBatchStreamProcessor::overlayMtpCacheSnapshots(const StreamGroups& strea
             bucket.kernel_tables.push_back(kernel);
             bucket.rows.push_back(row);
         }
-        row += use_snapshot ? 1 : stream->currentBatchSize();
+        const int64_t row_count = use_snapshot ? 1 : stream->currentBatchSize();
+        if (writer_host_rows && row_count == 1) {
+            auto& receipt = (*writer_host_rows)[stream_index];
+            if (use_snapshot) {
+                // The CPU batch column can be empty or absent. Only the
+                // sources of the selected device snapshot describe this row.
+                if (state.cache_snapshot_host_buffers.size() == 2) {
+                    receipt = {stream.get(), state.cache_snapshot_host_buffers[0],
+                               state.cache_snapshot_host_buffers[1], state.cache_snapshot_host_row_compact};
+                }
+            } else if (has_host_rows && row < gathered_physical.size(1)) {
+                receipt = {stream.get(), gathered_physical.narrow(1, row, 1),
+                           gathered_kernel.narrow(1, row, 1), false};
+            }
+        }
+        row += row_count;
+        ++stream_index;
     }
 
     if (buckets.empty()) {
@@ -1901,9 +1929,15 @@ void MtpBatchStreamProcessor::prepareDecodeSpecUpdateInfo(
     const speculative::SpeculativeSamplerOutput& spec_decode_output,
     const MergedOutput&                          draft_prefill_output,
     MtpTargetLogprobs&                           target_logprobs,
-    std::vector<StreamSpecUpdateInfo>&           spec_update_infos) const {
-    finalizeDecodeTargetLogprobs(stream_groups, spec_decode_output, target_logprobs);
-    const auto  accepted      = mtp::getHostAcceptedTokens(spec_decode_output);
+    std::vector<StreamSpecUpdateInfo>&           spec_update_infos,
+    const std::vector<DecodeWriterTables>&       writer_tables) const {
+    const bool finalize_logprobs = target_logprobs.defined() && !target_logprobs.finalized();
+    if (finalize_logprobs) {
+        finalizeDecodeTargetLogprobs(stream_groups, spec_decode_output, target_logprobs);
+    }
+    // The logprob finalizer already waited for this output's transfer event.
+    const auto  accepted = mtp::getHostAcceptedTokens(
+        spec_decode_output, /*wait_for_transfer=*/!finalize_logprobs || writer_tables.empty());
     const auto& accept_len    = accepted.lengths;
     const auto& accept_tokens = accepted.token_ids;
 
@@ -1951,6 +1985,9 @@ void MtpBatchStreamProcessor::prepareDecodeSpecUpdateInfo(
         const size_t stream_idx = spec_update_infos.size();
         if (stream_idx < spec_decode_output.processor_errors.size()) {
             spec_update_info.error_info = spec_decode_output.processor_errors[stream_idx];
+        }
+        if (stream_idx < writer_tables.size()) {
+            spec_update_info.decode_writer_tables = writer_tables[stream_idx];
         }
         const int32_t offset                   = stream->generateConfig()->return_logprobs ?
                                                      stream->logprobsContentOffset(accept_tokens_tensor, cur_accept_len) :

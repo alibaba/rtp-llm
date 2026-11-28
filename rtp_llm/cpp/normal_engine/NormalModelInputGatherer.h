@@ -1,5 +1,6 @@
 #pragma once
 
+#include <array>
 #include <cstdint>
 #include <vector>
 #include "absl/status/status.h"
@@ -49,7 +50,8 @@ public:
     StreamGroups::NormalDeviceStates prepareDeviceStateInputs(const std::list<GenerateStreamPtr>& streams) const;
 
     absl::StatusOr<GptModelInputs>
-    gather(const StreamGroups& stream_groups, TensorHolder& host_holder, bool record_lengths = false) const;
+    gather(const StreamGroups& stream_groups, TensorHolder& host_holder, bool record_lengths = false,
+           std::array<torch::Tensor, 2>* writer_page_tables = nullptr) const;
 
     // Build only the CUDA kv_cache_kernel_block_id tensor in group_tags row order.
     // Read-only over streams: no step(), no sibling kv_cache_block_id, no

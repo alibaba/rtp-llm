@@ -9,6 +9,26 @@
 
 namespace rtp_llm {
 
+// CPU sources of the page-table rows selected by this gather. A device
+// snapshot can have a narrower valid row than the padded model batch.
+struct MtpWriterHostRow {
+    const GenerateStream* stream = nullptr;
+    torch::Tensor         physical;
+    torch::Tensor         kernel;
+    bool                  compact = false;
+
+    DecodeWriterTables ownTables(const GenerateStream* expected_stream) const {
+        if (stream != expected_stream || !physical.defined() || !kernel.defined()) return {};
+        if (compact) return {physical, kernel};
+        // Keep only this request's rows, not the batch's pinned allocation.
+        const auto own = [](const torch::Tensor& table) {
+            return torch::empty(table.sizes(), torch::TensorOptions().dtype(torch::kInt32)).copy_(table);
+        };
+        return {own(physical), own(kernel)};
+    }
+};
+using MtpWriterHostRows = std::vector<MtpWriterHostRow>;
+
 class MtpBatchStreamProcessor: public NormalBatchStreamProcessor {
 public:
     static torch::Tensor
@@ -53,14 +73,16 @@ public:
     absl::Status dispatchDecode(const StreamGroups&                          stream_groups,
                                 const speculative::SpeculativeSamplerOutput& spec_decode_output,
                                 const MergedOutput&                          draft_prefill_output,
-                                MtpTargetLogprobs                            target_logprobs) const;
+                                MtpTargetLogprobs                            target_logprobs,
+                                const std::vector<DecodeWriterTables>&       writer_tables = {}) const;
 
     void finalizeDecodeTargetLogprobs(const StreamGroups&                          stream_groups,
                                       const speculative::SpeculativeSamplerOutput& spec_decode_output,
                                       MtpTargetLogprobs&                           target_logprobs) const;
 
     absl::StatusOr<GptModelInputs> gatherDecodeModelInput(const StreamGroups& stream_groups,
-                                                          TensorHolder&       host_holder) const;
+                                                    TensorHolder& host_holder,
+                                                    MtpWriterHostRows* writer_host_rows = nullptr) const;
     absl::Status                   gatherLinearReplayInputs(const StreamGroups&                             stream_groups,
                                                             const CacheConfig&                              cache_config,
                                                             GptModelInputs&                                 model_input,
@@ -163,8 +185,10 @@ public:
 
 protected:
     void overlayMtpCacheSnapshots(const StreamGroups& stream_groups,
-                                  GptModelInputs&     model_input,
-                                  TensorHolder&       host_holder) const;
+                                  GptModelInputs& model_input,
+                                  TensorHolder& host_holder,
+                                  MtpWriterHostRows* writer_host_rows = nullptr,
+                                  const DecodeWriterTables* gathered_host_tables = nullptr) const;
 
     torch::Tensor collectDSparkPositionBases(const StreamGroups& stream_groups, TensorHolder& host_holder) const;
 
@@ -184,7 +208,8 @@ protected:
                                      const speculative::SpeculativeSamplerOutput& spec_decode_output,
                                      const MergedOutput&                          draft_prefill_output,
                                      MtpTargetLogprobs&                           target_logprobs,
-                                     std::vector<StreamSpecUpdateInfo>&           spec_update_infos) const;
+                                     std::vector<StreamSpecUpdateInfo>&           spec_update_infos,
+                                     const std::vector<DecodeWriterTables>&       writer_tables = {}) const;
 
     void gatherHiddenStates(const StreamGroups& stream_groups, GptModelInputs& model_input) const;
 

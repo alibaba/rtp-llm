@@ -21,6 +21,7 @@ cuda13_torch_link_deps = select({
 })
 
 test_deps = [
+    "//rtp_llm/cpp/utils/test:decode_publication_test_startup",
     "//rtp_llm/cpp/normal_engine:normal_engine",
     "//rtp_llm/cpp/engine_base:engine_base",
     "//rtp_llm/cpp/engine_base/stream:stream",

@@ -108,6 +108,8 @@ public:
     const SpecInfoMap& spec_info_map() const {
         return spec_name_to_info_;
     }
+    const SpecNames& allLocationSpecs() const { return all_spec_names_; }
+    bool validateWriteLocation(const kv_cache_manager::Location& location, const SpecNames& expected) const;
     virtual std::string debugString() const;
 
 protected:

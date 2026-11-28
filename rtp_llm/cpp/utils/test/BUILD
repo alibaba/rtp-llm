@@ -130,3 +130,28 @@ cc_test(
     deps = google_test_deps + ["//rtp_llm/cpp/utils:core_utils"],
     copts = copts(),
 )
+
+cc_library(
+    name = "decode_publication_test_startup",
+    testonly = True,
+    hdrs = ["DecodePublicationTestStartup.h"],
+    visibility = [
+        "//rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm/test:__pkg__",
+        "//rtp_llm/cpp/cache/test:__pkg__",
+        "//rtp_llm/cpp/engine_base/stream/test:__pkg__",
+        "//rtp_llm/cpp/normal_engine/speculative/test:__pkg__",
+    ],
+    deps = [
+        "@com_google_googletest//:gtest",
+    ],
+)
+
+cc_test(
+    name = "remote_cache_config_test",
+    srcs = ["RemoteCacheConfigTest.cc"],
+    copts = copts(),
+    deps = google_test_deps + [
+        ":decode_publication_test_startup",
+        "//rtp_llm/cpp/utils:core_utils",
+    ],
+)

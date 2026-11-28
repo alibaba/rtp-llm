@@ -323,6 +323,7 @@ cc_test(
     data = [],
     copts = test_copts,
     deps = test_deps + [
+        "//rtp_llm/cpp/utils/test:decode_publication_test_startup",
         ":block_pool_test_helper",
         ":block_tree_cache_allocator_test_helper",
         "//rtp_llm/cpp/cache/block_tree_cache",
@@ -508,6 +509,7 @@ cc_test(
         ":cache_config_test_utils",
         "//rtp_llm/cpp/cache:batch_kv_cache_resource",
         "//rtp_llm/cpp/cache:coordinator_cache_manager",
+        "//rtp_llm/cpp/utils/test:decode_publication_test_startup",
         "@com_google_googletest//:gtest_main",
     ] + torch_deps() + select({
         "@//:using_rocm": [
@@ -533,5 +535,17 @@ cc_test(
         "//rtp_llm/cpp/cache:tp_cache_transfer_layout",
         "@com_google_googletest//:gtest",
         "@com_google_googletest//:gtest_main",
+    ],
+)
+
+cc_test(
+    name = "cache_prefix_hash_test",
+    srcs = ["CachePrefixHashTest.cc"],
+    copts = test_copts,
+    exec_properties = {"gpu": "L20_CU13"},
+    tags = ["L20_CU13"],
+    deps = test_deps + [
+        "//rtp_llm/cpp/cache:cache_core",
+        "//rtp_llm/cpp/utils:hash_util",
     ],
 )

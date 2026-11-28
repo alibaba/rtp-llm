@@ -33,12 +33,14 @@ cc_library(
         "StringUtil.h",
         "StatusUtil.h",
         "Exception.h",
+        "RemoteCacheConfig.h",
         "utils.h"
     ],
     srcs = [
         "AssertUtils.cc",
         "Logger.cc",
-        "Exception.cc"
+        "Exception.cc",
+        "RemoteCacheConfig.cc"
     ],
     deps = [
         "@havenask//aios/alog:alog",

@@ -91,6 +91,7 @@ public:
     GptModelOutputs                model_output;
     SamplerOutput                  sampler_output;
     std::shared_ptr<RecordedBatch> recorded_batch;
+    bool decode_publication_writer_complete = false;
 };
 
 }  // namespace rtp_llm

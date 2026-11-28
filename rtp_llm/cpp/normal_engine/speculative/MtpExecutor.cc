@@ -1,6 +1,7 @@
 #include "rtp_llm/cpp/normal_engine/speculative/MtpCompute.h"
 #include "rtp_llm/cpp/observability/ExecutionRecorder.h"
 #include "rtp_llm/cpp/normal_engine/speculative/MtpExecutor.h"
+#include "rtp_llm/cpp/utils/RemoteCacheConfig.h"
 #include "rtp_llm/cpp/metrics/ServiceStatus.h"
 #include "rtp_llm/cpp/normal_engine/NormalExecutor.h"
 #include "rtp_llm/cpp/normal_engine/HiddenStateCapturePolicy.h"
@@ -15,6 +16,7 @@
 #include "rtp_llm/cpp/engine_base/schedulers/BatchDecodeScheduler.h"
 #include "rtp_llm/cpp/engine_base/schedulers/SchedulerUtils.h"
 #include "rtp_llm/cpp/cache/CacheConfigCreator.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/ScopeRollback.h"
 #include "rtp_llm/cpp/engine_base/system_prompt/SystemPromptConstructor.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
@@ -127,6 +129,149 @@ bool MtpExecutor::hasLinearCacheSnapshotCapacity(const std::list<GenerateStreamP
         }
     }
     return true;
+}
+
+MtpExecutor::DecodePublicationRound::~DecodePublicationRound() {
+    // The round can unwind before dispatch, or while establishing the
+    // bookkeeping worker's dependencies. Keep pins until proof or freezing.
+    freezeUnknownWriter();
+    if (release_snapshot) {
+        for (const auto& [stream, pages] : candidates) {
+            try {
+                stream->endDecodePublicationSubmission();
+            } catch (...) {
+                RTP_LLM_LOG_ERROR("Decode publication submission release failed");
+            }
+        }
+    }
+}
+
+void MtpExecutor::DecodePublicationRound::freezeUnknownWriter() noexcept {
+    if (writer_resolved) {
+        return;
+    }
+    writer_resolved = true;
+    for (const auto& [stream, pages] : candidates) {
+        if (release_snapshot) {
+            try {
+                stream->retainUnknownDecodePublication(stream);
+            } catch (...) {
+                stream->freezeUnknownDecodeWriter(pages);
+            }
+        } else {
+            stream->freezeUnknownDecodeWriter(pages);
+        }
+    }
+}
+
+void MtpExecutor::DecodePublicationRound::complete(const torch::Event& writer_done) {
+    try {
+        writer_done.synchronize();
+    } catch (...) {
+        freezeUnknownWriter();
+        throw;
+    }
+    writer_resolved = true;
+    for (auto& [stream, pages] : candidates) {
+        if (!pages.empty()) {
+            stream->setDecodePublicationCandidates(std::move(pages));
+        }
+    }
+}
+
+std::shared_ptr<MtpExecutor::DecodePublicationRound>
+MtpExecutor::retainDecodePublicationPages(const StreamGroups& streams, const GptModelInputs& target,
+                                         const GptModelInputs& draft,
+                                         const speculative::SpeculativeSamplerOutput& sampled) {
+    if (target.is_fake_stream || draft.is_fake_stream || !sampled.accept_len_cpu.defined()
+        || !sampled.transfer_done_event || !target.prefix_lengths.defined() || !target.input_lengths.defined()
+        || !draft.prefix_lengths.defined() || !draft.input_lengths.defined() || !target.kv_cache_block_id.defined()) {
+        return {};
+    }
+    const size_t unit = cache_manager_->decodePublicationUnit();
+    if (!unit) {
+        return {};
+    }
+    RTP_LLM_PROFILE_SCOPE("executor.mtp.retain_decode_endpoint");
+    // Only the accepted-token metadata is required on this thread. This event
+    // precedes the final draft forward, whose completion is observed separately.
+    try {
+        sampled.transfer_done_event->synchronize();
+    } catch (...) {
+        for (const auto& stream : streams.allStreams()) {
+            if (!stream->isFakeStream()) {
+                stream->freezeUnknownDecodeWriter({});
+            }
+        }
+        throw;
+    }
+    try {
+        auto accepted = sampled.accept_len_cpu.to(torch::kCPU).to(torch::kInt32).contiguous();
+        auto prefixes = target.prefix_lengths.to(torch::kCPU).to(torch::kInt32).contiguous();
+        auto target_lengths = target.input_lengths.to(torch::kCPU).to(torch::kInt32).contiguous();
+        auto draft_prefixes = draft.prefix_lengths.to(torch::kCPU).to(torch::kInt32).contiguous();
+        auto draft_lengths = draft.input_lengths.to(torch::kCPU).to(torch::kInt32).contiguous();
+        auto ids = target.kv_cache_block_id.to(torch::kCPU).to(torch::kInt32).contiguous();
+        if (is_block_draft_ && (!draft.last_hidden_states.defined() || draft.last_hidden_states.numel() == 0)) return {};
+        size_t row = 0;
+        auto publication = std::make_shared<DecodePublicationRound>();
+        const auto all_streams = streams.allStreams();
+        publication->candidates.reserve(all_streams.size());
+        bool retained_any = false;
+        // Keep the pins outside the stream's accepted endpoints until the
+        // final writer completes and this round's bookkeeping can consume them.
+        for (const auto& stream : all_streams) {
+            if (stream->isFakeStream()) {
+                ++row;
+                continue;
+            }
+            // The same writer event covers every real row, including rows
+            // excluded from reuse. Keep their streams for error settlement.
+            auto& endpoints = publication->candidates.emplace_back(stream,
+                std::vector<std::shared_ptr<const DecodeEndpoint>>{}).second;
+            if (!stream->canCaptureDecodePublication()) {
+                ++row;
+                continue;
+            }
+            try {
+                if (stream->currentBatchSize() != 1 || stream->nextBatchSize() != 1
+                    || row >= static_cast<size_t>(accepted.numel()) || row >= static_cast<size_t>(prefixes.numel())
+                    || row >= static_cast<size_t>(target_lengths.numel())
+                    || row >= static_cast<size_t>(draft_prefixes.numel()) || row >= static_cast<size_t>(draft_lengths.numel()))
+                    throw std::runtime_error("invalid DSV4.1 writer row geometry");
+                const int prefix = prefixes.data_ptr<int32_t>()[row];
+                const int count = accepted.data_ptr<int32_t>()[row];
+                const int target_end = prefix + count;
+                const int draft_end = draft_prefixes.data_ptr<int32_t>()[row] + draft_lengths.data_ptr<int32_t>()[row];
+                if (prefix < 0 || count <= 0 || count > target_lengths.data_ptr<int32_t>()[row]
+                    || target_end < prefix || draft_end < 0) throw std::runtime_error("invalid DSV4.1 writer range");
+                const size_t end = std::min(target_end, draft_end) / unit * unit;
+                // Include all complete endpoints in this actual accept packet:
+                // EOS/stop can subsequently trim it to an earlier candidate.
+                const size_t first = (static_cast<size_t>(prefix) / unit + 1) * unit;
+                auto previous = first <= end ? stream->latestDecodePublicationEndpoint() : nullptr;
+                for (size_t h = first; h <= end; h += unit) {
+                    auto endpoint = cache_manager_->retainDecodeEndpoint(
+                        ids, target.kv_cache_group_tags, row, h, previous, /*defer_writer_wait=*/true);
+                    if (endpoint) {
+                        previous = endpoint;
+                        endpoints.push_back(std::move(endpoint));
+                    } else RTP_LLM_LOG_WARNING("DSV4.1 optional endpoint capture failed: H=%zu", h);
+                }
+            } catch (const std::exception& error) {
+                RTP_LLM_LOG_WARNING("DSV4.1 optional endpoint capture failed: %s", error.what());
+            }
+            retained_any |= !endpoints.empty();
+            ++row;
+        }
+        if (retained_any) {
+            publication->writer_resolved = false;
+            return publication;
+        }
+    } catch (const std::exception& error) {
+        RTP_LLM_LOG_WARNING("DSV4.1 optional endpoint metadata failed: %s", error.what());
+    }
+    return {};
 }
 
 GptModelOutputs MtpExecutor::forwardModel(ModelBase* model, const GptModelInputs& inputs, ModelInputsModelRole role) {
@@ -640,6 +785,8 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
     draft_vocab_size_           = propose_params->getEngineInitParams().model_config_.vocab_size;
     is_block_draft_             = isBlockDraftType(propose_params->sp_type);
     is_dflash_                  = propose_params->sp_type == SP_TYPE_DFLASH;
+    dsv41_release_publication_supported_ = propose_params->sp_type == SP_TYPE_DSPARK
+        && params.model_config_.model_type == "deepseek_v41" && params.parallelism_config.tp_size == 1;
     const auto& draft_config   = propose_params->getEngineInitParams().model_config_;
     const auto& draft_parallel = propose_params->getEngineInitParams().parallelism_config;
     // Block drafts (DSpark/DFlash) run their own propose/commit blocks and do
@@ -1507,11 +1654,34 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
 +-------------------------------+
 */
 
-absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams,
+absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& scheduled_streams,
                                      MtpMetricsCollector&                metrics_collector) {
     MtpTargetLogprobs                  target_logprobs;
     std::shared_ptr<MtpTargetLogprobs> early_target_logprobs_finalize_state;
-    RTP_LLM_PROFILE_SCOPE_DYNAMIC("executor.mtp.decode_step(decode_stream_size=%zu)", streams.size());
+    RTP_LLM_PROFILE_SCOPE_DYNAMIC("executor.mtp.decode_step(decode_stream_size=%zu)", scheduled_streams.size());
+
+    const bool can_publish = remoteCacheDecodePublicationEnabled() && role_type_ == RoleType::DECODE
+        && isTpRank0() && !warm_up_ && cache_manager_ && cache_manager_->remoteCacheEnabled();
+    const size_t release_unit = can_publish && dsv41_release_publication_supported_ && !is_linear_attention_model_ ?
+        cache_manager_->decodePublicationUnit() : 0;
+    std::shared_ptr<DecodePublicationRound> publication;
+    std::list<GenerateStreamPtr> publication_streams;
+    if (release_unit) {
+        publication = std::make_shared<DecodePublicationRound>();
+        publication->release_snapshot = true;
+        publication->candidates.reserve(scheduled_streams.size());
+        for (const auto& stream : scheduled_streams) {
+            if (stream->isFakeStream()) {
+                publication_streams.push_back(stream);
+            } else if (stream->beginDecodePublicationSubmission(release_unit)) {
+                publication->candidates.emplace_back(stream, BatchKVCacheResource::DecodeEndpoints{});
+                publication_streams.push_back(stream);
+            }
+        }
+        publication->writer_resolved = publication->candidates.empty();
+    }
+    const auto& streams = release_unit ? publication_streams : scheduled_streams;
+    MtpWriterHostRows writer_host_rows;
 
     RtpLLMExecutorMetricsCollector& executor_collector = metrics_collector.executor_collector;
 
@@ -1576,7 +1746,8 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
     {
         RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(gather_model_input)");
         int64_t start_time_us      = autil::TimeUtility::currentTimeInMicroSeconds();
-        auto    model_input_status = batch_stream_processor_->gatherDecodeModelInput(stream_groups, buffer_holder_);
+        auto    model_input_status = batch_stream_processor_->gatherDecodeModelInput(
+            stream_groups, buffer_holder_, release_unit ? &writer_host_rows : nullptr);
         RETURN_IF_STATUS_OR_ERROR(model_input_status);
         model_input = std::move(model_input_status.value());
         executor_collector.gather_model_input_us += autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
@@ -1977,6 +2148,16 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
         target_commit_guard.dismiss();
     }
 
+    std::optional<GptModelInputs> publication_target;
+    if (can_publish && !release_unit && !model_input.is_fake_stream && !streams.empty()) {
+        const auto unit = cache_manager_->decodePublicationUnit();
+        for (const auto& stream : stream_groups.allStreams()) {
+            if (stream->mayCrossDecodePublicationBoundary(unit, propose_step_ + 1)) {
+                publication_target.emplace(model_input);
+                break;
+            }
+        }
+    }
     if (isTpRank0()) {
         if (is_block_draft_) {
             // Target verify wrote its aux features into the shared MTP hidden
@@ -2026,6 +2207,10 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
 
     draft_prefill_prepare_runner_.sync(cuda_graph::graphGetCurrentStream());
 
+    if (publication_target) {
+        publication = retainDecodePublicationPages(stream_groups, *publication_target, model_input,
+                                                    speculative_sampler_output);
+    }
     {
         int64_t start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
         // DSpARK tail = commit only: dense verify rows into the draft
@@ -2049,6 +2234,9 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
 
     if (!isTpRank0() || warm_up_ || streams.size() == 0 || model_input.is_fake_stream) {
         cudaSyncAndCheck();
+        if (publication && publication->release_snapshot) {
+            publication->writer_resolved = true;
+        }
         releaseAllModelBuffers();
         return absl::OkStatus();
     }
@@ -2069,7 +2257,7 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
 
     // Record after draft_model_sample so worker all_probs/token_ids reads wait
     // on the earliest valid point, not metrics or dispatch slicing.
-    if (useStreamAsync()) {
+    if (useStreamAsync() || publication) {
         draft_event = std::make_shared<torch::Event>(cuda_graph::makeGraphEvent());
         draft_event->record(cuda_graph::graphGetCurrentStream());
     }
@@ -2101,7 +2289,9 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
                                                 std::move(rejection_event),
                                                 std::move(draft_event),
                                                 std::move(batch_record),
-                                                std::move(target_logprobs));
+                                                std::move(target_logprobs),
+                                                std::move(publication),
+                                                writer_host_rows);
     if (dispatch_result.ok() && engram_anchor_windows.defined()) {
         auto next_history = MtpBatchStreamProcessor::advanceEngramTokenWindows(
             engram_anchor_windows, speculative_sampler_output.accept_tokens, speculative_sampler_output.accept_len);
@@ -2930,13 +3120,16 @@ absl::Status MtpExecutor::dispatchDecodeOutput(const StreamGroups&              
                                                std::shared_ptr<torch::Event>  rejection_event,
                                                std::shared_ptr<torch::Event>  draft_event,
                                                std::shared_ptr<RecordedBatch> recorded_batch,
-                                               MtpTargetLogprobs              target_logprobs) {
+                                               MtpTargetLogprobs              target_logprobs,
+                                               std::shared_ptr<DecodePublicationRound> publication,
+                                               const MtpWriterHostRows& writer_host_rows) {
     RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(dispatch_output)");
     absl::Status result;
     if (useStreamAsync()) {
-        // Hand off to a worker that waits on main-stream rejection/draft events
-        // via cudaStreamWaitEvent; the main thread returns immediately. The
-        // recorded_batch shared_ptr travels with the merged output; the worker
+        // Hand off to a worker that orders normal bookkeeping by stream events.
+        // At a publication boundary it also proves writer completion before
+        // making retained pages visible to specUpdate. The recorded batch
+        // travels with the merged output; the worker
         // fills the timing fields in specUpdate and the destructor submits
         // from whichever thread drops the last reference.
         result = dispatchDecodeAsync(
@@ -2950,12 +3143,33 @@ absl::Status MtpExecutor::dispatchDecodeOutput(const StreamGroups&              
             replay_rounds,
             std::move(rejection_event),
             std::move(draft_event),
-            std::move(target_logprobs));
+            std::move(target_logprobs),
+            std::move(publication),
+            writer_host_rows);
     } else {
+        const bool release_snapshot = publication && publication->release_snapshot;
+        if (publication && !release_snapshot) {
+            publication->complete(*draft_event);
+        }
         MergedOutput draft_prefill_output{
             std::move(draft_prefill_model_output), std::move(draft_prefill_sampler_output), std::move(recorded_batch)};
-        result = batch_stream_processor_->dispatchDecode(
-            stream_groups, speculative_sampler_output, draft_prefill_output, std::move(target_logprobs));
+        if (release_snapshot) {
+            auto output = speculative_sampler_output;
+            output.transfer_done_event = draft_event;
+            std::vector<DecodeWriterTables> writer_tables(writer_host_rows.size());
+            size_t row = 0;
+            for (const auto& stream : stream_groups.allStreams()) {
+                if (row >= writer_host_rows.size()) break;
+                writer_tables[row] = writer_host_rows[row].ownTables(stream.get());
+                ++row;
+            }
+            result = batch_stream_processor_->dispatchDecode(
+                stream_groups, output, draft_prefill_output, std::move(target_logprobs), writer_tables);
+            publication->writer_resolved = result.ok();
+        } else {
+            result = batch_stream_processor_->dispatchDecode(
+                stream_groups, speculative_sampler_output, draft_prefill_output, std::move(target_logprobs));
+        }
         if (result.ok() && linear_replay) {
             publishLinearReplayWindows(
                 stream_groups, *linear_replay, replay_rounds, speculative_sampler_output.accept_len.clone());
@@ -3684,7 +3898,9 @@ absl::Status MtpExecutor::dispatchDecodeAsync(const StreamGroups&               
                                               const std::vector<GenerateStream::LinearReplayRound>& replay_rounds,
                                               std::shared_ptr<torch::Event>                rejection_event,
                                               std::shared_ptr<torch::Event>                draft_event,
-                                              MtpTargetLogprobs                            target_logprobs) {
+                                              MtpTargetLogprobs                            target_logprobs,
+                                              std::shared_ptr<DecodePublicationRound>       publication,
+                                              const MtpWriterHostRows&                     writer_host_rows) {
     RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(dispatch_output_async)");
 
     // The next verify may reuse the sampler's output storage. Replay windows
@@ -3822,6 +4038,7 @@ absl::Status MtpExecutor::dispatchDecodeAsync(const StreamGroups&               
     }
 
     // 4. Assign per-stream views (narrow is metadata-only, no kernel launch)
+    std::vector<DecodeWriterTables> writer_tables(writer_host_rows.size());
     int64_t probs_batch_off = 0;
     int64_t idx             = 0;
     for (auto& stream : all_streams) {
@@ -3854,6 +4071,9 @@ absl::Status MtpExecutor::dispatchDecodeAsync(const StreamGroups&               
         RTP_LLM_CHECK_WITH_INFO(state.previous_seq_len_upper_bound > 0,
                                 "pending MTP bookkeeping requires a published sequence-length upper bound");
         state.next_seq_len_upper_bound = state.previous_seq_len_upper_bound + static_cast<int>(propose_step_ + 1);
+        if (idx < static_cast<int64_t>(writer_host_rows.size())) {
+            writer_tables[idx] = writer_host_rows[idx].ownTables(stream.get());
+        }
         stream->setMtpAsyncDeviceState(std::move(state));
 
         probs_batch_off += next_batch_size;
@@ -3863,13 +4083,25 @@ absl::Status MtpExecutor::dispatchDecodeAsync(const StreamGroups&               
     // --- Launch async worker (unchanged) ---
     auto* processor          = batch_stream_processor_.get();
     auto  spec_decode_copy   = spec_decode_output;
+    const bool release_snapshot = publication && publication->release_snapshot;
+    if (release_snapshot) {
+        // Accept D2H and the final draft writer are ordered on the same
+        // engine stream. The processor uses its existing host wait.
+        spec_decode_copy.transfer_done_event = draft_event;
+    }
     auto  draft_prefill_copy = std::move(draft_prefill_output);
     auto  stream_groups_copy = stream_groups;
 
-    auto streams_for_inc = stream_groups_copy.allStreams();
-    for (auto& s : streams_for_inc) {
-        s->incPendingAsyncBookkeeping();
+    const auto worker_streams = stream_groups_copy.allStreams();
+    for (const auto& stream : worker_streams) {
+        stream->incPendingAsyncBookkeeping();
     }
+    const auto release_bookkeeping = [](const auto& streams) {
+        for (const auto& stream : streams) {
+            stream->decPendingAsyncBookkeepingAndMaybeRelease();
+        }
+    };
+    block_tree_cache_detail::ScopeRollback rollback([&] { release_bookkeeping(worker_streams); });
 
     spec_bookkeeping_runner_.launch([processor,
                                      stream_groups_copy = std::move(stream_groups_copy),
@@ -3877,31 +4109,44 @@ absl::Status MtpExecutor::dispatchDecodeAsync(const StreamGroups&               
                                      draft_prefill_copy = std::move(draft_prefill_copy),
                                      rejection_event,
                                      draft_event,
-                                     target_logprobs = std::move(target_logprobs)]() mutable {
+                                     target_logprobs = std::move(target_logprobs),
+                                     writer_tables = std::move(writer_tables),
+                                     release_snapshot,
+                                     worker_streams,
+                                     release_bookkeeping,
+                                     publication = std::move(publication)]() mutable {
         c10::InferenceMode inference_guard(true);
+        block_tree_cache_detail::ScopeRollback release([&] { release_bookkeeping(worker_streams); });
+        // Settle the publication before retiring the batch bookkeeping count.
+        block_tree_cache_detail::ScopeRollback retire_publication([&] { publication.reset(); });
         RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(spec_bookkeeping_worker)");
 
-        auto worker_streams = stream_groups_copy.allStreams();
-
-        auto dec_guard = std::shared_ptr<void>(nullptr, [worker_streams](void*) {
-            for (auto& s : worker_streams) {
-                s->decPendingAsyncBookkeepingAndMaybeRelease();
+        try {
+            if (rejection_event) {
+                rejection_event->block(cuda_graph::graphGetCurrentStream());
             }
-        });
-
-        if (rejection_event) {
-            rejection_event->block(cuda_graph::graphGetCurrentStream());
-        }
-        if (draft_event) {
-            draft_event->block(cuda_graph::graphGetCurrentStream());
+            if (publication && !release_snapshot) {
+                publication->complete(*draft_event);
+            } else if (draft_event) {
+                draft_event->block(cuda_graph::graphGetCurrentStream());
+            }
+        } catch (...) {
+            if (publication) {
+                publication->freezeUnknownWriter();
+            }
+            throw;
         }
 
         auto status = processor->dispatchDecode(
-            stream_groups_copy, spec_decode_copy, draft_prefill_copy, std::move(target_logprobs));
+            stream_groups_copy, spec_decode_copy, draft_prefill_copy, std::move(target_logprobs), writer_tables);
+        if (release_snapshot && status.ok()) {
+            publication->writer_resolved = true;
+        }
         if (!status.ok()) {
             RTP_LLM_LOG_ERROR("[stream-async] dispatchDecode (worker) failed: %s", status.ToString().c_str());
         }
     });
+    rollback.dismiss();
 
     return absl::OkStatus();
 }

@@ -1011,7 +1011,8 @@ absl::StatusOr<torch::Tensor> NormalModelInputGatherer::gatherKvCacheKernelBlock
 
 absl::StatusOr<GptModelInputs> NormalModelInputGatherer::gather(const StreamGroups& stream_groups,
                                                                 TensorHolder&       host_holder,
-                                                                bool                record_lengths) const {
+                                                                bool                record_lengths,
+                                                                std::array<torch::Tensor, 2>* writer_page_tables) const {
     RTP_LLM_LOG_DEBUG(__PRETTY_FUNCTION__);
     RTP_LLM_LOG_DEBUG("context_streams size = %d, decode_streams size = %d",
                       stream_groups.contextStreams().size(),
@@ -1068,6 +1069,9 @@ absl::StatusOr<GptModelInputs> NormalModelInputGatherer::gather(const StreamGrou
     initializeKvCacheMetadata(model_input);
     RETURN_IF_STATUS_ERROR(processDecodeStreams(model_input, stream_groups));
     RETURN_IF_STATUS_ERROR(processContextStreams(model_input, stream_groups, host_holder));
+    if (writer_page_tables) {
+        *writer_page_tables = {model_input.kv_cache_block_id, model_input.kv_cache_kernel_block_id};
+    }
     // No host mirrors are kept for ModelInputsLogger: it snapshots every tensor
     // in place (device-side clone + per-device c10::Event) and only pays the D2H
     // on its own worker thread, so it reads post-publish CUDA members directly.

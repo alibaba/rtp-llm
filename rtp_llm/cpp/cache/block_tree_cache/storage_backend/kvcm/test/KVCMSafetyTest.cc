@@ -1,4 +1,6 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeReclaimer.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm/PayloadDispatchProof.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm/PublicationSettlement.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm/test/KVCMMockTestBase.h"
 
 #include <cuda_runtime.h>
@@ -31,6 +33,23 @@ kv_cache_manager::WriteLocation singleWriteLocation() {
     result.block_mask       = kv_cache_manager::BlockMaskOffset{0};
     result.locations        = singleLocation();
     return result;
+}
+
+TEST(KVCMSafetyTest, DecodeWriteCloseRequiresPayloadProofAndNoFinishAttempt) {
+    using Action = kvcm::FailedPublicationAction;
+    kvcm::PayloadDispatchProof never_started;
+    never_started.pending();
+    EXPECT_EQ(kvcm::failedPublicationAction(!never_started.neverStarted(), false), Action::RETAIN_SESSION);
+    never_started.notStarted();
+    EXPECT_EQ(kvcm::failedPublicationAction(!never_started.neverStarted(), false), Action::ABORT_UNCOMMITTED);
+
+    kvcm::PayloadDispatchProof partial_submission;
+    partial_submission.pending();
+    partial_submission.started();
+    partial_submission.notStarted();
+    EXPECT_EQ(kvcm::failedPublicationAction(!partial_submission.neverStarted(), false), Action::RETAIN_SESSION);
+    EXPECT_EQ(kvcm::failedPublicationAction(!partial_submission.neverStarted(), false, true), Action::ABORT_UNCOMMITTED);
+    EXPECT_EQ(kvcm::failedPublicationAction(!partial_submission.neverStarted(), true, true), Action::RETAIN_SESSION);
 }
 
 TEST(KVCMSafetyTest, LocalSdkResultPermanentlyProtectsUnknownCompletion) {

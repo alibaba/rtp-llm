@@ -176,6 +176,20 @@ public:
             }));
     }
 
+    FinishWriteResult finishWriteWithResult(const std::string& id,
+                                            const std::string& trace,
+                                            const std::string& session,
+                                            const kv_cache_manager::BlockMask& mask,
+                                            const kv_cache_manager::Locations& locations) override {
+        if (finish_write_result) {
+            return finish_write_result(mask, locations);
+        }
+        return finishWrite(id, trace, session, mask, locations) ? FinishWriteResult::ACKNOWLEDGED :
+                                                                 FinishWriteResult::UNKNOWN;
+    }
+
+    std::function<FinishWriteResult(const kv_cache_manager::BlockMask&, const kv_cache_manager::Locations&)>
+        finish_write_result;
     std::optional<kv_cache_manager::ClientErrorCode> load_status;
     std::optional<kv_cache_manager::ClientErrorCode> save_status;
 
@@ -231,6 +245,10 @@ public:
                  kv_cache_manager::RoleType,
                  const std::vector<PoolRegistration>&,
                  const std::vector<std::string>&),
+                (override));
+    MOCK_METHOD(std::shared_ptr<kvcm::ClientWrapper>,
+                createMetadataOnlyClient,
+                (kvcm::KVCMConfigPtr),
                 (override));
     MOCK_METHOD(void, shutdown, (), (noexcept, override));
     MOCK_METHOD((std::pair<bool, kv_cache_manager::Locations>),
