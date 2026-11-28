@@ -1,0 +1,113 @@
+id: fallback_takeover_speed
+name: 单主 kill 兜底速度
+describe: E1.1 降级版：kill 主 Master 后验证兜底接管速度——15s 内完成接管且窗口成功率 ≥85%，调度提交 p95 <500ms（真机 1~8ms 量级）；凹坑曲线留证。路径级逐请求计时待 GAP-F2。
+environment:
+  master:
+    deployment:
+      replicas: 2
+    config: configs/master.yaml
+  prefill:
+    engine: rtp
+    deployment:
+      replicas: 2
+    config: configs/prefill.yaml
+  decode:
+    engine: rtp
+    deployment:
+      replicas: 1
+    config: configs/decode.yaml
+  frontend:
+    config:
+      seq_size_per_block: 128
+      prefill_cp_size: 4
+      image_token_id: 129264
+      cache_key_hash_seed: "4923373599811257905"
+phases:
+  - id: startup
+    describe: 确认唯一主 Master 并等待 Engine 发现传播。
+    timeout: 120s
+    steps:
+      - id: check_master_leader
+        describe: 只有一个主 Master。
+        interface: master/list/addresses
+        args:
+          is_leader: true
+        expect:
+          count: 1
+        wait_after: 10s
+  - id: failover
+    describe: 杀主并测接管速度。
+    timeout: 300s
+    steps:
+      - id: get_master_a
+        describe: 记录当前主 Master 地址。
+        interface: master/list/addresses
+        args:
+          is_leader: true
+        expect:
+          count: 1
+      - id: start_frontend
+        describe: qps 8 持续打流。
+        interface: frontend/start/playback
+        args:
+          requests_file: data/traffic/uniform-2k.mckidx
+          qps: 8
+          total_concurrency: 32
+          queue_capacity: 64
+          request_timeout: 30s
+          drain_timeout: 60s
+        wait_after: 15s
+      - id: check_success_before
+        describe: 杀主前成功率基线。
+        interface: frontend/query/success_rate
+        args:
+          range:
+            - -10s
+            - 0s
+        expect:
+          gte: 0.99
+      - id: kill_master_a
+        describe: 强制杀掉主 Master（计时起点）。
+        interface: master/stop
+        args:
+          targets:
+            ref: steps.get_master_a
+          mode: kill
+        within: 45s
+        wait_after: 15s
+      - id: check_leader_after_kill
+        describe: 15s 内新主接管完成（唯一主）。
+        interface: master/list/addresses
+        args:
+          is_leader: true
+        expect:
+          count: 1
+      - id: check_recovery_speed
+        describe: 接管后 15s 窗口成功率不低于 85%（对照真机 kill→首个兜底成功 1.27s）。
+        interface: frontend/query/success_rate
+        args:
+          range:
+            - -15s
+            - 0s
+        expect:
+          gte: 0.85
+      - id: check_fallback_submit_fast
+        describe: 兜底/转发路径的调度提交耗时 p95 应远低于 1s（真机基线 1~8ms，mock 允许 500ms 上界）。
+        interface: prometheus/query_scalar
+        args:
+          promql: histogram_quantile(0.95, sum by(le)(rate(flexlb_app_flexlb_route_submit_time_ms_seconds_bucket[60s])))
+        expect:
+          lte: 0.5
+      - id: stop_frontend
+        describe: 停止播放并收齐已发请求终态。
+        interface: frontend/stop/playback
+        within: 190s
+      - id: check_total_success_rate
+        describe: 全程成功率不低于 95%。
+        interface: frontend/query/success_rate
+        args:
+          range:
+            - -150s
+            - 0s
+        expect:
+          gte: 0.95

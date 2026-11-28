@@ -11,6 +11,27 @@ import org.flexlb.engine.grpc.EngineRpcService.*;
  */
 final class PrefillEnqueueHandler {
     static void enqueue(PrefillRpcServer generation, EnqueueBatchRequestPB request, StreamObserver<EnqueueBatchResponsePB> observer) {
+        enqueue(generation, request, observer, 0, 0, null);
+    }
+
+    /**
+     * admissionDelayMs postpones the admission itself (and with it the fetch-attach retention
+     * window); ackDelayMs delays only the ACK response after admission completed.
+     */
+    static void enqueue(PrefillRpcServer generation, EnqueueBatchRequestPB request,
+                        StreamObserver<EnqueueBatchResponsePB> observer, long admissionDelayMs,
+                        long ackDelayMs, java.util.concurrent.ScheduledExecutorService delayScheduler) {
+        if (admissionDelayMs > 0) {
+            delayScheduler.schedule(() -> admit(generation, request, observer, ackDelayMs, delayScheduler),
+                admissionDelayMs, TimeUnit.MILLISECONDS);
+            return;
+        }
+        admit(generation, request, observer, ackDelayMs, delayScheduler);
+    }
+
+    private static void admit(PrefillRpcServer generation, EnqueueBatchRequestPB request,
+                              StreamObserver<EnqueueBatchResponsePB> observer, long ackDelayMs,
+                              java.util.concurrent.ScheduledExecutorService delayScheduler) {
         var seen = new HashSet<Long>();
         boolean duplicate = false;
         int size = 0;
@@ -50,7 +71,10 @@ final class PrefillEnqueueHandler {
         CompletableFuture.allOf(pending.toArray(CompletableFuture[]::new)).thenRun(() -> {
             var result = EnqueueBatchResponsePB.newBuilder().setBatchId(request.getBatchId());
             pending.forEach(p -> { var value = p.join(); result.addAllSuccesses(value.getSuccessesList()).addAllErrors(value.getErrorsList()); });
-            observer.onNext(result.build()); observer.onCompleted();
+            if (ackDelayMs > 0) delayScheduler.schedule(() -> {
+                observer.onNext(result.build()); observer.onCompleted();
+            }, ackDelayMs, TimeUnit.MILLISECONDS);
+            else { observer.onNext(result.build()); observer.onCompleted(); }
         });
     }
 

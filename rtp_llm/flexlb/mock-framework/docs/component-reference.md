@@ -46,16 +46,22 @@ real 默认值和映射以 `rtp_llm/server/server_args`、`rtp_llm/config/engine
 
 ### Mock 参数
 
-| 参数                                                                          | 含义                                                                                                                                                                       |
-| ----------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| mock.cache.total.blocks                                                       | 统一池总块数，不含 null block；默认 test_block_num - 1，不得小于 device 可用总块数。ENV：MOCK_CACHE_TOTAL_BLOCKS。                                                         |
-| mock.scheduler.mode                                                           | P 调度方式，默认 `fifo` 按单请求入队、自主组 Forward batch，拒绝 `EnqueueBatch`/`EnqueueGroup`；`group` 显式启用组语义。ENV 为 `MOCK_SCHEDULER_MODE`；D 始终使用普通调度。 |
-| mock.vit.skip.download                                                        | 默认 false；true 时只跳过实际图片读取，使用输入宽高，其余异步调度不变。                                                                                                    |
-| mock.compute.forward.expression                                               | 必填，Forward 公式，结果单位 ms。                                                                                                                                          |
-| mock.engine.prefill.overhead.ms                                               | 仅 Prefill。非负整数，默认 0。控制一轮输出提交后到下一轮允许组批前的额外等待，单位 ms。见 [Prefill 轮间开销](whale-engine.md#prefill-轮间开销)。                           |
-| mock.compute.forward.noise.stddev.ms / stddev.ratio / max.deviation.ms / seed | 有界噪声，详见 Compute；数值后缀均相对 mock.compute.forward.noise。                                                                                                        |
-| mock.compute.decode.tokens.per.step                                           | D 平均每轮进度，与真实投机机制不同。                                                                                                                                       |
-| mock.compute.output.mean.tokens / stddev.percent / seed                       | Decode 输出总长的高斯均值、标准差百分比和随机种子。                                                                                                                        |
+| 参数                                                                          | 含义                                                                                                                                                                               |
+| ----------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| mock.cache.total.blocks                                                       | 统一池总块数，不含 null block；默认 test_block_num - 1，不得小于 device 可用总块数。ENV：MOCK_CACHE_TOTAL_BLOCKS。                                                                 |
+| mock.scheduler.mode                                                           | P 调度方式，默认 `fifo` 按单请求入队、自主组 Forward batch，拒绝 `EnqueueBatch`/`EnqueueGroup`；`group` 显式启用组语义。ENV 为 `MOCK_SCHEDULER_MODE`；D 始终使用普通调度。         |
+| mock.vit.skip.download                                                        | 默认 false；true 时只跳过实际图片读取，使用输入宽高，其余异步调度不变。                                                                                                            |
+| mock.compute.forward.expression                                               | 必填，Forward 公式，结果单位 ms。                                                                                                                                                  |
+| mock.engine.prefill.overhead.ms                                               | 仅 Prefill。非负整数，默认 0。控制一轮输出提交后到下一轮允许组批前的额外等待，单位 ms。见 [Prefill 轮间开销](whale-engine.md#prefill-轮间开销)。                                   |
+| mock.rpc.enqueue.ack.delay.ms                                                 | 仅 Prefill 批量模式。非负整数，默认 0。受理照常开始（附着保留窗口同时启动），仅把 EnqueueBatch 的 ACK 响应推迟指定毫秒数；超过 Master 的 fetchAttachTimeoutMs 即触发附着超时路径。 |
+| mock.rpc.cancel.effect.delay.ms                                               | 仅 Prefill。非负整数，默认 0。Cancel 的对请求生效与 ACK 都推迟指定毫秒数；超过 Master 的 preemption.timeoutMs 即触发抢占超时路径。                                                 |
+| mock.execute.error.rate                                                       | 概率 [0,1]，默认 0。每个已受理的批在执行时按该概率立即以内部错误终结（受理后、计算前注入）。                                                                                       |
+| mock.execute.error.seed                                                       | 整数，默认 0。error.rate 注入抽签的随机种子，固定种子可复现。                                                                                                                      |
+| mock.rpc.enqueue.admission.delay.ms                                           | 仅 Prefill 批量模式。非负整数，默认 0。把受理本身（含附着保留窗口的开启）推迟指定毫秒数，用于注入"接受前慢"的背压形态；与 ack.delay 叠加时 ACK 更晚。                              |
+| mock.rpc.status.no.respond                                                    | 布尔，默认 false。true 时 WorkerStatus/CacheStatus 轮询被接受但永不回应，表现与卡死 Engine 一致：Master 的过期判定（statusStaleAfterMs）与清退路径被触发。                         |
+| mock.compute.forward.noise.stddev.ms / stddev.ratio / max.deviation.ms / seed | 有界噪声，详见 Compute；数值后缀均相对 mock.compute.forward.noise。                                                                                                                |
+| mock.compute.decode.tokens.per.step                                           | D 平均每轮进度，与真实投机机制不同。                                                                                                                                               |
+| mock.compute.output.mean.tokens / stddev.percent / seed                       | Decode 输出总长的高斯均值、标准差百分比和随机种子。                                                                                                                                |
 
 ### ENV 输入
 

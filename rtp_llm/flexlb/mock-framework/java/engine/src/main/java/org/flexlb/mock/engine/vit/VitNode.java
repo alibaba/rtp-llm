@@ -30,7 +30,10 @@ public final class VitNode implements AutoCloseable {
     public static VitNode start(VitConfig config,int rpcPort,int controlPort) throws Exception {
         var node=new VitNode(config);
         try {
-            node.rpc=NettyServerBuilder.forAddress(node.address.listener(rpcPort)).addService(node.service).addService(node.service.mockVitService()).build().start();
+            node.rpc=NettyServerBuilder.forAddress(node.address.listener(rpcPort))
+                .permitKeepAliveTime(1,TimeUnit.SECONDS)
+                .permitKeepAliveWithoutCalls(true)
+                .addService(node.service).addService(node.service.mockVitService()).build().start();
             node.metrics=org.flexlb.mock.metrics.MetricsOutput.start(node.service::collectMetrics);
             node.api=new ControlHttpServer(node.address.listener(controlPort)).health(node::checkHealthy);
             if(node.metrics.prometheus()) node.api.metrics(node.service::metrics);

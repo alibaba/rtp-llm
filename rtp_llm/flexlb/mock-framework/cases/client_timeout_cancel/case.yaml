@@ -1,0 +1,93 @@
+id: client_timeout_cancel
+name: 客户端超时取消
+describe: S5-3：客户端 request_timeout 2s 短于 prefill 单批 3s，请求应以 timeout/cancelled 终结；随后恢复正常超时预算的第二轮应全部成功，证明取消后资源回收。engine 侧资源释放的逐请求核对依赖 GAP-F2，当前以恢复轮成功率佐证。
+environment:
+  master:
+    deployment:
+      replicas: 1
+    config: configs/master.yaml
+  prefill:
+    engine: rtp
+    deployment:
+      replicas: 1
+    config: configs/prefill.yaml
+  decode:
+    engine: rtp
+    deployment:
+      replicas: 1
+    config: configs/decode.yaml
+  frontend:
+    config:
+      seq_size_per_block: 128
+      prefill_cp_size: 4
+      image_token_id: 129264
+      cache_key_hash_seed: "4923373599811257905"
+phases:
+  - id: startup
+    describe: 确认唯一主 Master 并等待 Engine 发现传播。
+    timeout: 120s
+    steps:
+      - id: check_master_leader
+        describe: 只有一个主 Master。
+        interface: master/list/addresses
+        args:
+          is_leader: true
+        expect:
+          count: 1
+        wait_after: 10s
+  - id: timeout_round
+    describe: 短超时轮：全部请求客户端超时。
+    timeout: 180s
+    steps:
+      - id: start_short_timeout
+        describe: request_timeout 2s 短于 3s/批的 prefill 耗时，请求全部超时。
+        interface: frontend/start/playback
+        args:
+          requests_file: data/traffic/uniform-2k.mckidx
+          qps: 1
+          total_concurrency: 16
+          queue_capacity: 32
+          request_timeout: 2s
+          drain_timeout: 15s
+        wait_after: 20s
+      - id: stop_short_timeout
+        describe: 停止短超时轮。
+        interface: frontend/stop/playback
+        within: 190s
+      - id: check_success_timeout
+        describe: 全部请求客户端超时，成功率应接近 0。
+        interface: frontend/query/success_rate
+        args:
+          range:
+            - -60s
+            - 0s
+        expect:
+          lte: 0.1
+  - id: recover
+    describe: 恢复轮：正常超时预算。
+    timeout: 180s
+    steps:
+      - id: start_recovered
+        describe: request_timeout 30s、qps 0.5 恢复轮 30s，取消后的资源应已回收。
+        interface: frontend/start/playback
+        args:
+          requests_file: data/traffic/uniform-2k.mckidx
+          qps: 0.5
+          total_concurrency: 8
+          queue_capacity: 16
+          request_timeout: 30s
+          drain_timeout: 30s
+        wait_after: 30s
+      - id: check_success_recovered
+        describe: 恢复轮窗口内全部成功（在打流中测量，窗口不覆盖超时轮）。
+        interface: frontend/query/success_rate
+        args:
+          range:
+            - -25s
+            - 0s
+        expect:
+          gte: 0.99
+      - id: stop_recovered
+        describe: 停止恢复轮。
+        interface: frontend/stop/playback
+        within: 190s

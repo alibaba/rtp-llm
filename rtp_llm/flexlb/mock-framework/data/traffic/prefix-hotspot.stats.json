@@ -1,0 +1,14 @@
+{
+  "requests": 4000,
+  "prefix_groups": 20,
+  "hot_prefix_groups": 2,
+  "hot_traffic_share": 0.7,
+  "prefix_tokens": 4096,
+  "suffix_tokens_per_request": 512,
+  "output_token_cap": 64,
+  "priority": 50,
+  "capture_duration_seconds": 600,
+  "theoretical_prefix_hit_rate": 0.889,
+  "note": "合成热点前缀流量：20 个前缀组中 2 个热组承载 70% 请求（i%10<7 命中热组 i%2，否则落入其余 18 个冷组），每组 4096 token 共享前缀 + 512 token 独有后缀；预热后理论命中率上限 88.9%（按 128 token 块对齐）。用于 F2.2/G3.3 热点倾斜与外溢 case。",
+  "generator": "gen_hotspot_traffic.py（按 IndexedTrafficReader 格式写出）"
+}

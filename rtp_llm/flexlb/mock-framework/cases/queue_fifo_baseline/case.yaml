@@ -1,0 +1,97 @@
+id: queue_fifo_baseline
+name: QUEUE+FIFO 调度基线
+describe:
+  S1-1：最常用组合（QUEUE/FIFO/FIXED_WINDOW 8×300ms + BATCH inflight 2）的调度延迟与排队基准。prefill 2 / decode 1，qps 8 稳态。基线记录：ttft p50/p95/p99、route_submit
+  与 queue_wait 分布、成功率。规模敏感：prefill 改 8/32/48 重跑看调度开销随 worker 数增长。
+environment:
+  master:
+    deployment:
+      replicas: 1
+    config: configs/master.yaml
+  prefill:
+    engine: rtp
+    deployment:
+      replicas: 2
+    config: configs/prefill.yaml
+  decode:
+    engine: rtp
+    deployment:
+      replicas: 1
+    config: configs/decode.yaml
+  frontend:
+    config:
+      seq_size_per_block: 128
+      prefill_cp_size: 4
+      image_token_id: 129264
+      cache_key_hash_seed: "4923373599811257905"
+phases:
+  - id: startup
+    describe: 确认唯一主 Master 并等待 Engine 发现传播。
+    timeout: 120s
+    steps:
+      - id: check_master_leader
+        describe: 只有一个主 Master。
+        interface: master/list/addresses
+        args:
+          is_leader: true
+        expect:
+          count: 1
+        wait_after: 10s
+  - id: traffic
+    describe: qps 8 稳态打流并采集调度指标。
+    timeout: 180s
+    steps:
+      - id: start_frontend
+        describe: qps 8 固定节奏播放，并发预算覆盖凑批等待。
+        interface: frontend/start/playback
+        args:
+          requests_file: data/traffic/uniform-2k.mckidx
+          qps: 8
+          total_concurrency: 32
+          queue_capacity: 64
+          request_timeout: 30s
+          drain_timeout: 30s
+        wait_after: 25s
+      - id: check_frontend_qps
+        describe: 实际发出速率稳定在目标区间。
+        interface: frontend/query/qps
+        args:
+          range:
+            - -10s
+            - 0s
+        expect:
+          gte: 7
+          lte: 9
+      - id: check_ttft_p95
+        describe: 稳态 TTFT P95 有上界（首轮跑出后收紧为基线）。
+        interface: frontend/query/ttft
+        args:
+          range:
+            - -10s
+            - 0s
+          statistic: p95
+        expect:
+          lte: 3
+      - id: observe_route_submit
+        describe: 调度链路耗时计时器留证。
+        interface: prometheus/query
+        args:
+          promql: flexlb_app_flexlb_route_submit_time_ms_seconds_count
+      - id: observe_queue_wait
+        describe: 排队等待计时器留证（含 priority 标签）。
+        interface: prometheus/query
+        args:
+          promql: flexlb_app_routing_queue_wait_time_ms_seconds_count
+      - id: stop_frontend
+        describe: 停止播放并收齐已发请求终态。
+        interface: frontend/stop/playback
+        within: 190s
+      - id: check_total_success_rate
+        describe: 全程成功率不低于 99%。
+        interface: frontend/query/success_rate
+        args:
+          range:
+            - -90s
+            - 0s
+        expect:
+          gte: 0.99

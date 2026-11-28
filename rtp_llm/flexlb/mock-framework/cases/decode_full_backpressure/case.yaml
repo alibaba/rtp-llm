@@ -1,0 +1,100 @@
+id: decode_full_backpressure
+name: Decode 满不拖死 Prefill
+describe:
+  G3.4 降级版：decode KV 预算只放 2 路并发（test_block_num=100 + 长输出数据集 cap 2000），第 3 路起在 master 排队、15s 超时以 8431 回收而非无限挂；恢复轮普通输出成功率回 99%。P 侧逐请求回收核对待
+  GAP-F2。
+environment:
+  master:
+    deployment:
+      replicas: 1
+    config: configs/master.yaml
+  prefill:
+    engine: rtp
+    deployment:
+      replicas: 2
+    config: configs/prefill.yaml
+  decode:
+    engine: rtp
+    deployment:
+      replicas: 1
+    config: configs/decode.yaml
+  frontend:
+    config:
+      seq_size_per_block: 128
+      prefill_cp_size: 4
+      image_token_id: 129264
+      cache_key_hash_seed: "4923373599811257905"
+phases:
+  - id: startup
+    describe: 确认唯一主 Master 并等待 Engine 发现传播。
+    timeout: 120s
+    steps:
+      - id: check_master_leader
+        describe: 只有一个主 Master。
+        interface: master/list/addresses
+        args:
+          is_leader: true
+        expect:
+          count: 1
+        wait_after: 10s
+  - id: saturate
+    describe: D 侧满载有界失败。
+    timeout: 420s
+    steps:
+      - id: start_saturation
+        describe: qps 4 打 40s：长输出数据集（cap 2000）+ decode KV 仅 100 块（master 侧预算只放 2 路并发），第 3 路起排队 15s 超时回收。
+        interface: frontend/start/playback
+        args:
+          requests_file: data/traffic/uniform-2k-longout.mckidx
+          qps: 4
+          total_concurrency: 128
+          queue_capacity: 256
+          request_timeout: 60s
+          drain_timeout: 60s
+        wait_after: 40s
+      - id: check_bounded_failure
+        describe: D 侧预算打满后请求以排队超时回收而非无限挂：成功率 ≤50%（前 2 路可成功）。
+        interface: frontend/query/success_rate
+        args:
+          range:
+            - -45s
+            - 0s
+        expect:
+          lte: 0.5
+      - id: check_queue_timeout_reclaims
+        describe: 排队等待超时的回收路径确实发生（error_code 8431 计数 ≥1）。
+        interface: frontend/query/playback_requests
+        args:
+          kind: TERMINAL
+          field: error_code
+          equals: "8431"
+        expect:
+          gte: 1
+      - id: stop_saturation
+        describe: 停止饱和轮；stop 内部强校验 issued==finished（无悬挂即通过）。
+        interface: frontend/stop/playback
+        within: 240s
+      - id: start_recovery
+        describe: 恢复轮：普通输出长度（cap 64）同负载，decode 快速释放。
+        interface: frontend/start/playback
+        args:
+          requests_file: data/traffic/uniform-2k.mckidx
+          qps: 3
+          total_concurrency: 128
+          queue_capacity: 256
+          request_timeout: 30s
+          drain_timeout: 60s
+        wait_after: 25s
+      - id: stop_recovery
+        describe: 停止恢复轮。
+        interface: frontend/stop/playback
+        within: 240s
+      - id: check_prefill_recovered
+        describe: 撤压后 Prefill 不被拖死：恢复轮成功率 ≥99%。
+        interface: frontend/query/success_rate
+        args:
+          range:
+            - -30s
+            - 0s
+        expect:
+          gte: 0.99

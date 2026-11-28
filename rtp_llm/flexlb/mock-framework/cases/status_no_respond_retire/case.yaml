@@ -1,0 +1,108 @@
+id: status_no_respond_retire
+name: 批量超时不滚雪球
+describe:
+  D1.1+D1.2 降级版：prefill-2/3 以 mock.rpc.status.no.respond 注入为发现即不应答（PENDING 形态）。实测定性（D1.2 的答案）：PENDING 超过 statusStaleAfterMs(10s) 即被判过期清退（设计如此），但因发现文件仍列出地址会被立即重发现，目录计数在
+  [2,4] 振荡；路由层永不调度未发布 endpoint 的 worker，健康 worker 零连坐、成功率 100%。真机基线：244 个 endpoint 被清退耗时 313s（反面教材）。
+environment:
+  master:
+    deployment:
+      replicas: 1
+    config: configs/master.yaml
+  prefill:
+    engine: rtp
+    deployment:
+      replicas: 4
+    config: configs/prefill.yaml
+    instance_configs:
+      prefill-2: configs/prefill-poisoned.yaml
+      prefill-3: configs/prefill-poisoned.yaml
+  decode:
+    engine: rtp
+    deployment:
+      replicas: 1
+    config: configs/decode.yaml
+  frontend:
+    config:
+      seq_size_per_block: 128
+      prefill_cp_size: 4
+      image_token_id: 129264
+      cache_key_hash_seed: "4923373599811257905"
+phases:
+  - id: startup
+    describe: 确认唯一主 Master 并等待 Engine 发现传播。
+    timeout: 120s
+    steps:
+      - id: check_master_leader
+        describe: 只有一个主 Master。
+        interface: master/list/addresses
+        args:
+          is_leader: true
+        expect:
+          count: 1
+        wait_after: 10s
+  - id: retire
+    describe: 不应答清退精确性。
+    timeout: 300s
+    steps:
+      - id: observe_catalog_early
+        describe: 早期目录计数（含未应答者，留证）。
+        interface: master/query/engine_count
+        args:
+          role: prefill
+        wait_after: 15s
+      - id: check_catalog_bounded
+        describe: 过期清退+重发现循环有界：目录始终在 [2,4]（健康者永不被清退，不应答者清了又被发现回注册）。
+        interface: master/query/engine_count
+        args:
+          role: prefill
+        expect:
+          gte: 2
+          lte: 4
+        wait_after: 25s
+      - id: start_frontend
+        describe: qps 8 打 25s，只有健康 worker 能接活。
+        interface: frontend/start/playback
+        args:
+          requests_file: data/traffic/uniform-2k.mckidx
+          qps: 8
+          total_concurrency: 32
+          queue_capacity: 64
+          request_timeout: 30s
+          drain_timeout: 60s
+        wait_after: 25s
+      - id: check_only_healthy_serving
+        describe: 恰好 2 台 prefill 在执行（不应答者零调度，清退精确不连坐）。
+        interface: prometheus/query_scalar
+        args:
+          promql: count(sum by(instance)(increase(rtp_llm_framework_requests_total{role="prefill"}[60s])) > 0)
+        expect:
+          eq: 2
+      - id: check_success_healthy
+        describe: 健康集合独立承载：成功率 100%。
+        interface: frontend/query/success_rate
+        args:
+          range:
+            - -20s
+            - 0s
+        expect:
+          eq: 1.0
+      - id: check_healthy_never_retired
+        describe: 打流全程健康者始终在岗（目录 ≥2，雪球式连坐不存在）。
+        interface: master/query/engine_count
+        args:
+          role: prefill
+        expect:
+          gte: 2
+      - id: stop_frontend
+        describe: 停止播放并收齐已发请求终态。
+        interface: frontend/stop/playback
+        within: 190s
+      - id: check_total_success_rate
+        describe: 全程成功率 100%。
+        interface: frontend/query/success_rate
+        args:
+          range:
+            - -120s
+            - 0s
+        expect:
+          gte: 1.0

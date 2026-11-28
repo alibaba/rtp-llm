@@ -1,0 +1,111 @@
+id: overload_recovery
+name: 过载后恢复
+describe: S8-2：过载 45s（qps 24 超过约 11/s 饱和点）后降回 qps 4，校验 TTFT 与排队等待在有限时间回基线、成功率恢复 99% 以上、inflight 无残留。（容量刻意做小，使过载在低 qps 区间完成。）基线记录：排空时长。
+environment:
+  master:
+    deployment:
+      replicas: 1
+    config: configs/master.yaml
+  prefill:
+    engine: rtp
+    deployment:
+      replicas: 1
+    config: configs/prefill.yaml
+  decode:
+    engine: rtp
+    deployment:
+      replicas: 1
+    config: configs/decode.yaml
+  frontend:
+    config:
+      seq_size_per_block: 128
+      prefill_cp_size: 4
+      image_token_id: 129264
+      cache_key_hash_seed: "4923373599811257905"
+phases:
+  - id: startup
+    describe: 确认唯一主 Master 并等待 Engine 发现传播。
+    timeout: 120s
+    steps:
+      - id: check_master_leader
+        describe: 只有一个主 Master。
+        interface: master/list/addresses
+        args:
+          is_leader: true
+        expect:
+          count: 1
+        wait_after: 10s
+  - id: overload
+    describe: 过载轮。
+    timeout: 300s
+    steps:
+      - id: start_overload
+        describe: qps 24 过载 45s（饱和点约 11/s），队列堆积、部分请求超时。
+        interface: frontend/start/playback
+        args:
+          requests_file: data/traffic/uniform-2k.mckidx
+          qps: 24
+          total_concurrency: 1024
+          queue_capacity: 2048
+          request_timeout: 12s
+          drain_timeout: 60s
+        wait_after: 50s
+      - id: stop_overload
+        describe: 停止过载轮。
+        interface: frontend/stop/playback
+        within: 90s
+      - id: record_success_overload
+        describe: 过载轮成功率留证（应明显受损）。
+        interface: frontend/query/success_rate
+        args:
+          range:
+            - -90s
+            - 0s
+      - id: observe_queue_length_after
+        describe: 过载后排空前的队列深度（留证）。
+        interface: prometheus/query
+        args:
+          promql: sum(flexlb_app_flexlb_batcher_queue_size)
+  - id: recover
+    describe: 恢复轮：降回约 0.2 倍饱和点。
+    timeout: 240s
+    steps:
+      - id: start_recover
+        describe: qps 4 恢复轮（约 0.36 倍饱和点），队列排空后延迟应回基线。
+        interface: frontend/start/playback
+        args:
+          requests_file: data/traffic/uniform-2k.mckidx
+          qps: 4
+          total_concurrency: 64
+          queue_capacity: 128
+          request_timeout: 30s
+          drain_timeout: 30s
+        wait_after: 35s
+      - id: check_ttft_recovered
+        describe: 恢复轮 TTFT P95 回到基线水位（与 S1-1 一致量级）。
+        interface: frontend/query/ttft
+        args:
+          range:
+            - -15s
+            - 0s
+          statistic: p95
+        expect:
+          lte: 3
+      - id: check_success_recovered
+        describe: 恢复轮成功率回到 99% 以上（在打流中测量，窗口不覆盖过载轮）。
+        interface: frontend/query/success_rate
+        args:
+          range:
+            - -25s
+            - 0s
+        expect:
+          gte: 0.99
+      - id: stop_recover
+        describe: 停止恢复轮。
+        interface: frontend/stop/playback
+        within: 190s
+      - id: observe_inflight_drained
+        describe: 恢复后在途记录应回落无残留（留证）。
+        interface: prometheus/query
+        args:
+          promql: flexlb_app_flexlb_inflight_request_count

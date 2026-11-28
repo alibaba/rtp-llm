@@ -310,6 +310,52 @@ class RtpConfigTest {
         }
     }
 
+    @Test void faultInjectionSettingsAreOptionalValidatedAndReported() throws Exception {
+        var root = root();
+        var config = (ObjectNode) root.path("component").path("config");
+        var defaults = load(root);
+        assertEquals(0, defaults.enqueueAckDelayMs());
+        assertEquals(0, defaults.cancelEffectDelayMs());
+        assertEquals(0.0, defaults.executeErrorRate());
+        assertFalse(defaults.effective().has("mock.rpc.enqueue.ack.delay.ms"));
+        assertFalse(defaults.effective().has("mock.execute.error.rate"));
+        config.put("mock.rpc.enqueue.ack.delay.ms", 600).put("mock.rpc.cancel.effect.delay.ms", 3000)
+            .put("mock.execute.error.rate", 0.5).put("mock.execute.error.seed", 7);
+        var configured = load(root);
+        assertEquals(600, configured.enqueueAckDelayMs());
+        assertEquals(3000, configured.cancelEffectDelayMs());
+        assertEquals(0.5, configured.executeErrorRate());
+        assertEquals(7, configured.executeErrorSeed());
+        assertEquals(600, configured.effective().path("mock.rpc.enqueue.ack.delay.ms").asInt());
+        assertEquals(0.5, configured.effective().path("mock.execute.error.rate").asDouble(), 1e-9);
+        config.put("mock.execute.error.rate", 1.5);
+        assertThrows(IllegalArgumentException.class, () -> load(root));
+        config.put("mock.execute.error.rate", 0.5).put("mock.rpc.cancel.effect.delay.ms", -1);
+        assertThrows(IllegalArgumentException.class, () -> load(root));
+    }
+
+    @Test void statusOutageAndAdmissionDelaySettingsAreOptionalValidatedAndReported() throws Exception {
+        var root = root();
+        var config = (ObjectNode) root.path("component").path("config");
+        var defaults = load(root);
+        assertEquals(0, defaults.enqueueAdmissionDelayMs());
+        assertFalse(defaults.statusNoRespond());
+        assertFalse(defaults.effective().has("mock.rpc.enqueue.admission.delay.ms"));
+        assertFalse(defaults.effective().has("mock.rpc.status.no.respond"));
+        config.put("mock.rpc.enqueue.admission.delay.ms", 800).put("mock.rpc.status.no.respond", true);
+        var configured = load(root);
+        assertEquals(800, configured.enqueueAdmissionDelayMs());
+        assertTrue(configured.statusNoRespond());
+        assertEquals(800, configured.effective().path("mock.rpc.enqueue.admission.delay.ms").asInt());
+        assertTrue(configured.effective().path("mock.rpc.status.no.respond").asBoolean());
+        assertEquals(configured.effective(),
+            RtpConfig.fromEnvironment(configured.id(), configured.role(), environmentOf(configured.business())).effective());
+        config.put("mock.rpc.enqueue.admission.delay.ms", -1);
+        assertThrows(IllegalArgumentException.class, () -> load(root));
+        config.put("mock.rpc.enqueue.admission.delay.ms", 800).put("mock.rpc.status.no.respond", "maybe");
+        assertThrows(IllegalArgumentException.class, () -> load(root));
+    }
+
     private RtpConfig load(ObjectNode value) throws Exception {
         var path = directory.resolve("component.json"); JSON.writeValue(path.toFile(), value); return RtpConfig.load(path);
     }

@@ -1,0 +1,9 @@
+{
+  "requests": 2000,
+  "input_tokens_per_request": 2048,
+  "output_token_cap": 2000,
+  "priority": 50,
+  "capture_duration_seconds": 600,
+  "note": "均匀文本流量的长输出变体：输出 cap 2000 token（普通版为 64），用于把 Decode 侧拖满（G3.4）。",
+  "generator": "gen_uniform_traffic.py（cap 参数 2000）"
+}

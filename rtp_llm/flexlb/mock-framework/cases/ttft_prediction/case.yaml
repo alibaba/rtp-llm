@@ -1,0 +1,82 @@
+id: ttft_prediction
+name: TTFT 投影准确度
+describe:
+  S3-1：executionTimeEstimator 公式预测准确度（预测是路由和凑批的共同输入）。engine 单批恒定 360ms，Master 估计公式同配 '360'，predict gap 应围绕 0 分布。反向使用时可用本 case 校准 Master
+  端 estimator 参数。基线记录：predict gap p50/p99。
+environment:
+  master:
+    deployment:
+      replicas: 1
+    config: configs/master.yaml
+  prefill:
+    engine: rtp
+    deployment:
+      replicas: 2
+    config: configs/prefill.yaml
+  decode:
+    engine: rtp
+    deployment:
+      replicas: 1
+    config: configs/decode.yaml
+  frontend:
+    config:
+      seq_size_per_block: 128
+      prefill_cp_size: 4
+      image_token_id: 129264
+      cache_key_hash_seed: "4923373599811257905"
+phases:
+  - id: startup
+    describe: 确认唯一主 Master 并等待 Engine 发现传播。
+    timeout: 120s
+    steps:
+      - id: check_master_leader
+        describe: 只有一个主 Master。
+        interface: master/list/addresses
+        args:
+          is_leader: true
+        expect:
+          count: 1
+        wait_after: 10s
+  - id: traffic
+    describe: 稳态打流并采集预测偏差。
+    timeout: 180s
+    steps:
+      - id: start_frontend
+        describe: qps 8 稳态打流 30s。
+        interface: frontend/start/playback
+        args:
+          requests_file: data/traffic/uniform-2k.mckidx
+          qps: 8
+          total_concurrency: 32
+          queue_capacity: 64
+          request_timeout: 30s
+          drain_timeout: 30s
+        wait_after: 30s
+      - id: observe_predict_gap
+        describe: 批预测偏差样本量与分布（留证；均值应围绕 0）。
+        interface: prometheus/query
+        args:
+          promql: flexlb_app_flexlb_batch_predict_gap_ms_seconds_sum
+      - id: observe_predicted_time
+        describe: 批预测耗时计时器留证。
+        interface: prometheus/query
+        args:
+          promql: flexlb_app_flexlb_batch_predicted_time_ms_seconds_sum
+      - id: observe_actual_time
+        describe: 批实际耗时计时器留证。
+        interface: prometheus/query
+        args:
+          promql: flexlb_app_flexlb_batch_actual_time_ms_seconds_sum
+      - id: stop_frontend
+        describe: 停止播放并收齐已发请求终态。
+        interface: frontend/stop/playback
+        within: 190s
+      - id: check_total_success_rate
+        describe: 全程成功率不低于 99%。
+        interface: frontend/query/success_rate
+        args:
+          range:
+            - -90s
+            - 0s
+        expect:
+          gte: 0.99

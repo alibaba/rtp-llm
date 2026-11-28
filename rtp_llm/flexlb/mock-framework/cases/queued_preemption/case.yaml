@@ -1,0 +1,77 @@
+id: queued_preemption
+name: 排队内抢占
+describe:
+  S4-1：PREFILL_QUEUED 抢占。PRIORITY + NON_BATCH inflight 2，prefill 1 台收紧容量；qps 8 压满后，高优先级（数值大）请求应顶掉队列中的低优先级请求。受害者收到 8429 的逐请求核对依赖 GAP-F2，当前采集
+  priority_preempt_count 与各优先级组排队耗时留证。基线记录：抢占计数、分组等待差。
+environment:
+  master:
+    deployment:
+      replicas: 1
+    config: configs/master.yaml
+  prefill:
+    engine: rtp
+    deployment:
+      replicas: 1
+    config: configs/prefill.yaml
+  decode:
+    engine: rtp
+    deployment:
+      replicas: 1
+    config: configs/decode.yaml
+  frontend:
+    config:
+      seq_size_per_block: 128
+      prefill_cp_size: 4
+      image_token_id: 129264
+      cache_key_hash_seed: "4923373599811257905"
+phases:
+  - id: startup
+    describe: 确认唯一主 Master 并等待 Engine 发现传播。
+    timeout: 120s
+    steps:
+      - id: check_master_leader
+        describe: 只有一个主 Master。
+        interface: master/list/addresses
+        args:
+          is_leader: true
+        expect:
+          count: 1
+        wait_after: 10s
+  - id: traffic
+    describe: 压满容量触发排队抢占。
+    timeout: 240s
+    steps:
+      - id: start_frontend
+        describe: qps 8 超过约 2.7/s 容量，队列竞争触发优先级抢占。
+        interface: frontend/start/playback
+        args:
+          requests_file: data/traffic/deepseek-v4.1-text.mckidx
+          qps: 8
+          total_concurrency: 128
+          queue_capacity: 256
+          request_timeout: 60s
+          drain_timeout: 60s
+        wait_after: 40s
+      - id: observe_preempt_count
+        describe: 排队内抢占计数（stage=prefill_queued 应非零，留证）。
+        interface: prometheus/query
+        args:
+          promql: flexlb_auto_tpm_priority_preempt_count_total
+      - id: observe_queue_wait_by_priority
+        describe: 各优先级组排队耗时（高优先级组应显著更低，留证）。
+        interface: prometheus/query
+        args:
+          promql: sum by(priority)(flexlb_app_routing_queue_wait_time_ms_seconds_sum)
+      - id: stop_frontend
+        describe: 停止播放并收齐已发请求终态。
+        interface: frontend/stop/playback
+        within: 90s
+      - id: check_total_success_rate
+        describe: 有被抢占失败的请求也有完成的请求，成功率应在合理区间。
+        interface: frontend/query/success_rate
+        args:
+          range:
+            - -120s
+            - 0s
+        expect:
+          gte: 0.3

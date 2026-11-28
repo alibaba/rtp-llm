@@ -1,0 +1,73 @@
+id: same_priority_no_preempt
+name: 同级不互抢
+describe:
+  S4-2：同优先级压满后继续注入，不应发生抢占，排队超时的请求按 8431 失败。uniform-2k 流量全部 priority 50，prefill 1 台 inflight 2 收紧容量，queueTimeoutMs 收紧到 3s 让消化不掉的同级请求快速失败。抢占计数应恒
+  0（留证）。基线记录：同级拒绝比例。
+environment:
+  master:
+    deployment:
+      replicas: 1
+    config: configs/master.yaml
+  prefill:
+    engine: rtp
+    deployment:
+      replicas: 1
+    config: configs/prefill.yaml
+  decode:
+    engine: rtp
+    deployment:
+      replicas: 1
+    config: configs/decode.yaml
+  frontend:
+    config:
+      seq_size_per_block: 128
+      prefill_cp_size: 4
+      image_token_id: 129264
+      cache_key_hash_seed: "4923373599811257905"
+phases:
+  - id: startup
+    describe: 确认唯一主 Master 并等待 Engine 发现传播。
+    timeout: 120s
+    steps:
+      - id: check_master_leader
+        describe: 只有一个主 Master。
+        interface: master/list/addresses
+        args:
+          is_leader: true
+        expect:
+          count: 1
+        wait_after: 10s
+  - id: traffic
+    describe: 同优先级压满验证不互抢。
+    timeout: 240s
+    steps:
+      - id: start_frontend
+        describe: qps 8 持续 15s，同优先级请求超出约 5/s 容量后排队 3s 超时失败。
+        interface: frontend/start/playback
+        args:
+          requests_file: data/traffic/uniform-2k.mckidx
+          qps: 8
+          total_concurrency: 64
+          queue_capacity: 128
+          request_timeout: 30s
+          drain_timeout: 30s
+        wait_after: 20s
+      - id: stop_frontend
+        describe: 停止打流。
+        interface: frontend/stop/playback
+        within: 60s
+      - id: check_total_success_rate
+        describe: 容量被同级占满后新请求超时拒绝，成功率应明显下降。
+        interface: frontend/query/success_rate
+        args:
+          range:
+            - -60s
+            - 0s
+        expect:
+          lte: 0.85
+          gte: 0.2
+      - id: observe_preempt_count
+        describe: 同优先级不应触发抢占，计数应为 0 或无样本（留证）。
+        interface: prometheus/query
+        args:
+          promql: flexlb_auto_tpm_priority_preempt_count_total

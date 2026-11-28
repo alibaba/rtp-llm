@@ -24,19 +24,22 @@
 
 `config` 文件的内容就是角色配置 mapping。Master 的 `FLEXLB_CONFIG` 和 `MODEL_SERVICE_CONFIG` 使用原生 JSON 字符串。Mock 点分键由编译器展开。重复键、YAML merge 和点分路径冲突会报错。[组件参数](component-reference.md#engine-配置规则)
 
+Engine 角色（prefill/decode/vit）可用 `instance_configs` 按实例覆盖配置：键是实例 ID（如 `prefill-2`，含扩容产生的新实例），值是与 `config` 同形的完整替换配置。用于"只给一台注入故障"的场景（如 F1.5 局部慢 worker、D1.1 带病实例）。
+
 ID 使用小写 `snake_case`，Case、Phase 和 Step 的 ID 在同一个 Case 中全局唯一。Case ID 与目录同名，Phase ID 描述阶段。Step ID 写成“动作 + 对象”，例如 `start_frontend`、`get_master_a`、`check_prefill_tps`、`check_frontend_success_rate_after_drain`。阈值放进 `expect`，场景意图放进 `describe`。改名时同步修改引用。
 
 ### `targets`
 
 `args.targets` 指定当前 Step 要操作或查询的实例。它是非空且无重复的 RPC 地址列表，可以直接写地址，也可以引用返回值或实时拓扑。Step 在执行时检查地址是否属于对应角色，以及实例状态是否符合操作要求。
 
-| 接口                  | 目标规则                                                                                                                           |
-| --------------------- | ---------------------------------------------------------------------------------------------------------------------------------- |
-| `master/stop`         | 必须传 `targets`，地址须属于在线 Master。                                                                                          |
-| `master/restart`      | 必须传 `targets`，地址须属于已停止的 Master。可以引用停止步骤返回的地址。                                                          |
-| `engine/scale` 缩容   | 至少传 `targets` 或 `count`。有 `targets` 时按列表顺序选择，两者都传时取前 `count` 个。只传 `count` 时从对应角色的在线实例中选择。 |
-| `engine/scale` 扩容   | 用 `role` 和 `count` 指定新增实例，`count` 默认 1。                                                                                |
-| 支持 `targets` 的查询 | 省略时查询该接口对应角色的全部在线实例。                                                                                           |
+| 接口                  | 目标规则                                                                                                                             |
+| --------------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
+| `master/stop`         | 必须传 `targets`，地址须属于在线 Master。                                                                                            |
+| `master/restart`      | 必须传 `targets`，地址须属于已停止的 Master。可以引用停止步骤返回的地址。                                                            |
+| `engine/scale` 缩容   | 至少传 `targets` 或 `count`。有 `targets` 时按列表顺序选择，两者都传时取前 `count` 个。只传 `count` 时从对应角色的在线实例中选择。   |
+| `engine/scale` 扩容   | 用 `role` 和 `count` 指定新增实例，`count` 默认 1。                                                                                  |
+| `engine/stop`         | `targets` 或 `count` 二选一；`mode` 默认 `kill`。只杀进程，**不摘服务发现**——Master 必须靠健康检查自己发现，用于 D1/D3 类故障 case。 |
+| 支持 `targets` 的查询 | 省略时查询该接口对应角色的全部在线实例。                                                                                             |
 
 `{ref: globals.masters}`、`globals.prefill`、`globals.decode` 和 `globals.vit` 提供当前 Step 取到的在线实例地址。引用前置 Step 的返回值时，取的是当时保存的地址。
 
@@ -94,6 +97,8 @@ phases:
 优先选择有明确单位和聚合方式的指标动作，用 `expect` 写绝对阈值。查询范围相对当前 Step 的固定查询时刻。比如 `range: [-60s, 0s]` 表示截至该时刻的最近 60 秒。安排预热和等待时，把所选窗口放在需要观察的阶段。
 
 支持 `mode` 的指标动作默认汇总整个区间。比例类指标分别汇总分子和分母，再相除。需要每个采样点都达标时，使用 `mode: series`，数值上下限会逐点检查。缺少样本或分母为零按查询错误处理。具体接口支持的参数和单位查动作源码，指标采样边界见 [指标覆盖](../views/coverage.md#指标口径)。
+
+`prometheus/query` 返回原始样本列表，只能留证不能做阈值断言；要把任意 PromQL 接进 `expect`，用 `prometheus/query_scalar`——它要求查询恰好返回一个有限数值（例如 `max(...)`、`count(...)`、分位数的 `histogram_quantile(...)`），否则按查询错误处理。`frontend/query/playback_requests` 按 `kind`（如 `TERMINAL`/`ISSUED`）、`field`、`equals` 统计最近一次回放落盘的逐请求证据事件数（`frontend-*` 全副本合计），返回值可断言——终态唯一性、错误码分类、重试放大（`duplicate` 标记）都走它。`master/query/pv_requests` 扫描各 Master 的 `logs/pv.log*`，按 `schedule_origin`、`success`、`code`、`decode_requeue_count_gte` 过滤统计逐请求调度记录，并支持 `require_frontend_outcome` 按 `request_id` 与 Frontend 最新回放终态交叉核对。`master/query/engine_count` 返回各 Master 一致的角色目录计数（不一致即报错），用于 D 类清退/发现断言。
 
 ## Step 函数规范
 

@@ -177,7 +177,7 @@ public final class FrontendNode implements AutoCloseable {
                     call(peers.get(i), "worker/prepare", new FrontendReplayPlan(number, args.masters(), args.requests_file(),
                         count, i, frontends, firstId, identity, args.qps(), args.replay_speed(), slots,
                         args.queue_capacity(), args.request_timeout_ms(), args.drain_timeout_ms(), args.reuse_cache(),
-                        args.fallback_max_output_tokens(), args.warmup()), 10_000);
+                        args.fallback_max_output_tokens(), args.warmup(), args.duplicate_every()), 10_000);
                 }
                 long startAt = System.currentTimeMillis() + Math.max(1000, peers.size() * 100L);
                 for (String peer : peers) {

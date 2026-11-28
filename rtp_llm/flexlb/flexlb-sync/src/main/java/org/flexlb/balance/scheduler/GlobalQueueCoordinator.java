@@ -207,6 +207,7 @@ final class GlobalQueueCoordinator implements AutoCloseable {
             entry.context.setPlanType("");
             entry.context.setPlanCost(0L);
             entry.context.setVictimCount(0);
+            entry.context.incrementDecodeRequeueCount();
             orderedQueue.restore(entry);
             changed.signal();
             return true;

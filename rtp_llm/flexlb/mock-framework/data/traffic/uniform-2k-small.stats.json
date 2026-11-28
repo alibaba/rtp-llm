@@ -1,0 +1,9 @@
+{
+  "requests": 2000,
+  "input_tokens_per_request": 2048,
+  "output_token_cap": 4096,
+  "priority": 50,
+  "capture_duration_seconds": 600,
+  "note": "uniform-2k 的小请求数、长输出变体：请求数少（低 qps 轮次不触 24h 回放上限），输出上限 4096 使 decode 输出均值配置能生效（S3-4 需要约 20s 的长 decode 占用）。",
+  "generator": "gen_uniform_traffic.py（按 IndexedTrafficReader 格式写出）"
+}

@@ -1,0 +1,115 @@
+id: engine_kill_detection
+name: 单机 kill 摘除时效
+describe:
+  D3.1 单机降级版（dp=1）：engine/stop SIGKILL 一台 prefill 但保留服务发现记录，验证 Master 靠健康检查发现死亡（目录 2→1）、摘除后零新调度、成功率恢复。真机组级基线：D 组 24~34ms、P 组 1.6s；DP>1
+  组拓扑待框架大改。
+environment:
+  master:
+    deployment:
+      replicas: 1
+    config: configs/master.yaml
+  prefill:
+    engine: rtp
+    deployment:
+      replicas: 2
+    config: configs/prefill.yaml
+  decode:
+    engine: rtp
+    deployment:
+      replicas: 1
+    config: configs/decode.yaml
+  frontend:
+    config:
+      seq_size_per_block: 128
+      prefill_cp_size: 4
+      image_token_id: 129264
+      cache_key_hash_seed: "4923373599811257905"
+phases:
+  - id: startup
+    describe: 确认唯一主 Master 并等待 Engine 发现传播。
+    timeout: 120s
+    steps:
+      - id: check_master_leader
+        describe: 只有一个主 Master。
+        interface: master/list/addresses
+        args:
+          is_leader: true
+        expect:
+          count: 1
+        wait_after: 10s
+  - id: kill
+    describe: kill 单机并验证摘除。
+    timeout: 300s
+    steps:
+      - id: start_frontend
+        describe: qps 8 持续打流贯穿 kill。
+        interface: frontend/start/playback
+        args:
+          requests_file: data/traffic/uniform-2k.mckidx
+          qps: 8
+          total_concurrency: 32
+          queue_capacity: 64
+          request_timeout: 30s
+          drain_timeout: 60s
+        wait_after: 15s
+      - id: check_success_before
+        describe: kill 前成功率基线。
+        interface: frontend/query/success_rate
+        args:
+          range:
+            - -10s
+            - 0s
+        expect:
+          gte: 0.99
+      - id: check_catalog_before
+        describe: kill 前目录 2 台。
+        interface: master/query/engine_count
+        args:
+          role: prefill
+        expect:
+          eq: 2
+      - id: kill_one_engine
+        describe: SIGKILL 一台 prefill（不摘服务发现）。
+        interface: engine/stop
+        args:
+          role: prefill
+          count: 1
+          mode: kill
+        within: 30s
+      - id: evidence_catalog_after_kill
+        describe: kill 后目录计数（死亡者被过期清退又因发现文件重发现，振荡留证）。
+        interface: master/query/engine_count
+        args:
+          role: prefill
+        wait_after: 25s
+      - id: check_dead_gets_nothing
+        describe: kill 后只有 1 台 prefill 在执行（死节点零新调度）。
+        interface: prometheus/query_scalar
+        args:
+          promql: count(sum by(instance)(increase(rtp_llm_framework_requests_total{role="prefill"}[20s])) > 0)
+        expect:
+          eq: 1
+        wait_after: 5s
+      - id: check_success_after
+        describe: 摘除后 20s 窗口成功率恢复 ≥95%。
+        interface: frontend/query/success_rate
+        args:
+          range:
+            - -20s
+            - 0s
+        expect:
+          gte: 0.95
+        wait_after: 15s
+      - id: stop_frontend
+        describe: 停止播放并收齐已发请求终态。
+        interface: frontend/stop/playback
+        within: 190s
+      - id: check_total_success_rate
+        describe: 全程成功率 ≥90%（kill 瞬间受损有界）。
+        interface: frontend/query/success_rate
+        args:
+          range:
+            - -150s
+            - 0s
+        expect:
+          gte: 0.9

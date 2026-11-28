@@ -45,7 +45,9 @@ public final class LLMMockEngine implements AutoCloseable {
                 ? AbstractRtpScheduler.create(lock, config, cacheManager, finished, rtpMetrics)
                 : schedulers.create(lock, cacheManager, finished);
             engine = new EngineLoop(lock, scheduler, finished, cacheManager, config.compute(), config.role(),
-                config.id(), config.prefillOverheadMs());
+                config.id(), config.prefillOverheadMs(),
+                config.executeErrorRate() > 0
+                    ? new EngineLoop.FailureInjection(config.executeErrorRate(), config.executeErrorSeed()) : null);
             try {
                 service = new RtpRpcService(RtpRpcService.Config.from(config), cacheManager, lock, finished, engine, config.groupScheduling());
             } catch (RuntimeException | Error failure) {
@@ -134,7 +136,10 @@ public final class LLMMockEngine implements AutoCloseable {
     private static LLMMockEngine start(RtpConfig config, int rpcPort, int controlPort, EngineScheduler.Factory schedulers) throws IOException {
         var node = new LLMMockEngine(config, schedulers);
         try {
-            var builder = NettyServerBuilder.forAddress(node.address.listener(rpcPort)).addService(node.service);
+            var builder = NettyServerBuilder.forAddress(node.address.listener(rpcPort))
+                    .permitKeepAliveTime(1, TimeUnit.SECONDS)
+                    .permitKeepAliveWithoutCalls(true)
+                    .addService(node.service);
             if (config.role() == org.flexlb.mock.protocol.Role.decode) builder.addService(node.service.mockDecodeService());
             node.rpc = builder.build().start();
             node.metrics = org.flexlb.mock.metrics.MetricsOutput.start(node::collectMetrics);

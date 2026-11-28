@@ -1,0 +1,75 @@
+id: duplicate_request_id
+name: 幂等拒绝
+describe:
+  S5-1：同 request_id 并发重发，Master 应以 8406 拒绝第二笔且不产生第二个执行任务。60 条正常请求 + 每第 6 条并发重复（duplicate_every=6）。首轮实测发现一个 Master 侧缺陷：8406 拒绝响应携带了原始请求的
+  lifecycle（routeLocally 按 id 查到了主请求 slot），导致 frontend 按惯例补发 Cancel 误杀原始请求（8504）。本 case 门禁记录当前可观测区间，journal 中同 id 双终态（8406+8504）为缺陷留证；修复后成功率应收窄到
+  ≈0.857。
+environment:
+  master:
+    deployment:
+      replicas: 1
+    config: configs/master.yaml
+  prefill:
+    engine: rtp
+    deployment:
+      replicas: 1
+    config: configs/prefill.yaml
+  decode:
+    engine: rtp
+    deployment:
+      replicas: 1
+    config: configs/decode.yaml
+  frontend:
+    config:
+      seq_size_per_block: 128
+      prefill_cp_size: 4
+      image_token_id: 129264
+      cache_key_hash_seed: "4923373599811257905"
+phases:
+  - id: startup
+    describe: 确认唯一主 Master 并等待 Engine 发现传播。
+    timeout: 120s
+    steps:
+      - id: check_master_leader
+        describe: 只有一个主 Master。
+        interface: master/list/addresses
+        args:
+          is_leader: true
+        expect:
+          count: 1
+        wait_after: 10s
+  - id: traffic
+    describe: 播放含重复 request_id 的流量。
+    timeout: 240s
+    steps:
+      - id: start_frontend
+        describe: qps 4 播放 60 条请求，每第 6 条并发重发一次同 id。
+        interface: frontend/start/playback
+        args:
+          requests_file: data/traffic/uniform-2k.mckidx
+          qps: 4
+          total_concurrency: 32
+          queue_capacity: 64
+          request_timeout: 30s
+          drain_timeout: 30s
+          duplicate_every: 6
+        wait_after: 25s
+      - id: stop_frontend
+        describe: 停止打流并收齐终态。
+        interface: frontend/stop/playback
+        within: 90s
+      - id: check_success_rate
+        describe: 重复拒绝生效且全部有终态：成功率落在当前可观测区间（原始请求被误杀时 ≈0.70，修复 Master lifecycle 携带后应 ≈0.857）。
+        interface: frontend/query/success_rate
+        args:
+          range:
+            - -90s
+            - 0s
+        expect:
+          gte: 0.5
+          lte: 0.88
+      - id: observe_prefill_executed
+        describe: prefill 实际执行的请求数应等于 60（无重复执行，留证）。
+        interface: prometheus/query
+        args:
+          promql: sum(increase(rtp_llm_framework_requests_total{role="prefill"}[90s]))

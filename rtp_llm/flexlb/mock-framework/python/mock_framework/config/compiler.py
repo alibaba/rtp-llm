@@ -371,7 +371,7 @@ def compile_environment(raw, *, directory=None):
     fields(raw, _ROLES, where="environment")
     result = {}
     for role, component in raw.items():
-        allowed = {"deployment", "config"}
+        allowed = {"deployment", "config", "instance_configs"}
         required = set()
         if role in ("prefill", "decode"):
             allowed.add("engine")
@@ -387,4 +387,39 @@ def compile_environment(raw, *, directory=None):
         result[role] = {"deployment": deployment, "config": _expand_config(native)}
         if "engine" in component:
             result[role]["engine"] = component["engine"]
+        if "instance_configs" in component:
+            result[role]["instance_configs"] = _compile_instance_configs(
+                component["instance_configs"], role, directory
+            )
+    return result
+
+
+_INSTANCE_ID = re.compile(r"^[a-z]+-\d+$")
+
+
+def _compile_instance_configs(raw, role, directory):
+    """Per-instance Engine config overrides keyed by instance id like prefill-2.
+
+    An override replaces the role config for that one instance, so a single Engine
+    can carry a fault knob while the rest of the role stays healthy.
+    """
+    if role not in ("prefill", "decode", "vit"):
+        raise ConfigError(
+            f"{role}.instance_configs: only Engine roles support overrides"
+        )
+    if not isinstance(raw, dict) or not raw:
+        raise ConfigError(f"{role}.instance_configs: expected a nonempty mapping")
+    result = {}
+    for instance_id, override in raw.items():
+        if (
+            not isinstance(instance_id, str)
+            or not _INSTANCE_ID.fullmatch(instance_id)
+            or not instance_id.startswith(role + "-")
+        ):
+            raise ConfigError(
+                f"{role}.instance_configs: keys must be instance ids like {role}-2"
+            )
+        result[instance_id] = _expand_config(
+            _load_role_config(override, role, directory)
+        )
     return result

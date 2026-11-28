@@ -1,0 +1,140 @@
+id: failover_error_breakdown
+name: 切换错误分类统计
+describe: A4.1 降级版：主备切换窗口内请求全量核对——终态唯一（TERMINAL==ISSUED）、零重试放大（无 duplicate ISSUED）、成功率有界；按 error_code/outcome 的分类计数作为证据记录（真机三分法：在途受损/冷启动拒绝/重试放大）。
+environment:
+  master:
+    deployment:
+      replicas: 2
+    config: configs/master.yaml
+  prefill:
+    engine: rtp
+    deployment:
+      replicas: 2
+    config: configs/prefill.yaml
+  decode:
+    engine: rtp
+    deployment:
+      replicas: 1
+    config: configs/decode.yaml
+  frontend:
+    config:
+      seq_size_per_block: 128
+      prefill_cp_size: 4
+      image_token_id: 129264
+      cache_key_hash_seed: "4923373599811257905"
+phases:
+  - id: startup
+    describe: 确认唯一主 Master 并等待 Engine 发现传播。
+    timeout: 120s
+    steps:
+      - id: check_master_leader
+        describe: 只有一个主 Master。
+        interface: master/list/addresses
+        args:
+          is_leader: true
+        expect:
+          count: 1
+        wait_after: 10s
+  - id: failover
+    describe: 打流中杀主并做错误分类。
+    timeout: 300s
+    steps:
+      - id: get_master_a
+        describe: 记录当前主 Master 地址。
+        interface: master/list/addresses
+        args:
+          is_leader: true
+        expect:
+          count: 1
+      - id: start_frontend
+        describe: qps 8 持续打流贯穿杀主窗口。
+        interface: frontend/start/playback
+        args:
+          requests_file: data/traffic/uniform-2k.mckidx
+          qps: 8
+          total_concurrency: 32
+          queue_capacity: 64
+          request_timeout: 30s
+          drain_timeout: 60s
+        wait_after: 15s
+      - id: check_success_before
+        describe: 杀主前成功率基线。
+        interface: frontend/query/success_rate
+        args:
+          range:
+            - -10s
+            - 0s
+        expect:
+          gte: 0.99
+      - id: kill_master_a
+        describe: 强制杀掉主 Master。
+        interface: master/stop
+        args:
+          targets:
+            ref: steps.get_master_a
+          mode: kill
+        within: 45s
+        wait_after: 25s
+      - id: check_leader_after_kill
+        describe: 新主唯一。
+        interface: master/list/addresses
+        args:
+          is_leader: true
+        expect:
+          count: 1
+      - id: check_success_window
+        describe: 切换窗口内成功率不低于 90%。
+        interface: frontend/query/success_rate
+        args:
+          range:
+            - -25s
+            - 0s
+        expect:
+          gte: 0.9
+      - id: stop_frontend
+        describe: 停止播放并收齐已发请求终态。
+        interface: frontend/stop/playback
+        within: 190s
+      - id: count_issued
+        describe: 发出的请求总数（后续终态核对的基数）。
+        interface: frontend/query/playback_requests
+        args:
+          kind: ISSUED
+      - id: check_terminal_unique
+        describe: 每个已发请求恰好一个终态（无重复执行/双路终态）。
+        interface: frontend/query/playback_requests
+        args:
+          kind: TERMINAL
+        expect:
+          eq:
+            ref: steps.count_issued
+      - id: check_no_retry_duplicates
+        describe: 不允许重试放大：重复发同 request_id 的 ISSUED 事件为 0。
+        interface: frontend/query/playback_requests
+        args:
+          kind: ISSUED
+          field: duplicate
+        expect:
+          lte: 0
+      - id: evidence_error_codes
+        describe: 按 error_code 分类的受损请求数（切换错误分类留证）。
+        interface: frontend/query/playback_requests
+        args:
+          kind: TERMINAL
+          field: error_code
+      - id: evidence_cancelled
+        describe: 在途受损（取消）的请求数（分类之一，留证）。
+        interface: frontend/query/playback_requests
+        args:
+          kind: TERMINAL
+          field: outcome
+          equals: cancelled
+      - id: check_total_success_rate
+        describe: 全程成功率不低于 90%。
+        interface: frontend/query/success_rate
+        args:
+          range:
+            - -120s
+            - 0s
+        expect:
+          gte: 0.9

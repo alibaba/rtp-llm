@@ -197,7 +197,7 @@ class PlaybackTest {
                  var one = new FrontendNode("frontend-1", topology, directory.resolve("one-" + early))) {
                 new ObjectMapper().writeValue(topology.toFile(), List.of(h.endpoint(),
                     Map.of("role", "frontend", "control", zero.url()), Map.of("role", "frontend", "control", one.url())));
-                zero.startReplay(new Start(List.of(master(h)), source.toString(), null, 5.0, 4, 8, 3000, 1000, true, null, null));
+                zero.startReplay(new Start(List.of(master(h)), source.toString(), null, 5.0, 4, 8, 3000, 1000, true, null, null, null));
                 assertTrue(h.scheduleEntered.await(3, TimeUnit.SECONDS));
                 if (!early) eventually(() -> zero.state(new Sequence(1)).done() && one.state(new Sequence(1)).done());
                 var result = zero.stopReplay(new Empty());
@@ -280,6 +280,33 @@ class PlaybackTest {
         assertThrows(IllegalArgumentException.class, () -> new Start(List.of("m:1"), "/input.mckidx", Double.NaN, null, 1, 1, 100, 100));
         assertThrows(IllegalArgumentException.class, () -> new Start(List.of("m:1"), "/input.mckidx", 0.0, null, 1, 1, 100, 100));
         assertThrows(IllegalArgumentException.class, () -> new Start(null, null, 1.0, null, 1, 1, 100, 100));
+        assertThrows(IllegalArgumentException.class, () -> new Start(null, "/input.mckidx", 1.0, null, 1, 1, 100, 100, false, null, null, 1));
+    }
+
+    @Test void duplicateEveryIssuesAConcurrentSecondCallReusingTheRequestId() throws Exception {
+        Path topology = directory.resolve("topology.json");
+        Path input = InputFixture.write(directory.resolve("dup.mckidx"), java.util.Collections.nCopies(4, 0L));
+        try (var h = new BackendRpcTransportTest.Harness();
+             var zero = new FrontendNode("frontend-0", topology, directory.resolve("zero"))) {
+            new ObjectMapper().writeValue(topology.toFile(), List.of(h.endpoint(),
+                Map.of("role", "frontend", "control", zero.url())));
+            zero.startReplay(new Start(null, input.toString(), 50.0, null, 8, 16, 3000, 3000, false, null, null, 2));
+            eventually(() -> zero.state(new Sequence(1)).done());
+            var result = zero.stopReplay(new Empty());
+            assertTrue(result.errors().isEmpty(), result.toString());
+            var state = result.frontends().values().iterator().next();
+            assertTrue(state.done());
+            assertEquals(6, state.issued());
+            assertEquals(6, state.finished());
+            assertEquals(6L, state.outcomes().values().stream().mapToLong(Long::longValue).sum());
+            assertEquals(6L, (long) state.outcomes().get("success"));
+            // Positions 0 and 2 are duplicated: two extra schedule calls reuse their request ids.
+            assertEquals(6, h.schedules.get());
+            var frequency = new java.util.HashMap<Long, Integer>();
+            for (var schedule : h.scheduleInputs) frequency.merge(schedule.getRequestId(), 1, Integer::sum);
+            assertEquals(4, frequency.size());
+            assertEquals(2, frequency.values().stream().filter(count -> count == 2).count());
+        }
     }
 
     private ReplayWorker worker(FrontendReplayPlan plan, FrontendMetrics metrics, BackendRpcTransportTest.Harness harness)

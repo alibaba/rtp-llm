@@ -1,0 +1,9 @@
+{
+  "requests": 20000,
+  "input_tokens_per_request": 2048,
+  "output_token_cap": 64,
+  "priority": 50,
+  "capture_duration_seconds": 600,
+  "note": "合成流量：每请求独立 2048 token 文本（单链、填充符 1），无共享前缀、无图片；到达时间均匀分布，qps 与 replay_speed 模式均可用。用于调度/派发/背压基线 case。",
+  "generator": "gen_uniform_traffic.py（按 IndexedTrafficReader 格式写出）"
+}

@@ -1,0 +1,338 @@
+id: saturation_point
+name: 饱和点与过载形态
+describe:
+  S8-1：qps 爬坡 4→8→12→16→24（每档 45s）找饱和点：prefill 1 台恒定 360ms/批、批 4，理论上限约 11 req/s。成功率跌破 99% 的第一个拐点记入基线；拐点后失败应快速返回、p99 TTFT 有界。（容量刻意做小，使爬坡在低
+  qps 区间完成，便于复跑。）基线记录：饱和 qps、拐点后 p99、失败响应耗时。
+environment:
+  master:
+    deployment:
+      replicas: 1
+    config: configs/master.yaml
+  prefill:
+    engine: rtp
+    deployment:
+      replicas: 1
+    config: configs/prefill.yaml
+  decode:
+    engine: rtp
+    deployment:
+      replicas: 1
+    config: configs/decode.yaml
+  frontend:
+    config:
+      seq_size_per_block: 128
+      prefill_cp_size: 4
+      image_token_id: 129264
+      cache_key_hash_seed: "4923373599811257905"
+phases:
+  - id: startup
+    describe: 确认唯一主 Master 并等待 Engine 发现传播。
+    timeout: 120s
+    steps:
+      - id: check_master_leader
+        describe: 只有一个主 Master。
+        interface: master/list/addresses
+        args:
+          is_leader: true
+        expect:
+          count: 1
+        wait_after: 10s
+  - id: ramp_qps_4
+    describe: 爬坡档位 qps=4。
+    timeout: 300s
+    steps:
+      - id: start_qps_4
+        describe: 爬坡档位 qps=4 打 25s。
+        interface: frontend/start/playback
+        args:
+          requests_file: data/traffic/uniform-2k.mckidx
+          qps: 4
+          total_concurrency: 64
+          queue_capacity: 128
+          request_timeout: 12s
+          drain_timeout: 60s
+        wait_after: 25s
+      - id: check_qps_4
+        describe: 实际发出速率稳定在目标区间。
+        interface: frontend/query/qps
+        args:
+          range:
+            - -10s
+            - 0s
+        expect:
+          gte: 3.4
+          lte: 4.6
+      - id: record_ttft_4
+        describe: 记录 qps=4 档 TTFT P95（request_timeout=12s 构造性有界；打流中段测量保证有成功样本；histogram_quantile 在粗桶上有插值虚高，仅防真正失控）。
+        interface: frontend/query/ttft
+        args:
+          range:
+            - -10s
+            - 0s
+          statistic: p95
+      - id: observe_queue_4
+        describe: 持续积压 20s 使深档越过 request_timeout；采集队列深度留证。
+        interface: prometheus/query
+        args:
+          promql: sum(flexlb_app_flexlb_batcher_queue_size)
+      - id: record_prefill_tps_4
+        describe: 记录 qps=4 档 prefill 吞吐。
+        interface: engine/query/prefill_tps
+        args:
+          range:
+            - -10s
+            - 0s
+        wait_after: 20s
+      - id: stop_qps_4
+        describe: 停止 qps=4 档。
+        interface: frontend/stop/playback
+        within: 190s
+      - id: check_success_4
+        describe: qps=4 档成功率。
+        interface: frontend/query/success_rate
+        args:
+          range:
+            - -70s
+            - 0s
+        expect:
+          gte: 0.99
+  - id: ramp_qps_8
+    describe: 爬坡档位 qps=8。
+    timeout: 300s
+    steps:
+      - id: start_qps_8
+        describe: 爬坡档位 qps=8 打 25s。
+        interface: frontend/start/playback
+        args:
+          requests_file: data/traffic/uniform-2k.mckidx
+          qps: 8
+          total_concurrency: 128
+          queue_capacity: 256
+          request_timeout: 12s
+          drain_timeout: 60s
+        wait_after: 25s
+      - id: check_qps_8
+        describe: 实际发出速率稳定在目标区间。
+        interface: frontend/query/qps
+        args:
+          range:
+            - -10s
+            - 0s
+        expect:
+          gte: 6.8
+          lte: 9.2
+      - id: record_ttft_8
+        describe: 记录 qps=8 档 TTFT P95（request_timeout=12s 构造性有界；打流中段测量保证有成功样本；histogram_quantile 在粗桶上有插值虚高，仅防真正失控）。
+        interface: frontend/query/ttft
+        args:
+          range:
+            - -10s
+            - 0s
+          statistic: p95
+      - id: observe_queue_8
+        describe: 持续积压 20s 使深档越过 request_timeout；采集队列深度留证。
+        interface: prometheus/query
+        args:
+          promql: sum(flexlb_app_flexlb_batcher_queue_size)
+      - id: record_prefill_tps_8
+        describe: 记录 qps=8 档 prefill 吞吐。
+        interface: engine/query/prefill_tps
+        args:
+          range:
+            - -10s
+            - 0s
+        wait_after: 20s
+      - id: stop_qps_8
+        describe: 停止 qps=8 档。
+        interface: frontend/stop/playback
+        within: 190s
+      - id: check_success_8
+        describe: qps=8 档成功率。
+        interface: frontend/query/success_rate
+        args:
+          range:
+            - -70s
+            - 0s
+        expect:
+          gte: 0.99
+  - id: ramp_qps_12
+    describe: 爬坡档位 qps=12。
+    timeout: 300s
+    steps:
+      - id: start_qps_12
+        describe: 爬坡档位 qps=12 打 25s。
+        interface: frontend/start/playback
+        args:
+          requests_file: data/traffic/uniform-2k.mckidx
+          qps: 12
+          total_concurrency: 192
+          queue_capacity: 384
+          request_timeout: 12s
+          drain_timeout: 60s
+        wait_after: 25s
+      - id: check_qps_12
+        describe: 实际发出速率稳定在目标区间。
+        interface: frontend/query/qps
+        args:
+          range:
+            - -10s
+            - 0s
+        expect:
+          gte: 10.2
+          lte: 13.799999999999999
+      - id: record_ttft_12
+        describe: 记录 qps=12 档 TTFT P95（request_timeout=12s 构造性有界；打流中段测量保证有成功样本；histogram_quantile 在粗桶上有插值虚高，仅防真正失控）。
+        interface: frontend/query/ttft
+        args:
+          range:
+            - -10s
+            - 0s
+          statistic: p95
+      - id: observe_queue_12
+        describe: 持续积压 20s 使深档越过 request_timeout；采集队列深度留证。
+        interface: prometheus/query
+        args:
+          promql: sum(flexlb_app_flexlb_batcher_queue_size)
+      - id: record_prefill_tps_12
+        describe: 记录 qps=12 档 prefill 吞吐。
+        interface: engine/query/prefill_tps
+        args:
+          range:
+            - -10s
+            - 0s
+        wait_after: 20s
+      - id: stop_qps_12
+        describe: 停止 qps=12 档。
+        interface: frontend/stop/playback
+        within: 190s
+      - id: check_success_12
+        describe: qps=12 档成功率。
+        interface: frontend/query/success_rate
+        args:
+          range:
+            - -70s
+            - 0s
+        expect:
+          gte: 0.95
+  - id: ramp_qps_16
+    describe: 爬坡档位 qps=16。
+    timeout: 300s
+    steps:
+      - id: start_qps_16
+        describe: 爬坡档位 qps=16 打 25s。
+        interface: frontend/start/playback
+        args:
+          requests_file: data/traffic/uniform-2k.mckidx
+          qps: 16
+          total_concurrency: 256
+          queue_capacity: 512
+          request_timeout: 12s
+          drain_timeout: 60s
+        wait_after: 25s
+      - id: check_qps_16
+        describe: 实际发出速率稳定在目标区间。
+        interface: frontend/query/qps
+        args:
+          range:
+            - -10s
+            - 0s
+        expect:
+          gte: 13.6
+          lte: 18.4
+      - id: record_ttft_16
+        describe: 记录 qps=16 档 TTFT P95（request_timeout=12s 构造性有界；打流中段测量保证有成功样本；histogram_quantile 在粗桶上有插值虚高，仅防真正失控）。
+        interface: frontend/query/ttft
+        args:
+          range:
+            - -10s
+            - 0s
+          statistic: p95
+        expect:
+          lte: 25
+      - id: observe_queue_16
+        describe: 持续积压 20s 使深档越过 request_timeout；采集队列深度留证。
+        interface: prometheus/query
+        args:
+          promql: sum(flexlb_app_flexlb_batcher_queue_size)
+      - id: record_prefill_tps_16
+        describe: 记录 qps=16 档 prefill 吞吐。
+        interface: engine/query/prefill_tps
+        args:
+          range:
+            - -10s
+            - 0s
+        wait_after: 20s
+      - id: stop_qps_16
+        describe: 停止 qps=16 档。
+        interface: frontend/stop/playback
+        within: 190s
+      - id: check_success_16
+        describe: qps=16 档成功率（拐点档：成功率应已跌破 99%）。
+        interface: frontend/query/success_rate
+        args:
+          range:
+            - -70s
+            - 0s
+        expect:
+          lte: 0.99
+  - id: ramp_qps_24
+    describe: 爬坡档位 qps=24。
+    timeout: 300s
+    steps:
+      - id: start_qps_24
+        describe: 爬坡档位 qps=24 打 25s。
+        interface: frontend/start/playback
+        args:
+          requests_file: data/traffic/uniform-2k.mckidx
+          qps: 24
+          total_concurrency: 384
+          queue_capacity: 768
+          request_timeout: 12s
+          drain_timeout: 60s
+        wait_after: 25s
+      - id: check_qps_24
+        describe: 实际发出速率稳定在目标区间。
+        interface: frontend/query/qps
+        args:
+          range:
+            - -10s
+            - 0s
+        expect:
+          gte: 20.4
+          lte: 27.599999999999998
+      - id: record_ttft_24
+        describe: 记录 qps=24 档 TTFT P95（request_timeout=12s 构造性有界；打流中段测量保证有成功样本；histogram_quantile 在粗桶上有插值虚高，仅防真正失控）。
+        interface: frontend/query/ttft
+        args:
+          range:
+            - -10s
+            - 0s
+          statistic: p95
+        expect:
+          lte: 25
+      - id: observe_queue_24
+        describe: 持续积压 20s 使深档越过 request_timeout；采集队列深度留证。
+        interface: prometheus/query
+        args:
+          promql: sum(flexlb_app_flexlb_batcher_queue_size)
+      - id: record_prefill_tps_24
+        describe: 记录 qps=24 档 prefill 吞吐。
+        interface: engine/query/prefill_tps
+        args:
+          range:
+            - -10s
+            - 0s
+        wait_after: 20s
+      - id: stop_qps_24
+        describe: 停止 qps=24 档。
+        interface: frontend/stop/playback
+        within: 190s
+      - id: check_success_24
+        describe: qps=24 档成功率（过饱和后应明显受损，拐点留证）。
+        interface: frontend/query/success_rate
+        args:
+          range:
+            - -70s
+            - 0s
+        expect:
+          lte: 0.7

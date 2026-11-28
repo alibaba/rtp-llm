@@ -88,7 +88,8 @@ public final class MasterMain {
                         "--flexlb.monitor.metric-whitelist=flexlb_",
                         "--server.port=" + port,
                         "--management.server.port=" + port,
-                        "--flexlb.log.path=" + directory.resolve("logs"));
+                        "--flexlb.log.path=" + directory.resolve("logs"),
+                        "--flexlb.log.app-path=" + directory.resolve("logs"));
         try {
             var lifecycle = context.getBean(ApplicationLifecycle.class);
             var consistency = context.getBean(LBStatusConsistencyService.class);

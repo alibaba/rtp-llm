@@ -111,6 +111,96 @@ public class LLMMockEngineTest {
         Files.writeString(Path.of("target/rtp-classpath.txt"), System.getProperty("surefire.test.class.path", System.getProperty("java.class.path")));
     }
 
+    @Test void injectedExecutionFailureFailsAdmittedRequestsTerminally() throws Exception {
+        var root = JSON.<com.fasterxml.jackson.databind.node.ObjectNode>valueToTree(configuration("prefill"));
+        ((com.fasterxml.jackson.databind.node.ObjectNode) root.path("component").path("config"))
+            .put("mock.execute.error.rate", 1.0).put("mock.execute.error.seed", 1);
+        try (var node = LLMMockEngine.start(RtpConfig.load(root))) {
+            var channel = ManagedChannelBuilder.forTarget(node.rpcAddress()).usePlaintext().build();
+            try {
+                var rpc = RpcServiceGrpc.newBlockingStub(channel).withDeadlineAfter(5, TimeUnit.SECONDS);
+                var request = GenerateInputPB.newBuilder().setRequestId(1).addTokenIds(42)
+                    .setGenerateConfig(GenerateConfigPB.newBuilder().setMaxNewTokens(1)).build();
+                var outputs = rpc.generateStreamCall(request);
+                var error = assertThrows(StatusRuntimeException.class, outputs::next);
+                assertEquals(Status.Code.INTERNAL, error.getStatus().getCode());
+            } finally { channel.shutdownNow().awaitTermination(3, TimeUnit.SECONDS); }
+        }
+    }
+
+    @Test void cancelEffectDelayHoldsBothTheCancelAndItsAck() throws Exception {
+        var root = JSON.<com.fasterxml.jackson.databind.node.ObjectNode>valueToTree(configuration("prefill"));
+        ((com.fasterxml.jackson.databind.node.ObjectNode) root.path("component").path("config"))
+            .put("mock.rpc.cancel.effect.delay.ms", 400);
+        try (var node = LLMMockEngine.start(RtpConfig.load(root))) {
+            var channel = ManagedChannelBuilder.forTarget(node.rpcAddress()).usePlaintext().build();
+            try {
+                var rpc = RpcServiceGrpc.newBlockingStub(channel);
+                long started = System.nanoTime();
+                rpc.cancel(CancelRequestPB.newBuilder().setRequestId(99).build());
+                long elapsedMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started);
+                assertTrue(elapsedMs >= 350, "cancel ACK must arrive only after the effect delay, took " + elapsedMs + "ms");
+            } finally { channel.shutdownNow().awaitTermination(3, TimeUnit.SECONDS); }
+        }
+    }
+
+    @Test void enqueueAckDelayHoldsTheBatchAckAfterAdmission() throws Exception {
+        var root = JSON.<com.fasterxml.jackson.databind.node.ObjectNode>valueToTree(configuration("prefill"));
+        ((com.fasterxml.jackson.databind.node.ObjectNode) root.path("component").path("config"))
+            .put("mock.scheduler.mode", "group").put("mock.rpc.enqueue.ack.delay.ms", 400);
+        try (var node = LLMMockEngine.start(RtpConfig.load(root))) {
+            var channel = ManagedChannelBuilder.forTarget(node.rpcAddress()).usePlaintext().build();
+            try {
+                var rpc = RpcServiceGrpc.newBlockingStub(channel);
+                long started = System.nanoTime();
+                rpc.enqueueBatch(EnqueueBatchRequestPB.getDefaultInstance());
+                long elapsedMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started);
+                assertTrue(elapsedMs >= 350, "batch ACK must arrive only after the configured delay, took " + elapsedMs + "ms");
+            } finally { channel.shutdownNow().awaitTermination(3, TimeUnit.SECONDS); }
+        }
+    }
+
+    @Test void enqueueAdmissionDelayPostponesTheAdmissionItself() throws Exception {
+        var root = JSON.<com.fasterxml.jackson.databind.node.ObjectNode>valueToTree(configuration("prefill"));
+        ((com.fasterxml.jackson.databind.node.ObjectNode) root.path("component").path("config"))
+            .put("mock.scheduler.mode", "group").put("mock.rpc.enqueue.admission.delay.ms", 400);
+        try (var node = LLMMockEngine.start(RtpConfig.load(root))) {
+            var channel = ManagedChannelBuilder.forTarget(node.rpcAddress()).usePlaintext().build();
+            try {
+                var rpc = RpcServiceGrpc.newBlockingStub(channel);
+                long started = System.nanoTime();
+                rpc.enqueueBatch(EnqueueBatchRequestPB.getDefaultInstance());
+                long elapsedMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started);
+                assertTrue(elapsedMs >= 350, "admission must start only after the configured delay, took " + elapsedMs + "ms");
+            } finally { channel.shutdownNow().awaitTermination(3, TimeUnit.SECONDS); }
+        }
+    }
+
+    @Test void statusNoRespondLeavesHealthPollsUnansweredButServingWorks() throws Exception {
+        var root = JSON.<com.fasterxml.jackson.databind.node.ObjectNode>valueToTree(configuration("prefill"));
+        ((com.fasterxml.jackson.databind.node.ObjectNode) root.path("component").path("config"))
+            .put("mock.rpc.status.no.respond", true);
+        try (var node = LLMMockEngine.start(RtpConfig.load(root))) {
+            var channel = ManagedChannelBuilder.forTarget(node.rpcAddress()).usePlaintext().build();
+            try {
+                var rpc = RpcServiceGrpc.newBlockingStub(channel);
+                var statusError = assertThrows(StatusRuntimeException.class,
+                    () -> rpc.withDeadlineAfter(300, TimeUnit.MILLISECONDS)
+                        .getWorkerStatus(StatusVersionPB.getDefaultInstance()));
+                assertEquals(Status.Code.DEADLINE_EXCEEDED, statusError.getStatus().getCode());
+                var cacheError = assertThrows(StatusRuntimeException.class,
+                    () -> rpc.withDeadlineAfter(300, TimeUnit.MILLISECONDS)
+                        .getCacheStatus(CacheVersionPB.getDefaultInstance()));
+                assertEquals(Status.Code.DEADLINE_EXCEEDED, cacheError.getStatus().getCode());
+                assertEquals("OK", rpc.withDeadlineAfter(2, TimeUnit.SECONDS)
+                    .checkHealth(EmptyPB.getDefaultInstance()).getHealth());
+                var request = GenerateInputPB.newBuilder().setRequestId(1).addTokenIds(42)
+                    .setGenerateConfig(GenerateConfigPB.newBuilder().setMaxNewTokens(1)).build();
+                assertTrue(rpc.withDeadlineAfter(2, TimeUnit.SECONDS).generateStreamCall(request).hasNext());
+            } finally { channel.shutdownNow().awaitTermination(3, TimeUnit.SECONDS); }
+        }
+    }
+
     private RtpConfig config(String role) throws Exception {
         Path file = directory.resolve("config.json"); JSON.writeValue(file.toFile(), configuration(role));
         return RtpConfig.load(file);

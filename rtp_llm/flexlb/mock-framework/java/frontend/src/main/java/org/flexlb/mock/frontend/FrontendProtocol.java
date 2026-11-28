@@ -12,7 +12,7 @@ public final class FrontendProtocol {
 
     private static List<String> validateReplay(List<String> masters, String requestsFile, Double qps, Double replaySpeed,
                                                int concurrency, int queueCapacity, long requestTimeoutMs,
-                                               long drainTimeoutMs, Integer fallbackMaxOutputTokens) {
+                                               long drainTimeoutMs, Integer fallbackMaxOutputTokens, Integer duplicateEvery) {
         if (requestsFile == null || requestsFile.isBlank()
                 || !java.nio.file.Path.of(requestsFile).isAbsolute() || !requestsFile.endsWith(".mckidx"))
             throw new IllegalArgumentException("requests_file must be an absolute .mckidx path");
@@ -23,6 +23,8 @@ public final class FrontendProtocol {
         }
         if (fallbackMaxOutputTokens != null && fallbackMaxOutputTokens < 1)
             throw new IllegalArgumentException("fallback_max_output_tokens must be positive");
+        if (duplicateEvery != null && duplicateEvery < 2)
+            throw new IllegalArgumentException("duplicate_every must be at least 2 when supplied");
         Double rate = qps != null ? qps : replaySpeed;
         if ((qps == null) == (replaySpeed == null) || !Double.isFinite(rate) || rate <= 0
                 || concurrency < 1 || queueCapacity < 1 || queueCapacity > 100000
@@ -43,15 +45,16 @@ public final class FrontendProtocol {
                  long request_timeout_ms, long drain_timeout_ms,
                  @OptionalArgument Boolean reuse_cache,
                  @OptionalArgument Integer fallback_max_output_tokens,
-                 @OptionalArgument Warmup warmup) {
+                 @OptionalArgument Warmup warmup,
+                 @OptionalArgument Integer duplicate_every) {
         public Start(List<String> masters, String requests_file, Double qps, Double replay_speed,
                      int total_concurrency, int queue_capacity, long request_timeout_ms, long drain_timeout_ms) {
             this(masters, requests_file, qps, replay_speed, total_concurrency, queue_capacity,
-                request_timeout_ms, drain_timeout_ms, false, null, null);
+                request_timeout_ms, drain_timeout_ms, false, null, null, null);
         }
         public Start {
             masters = validateReplay(masters, requests_file, qps, replay_speed, total_concurrency, queue_capacity,
-                request_timeout_ms, drain_timeout_ms, fallback_max_output_tokens);
+                request_timeout_ms, drain_timeout_ms, fallback_max_output_tokens, duplicate_every);
         }
     }
 
@@ -65,17 +68,18 @@ public final class FrontendProtocol {
                  int concurrency, int queue_capacity, long request_timeout_ms, long drain_timeout_ms,
                  @OptionalArgument Boolean reuse_cache,
                  @OptionalArgument Integer fallback_max_output_tokens,
-                 @OptionalArgument Warmup warmup) {
+                 @OptionalArgument Warmup warmup,
+                 @OptionalArgument Integer duplicate_every) {
         public FrontendReplayPlan(long sequence, List<String> masters, String requests_file, long count, long first_index,
                      int stride, long first_request_id, String sha256, Double qps, Double replay_speed,
                      int concurrency, int queue_capacity, long request_timeout_ms, long drain_timeout_ms) {
             this(sequence, masters, requests_file, count, first_index, stride, first_request_id, sha256, qps,
-                replay_speed, concurrency, queue_capacity, request_timeout_ms, drain_timeout_ms, false, null, null);
+                replay_speed, concurrency, queue_capacity, request_timeout_ms, drain_timeout_ms, false, null, null, null);
         }
 
         public FrontendReplayPlan {
             masters = validateReplay(masters, requests_file, qps, replay_speed, concurrency, queue_capacity,
-                request_timeout_ms, drain_timeout_ms, fallback_max_output_tokens);
+                request_timeout_ms, drain_timeout_ms, fallback_max_output_tokens, duplicate_every);
             if (sequence < 1 || count < 1 || first_index < 0 || stride < 1 || first_index >= stride || first_request_id < 1
                     || sha256 == null || !sha256.matches("[0-9a-f]{64}"))
                 throw new IllegalArgumentException("Invalid worker playback plan");

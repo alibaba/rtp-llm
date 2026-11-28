@@ -1,0 +1,17 @@
+seq_size_per_block: 128
+max_seq_len: 1048576
+concurrency_limit: 128
+reuse_cache: false
+enable_device_cache: true
+enable_remote_cache: false
+mock.compute.forward.expression: "50"
+mock.compute.decode.tokens.per.step: 1
+mock.compute.output.mean.tokens: 200
+mock.compute.output.stddev.percent: 10
+mock.compute.output.seed: 20261122
+test_block_num: 991894
+reserve_block_ratio: 5
+image_token_id: 129264
+cache_key_hash_seed: "4923373599811257905"
+enable_memory_cache: false
+kv_cache_event_publisher_type: none

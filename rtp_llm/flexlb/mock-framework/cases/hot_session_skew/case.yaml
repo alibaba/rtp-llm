@@ -1,0 +1,90 @@
+id: hot_session_skew
+name: 热会话挤爆单机
+describe: G3.3 降级版：热会话前缀流量下验证调度可见单机热点（执行占比倾斜 ≥36%）且整体稳定（成功率 ≥99%、命中率 ≥0.5）；亲和与防倾斜的平衡留证。单机负载阈值断言待 GAP-M1。
+environment:
+  master:
+    deployment:
+      replicas: 1
+    config: configs/master.yaml
+  prefill:
+    engine: rtp
+    deployment:
+      replicas: 3
+    config: configs/prefill.yaml
+  decode:
+    engine: rtp
+    deployment:
+      replicas: 1
+    config: configs/decode.yaml
+  frontend:
+    config:
+      seq_size_per_block: 128
+      prefill_cp_size: 4
+      image_token_id: 129264
+      cache_key_hash_seed: "4923373599811257905"
+phases:
+  - id: startup
+    describe: 确认唯一主 Master 并等待 Engine 发现传播。
+    timeout: 120s
+    steps:
+      - id: check_master_leader
+        describe: 只有一个主 Master。
+        interface: master/list/addresses
+        args:
+          is_leader: true
+        expect:
+          count: 1
+        wait_after: 10s
+  - id: skew
+    describe: 热点倾斜观测。
+    timeout: 420s
+    steps:
+      - id: start_frontend
+        describe: prefix-hotspot 流量（70% 集中在 2 个热前缀）0.25 倍速预热 45s 后全速。
+        interface: frontend/start/playback
+        args:
+          requests_file: data/traffic/prefix-hotspot.mckidx
+          qps: 8
+          total_concurrency: 64
+          queue_capacity: 128
+          request_timeout: 30s
+          drain_timeout: 60s
+          reuse_cache: true
+          warmup:
+            duration: 45s
+            rate_scale: 0.25
+        wait_after: 120s
+      - id: check_skew_visible
+        describe: 单机热点可见：最忙 worker 执行占比 ≥36%（均匀为 33%）。
+        interface: prometheus/query_scalar
+        args:
+          promql: max(sum by(instance)(increase(rtp_llm_framework_requests_total{role="prefill"}[120s]))) / sum(increase(rtp_llm_framework_requests_total{role="prefill"}[120s]))
+        expect:
+          gte: 0.36
+      - id: evidence_queue_skew
+        describe: 分 worker 排队深度（热点队列倾斜留证）。
+        interface: prometheus/query
+        args:
+          promql: flexlb_app_flexlb_batcher_queue_size
+      - id: check_hit_rate
+        describe: 热前缀命中率 ≥0.5。
+        interface: engine/query/cache_hit_rate
+        args:
+          range:
+            - -20s
+            - 0s
+        expect:
+          gte: 0.5
+      - id: stop_frontend
+        describe: 停止播放并收齐已发请求终态。
+        interface: frontend/stop/playback
+        within: 190s
+      - id: check_total_success_rate
+        describe: 热点倾斜下全程成功率 ≥99%。
+        interface: frontend/query/success_rate
+        args:
+          range:
+            - -240s
+            - 0s
+        expect:
+          gte: 0.99

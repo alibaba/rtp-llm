@@ -1,0 +1,145 @@
+id: metrics_inspection
+name: Master 指标巡检
+describe: S9-1：QUEUE+FIFO 正常打流下逐个查询 Master 指标族（flexlb_app_* / flexlb_auto_tpm_*），验证指标在 mock 环境真实存在且有样本。原始结构只能采集留证（GAP-M1），缺失或恒空的指标登记为指标缺口。基线记录：各指标样本存在性与取值范围。
+environment:
+  master:
+    deployment:
+      replicas: 1
+    config: configs/master.yaml
+  prefill:
+    engine: rtp
+    deployment:
+      replicas: 2
+    config: configs/prefill.yaml
+  decode:
+    engine: rtp
+    deployment:
+      replicas: 1
+    config: configs/decode.yaml
+  frontend:
+    config:
+      seq_size_per_block: 128
+      prefill_cp_size: 4
+      image_token_id: 129264
+      cache_key_hash_seed: "4923373599811257905"
+phases:
+  - id: startup
+    describe: 确认唯一主 Master 并等待 Engine 发现传播。
+    timeout: 120s
+    steps:
+      - id: check_master_leader
+        describe: 只有一个主 Master。
+        interface: master/list/addresses
+        args:
+          is_leader: true
+        expect:
+          count: 1
+        wait_after: 10s
+  - id: inspect
+    describe: 打流并巡检 Master 指标。
+    timeout: 180s
+    steps:
+      - id: start_frontend
+        describe: 以 qps 8 播放 DeepSeek V4.1 流量，产生各类 Master 指标样本。
+        interface: frontend/start/playback
+        args:
+          requests_file: data/traffic/uniform-2k.mckidx
+          qps: 8
+          total_concurrency: 32
+          queue_capacity: 64
+          request_timeout: 30s
+          drain_timeout: 30s
+        wait_after: 25s
+      - id: inspect_route_submit_time
+        describe: 调度链路耗时计时器应有样本。
+        interface: prometheus/query
+        args:
+          promql: flexlb_app_flexlb_route_submit_time_ms_seconds_count
+      - id: inspect_queue_wait_time
+        describe: 排队等待计时器（含 priority 标签）应有样本。
+        interface: prometheus/query
+        args:
+          promql: flexlb_app_routing_queue_wait_time_ms_seconds_count
+      - id: inspect_queue_length
+        describe: 排队深度 Gauge（按优先级分桶）。
+        interface: prometheus/query
+        args:
+          promql: flexlb_app_routing_queue_length
+      - id: inspect_dispatch_ack_time
+        describe: 派发 ACK 耗时计时器应有样本。
+        interface: prometheus/query
+        args:
+          promql: flexlb_app_flexlb_dispatch_ack_time_ms_seconds_count
+      - id: inspect_inflight_batch_count
+        describe: 每 worker 在途批数 Gauge。
+        interface: prometheus/query
+        args:
+          promql: flexlb_app_flexlb_inflight_batch_count
+      - id: inspect_inflight_request_count
+        describe: 每 worker 在途请求数 Gauge。
+        interface: prometheus/query
+        args:
+          promql: flexlb_app_flexlb_inflight_request_count
+      - id: inspect_inflight_max_age
+        describe: 最老在途记录年龄 Gauge。
+        interface: prometheus/query
+        args:
+          promql: flexlb_app_flexlb_inflight_max_age_ms
+      - id: inspect_batch_size
+        describe: 派发批大小 Gauge（含 reason 标签）。
+        interface: prometheus/query
+        args:
+          promql: flexlb_app_engine_balancing_master_batch_size
+      - id: inspect_batch_predict_gap
+        describe: 批执行预测偏差计时器（实际减预测）。
+        interface: prometheus/query
+        args:
+          promql: flexlb_app_flexlb_batch_predict_gap_ms_seconds_count
+      - id: inspect_batch_actual_time
+        describe: 批实际执行耗时计时器。
+        interface: prometheus/query
+        args:
+          promql: flexlb_app_flexlb_batch_actual_time_ms_seconds_count
+      - id: inspect_cache_hit_ratio
+        describe: Master 视角缓存命中率 Gauge。
+        interface: prometheus/query
+        args:
+          promql: flexlb_app_cache_hit_ratio
+      - id: inspect_scheduler_inflight
+        describe: 调度账本未结算请求数 Gauge。
+        interface: prometheus/query
+        args:
+          promql: flexlb_app_flexlb_scheduler_inflight_size
+      - id: inspect_zk_master_node
+        describe: ZK 记录的主 Master 节点。
+        interface: prometheus/query
+        args:
+          promql: flexlb_app_engine_zk_master_node
+      - id: inspect_forward_to_master
+        describe: 主备转发结果计数（单主时可能无样本，登记缺口）。
+        interface: prometheus/query
+        args:
+          promql: flexlb_app_forward_to_master_result_total
+      - id: inspect_preempt_count
+        describe: 优先级抢占计数（FIFO 模式应无样本，登记缺口）。
+        interface: prometheus/query
+        args:
+          promql: flexlb_auto_tpm_priority_preempt_count_total
+      - id: inspect_cache_affinity_decision
+        describe: 亲和决策分布（未开 cacheAffinity 应无样本，登记缺口）。
+        interface: prometheus/query
+        args:
+          promql: flexlb_app_cache_affinity_decision_qps_total
+      - id: stop_frontend
+        describe: 停止播放并收齐已发请求终态。
+        interface: frontend/stop/playback
+        within: 190s
+      - id: check_total_success_rate
+        describe: 打流窗口内成功率不低于 99%。
+        interface: frontend/query/success_rate
+        args:
+          range:
+            - -90s
+            - 0s
+        expect:
+          gte: 0.99

@@ -1,0 +1,97 @@
+id: poisoned_address_no_schedule
+name: 地址回来不等于能接活
+describe: D3.3 单机降级版：扩容一台 status 永不应答的 prefill，验证地址出现在目录 ≠ 能接活——健康检查未过前新调度为零（只有健康 worker 在执行），成功率 100%。真机基线：目录 before=6 after=8。
+environment:
+  master:
+    deployment:
+      replicas: 1
+    config: configs/master.yaml
+  prefill:
+    engine: rtp
+    deployment:
+      replicas: 1
+    config: configs/prefill.yaml
+    instance_configs:
+      prefill-1: configs/prefill-poisoned.yaml
+  decode:
+    engine: rtp
+    deployment:
+      replicas: 1
+    config: configs/decode.yaml
+  frontend:
+    config:
+      seq_size_per_block: 128
+      prefill_cp_size: 4
+      image_token_id: 129264
+      cache_key_hash_seed: "4923373599811257905"
+phases:
+  - id: startup
+    describe: 确认唯一主 Master 并等待 Engine 发现传播。
+    timeout: 120s
+    steps:
+      - id: check_master_leader
+        describe: 只有一个主 Master。
+        interface: master/list/addresses
+        args:
+          is_leader: true
+        expect:
+          count: 1
+        wait_after: 10s
+  - id: poisoned
+    describe: 带毒地址不调度。
+    timeout: 300s
+    steps:
+      - id: start_frontend
+        describe: qps 8 持续打流。
+        interface: frontend/start/playback
+        args:
+          requests_file: data/traffic/uniform-2k.mckidx
+          qps: 8
+          total_concurrency: 32
+          queue_capacity: 64
+          request_timeout: 30s
+          drain_timeout: 60s
+        wait_after: 15s
+      - id: check_success_before
+        describe: 扩容前成功率基线。
+        interface: frontend/query/success_rate
+        args:
+          range:
+            - -10s
+            - 0s
+        expect:
+          gte: 0.99
+      - id: scale_out_poisoned
+        describe: 扩容一台注入 status 不应答的 prefill（地址先进目录，状态永远不应答）。
+        interface: engine/scale
+        args:
+          direction: out
+          role: prefill
+          count: 1
+        within: 120s
+        wait_after: 20s
+      - id: evidence_catalog
+        describe: 目录发现计数（含未过健康检查的新地址，留证）。
+        interface: master/query/engine_count
+        args:
+          role: prefill
+      - id: check_poisoned_gets_nothing
+        describe: 新地址未通过健康检查前零调度：只有 1 台在执行。
+        interface: prometheus/query_scalar
+        args:
+          promql: count(sum by(instance)(increase(rtp_llm_framework_requests_total{role="prefill"}[20s])) > 0)
+        expect:
+          eq: 1
+      - id: check_success_rate
+        describe: 全程成功率 100%（带病地址不影响服务）。
+        interface: frontend/query/success_rate
+        args:
+          range:
+            - -30s
+            - 0s
+        expect:
+          gte: 1.0
+      - id: stop_frontend
+        describe: 停止播放并收齐已发请求终态。
+        interface: frontend/stop/playback
+        within: 190s
