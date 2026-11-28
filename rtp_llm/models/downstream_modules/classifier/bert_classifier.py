@@ -4,9 +4,7 @@ import torch
 
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.frontend.tokenizer_factory.tokenizers import BaseTokenizer
-from rtp_llm.model_loader.weight_module import CustomAtomicWeight
 from rtp_llm.models.downstream_modules.custom_module import CustomHandler, CustomModule
-from rtp_llm.utils.model_weight import CkptWeightInfo
 from rtp_llm.utils.tensor_utils import get_first_token_from_combo_tokens
 from rtp_llm.utils.util import to_torch_dtype
 
@@ -31,19 +29,13 @@ class BertClassifierHandler(CustomHandler):
         self.activation = torch.nn.Tanh()
         self.linear = torch.nn.Linear(self.config_.hidden_size, num_labels)
 
-    def custom_weight_info(self) -> List[CustomAtomicWeight]:
-        w_list = [
+    def checkpoint_weight_names(self) -> tuple[str, ...]:
+        return (
             "bert.pooler.dense.bias",
             "bert.pooler.dense.weight",
             "classifier.weight",
             "classifier.bias",
-        ]
-        weights = []
-        for k in w_list:
-            weights.append(
-                CustomAtomicWeight(CustomAtomicWeight.prefix + k, [CkptWeightInfo(k)])
-            )
-        return weights
+        )
 
     def pooler(self, hidden_states: torch.Tensor) -> torch.Tensor:
         pooled_output = self.dense(hidden_states)

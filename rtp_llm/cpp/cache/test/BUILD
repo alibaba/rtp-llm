@@ -316,6 +316,25 @@ cc_test(
 )
 
 cc_test(
+    name = "ppu_kv_pool_zero_test",
+    visibility = ["//rtp_llm/test/smoke:__pkg__"],
+    srcs = ["PpuKVPoolZeroTest.cc"],
+    copts = copts(),
+    deps = [
+        "//rtp_llm/cpp/cache:memory_layout_strategy",
+        "@com_google_googletest//:gtest_main",
+        "@local_config_cuda//cuda:cuda_headers",
+        "@local_config_cuda//cuda:cudart",
+    ] + torch_deps(),
+    tags = ["PPU-ZW810E"],
+    exec_properties = {"gpu": "PPU-ZW810E", "gpu_count": "1"},
+    target_compatible_with = select({
+        "@//:using_ppu": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    }),
+)
+
+cc_test(
     name = "single_type_kv_cache_allocator_test",
     srcs = [
         "SingleTypeCoordinatorCacheManagerTest.cc",

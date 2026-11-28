@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import functools
 import inspect
 import logging
@@ -5,15 +7,17 @@ import time
 import traceback
 import weakref
 from abc import ABC, abstractmethod
-from typing import Any, Callable, Dict, List, Optional, Type, Union
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Type, Union
 
 import torch
 
-from rtp_llm.config.quant_config import QuantizationConfig
-from rtp_llm.model_loader.load_config import LoadConfig
-from rtp_llm.model_loader.tensor_source import TensorSource
-from rtp_llm.utils.database import BaseDatabase
 from rtp_llm.utils.model_weight import CkptWeightInfo, W, WeightStyle, identity, sp_id
+
+if TYPE_CHECKING:
+    from rtp_llm.config.quant_config import QuantizationConfig
+    from rtp_llm.model_loader.load_config import LoadConfig
+    from rtp_llm.model_loader.tensor_source import TensorSource
+    from rtp_llm.utils.database import BaseDatabase
 
 
 class WeightModule(ABC):
@@ -202,6 +206,8 @@ class WeightModule(ABC):
                     __extract_tensor(v)
                 else:
                     tensor = v.to(self.resident_output_devices.get(k, device))
+                    if tensor is not v and getattr(v, "is_shuffled", False):
+                        tensor.is_shuffled = True
                     flat_res.update({k: tensor})
 
         __extract_tensor(processed_tensors)

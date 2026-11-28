@@ -1050,6 +1050,29 @@ class TpSyncModelInputsIntegrationTest(unittest.TestCase):
 
 
 class PyWrappedModelCacheStoreIntegrationTest(unittest.TestCase):
+    def test_direct_eplb_counts_reset_with_or_without_inference_mode(self):
+        class RoutedModel(CacheStoreForwardModel):
+            _newloader_eplb_num_layers = 1
+
+            def _newloader_eplb_bind_stats(self, logical, loads):
+                self.logical, self.loads = logical[0], loads[0]
+
+            def _forward_one(self, inputs):
+                routes = torch.tensor([1, 0, 1], device=inputs.input_ids.device)
+                ones = torch.ones_like(routes, dtype=torch.int32)
+                self.logical.scatter_add_(0, routes, ones)
+                self.loads.scatter_add_(0, torch.zeros_like(routes), ones)
+                return super()._forward_one(inputs)
+
+        for inference_mode in (False, True):
+            with self.subTest(inference_mode=inference_mode):
+                model = RoutedModel()
+                with torch.inference_mode(inference_mode):
+                    run_scenario(model, "direct_eplb", forward_count=2)
+                self.assertEqual(model.forward_calls, 2)
+                self.assertEqual(model.logical.tolist(), [1, 2])
+                self.assertEqual(model.loads.tolist(), [3])
+
     def test_borrowed_warmup_model_survives_until_owning_wrapper_is_destroyed(self):
         model = CloseAwareCacheStoreForwardModel()
         run_scenario(model, "multi_tag", owns_py_model=False)

@@ -1,5 +1,6 @@
 #pragma once
 
+#include <thread>
 #include <utility>
 #include <torch/extension.h>
 #include "rtp_llm/cpp/models/eplb/ExpertBalancerPythonWrapper.h"
@@ -19,7 +20,7 @@ class ModelBase;
 
 struct EplbPlanBuffers {
     int           layer_id = -1;
-    torch::Tensor layer_id_buf;           // [1], INT32, GPU
+    torch::Tensor layer_id_buf;           // [terminal, failed], INT32, GPU
     torch::Tensor logic_expert_cnt;       // [log_exp_num], INT32, GPU
     torch::Tensor logic_expert_cnt_host;  // [log_exp_num], INT32, CPU pinned
     torch::Tensor log2phy;                // [log_exp_num, phy-log+1], INT32, GPU
@@ -39,7 +40,8 @@ struct EplbPlanBuffers {
               size_t    moe_size,
               size_t    ep_size,
               DataType  dtype,
-              QuantAlgo quant_algo);
+              QuantAlgo quant_algo,
+              bool      allocate_weights = true);
 };
 
 struct BalanceStatsBuffers {
@@ -53,13 +55,20 @@ struct BalanceStatsBuffers {
 };
 
 struct LoadFlags {
-    torch::Tensor flag_gpu;   // [1], INT32, GPU
-    torch::Tensor flag_sync;  // [1], INT32, GPU
-    torch::Tensor flag_host;  // [1], INT32, CPU pinned
+    torch::Tensor flag_gpu;   // [terminal, failed], INT32, GPU
+    torch::Tensor flag_sync;  // [terminal, failed], INT32, GPU
+    torch::Tensor flag_host;  // [terminal, failed], INT32, CPU pinned
 
     void init();
 
+    enum class SyncStatus {
+        LOADING,
+        READY,
+        FAILED
+    };
     void setReady(bool ready);
+    void       setFailed();
+    SyncStatus sync(size_t group_size, ParallelMode mode);
     bool isReady(size_t eplb_group_size, ParallelMode parallel_mode);
 };
 
@@ -67,7 +76,8 @@ enum class EplbPlanStatus {
     INIT,
     PREPARING,
     LOADING,
-    LOADED
+    LOADED,
+    FAILED
 };
 
 class EplbController {
@@ -121,6 +131,12 @@ private:
     void updateStats(OverallExpertStats& stats);
     void loadPlanWeights();
     bool syncPlanWeightsLoadStatus();
+    void        startPlanWeightLoad();
+    void        joinPlanWeightLoad();
+    void        finishPlan(bool committed);
+    std::thread load_thread_;
+    int64_t     load_latency_ms_ = 0;
+    bool        direct_install_  = false;
     void processPlanWeights();
     void applyPlanWeights(ModelBase& model);
 
@@ -158,7 +174,7 @@ private:
     EplbController eplb_controller_;
     EPLBConfig     eplb_control_data_;
 
-    RtpLLmEplbMetricsCollector   executor_collector_;
+    RtpLLmEplbMetricsCollector   executor_collector_{};
     kmonitor::MetricsReporterPtr metrics_reporter_;
     ExpertBalancerPythonWrapper  eplb_python_wrapper_;
 

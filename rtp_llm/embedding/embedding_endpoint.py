@@ -80,7 +80,11 @@ class EmbeddingEndpoint(object):
         try:
             channel = await self._channel_pool.get(self.address)
             stub = pb2_grpc.EmbeddingRpcServiceStub(channel)
-            await stub.health(pb2.EmbeddingHealthRequestPB(request_id=0), timeout=3)
+            await stub.health(
+                pb2.EmbeddingHealthRequestPB(request_id=0),
+                timeout=3,
+                wait_for_ready=True,
+            )
             return True
         except Exception as e:
             logging.warning("embedding backend health check failed: %s", e)

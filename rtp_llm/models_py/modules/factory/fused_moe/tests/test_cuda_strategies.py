@@ -9,6 +9,7 @@ from rtp_llm.config.quant_config import (
     CompressedW8A8Int8PerChannelQuantConfig,
     Fp8BlockWiseQuantConfig,
     Fp8DynamicPerTensorQuantConfig,
+    Fp8PerChannelCompressedQuantConfig,
     MXFp4QuarkQuantConfig,
     W4a8Int4PerChannelQuantConfig,
 )
@@ -29,6 +30,7 @@ from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.strategy import (
     CudaFp8PerBlockNoDPStrategy,
     CudaFp8PerBlockPureCPStrategy,
     CudaFp8PerBlockPureDPStrategy,
+    CudaFp8PerChannelNoDPStrategy,
     CudaFp8PerTensorNoDPStrategy,
     CudaNoQuantCppStrategy,
     CudaNoQuantDpNormalStrategy,
@@ -154,6 +156,39 @@ def create_moe_config_adapter(
         moe_config=moe_config,
         enable_cuda_graph=enable_cuda_graph,
     )
+
+
+class TestCudaPerChannelFp8Strategy(unittest.TestCase):
+    def test_eager_single_rank_ptpc_only(self):
+        channel = CudaFp8PerChannelNoDPStrategy()
+        tensor = CudaFp8PerTensorNoDPStrategy()
+        model = create_model_config_with_fp8_per_tensor_quant()
+        model.data_type = "bf16"
+        model.activation_type = "SiGLU"
+        parallel = create_parallelism_config()
+        parallel.world_size = 1
+        config = create_moe_config_adapter(
+            model, parallel, create_moe_config(use_all_gather=True)
+        )
+        self.assertTrue(tensor.can_handle(config))
+        self.assertFalse(channel.can_handle(config))
+
+        model.quant_config = Fp8PerChannelCompressedQuantConfig(is_quanted=True)
+        self.assertTrue(channel.can_handle(config))
+        self.assertFalse(tensor.can_handle(config))
+        self.assertTrue(channel.get_attributes().quant_config.per_out_ch_quant)
+        self.assertFalse(tensor.get_attributes().quant_config.per_out_ch_quant)
+
+        with patch(
+            "rtp_llm.models_py.kernels.cuda.fp8_kernel.fp8_kernel.fp8_grouped_gemm_ptpc",
+            None,
+        ):
+            self.assertFalse(channel.can_handle(config))
+        config.enable_cuda_graph = True
+        self.assertFalse(channel.can_handle(config))
+        config.enable_cuda_graph = False
+        config.world_size = 2
+        self.assertFalse(channel.can_handle(config))
 
 
 class TestCudaNoQuantFallbackStrategies(unittest.TestCase):
@@ -414,6 +449,72 @@ class TestCudaFp8PerBlockNoDPMaskedStrategy(unittest.TestCase):
 
         strategy = CudaFp8PerBlockNoDPMaskedStrategy()
         self.assertTrue(strategy.can_handle(config))
+
+    def test_auto_ep2_graph_registry_preserves_explicit_policy(self) -> None:
+        from rtp_llm.models_py.modules.factory.fused_moe.strategy_registry import (
+            StrategyRegistry,
+        )
+
+        registry = StrategyRegistry()
+        registry.register(CudaFp8PerBlockNoDPStrategy())
+        registry.register(CudaFp8PerBlockNoDPMaskedStrategy())
+        native = create_model_config_with_fp8_block_quant()
+        native.expert_num = 128
+        native.eplb_config.redundant_expert = 2
+        moe = create_moe_config(use_all_gather=True, moe_strategy="auto")
+        moe.use_deepep_moe = False
+        parallelism = create_parallelism_config(ep_size=2, tp_size=2)
+        parallelism.world_size = parallelism.local_world_size = 2
+        config = create_moe_config_adapter(
+            native,
+            parallelism,
+            moe,
+            enable_cuda_graph=True,
+        )
+        # Run both real graph predicates from the CI trace. Only the hardware
+        # capability probe is synthetic (this selector test needs no device).
+        executors = "rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors."
+        with (
+            patch(
+                "rtp_llm.models_py.kernels.cuda.deepgemm_wrapper.has_deep_gemm",
+                return_value=True,
+            ),
+            patch("rtp_llm.models_py.utils.arch.get_sm", return_value=(9, 0)),
+            patch(
+                executors + "deepgemm_masked_executor_v2.get_sm", return_value=(9, 0)
+            ),
+            patch(executors + "deepgemm_hybrid_executor.get_sm", return_value=(9, 0)),
+        ):
+            self.assertIsInstance(
+                registry.get_strategy(config), CudaFp8PerBlockNoDPMaskedStrategy
+            )
+            config.moe_strategy = "fp8_per_block_no_dp"
+            with self.assertRaisesRegex(ValueError, "No suitable MOE strategy"):
+                registry.get_strategy(config)
+
+    def test_auto_masked_selection_scope(self) -> None:
+        for graph, sm, tp, ep, dp, deepep, expected in (
+            (True, 9, 2, 2, 1, False, True),
+            (False, 9, 2, 2, 1, False, False),
+            (True, 12, 2, 2, 1, False, False),
+            (True, 9, 2, 2, 1, True, False),
+            (True, 9, 1, 2, 2, False, False),
+        ):
+            with self.subTest(graph=graph, sm=sm, tp=tp, ep=ep, dp=dp, deepep=deepep):
+                moe = create_moe_config(use_all_gather=True, moe_strategy="auto")
+                moe.use_deepep_moe = deepep
+                config = create_moe_config_adapter(
+                    model_config=create_model_config_with_fp8_block_quant(),
+                    parallelism_config=create_parallelism_config(
+                        ep_size=ep, tp_size=tp, dp_size=dp
+                    ),
+                    moe_config=moe,
+                    enable_cuda_graph=graph,
+                )
+                with patch("rtp_llm.models_py.utils.arch.get_sm", return_value=(sm, 0)):
+                    checker = ConditionChecker("AUTO masked applicability")
+                    CudaFp8PerBlockNoDPMaskedStrategy.check_conditions(checker, config)
+                    self.assertEqual(checker.all_passed(), expected)
 
     def test_priority(self) -> None:
         """Test priority"""

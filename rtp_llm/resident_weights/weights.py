@@ -62,7 +62,6 @@ from rtp_llm.resident_weights.vmm import (
 
 if TYPE_CHECKING:
     # The loader imports this package, so these stay annotations only.
-    from rtp_llm.model_loader.loader import ModelLoader
     from rtp_llm.model_loader.model_weight_info import ModelWeights
 
 # Safety ceiling on client-side polling for an in-flight restore; slightly past the store's own
@@ -445,7 +444,7 @@ class ResidentWeights:
 
     def attach_or_load_weights(
         self,
-        loader: "ModelLoader",
+        loader,
         device: str,
         global_weight_aliases: Mapping[str, torch.Tensor],
         excluded_names: Sequence[str] = (),
@@ -458,25 +457,52 @@ class ResidentWeights:
         cold start leaves both where they are. Verify mode always loads from the checkpoint,
         because what it verifies is the published record against a fresh one.
         """
+        restored = self.acquire_for_load(device, synchronize_ranks=synchronize_ranks)
+        if restored is not None:
+            weights = loader.assemble_weights(device, global_weight_aliases, restored)
+            self.bind(weights)
+            return weights
+        weights = loader.load_weights(
+            device=device, global_weight_aliases=global_weight_aliases
+        )
+        self.move_to_vmm(weights, tuple(global_weight_aliases) + tuple(excluded_names))
+        return weights
+
+    def acquire_for_load(
+        self, device: str, *, synchronize_ranks: bool, group=None
+    ) -> Optional[List[RestoredTensor]]:
+        """Decide once for the rank group, before opening any checkpoint tensors.
+
+        An empty record is a hit (for example, a stage with only loans).
+        Only None means that all participating ranks must take the cold path.
+        """
         self._restore_error = None
-        if self.verify:
-            self.begin_verify()
-            restored = None
-        else:
-            restored = self.attach()
+        restored = None
+        error = None
+        try:
+            if self.verify:
+                self.begin_verify()
+            else:
+                restored = self.attach()
+        except Exception as exc:
+            if not synchronize_ranks:
+                raise
+            error = exc
         if self._restore_error is not None:
             local_state = _ATTACH_RESTORE_FAILED
         elif restored is not None:
             local_state = _ATTACH_HIT
         else:
             local_state = _ATTACH_MISS
-        # fastsafetensors broadcasts on WORLD. All participating ranks must agree on whether to
-        # attach, cold-load, or fail on a host restore error before anyone enters load_weights.
-        state = (
-            all_ranks_min_state(local_state, device)
-            if synchronize_ranks
-            else local_state
-        )
+        # A PP draft participates on its own stage, not WORLD. Every consumer
+        # must agree before any rank enters checkpoint reads or replay.
+        state = local_state
+        if synchronize_ranks:
+            try:
+                state = agree_resident_step(local_state, error, device, group, "attach")
+            except Exception:
+                self.release_attach()
+                raise
         if state == _ATTACH_RESTORE_FAILED:
             self.release_attach()
             raise RuntimeError(
@@ -488,15 +514,7 @@ class ResidentWeights:
         if synchronize_ranks and state == _ATTACH_MISS:
             restored = None
             self.discard_attach()
-        if restored is not None:
-            weights = loader.assemble_weights(device, global_weight_aliases, restored)
-            self.bind(weights)
-            return weights
-        weights = loader.load_weights(
-            device=device, global_weight_aliases=global_weight_aliases
-        )
-        self.move_to_vmm(weights, tuple(global_weight_aliases) + tuple(excluded_names))
-        return weights
+        return restored
 
     def release_attach(self) -> None:
         """Drop this process's local mappings and hold without deleting the store's record."""
@@ -1151,6 +1169,11 @@ class ResidentWeights:
         if self._finalized:
             return
         self._finalized = True
+        if self._recorder is not None and self._model_weights is not None:
+            bank = self._model_weights()
+            finish = getattr(bank, "finish_native_record", None)
+            if finish is not None:
+                finish(self)
         self._unbind()
         try:
             if self._replay is not None:
@@ -1717,17 +1740,37 @@ def checkpoint_digest(path: str, follow_index: bool = False) -> str:
     return hashlib.sha256("\n".join(sorted(entries)).encode()).hexdigest()
 
 
-def all_ranks_min_state(state: int, device: str) -> int:
-    """Agree on the minimum integer state across participating WORLD ranks."""
+def all_ranks_min_state(state: int, device: str, *, group=None) -> int:
+    """Agree on the minimum state among the consumers of this checkpoint."""
     dist = torch.distributed
-    if not dist.is_initialized() or dist.get_world_size() <= 1:
+    if not dist.is_initialized() or dist.get_world_size(group) <= 1:
         return state
-    tensor_device = device if dist.get_backend() == "nccl" else "cpu"
+    tensor_device = device if dist.get_backend(group) == "nccl" else "cpu"
     flag = torch.tensor(int(state), dtype=torch.int32, device=tensor_device)
-    dist.all_reduce(flag, op=dist.ReduceOp.MIN)
+    dist.all_reduce(flag, op=dist.ReduceOp.MIN, group=group)
     return int(flag.item())
 
 
-def all_ranks_true(value: bool, device: str) -> bool:
-    """Agree before entering or skipping checkpoint-loader WORLD collectives."""
-    return bool(all_ranks_min_state(int(value), device))
+def all_ranks_true(value: bool, device: str, *, group=None) -> bool:
+    """Agree before entering or skipping checkpoint-loader collectives."""
+    return bool(all_ranks_min_state(int(value), device, group=group))
+
+
+def agree_resident_step(state: int, error: Optional[Exception], device: str, group, step: str) -> int:
+    """Complete the existing stage vote even when local work raises.
+
+    Nonnegative states retain their normal MIN semantics. Only a failure
+    exchanges diagnostics; a successful multi-rank step has just one vote.
+    """
+    result = all_ranks_min_state(-1 if error is not None else state, device, group=group)
+    if result >= 0:
+        return result
+    dist = torch.distributed
+    if not dist.is_initialized() or dist.get_world_size(group) == 1:
+        assert error is not None
+        raise error
+    reasons = [None] * dist.get_world_size(group)
+    reason = f"{type(error).__name__}: {error}" if error is not None else None
+    dist.all_gather_object(reasons, reason, group=group)
+    details = "; ".join(f"group rank {i}: {s}" for i, s in enumerate(reasons) if s)
+    raise RuntimeError(f"resident checkpoint {step} failed: {details}") from error

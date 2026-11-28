@@ -32,7 +32,14 @@ def _enabled() -> bool:
 def _plain_decode_block(layer) -> bool:
     from rtp_llm.models_py.modules.dsv41.block import Block
 
-    return type(layer) is Block
+    cls = type(layer)
+    # The direct checkpoint block replaces construction, not execution. Don't
+    # inherit this opt-in into further subclasses that can override semantics.
+    return cls is Block or (
+        cls.__dict__.get("_dsv41_native_decode_block") is Block
+        and Block in cls.__bases__
+        and cls.forward_decode is Block.forward_decode
+    )
 
 
 def can_defer_decode_post(layer, next_layer, preserve_output: bool) -> bool:

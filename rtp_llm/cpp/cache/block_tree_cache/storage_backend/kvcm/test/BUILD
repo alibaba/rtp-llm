@@ -7,6 +7,7 @@ cc_test_wrapper(
     srcs = [
         "ClientWrapperTest.cc",
         "MockKVCMClient.h",
+        "MockMetaClientSdkTest.cc",
     ],
     copts = copts(),
     target_compatible_with = select({

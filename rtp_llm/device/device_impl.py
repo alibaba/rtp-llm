@@ -7,9 +7,6 @@ import psutil
 import torch
 
 from rtp_llm.device.device_base import DeviceBase, MemInfo
-from rtp_llm.ops.compute_ops import (
-    preprocess_weight_scale,
-)
 from rtp_llm.utils.model_weight import W
 from rtp_llm.utils.swizzle_utils import should_swizzle_linear_attn_ba, swizzle_tensor
 
@@ -32,17 +29,14 @@ def is_gfx950(arch_fallback: Optional[str] = None) -> bool:
 
 
 class CpuImpl(DeviceBase):
-    def __init__(self):
-        super().__init__()
-
     def _get_mem_info(self) -> MemInfo:
         vmem = psutil.virtual_memory()
         return MemInfo(vmem.used, vmem.free)
 
 
 class ArmCpuImpl(CpuImpl):
-    def __init__(self):
-        super().__init__()
+    def __init__(self, *, engine_args=None):
+        super().__init__(engine_args=engine_args)
         self.gemm_rewrite_list = [
             W.attn_qkv_w,
             W.attn_o_w,
@@ -79,8 +73,9 @@ class ArmCpuImpl(CpuImpl):
         gptq: bool,
         awq: bool,
         weight_bits: int,
+        gptq_v2: bool = False,
     ):
-        GPTQ_FLAG = 1 if gptq == True else 0
+        GPTQ_FLAG = int(gptq and not gptq_v2)
         qweight = qweight_int32.reshape(qweight_int32.shape[0], -1).cpu()
         qzeros = qzeros_int32.reshape(qzeros_int32.shape[0], -1).cpu()
         scales_fp16 = scales_fp16.reshape(scales_fp16.shape[0], -1).cpu()
@@ -107,6 +102,8 @@ class ArmCpuImpl(CpuImpl):
         qweight = qweight.to(torch.int8)
         if not is_int8:
             qweight = packer(qweight)
+        from rtp_llm.ops.compute_ops import preprocess_weight_scale
+
         qweight_interleaved = preprocess_weight_scale(qweight, scales_fp16)
 
         # zero = 0 if qzeros_int32 = -2004318072 torch.int32 for awq
@@ -131,9 +128,6 @@ class ArmCpuImpl(CpuImpl):
 
 
 class GpuImpl(DeviceBase):
-    def __init__(self):
-        super().__init__()
-
     def get_device_id(self) -> int:
         return torch.cuda.current_device()
 
@@ -240,8 +234,9 @@ class GpuImpl(DeviceBase):
         gptq: bool,
         awq: bool,
         weight_bits: int,
+        gptq_v2: bool = False,
     ):
-        GPTQ_FLAG = 1 if gptq == True else 0
+        GPTQ_FLAG = int(gptq and not gptq_v2)
         qweight = qweight_int32.reshape(qweight_int32.shape[0], -1)
         qzeros = qzeros_int32.reshape(qzeros_int32.shape[0], -1)
         scales_fp16 = scales_fp16.reshape(scales_fp16.shape[0], -1)
@@ -300,6 +295,7 @@ class GpuImpl(DeviceBase):
         gptq: bool,
         awq: bool,
         weight_bits: int,
+        gptq_v2: bool = False,
     ):
         assert qweight_int32.dim() == 3
 
@@ -314,7 +310,7 @@ class GpuImpl(DeviceBase):
             z = torch.squeeze(z).transpose(1, 0).contiguous()
             s = torch.squeeze(s).transpose(1, 0).contiguous()
             p_w, p_z, p_s = self.preprocess_groupwise_weight_params(
-                w, z, s, device, gptq, awq, weight_bits
+                w, z, s, device, gptq, awq, weight_bits, gptq_v2
             )
             processed_weights.append(p_w)
             processed_zeros.append(p_z)
@@ -323,11 +319,6 @@ class GpuImpl(DeviceBase):
         processed_zeros = torch.stack(processed_zeros, dim=0)
         processed_scalses = torch.stack(processed_scalses, dim=0)
         return processed_weights, processed_zeros, processed_scalses
-
-    def shuffle_moe_weight(
-        self, x: torch.Tensor, datatype: torch.dtype, name: str
-    ) -> torch.Tensor:
-        return x
 
     def shuffle_gemm_weight(self, x: torch.Tensor) -> torch.Tensor:
         return x
@@ -339,8 +330,8 @@ class GpuImpl(DeviceBase):
 
 
 class CudaImpl(GpuImpl):
-    def __init__(self):
-        super().__init__()
+    def __init__(self, *, engine_args=None):
+        super().__init__(engine_args=engine_args)
         try:
             import pynvml
 
@@ -728,8 +719,8 @@ class PpuImpl(CudaImpl):
 
 
 class RocmImpl(GpuImpl):
-    def __init__(self):
-        super().__init__()
+    def __init__(self, *, engine_args=None):
+        super().__init__(engine_args=engine_args)
         # arch / mem-info paths read self.rocml unconditionally, so the
         # attribute must exist even when pyrsmi is missing or smi_initialize
         # fails. Keep it None on failure; callers already null-check.
@@ -837,8 +828,9 @@ class RocmImpl(GpuImpl):
         gptq: bool,
         awq: bool,
         weight_bits: int,
+        gptq_v2: bool = False,
     ):
-        GPTQ_FLAG = 1 if gptq == True else 0
+        GPTQ_FLAG = int(gptq and not gptq_v2)
         qweight = qweight_int32.reshape(qweight_int32.shape[0], -1)
         qzeros = qzeros_int32.reshape(qzeros_int32.shape[0], -1)
         scales_fp16 = scales_fp16.reshape(scales_fp16.shape[0], -1)

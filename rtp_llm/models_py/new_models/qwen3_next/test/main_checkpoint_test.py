@@ -1,0 +1,473 @@
+import os
+import tempfile
+import types
+import unittest
+from dataclasses import replace
+import torch
+from safetensors.torch import save_file
+from rtp_llm.config.model_config import ModelConfig
+from rtp_llm.models_py.checkpoint_reader_test_support import checkpoint_readers
+from rtp_llm.models_py.model_loader import NewLoaderConfig, NewLoaderLoadMethod, NewModelLoader
+from rtp_llm.models_py.new_models.qwen3_next.language import Qwen35DenseMTPForCausalLM
+from rtp_llm.models_py.new_models.qwen3_next.language import Qwen3NextMoEBlock
+from rtp_llm.models_py.quant_methods.base import QuantizationConfig
+from rtp_llm.ops import DataType, HybridAttentionType
+
+
+def _parallelism(
+    tp_size=1,
+    tp_rank=0,
+    ep_size=1,
+    ep_rank=0,
+    attn_tp_size=None,
+    attn_tp_rank=None,
+    ffn_tp_size=None,
+    ffn_tp_rank=None,
+    cp_enabled=False,
+):
+    attn_tp_size = tp_size if attn_tp_size is None else attn_tp_size
+    attn_tp_rank = tp_rank if attn_tp_rank is None else attn_tp_rank
+    ffn_tp_size = tp_size if ffn_tp_size is None else ffn_tp_size
+    ffn_tp_rank = tp_rank if ffn_tp_rank is None else ffn_tp_rank
+    return types.SimpleNamespace(
+        tp_size=tp_size,
+        tp_rank=tp_rank,
+        ep_size=ep_size,
+        ep_rank=ep_rank,
+        pp_size=1,
+        pp_rank=0,
+        pp_stage_layer_counts=[],
+        world_rank=tp_rank,
+        dp_size=1,
+        dp_rank=0,
+        world_size=max(tp_size, ep_size),
+        local_rank=tp_rank,
+        get_attn_tp_size=lambda: attn_tp_size,
+        get_attn_tp_rank=lambda: attn_tp_rank,
+        get_ffn_tp_size=lambda: ffn_tp_size,
+        get_ffn_tp_rank=lambda: ffn_tp_rank,
+        prefill_cp_config=types.SimpleNamespace(
+            is_enabled=lambda: cp_enabled,
+            is_prefill_enabled=lambda: False,
+        ),
+        ffn_disaggregate_config=types.SimpleNamespace(enable_ffn_disaggregate=False),
+    )
+
+
+def _moe_config():
+    return types.SimpleNamespace(
+        fake_balance_expert=False,
+        ll_num_max_token=1,
+        masked_max_token_num=1,
+        moe_strategy=0,
+        use_mori_ep=False,
+        use_deepep_moe=False,
+        use_deepep_low_latency=False,
+        use_all_gather=True,
+    )
+
+
+def _config(layer_type=HybridAttentionType.NONE, tie=True):
+    config = ModelConfig()
+    config.model_type = "qwen3_next"
+    config.num_layers = 1
+    config.vocab_size = 8
+    config.hidden_size = 4
+    config.inter_size = 4
+    config.expert_num = 2
+    config.moe_inter_size = 4
+    config.moe_k = 1
+    config.moe_style = 2
+    config.moe_layer_index = []
+    config.has_moe_norm = True
+    config.attn_config.head_num = 2
+    config.attn_config.kv_head_num = 1
+    config.attn_config.size_per_head = 2
+    config.layernorm_eps = 1e-6
+    config.partial_rotary_factor = 1.0
+    config.enable_fp32_lm_head = False
+    config.tie_word_embeddings = tie
+    config.data_type = "fp32"
+    config.quant_config = None
+    config.activation_type = "SiGLU"
+    config.hybrid_attention_config.enable_hybrid_attention = True
+    config.hybrid_attention_config.hybrid_attention_types = [layer_type]
+    linear = config.linear_attention_config
+    linear.linear_conv_kernel_dim = 2
+    linear.linear_key_head_dim = 2
+    linear.linear_num_key_heads = 2
+    linear.linear_num_value_heads = 2
+    linear.linear_value_head_dim = 2
+    linear.ssm_state_dtype = DataType.TYPE_FP32
+    linear.conv_state_dtype = DataType.TYPE_FP32
+    return config
+
+
+def _load_config(
+    tp_size=1,
+    tp_rank=0,
+    ep_size=1,
+    ep_rank=0,
+    attn_tp_size=None,
+    attn_tp_rank=None,
+    ffn_tp_size=None,
+    ffn_tp_rank=None,
+    quant_config=None,
+    cp_enabled=False,
+):
+    attn_tp_size = tp_size if attn_tp_size is None else attn_tp_size
+    attn_tp_rank = tp_rank if attn_tp_rank is None else attn_tp_rank
+    ffn_tp_size = tp_size if ffn_tp_size is None else ffn_tp_size
+    ffn_tp_rank = tp_rank if ffn_tp_rank is None else ffn_tp_rank
+    parallelism = _parallelism(
+        tp_size,
+        tp_rank,
+        ep_size,
+        ep_rank,
+        attn_tp_size,
+        attn_tp_rank,
+        ffn_tp_size,
+        ffn_tp_rank,
+        cp_enabled,
+    )
+    return NewLoaderConfig(
+        tp_size=tp_size,
+        tp_rank=tp_rank,
+        ep_size=ep_size,
+        ep_rank=ep_rank,
+        attn_tp_size=attn_tp_size,
+        attn_tp_rank=attn_tp_rank,
+        ffn_tp_size=ffn_tp_size,
+        ffn_tp_rank=ffn_tp_rank,
+        compute_dtype=torch.float32,
+        device="cpu",
+        load_method="scratch",
+        quant_config=quant_config or QuantizationConfig("none"),
+        parallelism_config=parallelism,
+        moe_config=_moe_config(),
+    )
+
+
+def _dense_weights(include_lm_head=False):
+    weights = {
+        "model.embed_tokens.weight": torch.arange(32, dtype=torch.float32).reshape(
+            8, 4
+        ),
+        "model.layers.0.input_layernorm.weight": torch.ones(4),
+        # Q and gate are interleaved per head: [head, q/gate, head_dim, hidden].
+        "model.layers.0.self_attn.q_proj.weight": torch.arange(
+            32, dtype=torch.float32
+        ).reshape(8, 4),
+        "model.layers.0.self_attn.k_proj.weight": torch.ones(2, 4),
+        "model.layers.0.self_attn.v_proj.weight": torch.ones(2, 4),
+        "model.layers.0.self_attn.q_norm.weight": torch.ones(2),
+        "model.layers.0.self_attn.k_norm.weight": torch.ones(2),
+        "model.layers.0.self_attn.o_proj.weight": torch.eye(4),
+        "model.layers.0.post_attention_layernorm.weight": torch.ones(4),
+        "model.layers.0.mlp.gate_proj.weight": torch.ones(4, 4),
+        "model.layers.0.mlp.up_proj.weight": torch.full((4, 4), 2.0),
+        "model.layers.0.mlp.down_proj.weight": torch.eye(4),
+        "model.norm.weight": torch.ones(4),
+    }
+    if include_lm_head:
+        weights["lm_head.weight"] = torch.full((8, 4), 3.0)
+    return weights
+
+
+def _mtp_config(model_type="qwen35_moe_mtp"):
+    config = _config(tie=False)
+    config.model_type = model_type
+    config.is_mtp = True
+    config.moe_layer_index = [0]
+    config.hybrid_attention_config.hybrid_attention_types = [HybridAttentionType.NONE]
+    return config
+
+
+class Qwen3NextLoadTest(unittest.TestCase):
+    def test_online_hf_q_proj_matches_both_cold_loaded_leaves_on_each_rank(self):
+        from rtp_llm.models_py.new_weight_manager import NewLoaderWeightManager
+
+        cfg = _config(tie=False)
+        data = _dense_weights(include_lm_head=True)
+        q_name = "model.layers.0.self_attn.q_proj.weight"
+        changed = data[q_name].neg() - 1
+        with tempfile.TemporaryDirectory() as initial, tempfile.TemporaryDirectory() as updated:
+            save_file(data, os.path.join(initial, "model.safetensors"))
+            save_file({**data, q_name: changed}, os.path.join(updated, "model.safetensors"))
+            for rank in (0, 1):
+                load = _load_config(tp_size=2, tp_rank=rank)
+                loader = NewModelLoader(cfg, load, initial)
+                live = loader.load()
+                cold = NewModelLoader(cfg, load, updated).load()
+                manager = NewLoaderWeightManager(live, loader)
+                attn, ref = live.layers[0].self_attn, cold.layers[0].self_attn
+                with self.assertRaises(ValueError):
+                    manager.update_tensors({q_name: changed[:-1]})
+                self.assertEqual(manager.version, 0)
+                manager.update_tensors({q_name: changed})
+                for owner, expected in ((attn.qkv_proj, ref.qkv_proj), (attn.gate, ref.gate)):
+                    torch.testing.assert_close(owner.weight, expected.weight, rtol=0, atol=0)
+
+    def test_nested_language_checkpoint_keeps_text_and_vision_ownership(self):
+        from rtp_llm.models_py.new_weight_manager import NewLoaderWeightManager
+        from rtp_llm.models_py.new_models.qwen_service_vision import load_service_vision
+
+        cfg = _config(tie=False)
+        cfg.model_type = "qwen35_dense"
+        cfg.expert_num = cfg.moe_k = cfg.moe_inter_size = cfg.moe_style = 0
+        prefix = "model." + "language_model." * 3
+        data = {
+            key.replace("model.", prefix, 1): value
+            for key, value in _dense_weights(include_lm_head=True).items()
+        }
+        visual_key = "model.visual.weight"
+        data[visual_key] = torch.arange(8).reshape(2, 4).float()
+        # Shared target/draft file: target must not consume a nested MTP key.
+        data[prefix + "mtp.pre_fc_norm_hidden.weight"] = torch.zeros(4)
+        with tempfile.TemporaryDirectory() as root:
+            save_file(data, os.path.join(root, "model.safetensors"))
+            loader = NewModelLoader(cfg, _load_config(), root)
+            model = loader.load()
+            vision = load_service_vision(
+                torch.nn.Linear(4, 2, bias=False), root, torch.float32,
+                "cpu", "scratch", prefix=None,
+            )
+        torch.testing.assert_close(model.embed_tokens.weight, data[prefix + "embed_tokens.weight"])
+        torch.testing.assert_close(model.norm.weight, data[prefix + "norm.weight"] + 1)
+        torch.testing.assert_close(vision.weight, data[visual_key])
+        manager = NewLoaderWeightManager(model, loader)
+        raw = torch.tensor([-1.0, 0.0, 1.0, 2.0])
+        manager.update_tensors({prefix + "layers.0.input_layernorm.weight": raw})
+        torch.testing.assert_close(model.layers[0].input_layernorm.weight, raw + 1)
+
+    def test_gemma_norm_checkpoint_updates_match_cold_start(self):
+        from rtp_llm.models_py.new_weight_manager import NewLoaderWeightManager
+
+        cfg = _config(tie=False)
+        data = _dense_weights(include_lm_head=True)
+        with tempfile.TemporaryDirectory() as root, tempfile.TemporaryDirectory() as updated:
+            save_file(data, os.path.join(root, "model.safetensors"))
+            loader = NewModelLoader(cfg, _load_config(), root)
+            live = loader.load()
+            incoming = {
+                key: torch.arange(value.numel()).reshape_as(value).float() - 2
+                for key, value in data.items() if key.endswith("norm.weight")
+            }
+            save_file({**data, **incoming}, os.path.join(updated, "model.safetensors"))
+            cold = NewModelLoader(cfg, _load_config(), updated).load()
+            manager = NewLoaderWeightManager(live, loader)
+            manager.update_tensors(incoming)
+            for name, raw in incoming.items():
+                local = name.removeprefix("model.")
+                with self.subTest(name=name):
+                    torch.testing.assert_close(cold.get_parameter(local), raw + 1)
+                    torch.testing.assert_close(live.get_parameter(local), cold.get_parameter(local))
+            # Published RPC names alias HF inputs; they are not finalized FT records.
+            published = live.runtime_weight_view()["final_layernorm.gamma"]
+            manager.update_tensors({"final_layernorm.gamma": incoming["model.norm.weight"] + 3})
+            self.assertIs(published, live.norm.weight)
+            torch.testing.assert_close(published, cold.norm.weight + 3)
+
+    def test_classifier_and_vocab_handler_own_complete_sources(self):
+        from dataclasses import replace
+        from rtp_llm.models_py.downstream_heads import handler_weight_mappings
+        from rtp_llm.ops import TaskType
+
+        for tag in ("qwen3_next", "qwen35_dense"):
+            cfg = _config(tie=True)
+            cfg.model_type, cfg.task_type = tag, TaskType.SEQ_CLASSIFICATION
+            if tag == "qwen35_dense":
+                cfg.expert_num = cfg.moe_k = cfg.moe_inter_size = cfg.moe_style = 0
+            data = _dense_weights(include_lm_head=True)
+            data["classifier.weight"] = torch.arange(12).float().reshape(3, 4)
+            names = ("classifier.weight", "model.embed_tokens.weight")
+            with self.subTest(tag=tag), tempfile.TemporaryDirectory() as root:
+                save_file(data, os.path.join(root, "model.safetensors"))
+                loader_cfg = replace(_load_config(tp_size=2, tp_rank=1), custom_weight_mappings=handler_weight_mappings(names))
+                model = NewModelLoader(cfg, loader_cfg, model_path=root).load()
+                view = model.runtime_weight_view()
+                self.assertIsNone(model.lm_head)
+                self.assertNotIn("lm_head", view)
+                self.assertIs(model.norm.weight, view["final_layernorm.gamma"])
+                for name in names:
+                    torch.testing.assert_close(view["__custom__." + name], data[name])
+
+    def test_shared_expert_fuses_gate_and_finalizes_only_once(self):
+        # Compare BF16 intermediate rounding with the one-store gate of the
+        # inference runtime. Use CPU stand-ins for just the CUDA kernel and TP
+        # collective so both precision and reduction order are observable.
+        block = object.__new__(Qwen3NextMoEBlock)
+        torch.nn.Module.__init__(block)
+        block.tp_size, block.ep_size = 2, 1
+        block.use_ep_shared_allreduce = False
+        block.experts = types.SimpleNamespace(fused_moe=types.SimpleNamespace(
+            router=types.SimpleNamespace(tp_collective_size=2, supports_skip_tp_allreduce=True)))
+        calls = []
+        hidden = torch.linspace(-2, 2, 64).reshape(8, 8).bfloat16()
+        gates = hidden[:, :1] * 0.625
+        shared = hidden * 2.1
+        routed = hidden.flip(1)
+        remote = hidden * 0.31
+        def route(_):
+            calls.append(("routed", block.use_unified_tp_allreduce))
+            return routed.clone()
+        def shared_expert(_, skip_allreduce=False):
+            calls.append(("shared", skip_allreduce))
+            return shared
+        def fused(gate, shard, out):
+            calls.append("merge")
+            out.copy_(torch.addcmul(out.float(), shard.float(), gate.float().sigmoid()))
+        def reduce(partial, group):
+            calls.append("allreduce")
+            return partial + remote
+        block._forward_routed = route
+        block.shared_expert = shared_expert
+        block.shared_expert_gate = lambda _: gates
+        block.sigmoid_gate_scale_add = fused
+        block.tp_all_reduce = reduce
+        expected_partial = torch.addcmul(routed.float(), shared.float(), gates.float().sigmoid()).bfloat16()
+        self.assertFalse(torch.equal(expected_partial, routed + gates.sigmoid() * shared))
+        self.assertTrue(torch.equal(block(hidden), expected_partial + remote))
+        self.assertEqual(calls, [("routed", True), ("shared", True), "merge", "allreduce"])
+        block.experts.fused_moe.router.supports_skip_tp_allreduce = False
+        calls.clear()
+        self.assertTrue(torch.equal(block(hidden), expected_partial))
+        self.assertEqual(calls, [("routed", False), ("shared", False), "merge"])
+
+    def _dense_mtp_checkpoint(self):
+        config = _mtp_config("qwen35_dense_mtp")
+        config.moe_layer_index = []
+        config.expert_num = 0
+        config.moe_k = 0
+        config.moe_style = 0
+        weights = {}
+        for name, tensor in _dense_weights(include_lm_head=True).items():
+            if name == "model.embed_tokens.weight":
+                weights["model.language_model.embed_tokens.weight"] = tensor
+            elif name.startswith("model."):
+                weights["mtp." + name[len("model.") :]] = tensor
+            else:
+                weights[name] = tensor
+        weights.update(
+            {
+                "mtp.pre_fc_norm_embedding.weight": torch.ones(4),
+                "mtp.pre_fc_norm_hidden.weight": torch.full((4,), 2.0),
+                "mtp.fc.weight": torch.arange(32, dtype=torch.float32).reshape(4, 8),
+            }
+        )
+        return config, weights
+
+    def test_mtp_vocab_sources_and_draft_norm(self):
+        embed = "model.language_model.embed_tokens.weight"
+        for method in checkpoint_readers("scratch", "fastsafetensors"):
+            for tied, missing in ((False, None), (True, None), (False, embed), (False, "lm_head.weight")):
+                with self.subTest(method=method, tied=tied, missing=missing), tempfile.TemporaryDirectory() as root:
+                    config, weights = self._dense_mtp_checkpoint()
+                    config.tie_word_embeddings = tied
+                    # A shared target/draft file also contains the target norm.
+                    weights["model.language_model.norm.weight"] = torch.full((4,), -30.)
+                    weights["mtp.norm.weight"] = torch.arange(4.)
+                    if tied:
+                        del weights["lm_head.weight"]
+                    # Deliberately non-release keys: they must never become
+                    # alternate sources for the shared vocabulary.
+                    weights["mtp.embed_tokens.weight"] = torch.full((8, 4), -17.)
+                    weights["mtp.lm_head.weight"] = torch.full((8, 4), -19.)
+                    if missing:
+                        del weights[missing]
+                    save_file(weights, os.path.join(root, "model.safetensors"))
+                    cfg = replace(_load_config(), load_method=NewLoaderLoadMethod(method))
+                    loader = NewModelLoader(config, cfg, root)
+                    if missing:
+                        with self.assertRaisesRegex(RuntimeError, "missing required"):
+                            loader.load()
+                        continue
+                    model = loader.load()
+                    self.assertEqual(loader.loaded_method.value, method)
+                    torch.testing.assert_close(model.embed_tokens.weight, weights[embed])
+                    torch.testing.assert_close(model.lm_head.weight, weights[embed if tied else "lm_head.weight"])
+                    torch.testing.assert_close(model.norm.weight, weights["mtp.norm.weight"] + 1)
+
+    def test_dense_mtp_real_checkpoint_load_uses_dense_mlp(self):
+        config, weights = self._dense_mtp_checkpoint()
+        with tempfile.TemporaryDirectory() as directory:
+            save_file(weights, os.path.join(directory, "model.safetensors"))
+            loader = NewModelLoader(config, _load_config(), directory)
+            model = loader.load()
+        self.assertIsInstance(model, Qwen35DenseMTPForCausalLM)
+        self.assertEqual(model._cfg["moe_layer_index"], [])
+        self.assertFalse(any("experts" in name for name, _ in model.named_parameters()))
+        torch.testing.assert_close(model.fc.weight, weights["mtp.fc.weight"])
+        torch.testing.assert_close(
+            model.pre_fc_norm_embedding.weight, torch.full((4,), 2.0)
+        )
+        torch.testing.assert_close(
+            model.pre_fc_norm_hidden.weight, torch.full((4,), 3.0)
+        )
+        self.assertIs(
+            model.runtime_weight_view()["embedding"], model.embed_tokens.weight
+        )
+        from rtp_llm.models_py.new_weight_manager import NewLoaderWeightManager
+
+        manager = NewLoaderWeightManager(model, loader)
+        raw = torch.arange(4).float() - 2
+        manager.update_tensors({
+            "mtp.pre_fc_norm_embedding.weight": raw,
+            "mtp.pre_fc_norm_hidden.weight": raw * 2,
+        })
+        torch.testing.assert_close(model.pre_fc_norm_embedding.weight, raw + 1)
+        torch.testing.assert_close(model.pre_fc_norm_hidden.weight, raw * 2 + 1)
+
+    def test_qwen35_dense_safetensors_loads_without_synthetic_moe_config(self):
+        config = _config(tie=False)
+        config._checkpoint_num_layers_before_override = 2
+        config.model_type = "qwen35_dense"
+        config.expert_num = config.moe_k = config.moe_inter_size = config.moe_style = 0
+        weights = {
+            name.replace("model.", "model.language_model.", 1): tensor
+            for name, tensor in _dense_weights(include_lm_head=True).items()
+        }
+        with tempfile.TemporaryDirectory() as model_path:
+            weights["model.language_model.layers.1.input_layernorm.weight"] = torch.ones(4)
+            weights["model.language_model.visual.weight"] = torch.arange(8).float().reshape(2, 4)
+            save_file(weights, os.path.join(model_path, "model.safetensors"))
+            from rtp_llm.models_py.new_models.qwen_service_vision import load_service_vision
+
+            for method in checkpoint_readers("scratch", "fastsafetensors"):
+                visual = load_service_vision(
+                    torch.nn.Linear(4, 2, bias=False), model_path, torch.float32,
+                    "cpu", method, prefix=None,
+                )
+                torch.testing.assert_close(visual.weight, weights["model.language_model.visual.weight"])
+            for rank in range(2):
+                with self.subTest(rank=rank):
+                    model = NewModelLoader(
+                        config,
+                        _load_config(tp_size=2, tp_rank=rank),
+                        model_path=model_path,
+                    ).load()
+                    NewModelLoader._validate_loaded_weights(model)
+                    self.assertTrue(model.owns_lora_checkpoint_target("layers.0.self_attn.q_proj.weight"))
+                    self.assertFalse(model.owns_lora_checkpoint_target("layers.1.self_attn.q_proj.weight"))
+                    # Keys outside even the source geometry must still reach strict validation.
+                    self.assertTrue(model.checkpoint_weight_name_filter()("model.language_model.layers.9.bad"))
+                    self.assertTrue(model.checkpoint_weight_name_filter()("model.language_model.visual_adapter.unknown"))
+                    self.assertEqual(model._cfg["expert_num"], 0)
+                    self.assertFalse(hasattr(model.layers[0].mlp, "experts"))
+                    q_gate = weights[
+                        "model.language_model.layers.0.self_attn.q_proj.weight"
+                    ].reshape(2, 2, 2, 4)
+                    torch.testing.assert_close(
+                        model.layers[0].self_attn.qkv_proj.weight[:2], q_gate[rank, 0]
+                    )
+                    torch.testing.assert_close(
+                        model.layers[0].self_attn.gate.weight, q_gate[rank, 1]
+                    )
+                    torch.testing.assert_close(model.norm.weight, torch.full((4,), 2.0))
+                    torch.testing.assert_close(
+                        model.lm_head.weight, torch.full((4, 4), 3.0)
+                    )
+
+
+if __name__ == "__main__":
+    unittest.main()

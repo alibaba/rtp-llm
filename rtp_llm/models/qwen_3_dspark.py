@@ -1,68 +1,32 @@
 """Qwen3 DSpark draft-model registration."""
 
-from typing import Any, List
-
-import torch
-
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.model_factory_register import register_model
-from rtp_llm.model_loader.weight_module import AtomicWeight
-from rtp_llm.models.qwen_v3 import QwenV3, QWenV3Weight
-from rtp_llm.utils.model_weight import CkptWeightInfo, W, identity, transpose
+from rtp_llm.models.qwen_v3 import QwenV3
+from rtp_llm.models_py.speculative.qwen3_dspark_checkpoint import (
+    target_layer_ids as checkpoint_target_layer_ids,
+    target_weight_roles,
+)
 from rtp_llm.utils.util import get_config_from_path
 
 
-def dspark_offset_d2t_to_absolute(ts: List[torch.Tensor]) -> torch.Tensor:
-    """Normalize Speculators' offset d2t table to absolute target token ids."""
-    offsets = identity(ts).to(torch.int64)
-    return offsets + torch.arange(
-        offsets.numel(), dtype=offsets.dtype, device=offsets.device
-    )
+def __getattr__(name):
+    # Keep the exporter API importable without pulling weight-building tools
+    # into frontend model discovery.
+    if name in ("Qwen3DSparkWeight", "dspark_offset_d2t_to_absolute"):
+        from rtp_llm.models import qwen_3_dspark_ft
 
-
-class Qwen3DSparkWeight(QWenV3Weight):
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self._d2t_path = None
-        self._hidden_norm_path = "model.hidden_norm.weight"
-
-    def _process_meta(self, meta_dicts: Any, weight_keys: List[str]):
-        super()._process_meta(meta_dicts, weight_keys)
-        if "hidden_norm.weight" in weight_keys:
-            self._hidden_norm_path = "hidden_norm.weight"
-        if "d2t" in weight_keys:
-            self._d2t_path = "d2t"
-        elif "model.d2t" in weight_keys:
-            self._d2t_path = "model.d2t"
-
-    def _get_weight_info(self):
-        info = super()._get_weight_info()
-        extras = (
-            (W.dspark_fc_w, "fc.weight", transpose),
-            (W.dspark_hidden_norm_gamma, self._hidden_norm_path, identity),
-            (W.dspark_markov_w1, "markov_head.markov_w1.weight", identity),
-            (W.dspark_markov_w2, "markov_head.markov_w2.weight", identity),
-        )
-        info.weights.extend(
-            AtomicWeight(name, [CkptWeightInfo(path, identity)], transform)
-            for name, path, transform in extras
-        )
-        if self._d2t_path is not None:
-            transform = (
-                dspark_offset_d2t_to_absolute if self._d2t_path == "d2t" else identity
-            )
-            info.weights.append(
-                AtomicWeight(
-                    W.multi_tokens_predict_d2t_map,
-                    [CkptWeightInfo(self._d2t_path, identity)],
-                    transform,
-                    data_type=torch.int64,
-                )
-            )
-        return info
+        return getattr(qwen_3_dspark_ft, name)
+    raise AttributeError(name)
 
 
 class Qwen3DSpark(QwenV3):
+    @staticmethod
+    def get_weight_cls():
+        from rtp_llm.models.qwen_3_dspark_ft import Qwen3DSparkWeight
+
+        return Qwen3DSparkWeight
+
     def support_pp(self) -> bool:
         return False
 
@@ -78,71 +42,92 @@ class Qwen3DSpark(QwenV3):
         config.input_vocab_size = int(backbone["vocab_size"])
         config.vocab_size = int(dspark.get("draft_vocab_size", backbone["vocab_size"]))
         config.dspark_noise_token_id = int(dspark["mask_token_id"])
-        target_layer_ids = [int(x) for x in dspark["aux_hidden_state_layer_ids"]]
-        if dspark.get("speculators_model_type") == "dspark":
-            target_layer_ids = [x - 1 for x in target_layer_ids]
-            if any(x < 0 for x in target_layer_ids):
-                raise ValueError(
-                    "Speculators DSpark aux_hidden_state_layer_ids must be positive"
-                )
-        config.dspark_target_layer_ids = target_layer_ids
+        config.dspark_target_layer_ids = checkpoint_target_layer_ids(dspark)
         config.dspark_markov_rank = int(dspark.get("markov_rank", 0) or 0)
         if config.dspark_markov_rank <= 0:
             raise ValueError("Qwen3 DSpark requires markov_rank > 0")
         config.dspark_sample_from_anchor = bool(dspark.get("sample_from_anchor", False))
-        lm_head_source = dspark.get("lm_head_source", "checkpoint")
-        if lm_head_source not in ("checkpoint", "target"):
+        # This opt-in assigns target ownership deliberately. No sharing is
+        # inferred for existing checkpoints with their own language-model head.
+        shares = dspark.get("dspark_shared_target_weights", [])
+        if (
+            not isinstance(shares, list)
+            or any(role not in ("embedding", "lm_head") for role in shares)
+            or len(set(shares)) != len(shares)
+        ):
+            raise ValueError(
+                "dspark_shared_target_weights must list unique embedding/lm_head roles"
+            )
+        head_source = dspark.get("lm_head_source")
+        if "lm_head_source" in dspark and head_source not in ("checkpoint", "target"):
             raise ValueError("DSpark lm_head_source must be 'checkpoint' or 'target'")
-        config.dspark_share_target_lm_head = lm_head_source == "target"
+        if head_source == "checkpoint" and "lm_head" in shares:
+            raise ValueError("lm_head_source contradicts dspark_shared_target_weights")
+        if head_source == "target" and "lm_head" not in shares:
+            shares = [*shares, "lm_head"]
+        config.dspark_share_target_lm_head = "lm_head" in shares
+        object.__setattr__(config, "_dspark_shared_target_weights", tuple(shares))
         return config
-
-    @staticmethod
-    def get_weight_cls():
-        return Qwen3DSparkWeight
 
     @classmethod
     def speculative_weight_alias_names(cls, target_model, draft_model_config):
-        # TorchSpec trains against the external target head. Other DSpark
-        # formats keep their checkpoint head, including reduced-vocab drafts.
-        if not draft_model_config.dspark_share_target_lm_head:
+        # Vocab matrices in a self-contained draft (including the five-layer
+        # training export) may be trained independently. Never substitute the
+        # target just because two tensors have the same size or one is absent.
+        explicit_roles = getattr(
+            draft_model_config, "_dspark_shared_target_weights", None
+        )
+        roles = target_weight_roles(draft_model_config)
+        if not roles:
             return ()
-        target_config = target_model.model_config
-        compatible = (
-            "hidden_size",
-            "vocab_size",
-            "data_type",
-            "enable_fp32_lm_head",
-            "normalize_lm_head_weight",
-        )
-        mismatches = [
-            name
-            for name in compatible
-            if getattr(target_config, name) != getattr(draft_model_config, name)
+        target = target_model.model_config
+        if getattr(target, "is_mtp", False):
+            raise ValueError("Qwen3 DSpARK loans require a loaded target, not a draft")
+        if target.hidden_size != draft_model_config.hidden_size:
+            raise ValueError("DSpARK target/draft hidden_size differs")
+        if "embedding" in roles and (
+            target.input_vocab_size or target.vocab_size
+        ) != draft_model_config.input_vocab_size:
+            raise ValueError("DSpARK target/draft input vocabularies differ")
+        if "lm_head" in roles:
+            for field in (
+                "vocab_size",
+                "data_type",
+                "enable_fp32_lm_head",
+                "normalize_lm_head_weight",
+            ):
+                if getattr(target, field, None) != getattr(
+                    draft_model_config, field, None
+                ):
+                    raise ValueError(
+                        f"DSpark cannot share incompatible target lm-head: {field}"
+                    )
+            if (
+                getattr(draft_model_config, "input_vocab_size", draft_model_config.vocab_size)
+                != draft_model_config.vocab_size
+                or getattr(target, "enable_output_vocab_pruning", False)
+            ):
+                raise ValueError("DSpARK cannot borrow a head with a different output vocabulary")
+        if explicit_roles is None and not hasattr(target_model, "weight"):
+            # The public config-only compatibility query has no local owner.
+            # Actual service models expose weight and must pass the stage check.
+            return roles
+        if (
+            getattr(target_model, "py_model", None) is None
+            or getattr(target_model, "weight", None) is None
+        ):
+            raise ValueError("Qwen3 DSpARK loans require a loaded target, not a draft")
+        missing = [
+            role for role in roles
+            if target_model.weight.get_global_weight_or_none(role) is None
         ]
-        if mismatches:
-            details = ", ".join(
-                f"{name}={getattr(target_config, name)!r}/{getattr(draft_model_config, name)!r}"
-                for name in mismatches
-            )
+        if missing:
             raise ValueError(
-                "DSpark cannot share incompatible target lm-head: " + details
+                f"DSpARK cannot borrow {missing}: the target weights must be on the same pipeline stage as the draft"
             )
-        # The draft's embedding and final norm are trained checkpoint tensors.
-        return (W.lm_head,)
-
-    def _create_python_model(self):
-        from rtp_llm.models_py.model_desc.qwen3_dspark_model import Qwen3DSparkModel
-
-        self.py_model = Qwen3DSparkModel(
-            self.model_config,
-            self.parallelism_config,
-            self.weight,
-            max_generate_batch_size=self.max_generate_batch_size,
-            quant_config=self.model_config.quant_config,
-            fmha_config=self.fmha_config,
-            py_hw_kernel_config=self.hw_kernel_config,
-        )
-        return self.py_model
+        return roles
 
 
-register_model("qwen_3_dspark", Qwen3DSpark, ["Qwen3DSparkForCausalLM"])
+register_model(
+    "qwen_3_dspark", Qwen3DSpark, ["Qwen3DSparkForCausalLM", "Qwen3DSparkModel"]
+)

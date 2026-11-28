@@ -215,7 +215,9 @@ class Block(nn.Module):
         self._mega_csa_adapter = None
         self._mega_hca_adapter = None
 
-    def enable_mega_csa(self, runtime, layer_weights: Dict[str, torch.Tensor]) -> None:
+    def enable_mega_csa(
+        self, runtime, layer_weights: Optional[Dict[str, torch.Tensor]]
+    ) -> None:
         """Attach the TP1 CSA adapter only to compress-ratio-4 layers."""
         from rtp_llm.models_py.modules.dsv4.fp8.decode.mega_csa_weights import (
             COMPRESS_RATIO,
@@ -231,7 +233,9 @@ class Block(nn.Module):
         # prefill and decode shapes that use the ordinary attention path.
         self._mega_csa_adapter = MegaCSAAdapter(self, layer_weights, runtime)
 
-    def enable_mega_hca(self, runtime, layer_weights: Dict[str, torch.Tensor]) -> None:
+    def enable_mega_hca(
+        self, runtime, layer_weights: Optional[Dict[str, torch.Tensor]]
+    ) -> None:
         """Attach the TP1 HCA adapter only to compress-ratio-128 layers."""
         from rtp_llm.models_py.modules.dsv4.fp8.decode.mega_hca_weights import (
             HCA_COMPRESS_RATIO,

@@ -419,6 +419,15 @@ class QuantizationConfig(ABC):
         }
         if quant_config.get("scale_fmt") is not None:
             normalized_config["scale_fmt"] = quant_config["scale_fmt"]
+        if quant_method in ("awq", "gptq"):
+            if quant_method == "gptq":
+                for key in ("format", "checkpoint_format"):
+                    if key in quant_config:
+                        normalized_config[key] = quant_config[key]
+            for key in ("modules_to_not_convert", "exclude", "exclude_modules"):
+                if key in quant_config:
+                    normalized_config[key] = quant_config[key]
+            return cls.from_config(normalized_config)
         result = cls.from_config(normalized_config)
         if quant_config and "exclude" in quant_config:
             result.exclude_modules = set(quant_config["exclude"])
@@ -438,7 +447,9 @@ class WeightOnlyInt8PerChannelQuantConfig(QuantizationConfig):
         return "weight_only_per_col"
 
     def get_supported_compute_dtypes(self) -> List[torch.dtype]:
-        return [torch.float32, torch.float16, torch.bfloat16]
+        # Both the CUDA mixed-dtype GEMM and its packed-weight Triton kernel
+        # consume FP16/BF16 activations; this is W8A16, not W8A32.
+        return [torch.float16, torch.bfloat16]
 
     def get_supported_kv_cache_dtypes(self) -> List[torch.dtype]:
         return [torch.float32, torch.float16, torch.bfloat16, torch.int8]
@@ -791,9 +802,26 @@ class Int8PerTensorQuantConfig(QuantizationConfig):
         return Int8PerTensorQuantConfig()
 
 
+def _groupwise_exclusions(config: Dict[str, Any]) -> set:
+    # HF and RTP exporters use different field names for projections kept
+    # floating point. Losing one makes the loader expect packed INT tensors.
+    result = set()
+    for name in ("modules_to_not_convert", "exclude", "exclude_modules"):
+        entries = config.get(name)
+        if entries is None:
+            continue
+        if not isinstance(entries, (list, tuple, set)) or not all(
+            isinstance(entry, str) and entry.strip() for entry in entries
+        ):
+            raise ValueError(f"{name} must be a collection of non-empty module names")
+        result.update(entry.strip() for entry in entries)
+    return result
+
+
 class AWQConfig(QuantizationConfig):
     def __init__(self, bits: int, group_size: int, is_quanted: bool, **kwargs: Any):
         super().__init__(bits=bits, group_size=group_size, is_quanted=is_quanted)
+        self.exclude_modules = _groupwise_exclusions(kwargs)
 
     @classmethod
     def get_method(cls) -> str:
@@ -817,6 +845,17 @@ class AWQConfig(QuantizationConfig):
 class GPTQConfig(QuantizationConfig):
     def __init__(self, bits: int, group_size: int, is_quanted: bool, **kwargs: Any):
         super().__init__(bits=bits, group_size=group_size, is_quanted=is_quanted)
+        self.exclude_modules = _groupwise_exclusions(kwargs)
+        formats = [
+            kwargs[key] for key in ("format", "checkpoint_format")
+            if kwargs.get(key) is not None
+        ]
+        if any(fmt not in ("gptq", "gptq_v2") for fmt in formats):
+            raise ValueError(f"Unsupported GPTQ checkpoint format: {formats!r}")
+        if len(set(formats)) > 1:
+            raise ValueError(f"Conflicting GPTQ checkpoint formats: {formats!r}")
+        # Original AutoGPTQ files without a format encode zero - 1.
+        self.checkpoint_format = formats[0] if formats else "gptq"
 
     @classmethod
     def get_method(cls) -> str:
@@ -835,6 +874,30 @@ class GPTQConfig(QuantizationConfig):
     @classmethod
     def _from_config(cls, config: Dict[str, Any]) -> "QuantizationConfig":
         return GPTQConfig(**config)
+
+
+def resolve_nvfp4_backend(config):
+    """Select one layout for both checkpoint preparation and MoE dispatch."""
+    backend = getattr(config, "fp4_moe_op", "auto")
+    strategy = getattr(config, "moe_strategy", "auto")
+    required = {
+        "nvfp4_marlin": "marlin",
+        "nvfp4_cutlass": "cutlass",
+        "fp4_no_dp": "trtllm",
+        "fp4_ep_normal": "trtllm",
+        "fp4_ep_low_latency": "cutedsl",
+    }.get(strategy)
+    if required is not None:
+        if backend not in ("auto", required):
+            raise ValueError(f"{strategy} requires FP4_MOE_OP=auto or {required}, got {backend}")
+        return required
+    if backend in ("cutlass", "marlin"):
+        raise ValueError(f"FP4_MOE_OP={backend} requires MOE_STRATEGY=nvfp4_{backend}")
+    if backend == "auto":
+        if getattr(config, "use_deepep_moe", False) and getattr(config, "use_deepep_low_latency", False):
+            return "cutedsl"
+        return "trtllm"
+    return backend
 
 
 class ModelOptFp4Config(QuantizationConfig):

@@ -23,6 +23,13 @@ They therefore get a second, tiny int64 region of their own.
 from typing import List
 
 from rtp_llm.config.model_config import ModelConfig
+from rtp_llm.config.qwen4_cache_tags import (
+    INDEXER_KV_TAG,
+    INDEXER_ROPE_POS_TAG,
+    INDEXER_STATE_TAG,
+    PLE_NGRAM_CTX_TAG,
+    PLE_STATE_TAG,
+)
 from rtp_llm.models.hybrid_kv_cache import build_hybrid_kv_cache_spec_descs
 from rtp_llm.ops import (
     CacheCapacityPolicyDesc,
@@ -36,12 +43,6 @@ from rtp_llm.ops import (
     OpaqueBlockEntryCountMode,
     TpCacheTransferMode,
 )
-
-PLE_STATE_TAG = "ple_conv_state"
-PLE_NGRAM_CTX_TAG = "ple_ngram_ctx"
-INDEXER_KV_TAG = "indexer_kv"
-INDEXER_STATE_TAG = "indexer_state"
-INDEXER_ROPE_POS_TAG = "indexer_rope_positions"
 
 
 def _full_group_state_desc(desc: KVCacheSpecDesc) -> KVCacheSpecDesc:

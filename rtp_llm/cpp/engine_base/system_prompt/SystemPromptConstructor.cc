@@ -22,6 +22,14 @@ absl::StatusOr<std::unordered_map<std::string, SystemPromptParams>> SystemPrompt
         const auto& task_id   = item.first;
         const auto& tokens_id = item.second;
 
+        if (!cache_manager->cacheConfig().hasLengthIndependentRope(tokens_id.size())) {
+            // The task still prepends these tokens, but their KV must be computed at the actual request length.
+            if (insert_kv_cache) {
+                multi_task_prompt_args[task_id] = SystemPromptParams(tokens_id, {});
+            }
+            continue;
+        }
+
         std::shared_ptr<GenerateInput>  generate_input(new GenerateInput());
         std::shared_ptr<GenerateConfig> generate_config(new GenerateConfig());
         generate_config->max_new_tokens = 1;

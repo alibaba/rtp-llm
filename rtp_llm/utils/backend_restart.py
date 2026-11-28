@@ -262,9 +262,9 @@ class RowCoordinator:
         """Reach the row store, letting a stop request end the wait between short attempts.
 
         A stop that arrives during the attempt that connects is seen right after it, before
-        any store or heartbeat exists. part0 hosts the store on this machine, so its single
-        attempt either works at once or shows a real fault (port taken, wrong address). The
-        other machines retry until part0 is up, all within one deadline: the attempts do not
+        any store or heartbeat exists. part0 must bind the port and connect a client to its
+        own server. A bind failure is fatal; a client handshake timeout can be transient.
+        Retries share the same deadline: the attempts do not
         extend the startup bound. A failed attempt leaves no store or thread behind.
         """
         deadline = self._clock() + self._connect_timeout_s
@@ -286,10 +286,14 @@ class RowCoordinator:
                 )
             except Exception as e:
                 if self.is_leader:
+                    from torch.distributed import DistNetworkError
+
                     cause = (str(e).splitlines() or [type(e).__name__])[0]
-                    raise RowStoreError(
-                        f"row store could not be hosted: {cause}"
-                    ) from e
+                    if not (isinstance(e, DistNetworkError)
+                            and "client socket has timed out" in cause.lower()):
+                        raise RowStoreError(
+                            f"row store could not be hosted: {cause}"
+                        ) from e
                 time.sleep(
                     POLL_INTERVAL_S
                 )  # an attempt can also fail at once (e.g. no route)

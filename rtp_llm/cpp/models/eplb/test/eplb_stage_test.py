@@ -5,6 +5,7 @@ import time
 import traceback
 import unittest
 from datetime import timedelta
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import torch
@@ -27,6 +28,36 @@ class FixedPlanBalancer:
         self.calls += 1
         self.stats = (log_stats.clone(), gpu_loads.clone())
         return self.plan
+
+
+class DirectStepBalancer(FixedPlanBalancer):
+    """Observe the real C++ stage transaction on a tiny Python-owned parameter."""
+
+    def __init__(self, stage, rank, fault):
+        super().__init__(stage)
+        self.fail = fault if stage == 0 and rank % 2 == 1 else None
+        self.weight = torch.tensor(-1, device="cuda")
+        self.committed = None
+
+    def supports_python_weight_install(self):
+        return True
+
+    def load_moe_weight(self, layer, ep_rank, ep_size, phy2log):
+        if self.fail == "load":
+            raise OSError("injected worker failure")
+        return int(layer.item())
+
+    def install_balance_plan(self, layer, phy2log, counts, inverse):
+        self.weight.fill_(layer)
+        if self.fail == "install":
+            raise ValueError("injected install failure")
+
+    def commit_balance_plan(self, layer):
+        self.committed = True
+
+    def rollback_balance_plan(self, layer):
+        self.weight.fill_(-1)
+        self.committed = False
 
 
 def run_rank(rank, pp_size, port):
@@ -95,6 +126,17 @@ def run_rank(rank, pp_size, port):
         assert result["all_ready"], result
         assert result["metrics_layer_begin"] == begin, result
         assert result["metrics_gpu_loads"] == [rank + 1] * (end - begin), result
+        # Source rank r routed its tokens to the other EP rank. Reporting
+        # only source-local counts would incorrectly give both GPUs zero.
+        assert test_ops.exercise_stats_only(
+            config, SimpleNamespace(eplb_stats_only=True), log_stats, gpu_loads.flip(1)
+        ) == [(rank ^ 1) + 1] * (end - begin)
+        for fault in (None, "load", "install"):
+            observer = DirectStepBalancer(stage, rank, fault)
+            assert test_ops.exercise_direct_step(config, observer, log_stats, gpu_loads)
+            committed = stage != 0 or fault is None
+            assert observer.committed == committed
+            assert observer.weight.item() == (begin if committed else -1)
     finally:
         test_ops.clear_comm_ops()
         dist.destroy_process_group()

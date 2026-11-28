@@ -100,6 +100,25 @@ class DraftModelLoadingTest(unittest.TestCase):
                     engine.parallelism_config.pp_stage_layer_counts, expected
                 )
 
+    def test_legacy_eagle3_draft_options_select_eagle3_execution(self):
+        for strategy in (SpeculativeType.MTP, SpeculativeType.EAGLE, SpeculativeType.EAGLE3):
+            with self.subTest(strategy=strategy):
+                engine = make_engine_config(strategy, 1, 0)
+                sp = engine.sp_config
+                sp.model_type, sp.checkpoint_path, sp.quantization = "qwen_3_moe_eagle3", "draft", None
+                engine.profiling_debug_logging_config = MagicMock()
+                model_cls = MagicMock()
+                target = SimpleNamespace(max_seq_len=128)
+                with patch.object(ModelFactory, "get_model_cls", return_value=model_cls), patch(
+                    "rtp_llm.model_factory.build_model_config"
+                ), patch.object(ModelFactory, "_setup_eagle3_configs") as configure:
+                    draft = ModelFactory.create_propose_model_config(engine, target, ModelArgs())
+                self.assertEqual(sp.type, SpeculativeType.EAGLE3)
+                configure.assert_called_once_with(target, draft, engine.parallelism_config)
+        sp.model_type = "other_draft"
+        with self.assertRaisesRegex(ValueError, "qwen_3_moe_eagle3 requires"):
+            ModelFactory.create_propose_model_config(engine, target, ModelArgs())
+
     def test_factory_sets_draft_role_before_building_config(self):
         for sp_type in (
             SpeculativeType.MTP,
@@ -172,12 +191,12 @@ class DraftModelLoadingTest(unittest.TestCase):
                 (1, 0, "scratch", "scratch", False),
                 (3, 0, "fastsafetensors", None, False),
                 (3, 1, "fastsafetensors", None, False),
-                (3, 2, "auto", "scratch", False),
-                (3, 2, "fastsafetensors", "scratch", False),
+                (3, 2, "auto", "auto", False),
+                (3, 2, "fastsafetensors", "fastsafetensors", False),
                 (3, 2, "scratch", "scratch", False),
                 (1, 0, "auto", "auto", True),
                 (3, 1, "auto", None, True),
-                (3, 2, "auto", "scratch", True),
+                (3, 2, "auto", "auto", True),
             ):
                 with self.subTest(
                     sp_type=sp_type,
@@ -306,9 +325,8 @@ class DraftModelLoadingTest(unittest.TestCase):
                     reject = pp_size > 1 and not is_mtp and not supports_pp
                     with patch.object(
                         model, "_init_custom_module", return_value=None
-                    ), patch.object(
-                        model,
-                        "create_model_loader",
+                    ), patch(
+                        "rtp_llm.models.direct_checkpoint.load_owned_model",
                         side_effect=RuntimeError("reached loader"),
                     ) as loader:
                         expected = (
@@ -318,6 +336,11 @@ class DraftModelLoadingTest(unittest.TestCase):
                         )
                         with self.assertRaisesRegex(Exception, expected):
                             model.load()
+                        if reject:
+                            loader.assert_not_called()
+                        else:
+                            loader.assert_called_once_with(model, publish_runtime=True)
+
     def test_dflash_rejects_pp_gt_1_before_weight_loading(self):
         from rtp_llm.models.qwen_3_dflash import Qwen3DFlash
 
@@ -348,6 +371,38 @@ class DraftModelLoadingTest(unittest.TestCase):
         # actionable message instead of a bare KeyError during weight loading.
         with self.assertRaisesRegex(ValueError, "pp_size=1 only"):
             Qwen3DFlash.speculative_weight_alias_names(pipelined, draft_config)
+
+    def test_dspark_torchspec_head_and_explicit_embedding_loans_agree(self):
+        from rtp_llm.models.qwen_3_dspark import Qwen3DSpark
+
+        raw = {
+            "vocab_size": 8,
+            "mask_token_id": 7,
+            "aux_hidden_state_layer_ids": [1],
+            "markov_rank": 2,
+            "lm_head_source": "target",
+            "dspark_shared_target_weights": ["embedding"],
+        }
+        draft = SimpleNamespace(hidden_size=4, attn_config=SimpleNamespace())
+        target = SimpleNamespace(
+            model_config=SimpleNamespace(hidden_size=4, input_vocab_size=8, vocab_size=8),
+            py_model=object(),
+            weight=SimpleNamespace(
+                get_global_weight_or_none={"embedding": object(), "lm_head": object()}.get
+            ),
+        )
+        with patch("rtp_llm.models.qwen_3_dspark.get_config_from_path", return_value=raw), patch.object(
+            Qwen3DSpark, "_create_config_from_json", return_value=draft
+        ):
+            parsed = Qwen3DSpark._create_config("test-checkpoint")
+            self.assertTrue(parsed.dspark_share_target_lm_head)
+            self.assertEqual(
+                Qwen3DSpark.speculative_weight_alias_names(target, parsed),
+                ("embedding", "lm_head"),
+            )
+            raw.update(lm_head_source="checkpoint", dspark_shared_target_weights=["lm_head"])
+            with self.assertRaisesRegex(ValueError, "lm_head_source"):
+                Qwen3DSpark._create_config("test-checkpoint")
 
 
 if __name__ == "__main__":

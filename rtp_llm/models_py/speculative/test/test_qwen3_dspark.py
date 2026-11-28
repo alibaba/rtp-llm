@@ -9,15 +9,18 @@ import torch
 
 from rtp_llm.model_factory import ModelFactory
 from rtp_llm.model_factory_register import ModelDict, ensure_model_registered
-from rtp_llm.models.qwen_3_dspark import Qwen3DSpark, dspark_offset_d2t_to_absolute
+from rtp_llm.models.qwen_3_dspark import Qwen3DSpark
 from rtp_llm.models_py.model_desc.module_base import GptModelBase
-from rtp_llm.models_py.model_desc.qwen3 import Qwen3Model
-from rtp_llm.models_py.model_desc.qwen3_dspark_model import (
-    Qwen3DSparkModel,
+from rtp_llm.models_py.model_desc.qwen3_dspark_runtime import (
     _apply_non_interleaved_rope,
     _write_rocm_paged_kv_cache,
 )
+from rtp_llm.models_py.new_models.qwen3 import Qwen3ForCausalLM as Qwen3Model
+from rtp_llm.models_py.new_models.qwen3_dspark import (
+    Qwen3DSparkForCausalLM as Qwen3DSparkModel,
+)
 from rtp_llm.models_py.speculative.dspark_proposer_mixin import device_metadata_tensor
+from rtp_llm.models_py.speculative.qwen3_dspark_checkpoint import absolute_d2t
 from rtp_llm.ops.compute_ops import PyAttentionInputs
 
 
@@ -91,9 +94,7 @@ class Qwen3DSparkRegistrationTest(unittest.TestCase):
             page_size,
             vector_size,
         )[:, 0]
-        value_physical = cache.view(
-            block_count, 2, kv_heads, head_dim, page_size
-        )[:, 1]
+        value_physical = cache.view(block_count, 2, kv_heads, head_dim, page_size)[:, 1]
         actual_key = key_physical[pages, :, :, slots, :].reshape_as(key)
         actual_value = value_physical[pages, :, :, slots]
         torch.testing.assert_close(actual_key, key)
@@ -134,6 +135,27 @@ class Qwen3DSparkRegistrationTest(unittest.TestCase):
         self.assertEqual(len(observed), 1)
         torch.testing.assert_close(observed[0], query_positions.reshape(-1).int())
         torch.testing.assert_close(target_mrope, original_target_mrope)
+
+    def test_native_training_format_and_main_route(self):
+        raw = {
+            "architectures": ["Qwen3DSparkModel"],
+            "hidden_size": 128,
+            "head_dim": 32,
+            "intermediate_size": 256,
+            "num_attention_heads": 4,
+            "num_key_value_heads": 2,
+            "num_hidden_layers": 2,
+            "vocab_size": 1024,
+            "mask_token_id": 1000,
+            "target_layer_ids": [1, 3],
+            "markov_rank": 32,
+        }
+        with tempfile.TemporaryDirectory() as path:
+            Path(path, "config.json").write_text(json.dumps(raw))
+            cfg = Qwen3DSpark._create_config(path)
+        self.assertEqual(cfg.dspark_target_layer_ids, [1, 3])
+        self.assertFalse(cfg.attn_config.is_causal)
+        self.assertEqual(ModelDict.get_ft_model_type_by_config(raw), "qwen_3_dspark")
 
     def test_config_wires_shared_dspark_contract(self) -> None:
         raw = {
@@ -294,7 +316,7 @@ class Qwen3DSparkRegistrationTest(unittest.TestCase):
 
     def test_speculators_d2t_offsets_are_normalized_to_absolute_ids(self) -> None:
         offsets = torch.tensor([1, 1, 2, -1], dtype=torch.int64)
-        absolute = dspark_offset_d2t_to_absolute([offsets])
+        absolute = absolute_d2t("d2t", offsets, 4, 8)
         self.assertEqual(absolute.tolist(), [1, 2, 4, 2])
 
     def test_commit_uses_kernel_block_ids_not_physical_cache_ids(self) -> None:

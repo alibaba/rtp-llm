@@ -162,18 +162,106 @@ class MegaCSAWeights:
         """Pack one CSA layer without changing checkpoint FP8 bits or scales."""
         from rtp_llm.utils.model_weight import W
 
-        g = geometry
-
         def get(tag: str) -> torch.Tensor:
             try:
                 return layer_weights[tag]
             except KeyError as exc:
                 raise KeyError(f"missing DSV4 mega weight {tag!r}") from exc
 
-        wq_a = get(W.v4_attn_wq_a_w)
-        wkv = get(W.v4_attn_wkv_w)
-        main_wq_b = get(W.v4_attn_wq_b_w)
-        index_wq_b = get(W.v4_indexer_wq_b_w)
+        return cls._pack(
+            geometry,
+            wq_a=get(W.v4_attn_wq_a_w),
+            wkv=get(W.v4_attn_wkv_w),
+            main_wq_b=get(W.v4_attn_wq_b_w),
+            wq_a_scale=get(W.v4_attn_wq_a_s),
+            wkv_scale=get(W.v4_attn_wkv_s),
+            wq_b_scale=get(W.v4_attn_wq_b_s),
+            main_wkv=get(W.v4_compressor_wkv),
+            main_wgate=get(W.v4_compressor_wgate),
+            q_norm=get(W.v4_attn_q_norm),
+            kv_norm=get(W.v4_attn_kv_norm),
+            comp_norm=get(W.v4_compressor_norm),
+            ape=get(W.v4_compressor_ape),
+            hc_fn=get(W.v4_hc_attn_fn),
+            hc_base=get(W.v4_hc_attn_base),
+            hc_scale=get(W.v4_hc_attn_scale),
+            attn_norm=get(W.v4_attn_norm),
+            index_wq_b=get(W.v4_indexer_wq_b_w),
+            index_wq_b_scale=get(W.v4_indexer_wq_b_s),
+            index_wkv=get(W.v4_indexer_compressor_wkv),
+            index_wgate=get(W.v4_indexer_compressor_wgate),
+            weights_proj=get(W.v4_indexer_weights_proj_w),
+            index_norm=get(W.v4_indexer_compressor_norm),
+            index_ape=get(W.v4_indexer_compressor_ape),
+            indexer_proj_folded=False,
+        )
+
+    @classmethod
+    def from_owned_block(cls, block, geometry: CSAGeometry) -> "MegaCSAWeights":
+        """Pack the post-load module parameters; never access a loader weight map."""
+        attn = block.attn
+        comp = attn.compressor
+        index = attn.indexer
+        if not index._weights_proj_folded:
+            raise RuntimeError("Mega CSA requires post-loaded indexer weights")
+        return cls._pack(
+            geometry,
+            wq_a=attn.wq_a.weight,
+            wkv=attn.wkv.weight,
+            main_wq_b=attn.wq_b.weight,
+            wq_a_scale=attn.wq_a.scale,
+            wkv_scale=attn.wkv.scale,
+            wq_b_scale=attn.wq_b.scale,
+            main_wkv=comp.wkv.weight,
+            main_wgate=comp.wgate.weight,
+            q_norm=attn.q_norm,
+            kv_norm=attn.kv_norm,
+            comp_norm=comp.norm.weight,
+            ape=comp.ape,
+            hc_fn=block.attn_hc.fn,
+            hc_base=block.attn_hc.base,
+            hc_scale=block.attn_hc.scale,
+            attn_norm=block.attn_norm.weight,
+            index_wq_b=index.wq_b.weight,
+            index_wq_b_scale=index.wq_b.scale,
+            index_wkv=index.compressor.wkv.weight,
+            index_wgate=index.compressor.wgate.weight,
+            weights_proj=index.weights_proj,
+            index_norm=index.compressor.norm.weight,
+            index_ape=index.compressor.ape,
+            indexer_proj_folded=True,
+        )
+
+    @classmethod
+    def _pack(
+        cls,
+        g: CSAGeometry,
+        *,
+        wq_a: torch.Tensor,
+        wkv: torch.Tensor,
+        main_wq_b: torch.Tensor,
+        wq_a_scale: torch.Tensor,
+        wkv_scale: torch.Tensor,
+        wq_b_scale: torch.Tensor,
+        main_wkv: torch.Tensor,
+        main_wgate: torch.Tensor,
+        q_norm: torch.Tensor,
+        kv_norm: torch.Tensor,
+        comp_norm: torch.Tensor,
+        ape: torch.Tensor,
+        hc_fn: torch.Tensor,
+        hc_base: torch.Tensor,
+        hc_scale: torch.Tensor,
+        attn_norm: torch.Tensor,
+        index_wq_b: torch.Tensor,
+        index_wq_b_scale: torch.Tensor,
+        index_wkv: torch.Tensor,
+        index_wgate: torch.Tensor,
+        weights_proj: torch.Tensor,
+        index_norm: torch.Tensor,
+        index_ape: torch.Tensor,
+        indexer_proj_folded: bool,
+    ) -> "MegaCSAWeights":
         for name, tensor, shape in (
             ("wq_a", wq_a, (g.q_lora_rank, g.dim)),
             ("wkv", wkv, (512, g.dim)),
@@ -183,24 +271,15 @@ class MegaCSAWeights:
             _require_shape(name, tensor, shape)
             _require_dtype(name, tensor, (torch.float8_e4m3fn,))
 
-        wq_a_sf = _normalize_weight_scale(
-            "wq_a_sf", get(W.v4_attn_wq_a_s), tuple(wq_a.shape)
-        )
-        wkv_sf = _normalize_weight_scale(
-            "wkv_sf", get(W.v4_attn_wkv_s), tuple(wkv.shape)
-        )
+        wq_a_sf = _normalize_weight_scale("wq_a_sf", wq_a_scale, tuple(wq_a.shape))
+        wkv_sf = _normalize_weight_scale("wkv_sf", wkv_scale, tuple(wkv.shape))
         main_wq_b_sf = _normalize_weight_scale(
-            "main_wq_b_sf", get(W.v4_attn_wq_b_s), tuple(main_wq_b.shape)
+            "main_wq_b_sf", wq_b_scale, tuple(main_wq_b.shape)
         )
         index_wq_b_sf = _normalize_weight_scale(
-            "index_wq_b_sf", get(W.v4_indexer_wq_b_s), tuple(index_wq_b.shape)
+            "index_wq_b_sf", index_wq_b_scale, tuple(index_wq_b.shape)
         )
 
-        main_wkv = get(W.v4_compressor_wkv)
-        main_wgate = get(W.v4_compressor_wgate)
-        index_wkv = get(W.v4_indexer_compressor_wkv)
-        index_wgate = get(W.v4_indexer_compressor_wgate)
-        weights_proj = get(W.v4_indexer_weights_proj_w)
         for name, tensor, shape in (
             ("main_compressor_wkv", main_wkv, (1024, g.dim)),
             ("main_compressor_wgate", main_wgate, (1024, g.dim)),
@@ -212,23 +291,24 @@ class MegaCSAWeights:
             _require_dtype(name, tensor, (torch.bfloat16,))
 
         # Match IndexerFP8: fold both score normalization factors into w64.
-        weights_proj = (
-            weights_proj * (INDEX_HEAD_DIM**-0.5 * INDEX_HEADS**-0.5)
-        ).contiguous()
+        if not indexer_proj_folded:
+            weights_proj = (
+                weights_proj * (INDEX_HEAD_DIM**-0.5 * INDEX_HEADS**-0.5)
+            ).contiguous()
 
-        def fp32(tag: str, shape: Tuple[int, ...]) -> torch.Tensor:
-            tensor = get(tag).float().contiguous()
+        def fp32(tag: str, value: torch.Tensor, shape: Tuple[int, ...]) -> torch.Tensor:
+            tensor = value.float().contiguous()
             _require_shape(tag, tensor, shape)
             return tensor
 
-        def fp32_flat(tag: str, elements: int) -> torch.Tensor:
-            tensor = get(tag).float().reshape(-1).contiguous()
+        def fp32_flat(tag: str, value: torch.Tensor, elements: int) -> torch.Tensor:
+            tensor = value.float().reshape(-1).contiguous()
             _require_shape(tag, tensor, (elements,))
             return tensor
 
-        attn_norm = get(W.v4_attn_norm).contiguous()
-        _require_shape(W.v4_attn_norm, attn_norm, (g.dim,))
-        _require_dtype(W.v4_attn_norm, attn_norm, (torch.bfloat16,))
+        attn_norm = attn_norm.contiguous()
+        _require_shape("attn_norm", attn_norm, (g.dim,))
+        _require_dtype("attn_norm", attn_norm, (torch.bfloat16,))
 
         return cls(
             front_fp8=_cat_rows("front_fp8", (wq_a, wkv), (g.front_fp8_rows, g.dim)),
@@ -249,15 +329,15 @@ class MegaCSAWeights:
                 (index_wq_b_sf, main_wq_b_sf),
                 (g.n_merged // 128, g.sf_q),
             ),
-            q_norm=fp32(W.v4_attn_q_norm, (g.q_lora_rank,)),
-            window_norm=fp32(W.v4_attn_kv_norm, (HEAD_DIM,)),
-            indexer_norm=fp32(W.v4_indexer_compressor_norm, (INDEX_HEAD_DIM,)),
-            main_compressor_norm=fp32(W.v4_compressor_norm, (HEAD_DIM,)),
-            main_ape=fp32(W.v4_compressor_ape, (COMPRESS_RATIO, 1024)),
-            indexer_ape=fp32(W.v4_indexer_compressor_ape, (COMPRESS_RATIO, 256)),
-            hc_fn=fp32(W.v4_hc_attn_fn, (HC_MIX, HC * g.dim)),
-            hc_base=fp32(W.v4_hc_attn_base, (HC_MIX,)),
-            hc_scale=fp32_flat(W.v4_hc_attn_scale, 3),
+            q_norm=fp32("q_norm", q_norm, (g.q_lora_rank,)),
+            window_norm=fp32("kv_norm", kv_norm, (HEAD_DIM,)),
+            indexer_norm=fp32("index_norm", index_norm, (INDEX_HEAD_DIM,)),
+            main_compressor_norm=fp32("comp_norm", comp_norm, (HEAD_DIM,)),
+            main_ape=fp32("ape", ape, (COMPRESS_RATIO, 1024)),
+            indexer_ape=fp32("index_ape", index_ape, (COMPRESS_RATIO, 256)),
+            hc_fn=fp32("hc_fn", hc_fn, (HC_MIX, HC * g.dim)),
+            hc_base=fp32("hc_base", hc_base, (HC_MIX,)),
+            hc_scale=fp32_flat("hc_scale", hc_scale, 3),
             attn_norm=attn_norm,
             geometry=g,
         )

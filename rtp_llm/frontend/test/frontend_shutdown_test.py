@@ -1,8 +1,10 @@
 import asyncio
+import selectors
 import signal
 import tempfile
 import time
 import unittest
+from contextlib import closing
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, create_autospec, patch
@@ -196,6 +198,61 @@ class FrontendShutdownManagerTest(unittest.TestCase):
         endpoint.health_check = AsyncMock(return_value=False)
         response = client.post("/health_check")
         self.assertEqual(response.status_code, 400)
+
+    def test_embedding_worker_waits_for_its_own_channel_before_serving(self):
+        owner = FrontendApp.__new__(FrontendApp)
+        owner.frontend_server = FakeFrontendServer(is_embedding=True)
+        endpoint = SimpleNamespace()
+        owner.frontend_server._embedding_endpoint = endpoint
+        owner.grpc_client = FakeGrpcClient()
+        for timeout, first_probe_seconds, deadline in (
+            (7200, 3601, None),  # Can take longer than the old one-hour cutoff.
+            (-1, 86400, None),
+            (2, 5, 2),  # Even an in-flight probe must respect the deadline.
+            (7200, 7201, 7200),
+            (0, 3601, 3600),
+            (-2, 3601, 3600),
+        ):
+            with self.subTest(timeout=timeout, first_probe_seconds=first_probe_seconds):
+                owner.server_config = SimpleNamespace(
+                    startup_health_check_timeout=timeout,
+                    rank_id=0,
+                    frontend_server_id=1,
+                )
+                now = 0.0
+                probes = []
+
+                async def probe():
+                    probes.append(now)
+                    if len(probes) == 1:
+                        await asyncio.sleep(first_probe_seconds)
+                        return False
+                    return True
+
+                def advance(seconds):
+                    # Skip idle time to the next asyncio timer, without sleeping.
+                    nonlocal now
+                    self.assertIsNotNone(seconds, "worker is stuck without a timer")
+                    now += seconds
+                    return []
+
+                endpoint.health_check = probe
+                selector = selectors.SelectSelector()
+                with closing(asyncio.SelectorEventLoop(selector)) as loop, patch.object(
+                    selector, "select", side_effect=advance
+                ), patch("time.monotonic", side_effect=lambda: now):
+                    wait_ready = owner._wait_backend_health_ready_impl()
+                    if deadline is None:
+                        loop.run_until_complete(wait_ready)
+                        self.assertEqual(probes, [0, first_probe_seconds + 1])
+                    else:
+                        with self.assertRaisesRegex(
+                            RuntimeError, f"within {deadline}s"
+                        ):
+                            loop.run_until_complete(wait_ready)
+                        self.assertEqual(probes, [0])
+                        self.assertEqual(now, deadline)
+                self.assertEqual(owner.grpc_client.calls, [])
 
     def test_draining_rejects_new_business_and_marks_health_unavailable(self):
         app_owner = FrontendApp.__new__(FrontendApp)

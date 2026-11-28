@@ -1,13 +1,15 @@
-from typing import Any, Dict, Optional, Tuple
+from __future__ import annotations
+
+from typing import TYPE_CHECKING, Any, Dict, Optional, Tuple
+
+if TYPE_CHECKING:
+    from rtp_llm.ops.compute_ops import LayerKVCache
 
 import torch
 from torch import nn
 
 from rtp_llm.device.device_type import DeviceType, get_device_type
-from rtp_llm.models_py.modules import IndexerOp, LayerNorm
-from rtp_llm.models_py.modules.factory import LinearFactory
 from rtp_llm.ops import AttentionConfigs, HWKernelConfig, ParallelismConfig
-from rtp_llm.ops.compute_ops import LayerKVCache
 from rtp_llm.utils.model_weight import W
 
 _DEVICE_TYPE = get_device_type()
@@ -50,15 +52,11 @@ class Indexer(nn.Module):
         scale_fmt: Optional[str] = "none",
         stable_topk: bool = False,
     ):
+        from rtp_llm.models_py.modules import IndexerOp, LayerNorm
+        from rtp_llm.models_py.modules.factory import LinearFactory
+
         super().__init__()
         self.layer_idx = layer_idx
-        from rtp_llm.models_py.utils.fuse_config import fuse_kernels_enabled
-
-        # Resolve the fusion policy once so forward does not read the config.
-        self._fuse_kernels_enabled = fuse_kernels_enabled(hw_kernel_config)
-        self._fuse_logits_head_gate = (
-            self._fuse_kernels_enabled and fused_logits_head_gate is not None
-        )
 
         self.index_n_heads = attn_config.indexer_head_num
         self.index_head_dim = attn_config.indexer_head_dim
@@ -79,9 +77,7 @@ class Indexer(nn.Module):
         # how prefill writes were laid out via cp_params.sharded_slot_mapping.
         kernel_tpb = int(attn_config.kernel_tokens_per_block)
         owner_tpb = int(getattr(attn_config, "tokens_per_block", kernel_tpb))
-        if owner_tpb <= 0 or kernel_tpb <= 0 or owner_tpb % kernel_tpb != 0:
-            owner_tpb = kernel_tpb
-        self._kv_owner_tokens_per_block = owner_tpb
+        self._configure_indexer_runtime(hw_kernel_config, owner_tpb)
         self.indexer_size = self.index_head_dim / 2 + self.index_head_dim / 128 * 2
         self.is_neox_style = attn_config.rope_config.indexer_is_neox_style
         self.parallelism_config = parallelism_config
@@ -136,13 +132,7 @@ class Indexer(nn.Module):
 
         # Fused RoPE kernels use equal rotary/non-rotary halves and power-of-2
         # tiles. Other supported indexer geometries retain the unfused path.
-        self._fuse_kernels_enabled = self._fuse_kernels_enabled and (
-            self.index_head_dim == 128
-            and self.rope_head_dim == 64
-            and self.index_n_heads > 0
-            and self.index_n_heads & (self.index_n_heads - 1) == 0
-            and self.cos_sin_cache.shape[-1] == self.rope_head_dim
-        )
+        self._fuse_kernels_enabled = self._can_fuse_rope(self.cos_sin_cache)
 
         self.indexer_op = IndexerOp(
             index_n_heads=self.index_n_heads,
@@ -156,6 +146,31 @@ class Indexer(nn.Module):
             is_neox_style=self.is_neox_style,
             stable_topk=stable_topk,
             enable_fuse_kernels=self._fuse_kernels_enabled,
+        )
+
+    def _configure_indexer_runtime(self, hw_kernel_config, owner_tpb):
+        from rtp_llm.models_py.utils.fuse_config import fuse_kernels_enabled
+
+        kernel_tpb = self.blocksize
+        self._kv_owner_tokens_per_block = (
+            owner_tpb
+            if kernel_tpb > 0 and owner_tpb > 0 and owner_tpb % kernel_tpb == 0
+            else kernel_tpb
+        )
+        self._fusion_requested = fuse_kernels_enabled(hw_kernel_config)
+        self._fuse_logits_head_gate = (
+            self._fusion_requested and fused_logits_head_gate is not None
+        )
+
+    def _can_fuse_rope(self, cache):
+        return (
+            self._fusion_requested
+            and self.index_head_dim == 128
+            and self.rope_head_dim == 64
+            and self.index_n_heads > 0
+            and self.index_n_heads & (self.index_n_heads - 1) == 0
+            and cache is not None
+            and cache.shape[-1] == self.rope_head_dim
         )
 
     def _prefill_cp_enabled(self) -> bool:
@@ -176,7 +191,7 @@ class Indexer(nn.Module):
         # ``self._fuse_logits_head_gate`` is resolved at __init__ from
         # ``HWKernelConfig.enable_fuse_kernels``.
         scale = self.softmax_scale * self.weights_scale
-        if self._fuse_logits_head_gate and x.is_contiguous():
+        if self._fuse_logits_head_gate and x.is_cuda and x.is_contiguous():
             return fused_logits_head_gate(
                 x,
                 q_scale,

@@ -9,7 +9,7 @@ from rtp_llm.models_py.distributed.collective_torch import Group, all_reduce
 from rtp_llm.models_py.modules.dsv4._profiler import record_function_range
 from rtp_llm.models_py.modules.dsv4.ppu.moe.gate import PpuGate as Gate
 from rtp_llm.models_py.modules.dsv4.ppu.moe.ppu_moe_config import PpuMoeConfig as MoeCfg
-from rtp_llm.utils.model_weight import W
+from rtp_llm.models_py.modules.dsv4.ppu.moe.packed_inputs import shared_expert_inputs
 from torch import nn
 
 from rtp_llm.models_py.kernels.ppu.moe.ppu_moe_combine import combine_tp_partials
@@ -111,12 +111,7 @@ class PpuTPMoE(nn.Module):
         self.shared_experts = PpuTPSharedExpert(
             dim,
             moe_inter_dim,
-            {
-                "w13_w": layer_weights[W.v4_shared_w13_w],
-                "w13_s": layer_weights[W.v4_shared_w13_s],
-                "w2_w": layer_weights[W.v4_shared_w2_w],
-                "w2_s": layer_weights[W.v4_shared_w2_s],
-            },
+            shared_expert_inputs(layer_weights),
             tp_size=tp_size,
             tp_rank=tp_rank,
             swiglu_limit=swiglu_limit,

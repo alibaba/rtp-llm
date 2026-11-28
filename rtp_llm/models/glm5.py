@@ -10,6 +10,7 @@ from rtp_llm.model_loader.weight_module import AtomicWeight, WeightModule
 from rtp_llm.models.deepseek_v2 import DeepSeekV2, DeepSeekV2Weight
 from rtp_llm.utils.dsa_indexing import dsa_layer_has_indexer
 from rtp_llm.utils.model_weight import CkptWeightInfo, W, identity, transpose, zeros
+from rtp_llm.utils.nextn_checkpoint import nextn_layer_from_names
 
 
 class Glm5Weight(DeepSeekV2Weight):
@@ -92,15 +93,17 @@ class Glm5MtpWeight(Glm5Weight):
         num_nextn_predict_layers>=1, MTP weights at model.layers.{N}.*,
         embedding at model.embed_tokens.weight, lm_head at lm_head.weight.
 
-    The mode is selected via model_config.mtp_layer_offset, set by
-    Glm5Mtp._create_config(). offset==0 => Layout A; offset>0 => Layout B.
+    A cropped score can retain the original draft layer number. Prefer its
+    EH projection key; use the configured offset when no HF marker is available.
     """
 
     def _process_meta(self, meta_dict, weight_keys):
         # The MTP layer index in the source checkpoint (78 for Layout B, 0 for
         # Layout A). DeepSeekV2Weight._process_meta only inspects layers
         # [0, _num_layers) which would miss the MTP layer in Layout B.
-        mtp_layer_idx = int(getattr(self.model_config, "mtp_layer_offset", 0) or 0)
+        marker = nextn_layer_from_names(weight_keys)
+        self._mtp_source_layer = marker
+        mtp_layer_idx = self._mtp_layer_index()
         if f"model.layers.{mtp_layer_idx}.self_attn.q_a_proj.weight" in weight_keys:
             self.q_use_lora = True
         if (
@@ -109,8 +112,12 @@ class Glm5MtpWeight(Glm5Weight):
         ):
             self.has_e_score_correction_bias = True
 
+    def _mtp_layer_index(self):
+        marker = getattr(self, "_mtp_source_layer", None)
+        return int(getattr(self.model_config, "mtp_layer_offset", 0) or 0) if marker is None else marker
+
     def _get_weight_info(self):
-        mtp_layer_idx = int(getattr(self.model_config, "mtp_layer_offset", 0) or 0)
+        mtp_layer_idx = self._mtp_layer_index()
 
         if mtp_layer_idx == 0:
             embedding_ckpt = "model.layers.0.embed_tokens.weight"

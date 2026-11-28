@@ -231,7 +231,13 @@ cc_library(
     deps = [
         ":kv_cache_spec_type",
         ":cache_types",
-    ] + torch_deps(),
+    ] + select({
+        "@//:using_ppu": [
+            "@local_config_cuda//cuda:cuda_headers",
+            "@local_config_cuda//cuda:cudart",
+        ],
+        "//conditions:default": [],
+    }) + torch_deps(),
 )
 
 cc_library(

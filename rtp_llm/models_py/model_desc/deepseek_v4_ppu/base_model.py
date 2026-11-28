@@ -13,7 +13,7 @@ import json
 import logging
 import os
 from dataclasses import dataclass
-from typing import Any, Dict, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Dict, Optional, Tuple
 import torch
 from rtp_llm.config.cuda_graph import (
     CudaGraphSelectionMode,
@@ -34,7 +34,6 @@ from rtp_llm.models_py.modules.dsv4.ppu.decode.forward import (
     forward_decode,
 )
 from rtp_llm.models_py.modules.dsv4.kv_cache_utils import primary_attention_inputs
-from rtp_llm.models_py.modules.dsv4.ppu.prefill.forward import forward_prefill
 from rtp_llm.models_py.modules.dsv4.ppu.transformer import V4Transformer
 from rtp_llm.models_py.modules.factory.fused_moe.utils.fp8_fp4.chunked_layer import (
     cp_padded_tokens_per_rank_bound,
@@ -42,8 +41,10 @@ from rtp_llm.models_py.modules.factory.fused_moe.utils.fp8_fp4.chunked_layer imp
 )
 from rtp_llm.ops import RoleType
 from rtp_llm.utils.warmup import model_warm_up_enabled
-from rtp_llm.ops.compute_ops import PyModelInitResources, PyModelInputs, PyModelOutputs
 from rtp_llm.models_py.model_desc.deepseek_v4_model import DeepSeekV4Model as _BaseDeepSeekV4Model
+
+if TYPE_CHECKING:
+    from rtp_llm.ops.compute_ops import PyModelInitResources, PyModelInputs, PyModelOutputs
 
 
 def _env_flag_enabled(name: str, default: bool = True) -> bool:
@@ -239,17 +240,34 @@ class DeepSeekV4Model(_BaseDeepSeekV4Model):
         self._materialized = True
         return True
 
+    def _build_runtime_backbone(self) -> None:
+        """Construct the provider's legacy runtime when no owned tree exists."""
+        logging.info(
+            "[DeepSeekV4Model] building PPU V4Transformer via factory "
+            "(layers=%d, globals=%d)",
+            len(self.weight.weights),
+            len(self.weight.global_weights),
+        )
+        prev_dtype = torch.get_default_dtype()
+        torch.set_default_dtype(torch.bfloat16)
+        try:
+            with torch.device("meta"):
+                self.v4 = self._platform_provider.build_transformer(
+                    V4Transformer,
+                    self._v4_args,
+                    self.weight,
+                    platform_provider=self._platform_provider,
+                )
+        finally:
+            torch.set_default_dtype(prev_dtype)
+
     def _initialize_impl(self, init_resource: PyModelInitResources) -> bool:
         # Called by the engine after construction and before forward.
         super(_BaseDeepSeekV4Model, self).initialize(init_resource)
         if self._materialized:
             return True
 
-        device = (
-            next(iter(self.weight.global_weights.values())).device
-            if self.weight.global_weights
-            else "cuda:0"
-        )
+        device = self._runtime_weight_device()
         device_str = str(device)
 
         self._is_speculative = bool(init_resource.is_speculative)
@@ -299,34 +317,7 @@ class DeepSeekV4Model(_BaseDeepSeekV4Model):
         if bool(getattr(self._v4_args, "commit_only", False)):
             return self._initialize_commit_only(init_resource, device_str)
 
-        # ``self.weight`` is a framework ``ModelWeights`` populated by the
-        # ``DeepSeekV4Weight`` descriptor (see ``rtp_llm/models/deepseek_v4.py``)
-        # via the fastsafetensors loader.  Each dsv4 sub-module's factory
-        # mode reads tensors directly from ``mw.global_weights[W.*]`` and
-        # ``mw.weights[layer_id][W.v4_*]`` — see the per-module __init__
-        # for the W tags consumed.
-        logging.info(
-            "[DeepSeekV4Model] building V4Transformer via factory "
-            "(layers=%d, globals=%d) ...",
-            len(self.weight.weights),
-            len(self.weight.global_weights),
-        )
-        # Construct under meta device so the nn.Embedding / nn.Linear /
-        # QuantizedLinear placeholder allocations inside the module tree
-        # skip real RAM. Each module's factory branch then reassigns
-        # `.weight`/`.scale` to the cuda tensors from the weights dict.
-        prev_dtype = torch.get_default_dtype()
-        torch.set_default_dtype(torch.bfloat16)
-        try:
-            with torch.device("meta"):
-                self.v4 = self._platform_provider.build_transformer(
-                    V4Transformer,
-                    self._v4_args,
-                    self.weight,
-                    platform_provider=self._platform_provider,
-                )
-        finally:
-            torch.set_default_dtype(prev_dtype)
+        self._build_runtime_backbone()
         if self._captures_aux_hidden:
             self.v4.set_aux_hidden_capture_layer_ids(self._capture_aux_hidden_layer_ids)
 
@@ -335,15 +326,7 @@ class DeepSeekV4Model(_BaseDeepSeekV4Model):
         for layer in self.v4.layers:
             layer.attn.init_rope_cache(device=device_str)
 
-        # Subclass hook: lift any model-level weights (e.g. MTP fusion
-        # norms / projections) off the ModelWeights wrapper before we
-        # discard it.  Default impl is a no-op.
-        self._load_extra_weights(self.weight)
-
-        # Drop the ModelWeights wrapper — per-tensor refs are now held
-        # only by the V4Transformer modules (or were popped during
-        # MoE._setup_mega_moe / per-expert routed init).
-        del self.weight
+        self._release_runtime_weight_source()
 
         if torch.cuda.is_available() and device_str.startswith("cuda"):
             gpu_mem_gb = torch.cuda.memory_allocated(torch.device(device_str)) / 1024**3
@@ -866,6 +849,8 @@ class DeepSeekV4Model(_BaseDeepSeekV4Model):
         if self.kv_cache is None:
             # Warmup-only PyWrappedModel: NormalExecutor builds it with
             # cache_manager==nullptr, so init_resources carries no kv_cache.
+            from rtp_llm.ops.compute_ops import PyModelOutputs
+
             logging.warning(
                 "[DeepSeekV4Model] forward() with kv_cache=None — warmup only"
             )
@@ -917,6 +902,8 @@ class DeepSeekV4Model(_BaseDeepSeekV4Model):
                 prepare_hidden_fn=prep_decode,
             )
         elif attn.is_prefill:
+            from rtp_llm.models_py.modules.dsv4.ppu.prefill.forward import forward_prefill
+
             with _profiler.moe_record_function_scope():
                 capture = self.capture_context(inputs.capture_hidden_states)
             return forward_prefill(

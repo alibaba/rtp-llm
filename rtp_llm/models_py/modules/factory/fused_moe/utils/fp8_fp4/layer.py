@@ -20,6 +20,7 @@ from rtp_llm.models_py.modules.factory.fused_moe.utils.fp8_fp4.shared_expert imp
     combine_routed_and_shared,
     get_shared_expert_executor,
 )
+from rtp_llm.models_py.modules.fp8_fp4_weight_source import OwnerWeightSource
 from rtp_llm.models_py.utils.profiler import record_function_range
 from rtp_llm.resident_weights import resident_init_scalar
 from rtp_llm.utils.model_weight import W
@@ -137,9 +138,7 @@ class Fp8Fp4MoeRuntimeConfig:
         )
 
 
-def _shared_fp8_block_size(layer_weights: Dict[str, torch.Tensor]) -> int:
-    shared_w13 = layer_weights.get(W.ffn_w13)
-    shared_s13 = layer_weights.get(W.ffn_s13)
+def _shared_fp8_block_size(shared_w13, shared_s13) -> int:
     return (
         MXFP8_BLOCK
         if shared_w13 is not None
@@ -151,6 +150,8 @@ def _shared_fp8_block_size(layer_weights: Dict[str, torch.Tensor]) -> int:
 
 class Fp8Fp4MoeLayer(nn.Module):
     """Route tokens and execute canonical FP8/FP4 MoE weights via the factory."""
+
+    eplb_stats = None
 
     def __init__(
         self,
@@ -166,7 +167,7 @@ class Fp8Fp4MoeLayer(nn.Module):
         swiglu_limit: float,
         n_hash_layers: int,
         vocab_size: int,
-        layer_weights: Dict[str, torch.Tensor],
+        layer_weights: Optional[Dict[str, torch.Tensor]] = None,
         ep_size: int = 1,
         ep_rank: int = 0,
         world_size: Optional[int] = None,
@@ -179,6 +180,7 @@ class Fp8Fp4MoeLayer(nn.Module):
         moe_w1_layout: str = "up_gate",
         physical_expert_num: Optional[int] = None,
         is_decode_role: bool = False,
+        weight_owner=None,
     ) -> None:
         super().__init__()
         if n_shared_experts < 0:
@@ -189,12 +191,28 @@ class Fp8Fp4MoeLayer(nn.Module):
         self.dim = int(dim)
         self.max_tokens_per_rank = int(max_tokens_per_rank)
         self.n_shared_experts = int(n_shared_experts)
-        # A fused executor may consume the shared weights; a resident restart reuses this size.
-        shared_fp8_block_size = resident_init_scalar(
-            layer_weights,
-            "fp8_fp4.shared_fp8_block_size",
-            lambda: _shared_fp8_block_size(layer_weights),
-        )
+        if layer_weights is not None and weight_owner is not None:
+            raise ValueError("FP8/FP4 layer accepts one loading API at a time")
+        if weight_owner is None and layer_weights is None:
+            raise ValueError(
+                "FP8/FP4 layer requires a weight owner or descriptor weights"
+            )
+        if weight_owner is not None:
+            binding = getattr(weight_owner, "_resident_expert_inputs", None)
+            shared_fp8_block_size = resident_init_scalar(
+                binding[0].global_weights if binding else None,
+                (binding[1] if binding else "") + "fp8_fp4.shared_fp8_block_size",
+                lambda: _shared_fp8_block_size(
+                    getattr(weight_owner, "shared_w13", None), getattr(weight_owner, "shared_s13", None)
+                ),
+            )
+        else:
+            shared_fp8_block_size = resident_init_scalar(
+                layer_weights, "fp8_fp4.shared_fp8_block_size",
+                lambda: _shared_fp8_block_size(
+                    layer_weights.get(W.ffn_w13), layer_weights.get(W.ffn_s13)
+                ),
+            )
         self.gate = Gate(
             layer_id,
             dim,
@@ -205,6 +223,7 @@ class Fp8Fp4MoeLayer(nn.Module):
             n_hash_layers,
             vocab_size,
             layer_weights=layer_weights,
+            weight_owner=weight_owner,
         )
         runtime_config = Fp8Fp4MoeRuntimeConfig(
             layer_id=layer_id,
@@ -230,7 +249,12 @@ class Fp8Fp4MoeLayer(nn.Module):
             is_decode_role=is_decode_role,
         )
         self.fused_moe = FusedMoeFactory().create_fused_moe(
-            runtime_config, layer_weights
+            runtime_config,
+            (
+                OwnerWeightSource(weight_owner)
+                if weight_owner is not None
+                else layer_weights
+            ),
         )
         self.strategy_name = self.fused_moe.strategy_name
         # MegaMoE formerly fused hash routing with input packing. Preserve its
@@ -249,12 +273,21 @@ class Fp8Fp4MoeLayer(nn.Module):
             self.shared_experts = W13SharedExpert(
                 dim,
                 shared_inter_dim,
-                expert_weights={
-                    "w13_w": layer_weights[W.ffn_w13],
-                    "w13_s": layer_weights[W.ffn_s13],
-                    "w2_w": layer_weights[W.ffn_w2],
-                    "w2_s": layer_weights[W.ffn_s2],
-                },
+                expert_weights=(
+                    {
+                        "w13_w": weight_owner.take_executor_weight("shared_w13"),
+                        "w13_s": weight_owner.take_executor_weight("shared_s13"),
+                        "w2_w": weight_owner.take_executor_weight("shared_w2"),
+                        "w2_s": weight_owner.take_executor_weight("shared_s2"),
+                    }
+                    if weight_owner is not None
+                    else {
+                        "w13_w": layer_weights[W.ffn_w13],
+                        "w13_s": layer_weights[W.ffn_s13],
+                        "w2_w": layer_weights[W.ffn_w2],
+                        "w2_s": layer_weights[W.ffn_s2],
+                    }
+                ),
                 swiglu_limit=swiglu_limit,
             )
             self._shared_executor = get_shared_expert_executor(
@@ -302,6 +335,7 @@ class Fp8Fp4MoeLayer(nn.Module):
         topk_ids = None
         use_gate_pack = (
             observer is None
+            and self.eplb_stats is None
             and self.fused_moe.supports_gate_pack
             and self.gate.can_prepare_gate_payload(x, flat_ids)
         )
@@ -317,6 +351,12 @@ class Fp8Fp4MoeLayer(nn.Module):
                         )
                 else:
                     topk_weights, topk_ids = self.gate(x, flat_ids)
+                    if self.eplb_stats is not None:
+                        # This executor requires identity placement. Count the
+                        # exact decisions passed to the kernel, once per chunk.
+                        self.eplb_stats.record(
+                            topk_ids, topk_ids, self.gate.weight.shape[0]
+                        )
             if observer is not None and not use_gate_pack:
                 assert topk_weights is not None and topk_ids is not None
                 observer("topk_weights", topk_weights)

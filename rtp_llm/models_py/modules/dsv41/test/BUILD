@@ -47,7 +47,10 @@ _TESTS = [
             "//rtp_llm/models_py:tile_kernels_mhc",
             "//rtp_llm:jit_cache_env",
             test_requirement("pytest"),
-        ],
+        ] + ([
+            "//rtp_llm/models_py:new_weight_loader",
+            "//rtp_llm:safetensors",
+        ] if name == "test_engram_cuda" else []),
         tags = ["dsv41_cuda13", "SM100_ARM_CU13"],
         exec_properties = {"gpu": "SM100_ARM_CU13", "gpu_count": "1"},
         target_compatible_with = select({
@@ -82,6 +85,27 @@ _TESTS = [
     )
     for name in _CPU_ONLY_TESTS
 ]
+
+py_test(
+    name = "test_engram_launch_device",
+    srcs = ["test_engram_launch_device.py", "//rtp_llm/test/pytest:pytest_main.py"],
+    main = "//rtp_llm/test/pytest:pytest_main.py",
+    args = ["--cuda-devices", "2", "$(location :test_engram_launch_device.py)"],
+    deps = [
+        "//rtp_llm:testlib",
+        "//rtp_llm:jit_cache_env",
+        "//rtp_llm/models_py:modules",
+        test_requirement("pytest"),
+    ],
+    env = {"GPU_COUNT": "2"},
+    tags = ["dsv41_cuda13", "SM100_ARM_CU13"],
+    exec_properties = {"gpu": "SM100_ARM_CU13", "gpu_count": "2"},
+    target_compatible_with = select({
+        "@//:using_cuda13_arm": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    }),
+    legacy_create_init = 0,
+)
 
 py_test(
     name = "test_embedding_tp4",

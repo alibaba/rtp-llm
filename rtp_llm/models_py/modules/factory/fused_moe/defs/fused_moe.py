@@ -36,6 +36,8 @@ class FinalizeArgs(TypedDict, total=False):
     a1_shape: torch.Size
     original_num_tokens: int
     skip_tp_allreduce: bool
+    eplb_logical_topk_ids: torch.Tensor
+    eplb_logical_experts_per_rank: int
 
 
 @dataclass(frozen=True)

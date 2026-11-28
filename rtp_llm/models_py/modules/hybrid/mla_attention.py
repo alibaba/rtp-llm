@@ -1,5 +1,7 @@
+from __future__ import annotations
+
 from collections.abc import Mapping
-from typing import Dict, Optional, Tuple, Union, cast
+from typing import TYPE_CHECKING, Dict, Optional, Tuple, Union
 
 import torch
 from torch import nn
@@ -8,11 +10,13 @@ from rtp_llm.device.device_type import DeviceType, get_device_type
 from rtp_llm.models_py.distributed.collective_torch import Group, all_reduce
 from rtp_llm.models_py.modules import RMSNorm
 from rtp_llm.models_py.modules.factory import LinearFactory
-from rtp_llm.models_py.modules.factory.attention.attn_factory import MlaImplBase
 from rtp_llm.models_py.modules.hybrid.indexer import Indexer
 from rtp_llm.ops import AttentionConfigs, HWKernelConfig, ParallelismConfig
-from rtp_llm.ops.compute_ops import LayerKVCache
 from rtp_llm.utils.model_weight import W
+
+if TYPE_CHECKING:
+    from rtp_llm.models_py.modules.factory.attention.attn_factory import MlaImplBase
+    from rtp_llm.ops.compute_ops import LayerKVCache
 
 # CUDA-only fused strided RMSNorm (replaces .contiguous() + RMSNorm). When
 # q_b_proj is fp8, we additionally emit fp8+scale to skip a separate
@@ -219,18 +223,23 @@ class MlaAttention(nn.Module):
             )
         return topk_indices
 
-    def forward(
+    def _resolve_layer_routes(
         self,
-        hidden_states: torch.Tensor,
         fmha_impl: MlaImplBase | Mapping[str, MlaImplBase],
         kv_cache: Optional[LayerKVCache] | Mapping[str, Optional[LayerKVCache]] = None,
-        x_fp8: Optional[torch.Tensor] = None,
-        x_scale: Optional[torch.Tensor] = None,
-        prev_topk_indices: Optional[torch.Tensor] = None,
-        force_reuse_topk_indices: bool = False,
-        return_topk: bool = False,
-    ) -> Union[torch.Tensor, Tuple[torch.Tensor, Optional[torch.Tensor]]]:
-        if self.attn_config.is_sparse:
+    ):
+        return self.resolve_layer_routes(
+            self.attn_config.is_sparse, self.reuse_topk_indices, fmha_impl, kv_cache
+        )
+
+    @staticmethod
+    def resolve_layer_routes(is_sparse, reuse_topk_indices, fmha_impl, kv_cache):
+        if is_sparse:
+            from rtp_llm.models_py.modules.factory.attention.attn_factory import (
+                MlaImplBase,
+            )
+            from rtp_llm.ops.compute_ops import LayerKVCache
+
             required_tags = {"default", "indexer_kv"}
             if not isinstance(fmha_impl, Mapping) or set(fmha_impl) != required_tags:
                 raise RuntimeError(
@@ -247,7 +256,7 @@ class MlaAttention(nn.Module):
                 indexer_kv_cache = None
             elif isinstance(kv_cache, Mapping) and (
                 set(kv_cache) == required_tags
-                or (self.reuse_topk_indices and set(kv_cache) == {"default"})
+                or (reuse_topk_indices and set(kv_cache) == {"default"})
             ):
                 default_kv_cache = kv_cache["default"]
                 indexer_kv_cache = kv_cache.get("indexer_kv")
@@ -266,8 +275,26 @@ class MlaAttention(nn.Module):
         else:
             if isinstance(fmha_impl, Mapping) or isinstance(kv_cache, Mapping):
                 raise RuntimeError("dense MLA does not accept tagged cache routes")
-            default_fmha_impl = cast(MlaImplBase, fmha_impl)
-            default_kv_cache = cast(Optional[LayerKVCache], kv_cache)
+            default_fmha_impl = fmha_impl
+            default_kv_cache = kv_cache
+            indexer_fmha_impl = indexer_kv_cache = None
+
+        return default_fmha_impl, default_kv_cache, indexer_fmha_impl, indexer_kv_cache
+
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        fmha_impl: MlaImplBase | Mapping[str, MlaImplBase],
+        kv_cache: Optional[LayerKVCache] | Mapping[str, Optional[LayerKVCache]] = None,
+        x_fp8: Optional[torch.Tensor] = None,
+        x_scale: Optional[torch.Tensor] = None,
+        prev_topk_indices: Optional[torch.Tensor] = None,
+        force_reuse_topk_indices: bool = False,
+        return_topk: bool = False,
+    ) -> Union[torch.Tensor, Tuple[torch.Tensor, Optional[torch.Tensor]]]:
+        default_fmha_impl, default_kv_cache, indexer_fmha_impl, indexer_kv_cache = (
+            self._resolve_layer_routes(fmha_impl, kv_cache)
+        )
 
         fmha_impl = default_fmha_impl
         kv_cache = default_kv_cache

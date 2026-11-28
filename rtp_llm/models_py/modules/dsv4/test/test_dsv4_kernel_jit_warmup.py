@@ -567,6 +567,37 @@ class Dsv4KernelJitWarmupTest(unittest.TestCase):
         )
         self.assertEqual(shapes[("fp8", 16, 32)]["name"], "fp8_a")
 
+    def test_collect_owned_fp8_backend_without_registering_its_weights_twice(self):
+        from rtp_llm.models_py.modules.dsv4.fp8.linear_owner import Dsv4FP8Linear
+
+        root = nn.Module()
+        root.proj = Dsv4FP8Linear(1024, 512, tp_size=2, tp_rank=1, partition="column")
+        self.assertEqual(_collect_dsv4_dense_gemm_shapes(root), {})
+        backend = _module_type(
+            "CudaFp8DeepGEMMLinear",
+            {
+                "N": 256,
+                "K": 1024,
+                "weight": root.proj.weight,
+                "weight_scales": torch.empty((2, 256), dtype=torch.int32).T,
+                "scale_ue8m0": True,
+            },
+        )()
+        dispatcher = nn.Module()
+        dispatcher.prequantized_input_backend = backend
+        for executor in (backend, dispatcher):
+            object.__setattr__(root.proj, "_executor", executor)
+            self.assertNotIn(backend, list(root.modules()))
+            self.assertEqual(set(root.state_dict()), {"proj.weight", "proj.scale"})
+            shapes = _collect_dsv4_dense_gemm_shapes(root)
+            self.assertEqual(set(shapes), {("fp8", 256, 1024)})
+            info = shapes[("fp8", 256, 1024)]
+            self.assertIs(info["weight"], root.proj.weight)
+            self.assertIs(info["scale"], backend.weight_scales)
+            self.assertIs(info["module"], backend)
+        root.to("cpu")  # migration invalidates the old executor
+        self.assertEqual(_collect_dsv4_dense_gemm_shapes(root), {})
+
     def test_collect_dense_shapes_includes_model_level_mtp_projections(self):
         root = nn.Module()
         root.v4 = nn.Module()
@@ -628,7 +659,10 @@ class Dsv4KernelJitWarmupTest(unittest.TestCase):
                 "fn": torch.empty((24, 16384), dtype=torch.float32),
             },
         )
-        root.add_module("attn_hc", TileLangHCUnit())
+        class OwnedHCUnit(TileLangHCUnit):
+            pass
+
+        root.add_module("attn_hc", OwnedHCUnit())
         root.add_module("ffn_hc_same_shape", TileLangHCUnit())
         root.add_module("head_hc", TileLangHCHead())
         root.add_module("fallback_hc", FallbackHCUnit())
@@ -664,7 +698,10 @@ class Dsv4KernelJitWarmupTest(unittest.TestCase):
                 "hc_mult": 4,
             },
         )
-        root.add_module("head_hc", TileLangHCHead())
+        class OwnedHCHead(TileLangHCHead):
+            pass
+
+        root.add_module("head_hc", OwnedHCHead())
         root.add_module("head_hc_same_shape", TileLangHCHead())
         root.add_module("fallback_head", FallbackHCHead())
 

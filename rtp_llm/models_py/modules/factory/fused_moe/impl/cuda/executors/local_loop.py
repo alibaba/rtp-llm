@@ -41,7 +41,7 @@ from rtp_llm.models_py.modules.factory.fused_moe.utils.fp8_fp4.expert import (
     Expert,
     require_silu_mul_split,
 )
-from rtp_llm.resident_weights import resident_init_tensors
+from rtp_llm.models_py.modules.fp8_fp4_weight_source import resident_init_tensors
 
 from .fp8_fp4_base import Fp8Fp4ExecutorBase, split_moe_w13_gate_up
 
@@ -129,10 +129,10 @@ class LocalLoopExecutor(Fp8Fp4ExecutorBase):
         for the small-batch fast path. They share storage with the per-Expert
         slices — no extra memory.
         """
-        from rtp_llm.utils.model_weight import W
+        from rtp_llm.models_py.modules.fp8_fp4_weight_source import take_weight
 
         cfg = self.cfg
-        consumes = (W.moe_w1, W.moe_s1, W.moe_w2, W.moe_s2)
+        consumes = ("routed_w13", "routed_s13", "routed_w2", "routed_s2")
         # Everything below is views or recomputed from these, also on a resident restart.
         group = "fp8_fp4.local_loop.routed"
         w13, s13, w2, s2 = resident_init_tensors(
@@ -145,7 +145,9 @@ class LocalLoopExecutor(Fp8Fp4ExecutorBase):
                 f"{group}.s2",
             ),
             consumed_names=consumes,
-            builder=lambda: tuple(layer_weights.pop(n) for n in consumes),
+            builder=lambda: tuple(take_weight(layer_weights, n) for n in (
+                "routed_w13", "routed_s13", "routed_w2", "routed_s2"
+            )),
         )
         inter = cfg.moe_inter_dim
         layout = cfg.moe_w1_layout

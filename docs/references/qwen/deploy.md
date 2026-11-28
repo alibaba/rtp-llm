@@ -36,7 +36,7 @@ ENABLE_MERGE_W13=1 \
 --sp_model_type qwen_3_moe_eagle3 \
 --sp_checkpoint_path XXXXXXX \
 --sp_act_type bf16 \
---sp_type mtp \
+--sp_type eagle3 \
 --max_seq_len 32768 \
 --max_batch_size 1024 \
 --concurrency_limit 1024 \

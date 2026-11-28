@@ -132,5 +132,5 @@ py_test(
     srcs = ["activation_test.py"],
     exec_properties = {"gpu": "H20_CU13"},
     tags = ["H20_CU13"],
-    deps = py_test_deps,
+    deps = py_test_deps + ["//rtp_llm/models_py:new_weight_loader"],
 )

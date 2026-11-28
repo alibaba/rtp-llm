@@ -186,18 +186,11 @@ class PpuGroupedFP4Strategy(torch.nn.Module):
                 "ppu_grouped_fp4 setup requires positive TP and EP sizes"
             )
 
-        from rtp_llm.utils.model_weight import W
+        from rtp_llm.models_py.modules.dsv4.ppu.moe.packed_inputs import PpuRoutedInputs
 
-        keys = (
-            W.v4_routed_w1_w,
-            W.v4_routed_w1_s,
-            W.v4_routed_w2_w,
-            W.v4_routed_w2_s,
-            W.v4_routed_w3_w,
-            W.v4_routed_w3_s,
-        )
         try:
-            w1, s1, w2, s2, w3, s3 = (layer_weights[key] for key in keys)
+            inputs = PpuRoutedInputs(layer_weights)
+            w1, s1, w2, s2, w3, s3 = inputs.parts
         except KeyError as error:
             raise KeyError(
                 f"ppu_grouped_fp4 requires all six packed routed tensors; missing {error}"
@@ -226,7 +219,7 @@ class PpuGroupedFP4Strategy(torch.nn.Module):
             raise ValueError("ppu_grouped_fp4 requires CUDA-compatible PPU tensors")
         if any(tensor.device != w1.device for tensor in tensors):
             raise ValueError("ppu_grouped_fp4 weights/scales must share one device")
-        if any(not tensor.is_contiguous() for tensor in tensors):
+        if any(not tensor.is_contiguous() for tensor in inputs.storage):
             raise ValueError("ppu_grouped_fp4 weights/scales must be contiguous")
 
         import deep_gemm
@@ -240,9 +233,8 @@ class PpuGroupedFP4Strategy(torch.nn.Module):
             prepare_fp4_weight_scale_mxfp4,
         )
 
-        w13 = torch.cat((w1, w3), dim=1).view(torch.uint8).contiguous()
-        s13 = prepare_fp4_weight_scale_mxfp4(torch.cat((s1, s3), dim=1).contiguous())
-        w2_packed = w2.view(torch.uint8).contiguous()
+        w13, s13, w2_packed, s2 = inputs.packed()
+        s13 = prepare_fp4_weight_scale_mxfp4(s13)
         s2_prepared = prepare_fp4_weight_scale_mxfp4(s2)
 
         self.register_buffer("_ppu_w13", w13, persistent=False)
@@ -252,8 +244,7 @@ class PpuGroupedFP4Strategy(torch.nn.Module):
         self.inter_local = inter_local
         self.routed_tp_size = routed_tp_size
         self._grouped_gemm = grouped_gemm
-        for key in keys:
-            layer_weights.pop(key)
+        inputs.consume()
         _log_operator_path_once(_module_path(deep_gemm))
 
     def forward(

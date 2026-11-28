@@ -1,6 +1,6 @@
 """BaseModel's resident-weights wiring: the switch, the role, and the fallbacks.
 
-Every branch of ``_resident_or_loaded_weights`` and ``_finish_resident_weights`` without a checkpoint
+Every branch of ``_load_with_residency`` and ``_finish_resident_weights`` without a checkpoint
 or a GPU: what they must do is call the loader, or call the manager, and never both.
 """
 
@@ -9,9 +9,10 @@ import os
 import tempfile
 import unittest
 from datetime import timedelta
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Optional
-from unittest.mock import Mock, patch
+from unittest.mock import Mock, call, patch
 
 import torch
 import torch.multiprocessing as mp
@@ -20,7 +21,7 @@ from rtp_llm.config.py_config_modules import ResidentWeightsConfig
 from rtp_llm.models.base_model import BaseModel
 from rtp_llm.resident_weights import vmm
 from rtp_llm.resident_weights.store import StoreOp, StoreSettings
-from rtp_llm.resident_weights.weights import ResidentWeights, all_ranks_true
+from rtp_llm.resident_weights.weights import ResidentWeights, all_ranks_true, checkpoint_digest
 from rtp_llm.utils.model_weight import W
 
 
@@ -28,9 +29,9 @@ class _Loader:
     def __init__(self):
         self.calls = []
 
-    def load_weights(self, device, global_weight_aliases):
-        self.calls.append((device, dict(global_weight_aliases)))
-        return "checkpoint weights"
+    def load(self, **kwargs):
+        self.calls.append(kwargs)
+        return "resident weights" if kwargs.get("restored") is not None else "checkpoint weights"
 
 
 class _Manager:
@@ -40,21 +41,9 @@ class _Manager:
         self.load_args = None
         self.finished_with = "not called"
 
-    def attach_or_load_weights(
-        self,
-        loader,
-        device,
-        global_weight_aliases,
-        excluded_names=(),
-        synchronize_ranks=False,
-    ):
-        self.load_args = (
-            loader,
-            device,
-            dict(global_weight_aliases),
-            tuple(excluded_names),
-        )
-        return "resident weights"
+    def acquire_for_load(self, device, *, synchronize_ranks, group=None):
+        self.load_args = (device, synchronize_ranks)
+        return []
 
     def finalize_after_initialize(self, py_model):
         self.finished_with = py_model
@@ -89,42 +78,37 @@ class ResidentWeightsWiringTest(unittest.TestCase):
             BaseModel, "_create_resident_weights", side_effect=AssertionError("called")
         ):
             self.assertEqual(
-                model._resident_or_loaded_weights("cuda:0", {}), "checkpoint weights"
+                model._load_with_residency("cuda:0", model.model_weights_loader.load), "checkpoint weights"
             )
         self.assertIsNone(model._resident_weights)
-        self.assertEqual(model.model_weights_loader.calls, [("cuda:0", {})])
+        self.assertEqual(model.model_weights_loader.calls, [{}])
 
     def test_enabled_delegates_the_whole_load_to_the_manager(self):
         manager = _Manager()
         model = _model(ResidentWeightsConfig(mode="dev"), manager)
         with patch.object(BaseModel, "_create_resident_weights", return_value=manager):
             self.assertEqual(
-                model._resident_or_loaded_weights("cuda:1", {"embed": "alias"}),
+                model._load_with_residency("cuda:1", model.model_weights_loader.load),
                 "resident weights",
             )
         self.assertIs(model._resident_weights, manager)
-        self.assertEqual(model.model_weights_loader.calls, [])
-        loader, device, aliases, excluded = manager.load_args
-        self.assertIs(loader, model.model_weights_loader)
-        self.assertEqual(device, "cuda:1")
-        self.assertEqual(aliases, {"embed": "alias"})
-        # The loader rebuilds the routing tables on every start.
-        self.assertEqual(excluded, (W.log2phy, W.logic_expert_cnt))
+        self.assertEqual(model.model_weights_loader.calls, [{"resident": manager, "restored": []}])
+        self.assertEqual(manager.load_args, ("cuda:1", True))
 
     def test_an_unusable_store_falls_back_to_the_checkpoint(self):
         model = _model(ResidentWeightsConfig(mode="dev"))
         with patch.object(BaseModel, "_create_resident_weights", return_value=None):
             self.assertEqual(
-                model._resident_or_loaded_weights("cuda:0", {}), "checkpoint weights"
+                model._load_with_residency("cuda:0", model.model_weights_loader.load), "checkpoint weights"
             )
         self.assertIsNone(model._resident_weights)
-        self.assertEqual(model.model_weights_loader.calls, [("cuda:0", {})])
+        self.assertEqual(model.model_weights_loader.calls, [{}])
 
     def test_verify_reaches_the_manager_as_a_field_not_a_branch(self):
         manager = _Manager()
         model = _model(ResidentWeightsConfig(mode="dev", verify=True), manager)
         with patch.object(BaseModel, "_create_resident_weights", return_value=manager):
-            model._resident_or_loaded_weights("cuda:0", {})
+            model._load_with_residency("cuda:0", model.model_weights_loader.load)
         # BaseModel no longer special-cases verify; the manager owns that decision.
         self.assertIsNotNone(manager.load_args)
         self.assertTrue(model.resident_weights_config.verify)
@@ -160,20 +144,19 @@ class ResidentWeightsRankBarrierTest(unittest.TestCase):
             BaseModel, "_create_resident_weights", return_value=manager
         ), patch("torch.distributed.is_initialized", return_value=initialized), patch(
             "torch.distributed.get_world_size", return_value=world_size
-        ), patch(
-            "torch.distributed.barrier"
-        ) as barrier, patch(
-            "rtp_llm.models.base_model.all_ranks_true",
-            side_effect=lambda value, device: value,
-        ):
-            model._resident_or_loaded_weights("cuda:0", {})
+        ), patch("torch.distributed.get_backend", return_value="gloo"), patch(
+            "torch.distributed.all_reduce"
+        ) as barrier:
+            model._load_with_residency("cpu", model.model_weights_loader.load)
         return barrier
 
     def test_a_multi_rank_start_waits_for_every_rank(self):
         barrier = self._load(
             ResidentWeightsConfig(mode="dev"), initialized=True, world_size=4
         )
-        barrier.assert_called_once_with()
+        # One setup vote and one completion vote (the fake manager does not attach).
+        self.assertEqual(barrier.call_count, 2)
+        self.assertTrue(all(c.kwargs["group"] is None for c in barrier.call_args_list))
 
     def test_a_process_without_a_process_group_does_not_wait(self):
         barrier = self._load(
@@ -229,7 +212,76 @@ def _distributed_load(rank, world_size, rendezvous, mixed):
         torch.distributed.destroy_process_group()
 
 
+def _resident_failures(rank, world_size, directory):
+    dist = torch.distributed
+    dist.init_process_group(
+        "gloo", init_method="file://" + directory + "/group", rank=rank,
+        world_size=world_size, timeout=timedelta(seconds=8),
+    )
+    try:
+        # A PP draft is instantiated on the tail stage only. The other ranks
+        # go directly to the final barrier, never participating in the votes.
+        group = dist.new_group([2, 3], timeout=timedelta(seconds=8)) if world_size == 4 else None
+        if world_size == 2 or rank >= 2:
+            last = rank == world_size - 1
+            root = Path(directory) / str(rank)
+            root.mkdir()
+            (root / "model.safetensors.index.json").write_text(
+                json.dumps({"weight_map": {"param": "shards/missing.safetensors"}})
+            )
+            for mode, expected in (
+                ("setup", ("setup", "FileNotFoundError", "missing.safetensors")),
+                ("attach", ("attach", "bad FD")),
+                ("scratch", ("load", "bad shard")),
+                ("replay", ("load", "bad record")),
+                ("cold", None), ("warm", None),
+            ):
+                manager = ResidentWeights.__new__(ResidentWeights)
+                manager.verify = False
+                manager.release_attach = Mock()
+                manager.discard_attach = Mock()
+                if mode == "attach" and last:
+                    manager.attach = Mock(side_effect=ValueError("bad FD"))
+                else:
+                    manager.attach = Mock(return_value=[] if mode in ("warm", "replay") else None)
+                model = _model(ResidentWeightsConfig(mode="dev", role="draft"))
+                model.parallelism_config.pp_size = world_size // 2
+
+                def create():
+                    if mode == "setup" and last:
+                        checkpoint_digest(str(root), follow_index=True)
+                    return manager
+
+                def load(*, resident, restored):
+                    assert resident is manager
+                    if last and mode in ("scratch", "replay"):
+                        raise ValueError("bad shard" if restored is None else "bad record")
+                    return "cold" if restored is None else "warm"
+
+                with patch.object(model, "_create_resident_weights", side_effect=create):
+                    try:
+                        owner = model._load_with_residency("cpu", load, group=group)
+                    except RuntimeError as exc:
+                        assert expected is not None, str(exc)
+                        assert all(s in str(exc) for s in (*expected, "group rank 1")), str(exc)
+                    else:
+                        assert expected is None and owner == mode, mode
+                if mode == "attach":
+                    manager.release_attach.assert_called_once()
+        dist.barrier()
+    finally:
+        dist.destroy_process_group()
+
+
 class ResidentWeightsRegressionTest(unittest.TestCase):
+    def test_setup_attach_and_local_load_failures_reach_all_checkpoint_ranks(self):
+        for world_size in (2, 4):
+            with self.subTest(world_size=world_size), tempfile.TemporaryDirectory() as directory:
+                mp.start_processes(
+                    _resident_failures, args=(world_size, directory), nprocs=world_size,
+                    join=True, start_method="fork",
+                )
+
     def test_world_hit_consensus_precedes_loader_collectives(self):
         for mixed in (False, True):
             with self.subTest(mixed=mixed), tempfile.TemporaryDirectory() as directory:
@@ -244,21 +296,27 @@ class ResidentWeightsRegressionTest(unittest.TestCase):
     def test_pp_draft_does_not_enter_world_collectives(self):
         model = _model(ResidentWeightsConfig(mode="dev", role="draft"), _Manager())
         model.parallelism_config.pp_size = 2
+        with patch("torch.distributed.is_initialized", return_value=True), patch.object(
+            BaseModel, "_create_resident_weights", side_effect=AssertionError("touched store")
+        ), self.assertRaisesRegex(RuntimeError, "checkpoint stage group"):
+            model._load_with_residency("cpu", model.model_weights_loader.load)
         with patch.object(
             BaseModel, "_create_resident_weights", return_value=model._created
         ), patch(
-            "rtp_llm.models.base_model.all_ranks_true",
-            side_effect=AssertionError("WORLD"),
-        ), patch.object(
-            BaseModel, "_wait_for_loading_ranks", side_effect=AssertionError("WORLD")
-        ):
-            model._resident_or_loaded_weights("cuda:0", {})
+            "rtp_llm.models.base_model.agree_resident_step", return_value=1
+        ) as vote:
+            stage = object()
+            model._load_with_residency("cuda:0", model.model_weights_loader.load, group=stage)
+            self.assertEqual(vote.call_args_list, [
+                call(1, None, "cuda:0", stage, "setup"),
+                call(1, None, "cuda:0", stage, "load"),
+            ])
 
     def _consensus_failure_load(self, manager):
         """Load with manager creation agreed by no one; returns the ordered side effects."""
         events = []
         loader = Mock()
-        loader.load_weights.side_effect = lambda **kwargs: (
+        loader.load.side_effect = lambda **kwargs: (
             events.append("cold load") or "checkpoint weights"
         )
         model = _model(ResidentWeightsConfig(mode="dev"), manager, loader)
@@ -269,13 +327,11 @@ class ResidentWeightsRegressionTest(unittest.TestCase):
 
         with patch.object(
             BaseModel, "_create_resident_weights", return_value=manager
-        ), patch("rtp_llm.models.base_model.all_ranks_true", return_value=False), patch(
+        ), patch("rtp_llm.models.base_model.agree_resident_step", side_effect=(0, 1)), patch(
             "rtp_llm.resident_weights.store.request", side_effect=request
-        ), patch.object(
-            BaseModel, "_wait_for_loading_ranks"
         ):
             self.assertEqual(
-                model._resident_or_loaded_weights("cuda:0", {}), "checkpoint weights"
+                model._load_with_residency("cuda:0", model.model_weights_loader.load), "checkpoint weights"
             )
         self.assertIsNone(model._resident_weights)
         return events
@@ -289,7 +345,7 @@ class ResidentWeightsRegressionTest(unittest.TestCase):
         manager.slot_key = "GPU-a/target"
         manager._allocation_refs = []
         manager._hold = None
-        manager.attach_or_load_weights = Mock(side_effect=AssertionError("attached"))
+        manager.acquire_for_load = Mock(side_effect=AssertionError("attached"))
         with self.assertLogs(level="WARNING") as logs:
             events = self._consensus_failure_load(manager)
         self.assertEqual(
@@ -329,18 +385,19 @@ class ResidentWeightsRegressionTest(unittest.TestCase):
                     create.assert_not_called()
 
     def test_resident_configuration_refuses_weight_updates_on_every_rank(self):
-        from rtp_llm.model_loader.weight_manager import WeightManager
+        from rtp_llm.models_py.new_weight_manager import NewLoaderWeightManager
 
         # A rank whose target fell back to a checkpoint load holds no resident weights, yet
         # must refuse exactly like the ranks that do; only the configuration decides.
-        for enabled, error in ((True, RuntimeError), (False, KeyError)):
+        for enabled, error in ((True, RuntimeError), (False, ValueError)):
             with self.subTest(enabled=enabled):
-                manager = WeightManager.__new__(WeightManager)
+                manager = NewLoaderWeightManager.__new__(NewLoaderWeightManager)
                 manager._resident_weights_enabled = enabled
-                with self.assertRaises(error) as raised:
-                    manager.update({})
-                if enabled:
-                    self.assertIn("resident weights", str(raised.exception))
+                for update in (manager.update, manager.update_tensors):
+                    with self.assertRaises(error) as raised:
+                        update({})
+                    if enabled:
+                        self.assertIn("resident weights", str(raised.exception))
 
     def test_default_model_weights_use_plain_independent_dicts(self):
         from rtp_llm.model_loader.model_weight_info import ModelWeights
@@ -408,7 +465,7 @@ class ResidentWeightsRegressionTest(unittest.TestCase):
         )
         seen_states = []
 
-        def fake_consensus(state, _device):
+        def fake_consensus(state, _device, *, group):
             seen_states.append(state)
             return 0  # _ATTACH_RESTORE_FAILED
 
@@ -474,7 +531,7 @@ class ResidentWeightsRegressionTest(unittest.TestCase):
 
         seen_states = []
 
-        def fake_consensus(state, _device):
+        def fake_consensus(state, _device, *, group):
             seen_states.append(state)
             return 0
 
@@ -518,7 +575,7 @@ class ResidentWeightsRegressionTest(unittest.TestCase):
 
         seen_states = []
 
-        def fake_consensus(state, _device):
+        def fake_consensus(state, _device, *, group):
             seen_states.append(state)
             return 0
 
@@ -584,7 +641,7 @@ class ResidentWeightsRegressionTest(unittest.TestCase):
 
         seen_states = []
 
-        def fake_consensus(state, _device):
+        def fake_consensus(state, _device, *, group):
             seen_states.append(state)
             return 0
 
@@ -624,7 +681,7 @@ class ResidentWeightsRegressionTest(unittest.TestCase):
 
         seen_states = []
 
-        def fake_consensus(state, _device):
+        def fake_consensus(state, _device, *, group):
             seen_states.append(state)
             return 0
 
@@ -664,10 +721,11 @@ class ResidentWeightsRegressionTest(unittest.TestCase):
         model._weight_alias_names = ()
         model.merge_lora = True
         model.moe_pure_tp_preshard = False
-        model.model_weights_loader.weights_info = SimpleNamespace(
-            resident_weights_env_vars=()
-        )
-        for name in ("parallelism_config", "hw_kernel_config", "moe_config"):
+        model.force_cpu_load_weights = False
+        model.max_generate_batch_size = 4
+        model.load_method = "auto"
+        model.resident_weights_env_vars = ()
+        for name in ("parallelism_config", "hw_kernel_config", "moe_config", "fmha_config"):
             setattr(model, name, SimpleNamespace(to_string=lambda: "config"))
         return model
 
@@ -796,7 +854,7 @@ class ResidentWeightsRegressionTest(unittest.TestCase):
     def test_fingerprint_tracks_only_declared_weight_environment(self):
         with tempfile.TemporaryDirectory() as directory:
             model = self._fingerprint_model(directory)
-            model.model_weights_loader.weights_info.resident_weights_env_vars = (
+            model.resident_weights_env_vars = (
                 "TEST_WEIGHT_LAYOUT",
             )
             with patch.dict(
@@ -809,20 +867,19 @@ class ResidentWeightsRegressionTest(unittest.TestCase):
                 self.assertNotEqual(before, model._resident_fingerprint())
 
     def test_default_fingerprint_tracks_fp4_gemm_backend(self):
-        from rtp_llm.model_loader.model_weight_info import ModelDeployWeightInfo
 
         self.assertIn(
             "MOE_MEGA_SHARED_EXPERT",
-            ModelDeployWeightInfo.resident_weights_env_vars,
+            BaseModel.resident_weights_env_vars,
         )
         self.assertIn(
             "RTP_LLM_FP4_GEMM_BACKEND",
-            ModelDeployWeightInfo.resident_weights_env_vars,
+            BaseModel.resident_weights_env_vars,
         )
         with tempfile.TemporaryDirectory() as directory:
             model = self._fingerprint_model(directory)
-            model.model_weights_loader.weights_info.resident_weights_env_vars = (
-                ModelDeployWeightInfo.resident_weights_env_vars
+            model.resident_weights_env_vars = (
+                BaseModel.resident_weights_env_vars
             )
             with patch.dict(os.environ, {"RTP_LLM_FP4_GEMM_BACKEND": "cutlass"}):
                 cutlass_fp = model._resident_fingerprint()

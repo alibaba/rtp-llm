@@ -56,10 +56,17 @@ class Glm5IndexerFusionTest(unittest.TestCase):
         x = torch.randn(128, 6144, device="cuda", dtype=torch.bfloat16)
         weight = torch.randn(32, 6144, device="cuda", dtype=torch.bfloat16).float()
         scales = torch.rand(128, 32, 1, device="cuda")
+        # These BF16 operands are exactly representable in TF32. An FP64
+        # dot isolates accumulation error from input rounding and from the
+        # cuBLAS algorithm selected for a particular weight stride.
+        reference = (
+            (x.double() @ weight.double().t()).unsqueeze(-1) * scales.double() * 0.125
+        ).float()
         for current in (weight, weight.t().contiguous().t()):
             actual = fused_logits_head_gate(x, scales, current, 0.125)
             expected = (x.float() @ current.t()).unsqueeze(-1) * scales * 0.125
             torch.testing.assert_close(actual, expected, rtol=1e-4, atol=1e-4)
+            torch.testing.assert_close(actual, reference, rtol=1e-4, atol=1e-4)
 
     def test_scatter_graph_replay_replaces_indices(self):
         from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.triton_kv_scatter import (

@@ -84,6 +84,15 @@ _active_weight_database: ContextVar[Optional[BaseDatabase]] = ContextVar(
 )
 
 
+def _choose_ft_head_source(tensors, *, transforms, provenance):
+    # The first viable source wins (an explicit head takes precedence).
+    # Record the decision after conversion succeeds, not from tensor equality
+    # or mere presence of a name in the archive.
+    result = choose_available(tensors, transforms)
+    provenance["source"] = "lm_head" if tensors[0] is not None else "embedding"
+    return result
+
+
 def _apply_mega_moe_fp4_wrappers(
     weight_info: "ModelWeightInfo",
     database: Optional[BaseDatabase] = None,
@@ -484,11 +493,6 @@ class ModelDeployWeightInfo:
         logging.info("fix merge_w13")
         weight_info = self._fix_merge_w1_w3(weight_info)
 
-        if self.gen_dummy_reciprocal:
-            weight_info = self._add_attention_output_static_quant_reciprocal(
-                weight_info
-            )
-
         is_glm = self.model_config.model_type in {"glm_5", "glm_5_mtp"}
         # For an online source, select the MoE destination format before the
         # generic FP8 pass. QuantWeight leaves these prepared descriptors alone,
@@ -505,6 +509,11 @@ class ModelDeployWeightInfo:
             )
         if self._quant_algo is not None and self._quant_algo.isQuant():
             weight_info = weight_info.to_quant_weight_info(self._quant_config)
+
+        if self.gen_dummy_reciprocal:
+            weight_info = self._add_attention_output_static_quant_reciprocal(
+                weight_info
+            )
 
         if self.output_vocab_ids:
             weight_info = ModelWeightInfo(
@@ -681,10 +690,21 @@ class ModelDeployWeightInfo:
     def _add_attention_output_static_quant_reciprocal(
         self, origin_weight_info: ModelWeightInfo
     ):
+        def output_names(weight):
+            yield weight.name
+            if isinstance(weight, CompositeWeight):
+                for child in weight.sub_weights.values():
+                    yield from output_names(child)
+
         for weights in origin_weight_info.layer_weights:
             # Hybrid models (Qwen3-Next / Qwen3.5) build linear-attention layers
-            # without attn_o_w, and those layers never consume the scale.
-            if not any(weight.name == W.attn_o_w for weight in weights):
+            # without attn_o_w. A calibrated output already owns its reciprocal;
+            # never overwrite the trained value with a synthetic cache unit.
+            names = {name for weight in weights for name in output_names(weight)}
+            if (
+                W.attn_o_w not in names
+                or W.attention_output_static_quant_reciprocal in names
+            ):
                 continue
             weights.append(
                 AtomicWeight(
@@ -762,10 +782,14 @@ class ModelDeployWeightInfo:
             ]
         )
         lm_head_merge_funcs = [lm_head.process_fun, word_emb.process_fun]
+        self.ft_head_provenance = {}
         lm_head = AtomicWeight(
             W.lm_head,
             lm_head_ckpt_weigth_infos,
-            functools.partial(choose_available, origin_func_list=lm_head_merge_funcs),
+            functools.partial(
+                _choose_ft_head_source, transforms=lm_head_merge_funcs,
+                provenance=self.ft_head_provenance,
+            ),
         )
         origin_weight_info.weights[lm_head_idx] = lm_head
         return origin_weight_info

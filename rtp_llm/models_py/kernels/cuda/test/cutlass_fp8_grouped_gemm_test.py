@@ -220,6 +220,79 @@ class Fp8GroupedGemmOpTest(TestCase):
             c = out_tensors_stacked[expert_offsets[g] : expert_offsets[g + 1]]
             torch.testing.assert_close(c, baseline, rtol=1e-2, atol=5e-4)
 
+    def test_per_token_per_channel_expert_projections(self):
+        from rtp_llm.models_py.kernels.cuda.fp8_kernel import cutlass_moe_mm_fp8_scaled
+        from rtp_llm.models_py.triton_kernels.common.activation import silu_and_mul
+
+        # Four assignments from two active experts, with an empty middle
+        # expert. Distinct up/gate/down and expert scales expose any scalar
+        # broadcast or off-by-one expert stride in either grouped GEMM.
+        E, M, H = 3, 4, 128
+        dtype = torch.float8_e4m3fn
+        eye = torch.eye(H, device="cuda")
+        w13 = torch.cat((eye, -eye)).repeat(E, 1, 1).to(dtype)
+        w2 = eye.roll(1, dims=0).repeat(E, 1, 1).to(dtype)
+        row = torch.arange(H, device="cuda", dtype=torch.float32)[None, :] / H
+        expert = torch.arange(E, device="cuda", dtype=torch.float32)[:, None]
+        s13 = torch.cat((1 + row + expert, 3 - row + expert), dim=1)
+        s2 = 1 + row / 2 + 2 * expert
+        ids = (0, 0, 2, 2)
+        xq = ((torch.arange(M * H, device="cuda").reshape(M, H) % 7) - 3).to(dtype)
+        sx = torch.arange(1, M + 1, device="cuda", dtype=torch.float32)[:, None] / 8
+        offsets = torch.tensor([0, 2, 2], dtype=torch.int32, device="cuda")
+
+        def grouped(x, s, w, sw, swap):
+            _, n, k = w.shape
+            sizes = torch.tensor(
+                [(n, m, k) if swap else (m, n, k) for m in (2, 0, 2)],
+                dtype=torch.int32,
+                device="cuda",
+            )
+            stride = torch.full((E,), k, dtype=torch.int64, device="cuda")
+            out = torch.empty(M, n, device="cuda", dtype=torch.bfloat16)
+            cutlass_moe_mm_fp8_scaled(
+                out,
+                x,
+                w,
+                s,
+                sw,
+                offsets,
+                sizes,
+                stride,
+                stride,
+                torch.full_like(stride, n),
+                True,
+                True,
+                M,
+                swap,
+            )
+            return out
+
+        def reference(x, s, w, sw):
+            return torch.stack(
+                [(w[e].float() @ x[i].float()) * s[i] * sw[e] for i, e in enumerate(ids)]
+            ).bfloat16()
+
+        expected13 = reference(xq, sx, w13, s13)
+        for swap in (False, True):
+            with self.subTest(swap_ab=swap):
+                # Exercise both OldLoader [E,N,1] and NewLoader [E,N] scales.
+                out13 = grouped(xq, sx, w13, s13.unsqueeze(-1), swap)
+                torch.testing.assert_close(out13, expected13, atol=0, rtol=0)
+                mid = torch.empty(M, H, device="cuda", dtype=torch.bfloat16)
+                silu_and_mul(mid, out13)
+                up, gate = expected13.float().chunk(2, -1)
+                expected_mid = (up * F.silu(gate)).bfloat16()
+                torch.testing.assert_close(mid, expected_mid, atol=0, rtol=0)
+                sm = mid.float().abs().amax(1, keepdim=True) / 448
+                mq = (mid.float() / sm).clamp(-448, 448).to(dtype)
+                torch.testing.assert_close(
+                    grouped(mq, sm, w2, s2, swap),
+                    reference(mq, sm, w2, s2),
+                    atol=0,
+                    rtol=0,
+                )
+
     def test_fp8_groupedgemm(self):
         for params in itertools.product(
             self.NUM_EXPERT,

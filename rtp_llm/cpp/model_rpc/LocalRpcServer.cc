@@ -1558,7 +1558,6 @@ LocalRpcServer::CheckHealth(grpc::ServerContext* context, const EmptyPB* request
 grpc::Status LocalRpcServer::UpdateEplbConfig(grpc::ServerContext*             context,
                                               const UpdateEplbConfigRequestPB* request,
                                               EmptyPB*                         response) {
-    RTP_LLM_LOG_DEBUG("receive cacheStatus rpc request from client: %s", context->peer().c_str());
     const string mode_str = request->mode();
     EPLBConfig   config;
     if (mode_str == "EPLB" || mode_str == "eplb") {
@@ -1574,7 +1573,12 @@ grpc::Status LocalRpcServer::UpdateEplbConfig(grpc::ServerContext*             c
         return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "Invalid eplb mode");
     }
     config.eplb_update_time = request->update_time();
-    engine_->updateEplbConfig(config);
+    if (!engine_) {
+        return grpc::Status(grpc::StatusCode::UNAVAILABLE, "EPLB engine is not initialized");
+    }
+    if (!engine_->updateEplbConfig(config)) {
+        return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, "Engine rejected EPLB mode: " + mode_str);
+    }
     return grpc::Status::OK;
 }
 
@@ -1689,12 +1693,14 @@ void LocalRpcServer::reportCacheStatusTime(int64_t request_begin_time_us) {
 
 grpc::Status LocalRpcServer::SetPause(grpc::ServerContext* context, const EmptyPB* request, EmptyPB* response) {
     RTP_LLM_LOG_DEBUG("receive cacheStatus rpc request from client: %s", context->peer().c_str());
+    std::lock_guard<std::mutex> lock(update_lifecycle_mutex_);
     engine_->pause();
     return grpc::Status::OK;
 }
 
 grpc::Status LocalRpcServer::SetRestart(grpc::ServerContext* context, const EmptyPB* request, EmptyPB* response) {
     RTP_LLM_LOG_DEBUG("receive cacheStatus rpc request from client: %s,", context->peer().c_str());
+    std::lock_guard<std::mutex> lock(update_lifecycle_mutex_);
     engine_->restart();
     return grpc::Status::OK;
 }
@@ -1702,24 +1708,43 @@ grpc::Status LocalRpcServer::SetRestart(grpc::ServerContext* context, const Empt
 grpc::Status
 LocalRpcServer::UpdateWeights(grpc::ServerContext* context, const UpdateWeightsRequestPB* request, EmptyPB* response) {
     RTP_LLM_LOG_DEBUG("Receive update weights request from: %s", context->peer().c_str());
+    std::lock_guard<std::mutex> lock(update_lifecycle_mutex_);
+    // Keep the GIL for the complete Python exception lifetime, including the
+    // destruction of py::error_already_set after its catch handler returns.
+    py::gil_scoped_acquire acquire;
     try {
+        if (!weight_manager_ || weight_manager_.is_none()) {
+            const std::string error_msg = "UpdateWeights is unavailable: no weight manager configured";
+            RTP_LLM_LOG_ERROR("Reject update weights request from %s: %s", context->peer().c_str(), error_msg.c_str());
+            return {grpc::StatusCode::UNIMPLEMENTED, error_msg};
+        }
         if (request->name().empty() || request->desc().empty() || request->method().empty()) {
-            throw std::runtime_error("Missing required field(s) in request");
+            return {grpc::StatusCode::INVALID_ARGUMENT, "Missing required field(s) in request"};
         }
-        {
-            py::gil_scoped_acquire acquire;
-            py::dict               req;
-            req["name"]   = request->name();
-            req["desc"]   = request->desc();
-            req["method"] = request->method();
-            weight_manager_.attr("update")(req);
+        if (py::hasattr(weight_manager_, "requires_paused_engine")
+            && weight_manager_.attr("requires_paused_engine").cast<bool>() && (!engine_ || !engine_->isPaused())) {
+            return {grpc::StatusCode::FAILED_PRECONDITION,
+                    "NewLoader UpdateWeights requires every engine rank to be paused before updating"};
         }
+        py::dict req;
+        req["name"]   = request->name();
+        req["desc"]   = request->desc();
+        req["method"] = request->method();
+        weight_manager_.attr("update")(req);
         return grpc::Status::OK;
     } catch (const py::error_already_set& e) {
-        PyObject *type, *value, *traceback;
-        PyErr_Fetch(&type, &value, &traceback);
-        std::string err_msg = value ? PyUnicode_AsUTF8(value) : "Unknown Python error";
-        return {grpc::StatusCode::INTERNAL, "exception from python: " + err_msg};
+        if (e.matches(PyExc_BlockingIOError)) {
+            return {grpc::StatusCode::ABORTED, "Weight update busy; retry after every rank is idle"};
+        }
+        const std::string details = e.what();
+        RTP_LLM_LOG_WARNING("UpdateWeights Python exception: %s", details.c_str());
+        const auto       newline               = details.find('\n');
+        std::string      summary               = details.substr(0, newline);
+        constexpr size_t kMaxClientErrorLength = 512;
+        if (summary.size() > kMaxClientErrorLength) {
+            summary.resize(kMaxClientErrorLength);
+        }
+        return {grpc::StatusCode::INTERNAL, "exception from python: " + summary};
     } catch (const std::exception& e) {
         return {grpc::StatusCode::INTERNAL, "exception from C++: " + std::string(e.what())};
     }

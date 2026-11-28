@@ -1,3 +1,4 @@
+load("@arch_config//:arch_select.bzl", "requirement")
 load("//bazel:tf_proto.bzl", "tf_proto_library_cc")
 load("//bazel:py_proto.bzl", "generate_grpc_proto")
 
@@ -5,6 +6,12 @@ exports_files(
     ["flexlb_schedule_service.proto", "model_rpc_service.proto"],
     visibility = ["//rtp_llm/flexlb:__pkg__"],
 )
+
+requirement(["grpcio"])
+
+# The generator is an exec tool; its wheels are not present in client runfiles.
+# Both generated *_pb2.py and *_pb2_grpc.py need their runtime imports declared.
+_PY_GRPC_RUNTIME_DEPS = [":grpcio", "//rtp_llm:protobuf"]
 
 tf_proto_library_cc(
     name = "model_rpc_service",
@@ -57,6 +64,7 @@ py_library(
     name = "model_rpc_service_py_proto",
     srcs = [":model_rpc_service_py"],
     visibility = ["//visibility:public"],
+    deps = _PY_GRPC_RUNTIME_DEPS,
 )
 
 generate_grpc_proto(
@@ -69,4 +77,5 @@ py_library(
     name = "flexlb_schedule_service_py_proto",
     srcs = [":flexlb_schedule_service_py"],
     visibility = ["//visibility:public"],
+    deps = _PY_GRPC_RUNTIME_DEPS,
 )

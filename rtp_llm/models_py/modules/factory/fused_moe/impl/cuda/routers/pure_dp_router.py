@@ -187,6 +187,34 @@ class PureDpRouterBase(FusedMoeDataRouter):
         return output
 
 
+class StageRouterWeightOnlyFp16(PureDpRouterBase):
+    """Preserve FP16 partials when the native DeepEP combine is BF16-only.
+
+    Gather each origin's tokens and reduce-scatter its local-expert results.
+    This also works if TP origins submit replicated tokens: those occupy
+    separate batch slices, and each origin gets only its own slice back.
+    """
+
+    @classmethod
+    def check_conditions(cls, checker: Any, config: MoEConfigAdapter) -> None:
+        from rtp_llm.utils.util import to_torch_dtype
+
+        checker.check(config.moe_quant_method in ("awq", "gptq", "INT8"))
+        checker.check(to_torch_dtype(config.data_type) == torch.float16)
+        checker.check(config.ep_size > 1)
+        checker.check(
+            config.ep_size * config.parallelism_config.pp_size == config.world_size
+        )
+        checker.check(not config.enable_cuda_graph)
+        checker.check(not MoeConfigResolver.use_low_latency(config))
+        checker.check(config.use_deepep_moe and not config.moe_config.use_all_gather)
+
+    def _do_quant(
+        self, a1: torch.Tensor
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+        return a1, None
+
+
 class PureDpRouterFp8PerBlock(PureDpRouterBase):
     """Pure DP router with FP8 per-block quantization."""
 

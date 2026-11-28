@@ -25,6 +25,10 @@ class V41Embedding(Embedding):
 class V41MXFP8Linear(torch.nn.Module):
     """Native 32x32 checkpoint blocks, expanded to per-row MXFP8 scales."""
 
+    @property
+    def v41_runtime_linear(self):
+        return self
+
     def __init__(self, weight: torch.Tensor, scales: torch.Tensor):
         super().__init__()
         self.weight = weight
@@ -95,14 +99,26 @@ def _is_v41_fp8_scale(w: torch.Tensor, s: torch.Tensor) -> bool:
     )
 
 
-def merge_v41_qkv_weights(weights, q_weight, q_scale, kv_weight, kv_scale):
-    """Merge replicated projections and make checkpoint entries share storage.
+def merge_v41_qkv_tensors(qw, qs, kw, ks):
+    """Return the native executor and its component weight/scale views.
 
     The separate linears remain available for fallback and prefill, but their
     weight views must point at this allocation instead of retaining the two
     original allocations. Packed scales have an exact N-major leading
     dimension, so each fallback linear still packs its own small scale tensor.
     """
+    merged = _merge_qkv(qw, qs, kw, ks)
+    if merged is None:
+        return None
+    merged_w, merged_s = merged
+    return (
+        V41MXFP8Linear(merged_w, merged_s),
+        merged_w.split((qw.shape[0], kw.shape[0])),
+        merged_s.split((qs.shape[0], ks.shape[0])),
+    )
+
+
+def merge_v41_qkv_weights(weights, q_weight, q_scale, kv_weight, kv_scale):
     keys = (q_weight, q_scale, kv_weight, kv_scale)
     # Read before the merge: on a restart these are the slices published below, whose row
     # counts are exactly the ones the publishing run split by.
@@ -113,7 +129,7 @@ def merge_v41_qkv_weights(weights, q_weight, q_scale, kv_weight, kv_scale):
         transform_key=group,
         output_names=(f"{group}.w", f"{group}.s"),
         consumed_names=keys,
-        builder=lambda: _merge_qkv(weights, *keys),
+        builder=lambda: _merge_qkv(*(weights[key] for key in keys)),
     )
     if merged is None:
         return None
@@ -128,8 +144,7 @@ def merge_v41_qkv_weights(weights, q_weight, q_scale, kv_weight, kv_scale):
     return linear
 
 
-def _merge_qkv(weights, q_weight, q_scale, kv_weight, kv_scale):
-    qw, qs, kw, ks = (weights[key] for key in (q_weight, q_scale, kv_weight, kv_scale))
+def _merge_qkv(qw, qs, kw, ks):
     if not (
         qw.ndim == kw.ndim == 2
         and qw.dtype == kw.dtype == torch.float8_e4m3fn

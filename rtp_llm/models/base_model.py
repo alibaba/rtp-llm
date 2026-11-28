@@ -3,19 +3,7 @@ import importlib.metadata
 import json
 import logging
 import os
-from typing import (
-    Any,
-    Dict,
-    List,
-    Mapping,
-    Optional,
-    Protocol,
-    Sequence,
-    Type,
-    Union,
-    cast,
-    runtime_checkable,
-)
+from typing import Any, Dict, List, Optional, Sequence, Union
 
 import torch
 
@@ -29,11 +17,9 @@ from rtp_llm.frontend.tokenizer_factory.tokenizer_factory import (
     BaseTokenizer,
     TokenizerFactory,
 )
-from rtp_llm.model_loader.load_config import LoadMethod
-from rtp_llm.model_loader.loader import ModelLoader, get_model_loader
-from rtp_llm.model_loader.model_weight_info import ModelDeployWeightInfo, ModelWeights
 from rtp_llm.models.downstream_modules.custom_module import CustomModule
 from rtp_llm.models.downstream_modules.utils import create_custom_module
+from rtp_llm.models_py.model_loader import NewLoaderLoadMethod
 from rtp_llm.ops import (
     FMHAConfig,
     HWKernelConfig,
@@ -44,29 +30,9 @@ from rtp_llm.ops import (
 )
 from rtp_llm.resident_weights import ResidentWeights, checkpoint_digest, vmm
 from rtp_llm.resident_weights.store import StoreSettings
-from rtp_llm.resident_weights.weights import all_ranks_true
-from rtp_llm.utils.database import CkptDatabase
-from rtp_llm.utils.model_weight import W, sp_0_pad8_size
+from rtp_llm.resident_weights.weights import agree_resident_step
+from rtp_llm.utils.model_weight import sp_0_pad8_size
 from rtp_llm.utils.time_util import timer_wrapper
-
-
-@runtime_checkable
-class _MultiModalModel(Protocol):
-    def init_multimodal(
-        self,
-        mm_model_config: Any,
-        vit_config: VitConfig,
-        device: str,
-    ) -> None: ...
-
-    def load_mm_weight(
-        self,
-        model_config: ModelConfig,
-        ctype: str,
-        tp_size: int,
-        tp_rank: int,
-        device: str,
-    ) -> None: ...
 
 
 def _package_version(name: str) -> str:
@@ -77,6 +43,8 @@ def _package_version(name: str) -> str:
 
 
 class BaseModel(object):
+
+    resident_weights_env_vars = ("MOE_MEGA_SHARED_EXPERT", "RTP_LLM_FP4_GEMM_BACKEND")
 
     # Independent configuration objects
     model_config: ModelConfig
@@ -95,7 +63,7 @@ class BaseModel(object):
         fmha_config: FMHAConfig,
         moe_config: MoeConfig,
         max_generate_batch_size: int,
-        load_method: LoadMethod,
+        load_method: NewLoaderLoadMethod,
         vit_config: Optional[VitConfig],
         merge_lora: bool,
         force_cpu_load_weights: bool = False,
@@ -134,6 +102,7 @@ class BaseModel(object):
         self._resident_weights: Optional[ResidentWeights] = None
         self.weight = None
         self.weight_manager = None
+        self.rank_local_lora = None
         # Keep the owner alive for the complete lifetime of any non-owning
         # tensor aliases. The alias names are immutable construction metadata;
         # a draft must never silently become an owner during reload/update.
@@ -146,6 +115,7 @@ class BaseModel(object):
         self.tokenizer: Optional[BaseTokenizer] = None
         self.custom_module: Optional[CustomModule] = None
         self.py_model = None
+        self.checkpoint_owner = None
         self.default_generate_config: GenerateConfig = GenerateConfig()
         self.load_tokenizer()
         self._finalize_output_vocab_config()
@@ -204,31 +174,11 @@ class BaseModel(object):
         ):
             raise Exception("current model can't support cuda graph in py model mode")
 
+        from rtp_llm.models.direct_checkpoint import load_owned_model
+
         self.custom_module = self._init_custom_module()
-        self.model_weights_loader = self.create_model_loader()
-        self.py_eplb = self.model_weights_loader._py_eplb
-        device_str = self._get_device_str()
-        self._load(device_str)
-        from rtp_llm.model_loader.weight_manager import WeightManager
-
-        self.weight_manager = WeightManager(
-            self.device,
-            self.weight,
-            self.model_weights_loader,
-            non_owned_global_weights=self._weight_alias_names,
-            resident_weights_enabled=self.resident_weights_config.enable,
-        )
-        if skip_python_model:
-            self._finish_resident_weights()
-            return
-        logging.info(
-            f"Creating python model for {self.model_config.ckpt_path} on {device_str}"
-        )
-        self._create_python_model()
+        load_owned_model(self, publish_runtime=not skip_python_model)
         self._finish_resident_weights()
-
-    def _create_python_model(self):
-        pass
 
     def support_pp(self) -> bool:
         return False
@@ -236,82 +186,49 @@ class BaseModel(object):
     def support_cuda_graph(self) -> bool:
         return False
 
-    def _load(self, device: str):
-        # set empty weights for attention service
-        # record device string for later use (e.g., WeightManager, python model init)
-        self.device = device
-        aliases = self._resolve_global_weight_aliases()
-        self.weight: ModelWeights = self._resident_or_loaded_weights(device, aliases)
-        self._load_custom_module()
-
-        # 清理checkpoint加载过程中使用的临时资源，释放host内存
-        # Alias descriptors have already been resolved and do not depend on the
-        # draft loader retaining its database metadata.
-        self._cleanup_loader_resources()
-
-        self.model_weights_loader.force_clean_all_memory()
-
-    def _resident_or_loaded_weights(
-        self, device: str, aliases: Mapping[str, torch.Tensor]
-    ) -> ModelWeights:
-        """The model's weights, kept resident across restarts when that is both on and usable."""
+    def _load_with_residency(self, device, load, *, group=None):
+        """Agree on the source before any loader enters a checkpoint collective."""
         if not self.resident_weights_config.enable:
-            # Off means this start neither uses nor contacts the store: records published
-            # by earlier runs keep their memory until the user drops or stops them.
-            return self.model_weights_loader.load_weights(
-                device=device, global_weight_aliases=aliases
-            )
-        self._resident_weights = self._create_resident_weights()
-        # A draft exists only on the last PP stage and already uses SCRATCH there;
-        # its ranks must never join a WORLD collective that other stages skip.
-        synchronize_ranks = (
-            self.resident_weights_config.role == "target"
-            or self.parallelism_config.pp_size == 1
-        )
-        if synchronize_ranks and not all_ranks_true(
-            self._resident_weights is not None, device
+            return load()
+        if (
+            self.resident_weights_config.role == "draft"
+            and self.parallelism_config.pp_size > 1
+            and torch.distributed.is_initialized()
+            and group is None
         ):
-            if self._resident_weights is not None:
+            raise RuntimeError("A distributed PP draft requires its checkpoint stage group")
+        manager = None
+        error = None
+        try:
+            manager = self._create_resident_weights()
+        except Exception as exc:
+            error = exc
+        # Use exactly the loader's participants for *both* decisions. Otherwise
+        # a warm rank may replay its owner while a peer enters FST cold-load collectives.
+        if not agree_resident_step(int(manager is not None), error, device, group, "setup"):
+            if manager is not None:
                 # Every rank now loads from the checkpoint. A record this rank published
                 # earlier would otherwise keep its memory alongside the new copy.
                 logging.warning(
                     "resident weights %s: another rank cannot use resident weights; "
                     "dropping this rank's record and loading from the checkpoint",
-                    self._resident_weights.slot_key,
+                    manager.slot_key,
                 )
-                self._resident_weights.discard_attach()
-            self._resident_weights = None
-        if self._resident_weights is None:
-            weights = self.model_weights_loader.load_weights(
-                device=device, global_weight_aliases=aliases
-            )
-        else:
-            # The routing tables are rebuilt from the configured placement on every start.
-            weights = self._resident_weights.attach_or_load_weights(
-                self.model_weights_loader,
-                device,
-                aliases,
-                excluded_names=(W.log2phy, W.logic_expert_cnt),
-                synchronize_ranks=synchronize_ranks,
-            )
-        if synchronize_ranks:
-            self._wait_for_loading_ranks()
-        return weights
-
-    def _wait_for_loading_ranks(self) -> None:
-        """Let every rank finish loading before any of them enters the C++ engine.
-
-        Resident weights make ``T1`` wildly uneven: one rank attaches a published record in
-        seconds while its neighbour misses and spends ten minutes reading the checkpoint. ``T1``
-        runs under the world group BackendManager.start() built with an infinite timeout, but
-        the C++ ``T2`` after it (RtpLLMOp::init, the cache store handshake) does not, so a fast
-        rank that goes on alone times out there and takes the whole group down.
-        """
-        if not torch.distributed.is_initialized():
-            return
-        if torch.distributed.get_world_size() <= 1:
-            return
-        torch.distributed.barrier()
+                manager.discard_attach()
+            manager = None
+        self._resident_weights = manager
+        restored = None if manager is None else manager.acquire_for_load(
+            device, synchronize_ranks=True, group=group
+        )
+        owner = None
+        try:
+            owner = load() if manager is None else load(resident=manager, restored=restored)
+        except Exception as exc:
+            error = exc
+        # This vote replaces the success-only barrier. Scratch/isolated or
+        # resident replay can fail on one rank without synchronizing internally.
+        agree_resident_step(1, error, device, group, "load")
+        return owner
 
     @property
     def resident_initialize_gpu_growth_bytes(self) -> int:
@@ -365,6 +282,11 @@ class BaseModel(object):
         config = self.model_config
         fingerprint = {
             "model_type": config.model_type,
+            "owner_layout": "newloader/native-v3",
+            "load_method": str(self.load_method),
+            "force_cpu_load_weights": str(self.force_cpu_load_weights),
+            "fmha_config": self.fmha_config.to_string() if self.fmha_config is not None else "",
+            "max_generate_batch_size": str(self.max_generate_batch_size),
             "checkpoint_path": os.path.realpath(config.ckpt_path),
             "checkpoint_files": checkpoint_digest(config.ckpt_path, follow_index=True),
             "ptuning_path": str(config.ptuning_path),
@@ -411,32 +333,9 @@ class BaseModel(object):
             # The expert placement table is a file the path alone does not pin down.
             with open(config.phy2log_path, "rb") as table:
                 fingerprint["phy2log_file"] = hashlib.sha256(table.read()).hexdigest()
-        for name in self.model_weights_loader.weights_info.resident_weights_env_vars:
+        for name in self.resident_weights_env_vars:
             fingerprint[f"env {name}"] = repr(os.environ.get(name))
         return fingerprint
-
-    def _resolve_global_weight_aliases(self):
-        aliases = {}
-        if self._weight_alias_owner is not None:
-            if self._weight_alias_owner.weight is None:
-                raise RuntimeError("global weight alias owner must be loaded first")
-            aliases = {
-                name: self._weight_alias_owner.weight.get_global_weight(name)
-                for name in self._weight_alias_names
-            }
-        return aliases
-
-    def _cleanup_loader_resources(self):
-        """清理模型加载过程中使用的临时资源，释放host内存
-
-        在模型权重加载完成后调用此方法，释放以下资源：
-        1. CkptDatabase 中的 CkptFileInfo 元数据
-        2. checkpoint文件列表
-        3. 临时的LoRA缓存
-
-        这可以显著减少host内存占用，为KV cache等运行时内存需求腾出空间。
-        """
-        self.model_weights_loader.cleanup_database()
 
     @classmethod
     def create_config(cls, ckpt_path: str) -> ModelConfig:
@@ -503,6 +402,7 @@ class BaseModel(object):
         resident_weights_config: Optional[ResidentWeightsConfig] = None,
         weight_alias_owner: Optional["BaseModel"] = None,
         weight_alias_names: Sequence[str] = (),
+        reserve_runtime_mem_mb: int = 0,
     ) -> "BaseModel":
         """Create model from independent configuration objects.
 
@@ -538,6 +438,7 @@ class BaseModel(object):
                 "weight_alias_names require an explicit weight_alias_owner"
             )
         model._weight_alias_owner = weight_alias_owner
+        model.reserve_runtime_mem_mb = reserve_runtime_mem_mb
         model._weight_alias_names = tuple(weight_alias_names)
 
         import os
@@ -553,10 +454,6 @@ class BaseModel(object):
         model.load(skip_python_model=skip_python_model)
         logging.info(f"After loading: {get_host_memory_usage():.2f} MB")
         return model
-
-    @staticmethod
-    def get_weight_cls() -> Type[ModelDeployWeightInfo]:
-        raise NotImplementedError
 
     @property
     def dtype(self) -> Union[str, torch.dtype]:
@@ -657,50 +554,3 @@ class BaseModel(object):
 
     def is_multimodal(self) -> bool:
         return self.model_config.mm_model_config.is_multimodal
-
-    def _load_model_weights(self):
-        self.weight: ModelWeights = self.model_weights_loader.load_weights(
-            device=self._get_device_str(),
-            global_weight_aliases=self._resolve_global_weight_aliases(),
-        )
-
-    @timer_wrapper(description="load custom module")
-    def _load_custom_module(self):
-        if self.custom_module is not None:
-            self.custom_module.init(self.weight)
-
-    def create_model_loader(self) -> ModelLoader:
-        # Create database locally, only used for model loading
-        database = CkptDatabase(
-            self.model_config.ckpt_path,
-            self.model_config.ptuning_path,
-            recycle_handles=self.loader_recycle_handles,
-        )
-        lora_infos = self.model_config.lora_infos
-        static_lora: bool = len(lora_infos) == 1
-        if static_lora:
-            for name, path in lora_infos.items():
-                database.load_lora(name, path)
-            database.dump_lora_info()
-
-        weights_info: ModelDeployWeightInfo = self.get_weight_cls()(
-            moe_strategy=self.moe_config.moe_strategy,
-            model_config=self.model_config,
-            parallelism_config=self.parallelism_config,
-            hw_kernel_config=self.hw_kernel_config,
-            kv_cache_config=self.kv_cache_config,
-            merge_lora=self.merge_lora,
-            load_method=self.load_method,
-        )
-        misc_weights_info = (
-            self.custom_module.get_custom_weight_info() if self.custom_module else []
-        )
-        return get_model_loader(
-            self.model_config,
-            weights_info,
-            misc_weights_info,
-            database,
-            load_method=self.load_method,
-            force_cpu_load_weights=self.force_cpu_load_weights,
-            moe_pure_tp_preshard=self.moe_pure_tp_preshard,
-        )

@@ -53,6 +53,50 @@ cc_library(
     alwayslink = 1,
 )
 
+cc_test(
+    name = "no_block_copy_test",
+    visibility = ["//rtp_llm/test/smoke:__pkg__"],
+    srcs = ["NoBlockCopyTest.cc", "TcpPageableCopyTest.cc"],
+    args = ["--gtest_filter=-PpuNoBlockCopyTest.CopiesBeyondFourGiBAllocationOffset"],
+    copts = copts(),
+    deps = [
+        ":no_block_copy",
+        "//rtp_llm/cpp/cache/connector/p2p/transfer/tcp:cuda_copy_util",
+        "//rtp_llm/models_py/bindings:no_block_copy_hdr",
+        "@com_google_googletest//:gtest_main",
+        "@local_config_cuda//cuda:cuda_headers",
+        "@local_config_cuda//cuda:cudart",
+    ] + torch_deps(),
+    tags = ["PPU-ZW810E"],
+    exec_properties = {"gpu": "PPU-ZW810E", "gpu_count": "1"},
+    target_compatible_with = select({
+        "@//:using_ppu": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    }),
+)
+
+# Explicit diagnostic: reserve a >4 GiB allocation only on a dedicated PPU run,
+# never as a dependency of ordinary smoke/light workers.
+cc_test(
+    name = "no_block_copy_large_offset_test",
+    srcs = ["NoBlockCopyTest.cc"],
+    args = ["--gtest_filter=PpuNoBlockCopyTest.CopiesBeyondFourGiBAllocationOffset"],
+    copts = copts(),
+    deps = [
+        ":no_block_copy",
+        "//rtp_llm/models_py/bindings:no_block_copy_hdr",
+        "@com_google_googletest//:gtest_main",
+        "@local_config_cuda//cuda:cuda_headers",
+        "@local_config_cuda//cuda:cudart",
+    ] + torch_deps(),
+    tags = ["manual", "PPU-ZW810E"],
+    exec_properties = {"gpu": "PPU-ZW810E", "gpu_count": "1"},
+    target_compatible_with = select({
+        "@//:using_ppu": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    }),
+)
+
 cc_library(
     name = "ppu_bindings_register",
     srcs = [

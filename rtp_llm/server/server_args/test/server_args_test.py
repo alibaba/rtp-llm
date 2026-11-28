@@ -90,6 +90,23 @@ class Glm5EnvironmentArgumentsTest(TestCase):
             self.assertNotIn("FASTSAFETENSORS_CONFIG_JSON", os.environ)
             self.assertEqual(os.environ["FASTSAFETENSORS_CONFIG"], "custom.json")
 
+    def test_load_method_cli_overrides_environment_even_for_auto(self):
+        from rtp_llm.server.server_args.server_args import setup_args
+
+        for cli, env, expected in (
+            (None, None, "auto"),
+            (None, "scratch", "scratch"),
+            ("auto", "fastsafetensors", "auto"),
+            ("scratch", "fastsafetensors", "scratch"),
+            ("fastsafetensors", "scratch", "fastsafetensors"),
+        ):
+            args = [] if cli is None else [f"--load_method={cli}"]
+            variables = {} if env is None else {"LOAD_METHOD": env}
+            with self.subTest(cli=cli, env=env), patch.dict(
+                os.environ, variables, clear=True
+            ):
+                self.assertEqual(setup_args(args).load_config.load_method, expected)
+
     def test_loader_cli_overrides_environment_and_is_published(self):
         from rtp_llm.server.server_args.server_args import setup_args
 

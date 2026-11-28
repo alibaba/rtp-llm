@@ -102,7 +102,7 @@ class DecodePlanTest(unittest.TestCase):
     def test_disabled_decode_graph_keeps_mainline_routing(self):
         module = "rtp_llm.models_py.modules.factory.attention.dispatch.backend_selector"
         with patch(
-            "rtp_llm.models_py.model_desc.module_base.AttnImplFactory.get_fmha_impl",
+            "rtp_llm.models_py.modules.AttnImplFactory.get_fmha_impl",
             return_value="static",
         ) as static, patch(module + ".select_decode_backend") as select, patch(
             module + ".instantiate_decode_backend"
@@ -204,7 +204,7 @@ class DecodePlanTest(unittest.TestCase):
         self.assertFalse(self.model._dynamic_decode_enabled)
         self.assertFalse(self.model.decode_backend_plan)
         with patch(
-            "rtp_llm.models_py.model_desc.module_base.AttnImplFactory.get_fmha_impl",
+            "rtp_llm.models_py.modules.AttnImplFactory.get_fmha_impl",
             return_value="static",
         ) as static, patch(module + ".select_decode_backend") as select, patch(
             module + ".instantiate_decode_backend"
@@ -254,7 +254,7 @@ class DecodePlanTest(unittest.TestCase):
         with patch(
             module + ".select_decode_backend", return_value=None
         ) as select, patch(
-            "rtp_llm.models_py.model_desc.module_base.AttnImplFactory.get_fmha_impl",
+            "rtp_llm.models_py.modules.AttnImplFactory.get_fmha_impl",
             return_value="static",
         ):
             self.assertEqual(
@@ -290,7 +290,7 @@ class DecodePlanTest(unittest.TestCase):
     def test_eager_and_prefill_keep_mainline_routing(self):
         self.model.configure_dynamic_decode(True)
         with patch(
-            "rtp_llm.models_py.model_desc.module_base.AttnImplFactory.get_fmha_impl",
+            "rtp_llm.models_py.modules.AttnImplFactory.get_fmha_impl",
             return_value="static",
         ):
             self.assertEqual(

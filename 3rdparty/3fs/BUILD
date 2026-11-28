@@ -1,11 +1,23 @@
 load("//bazel:defs.bzl", "rpm_library")
 
+# Use the platform package unless a distribution supplies its own 3FS build.
+alias(
+    name = "platform_client_rpm",
+    actual = select({
+        "@//:using_cuda12_arm": "@hf3fs_rpm_aarch64//file:file",
+        "//conditions:default": "@hf3fs_rpm//file:file",
+    }),
+)
+
+label_flag(
+    name = "client_rpm",
+    build_setting_default = ":platform_client_rpm",
+    visibility = ["//visibility:public"],
+)
+
 rpm_library(
     name = "hf3fs",
-    rpms = select({
-        "@//:using_cuda12_arm": ["@hf3fs_rpm_aarch64//file:file"],
-        "//conditions:default": ["@hf3fs_rpm//file:file"],
-    }),
+    rpms = [":client_rpm"],
     lib_path = "usr/lib64",
     include_path = "usr/include",
     shared_libs = [

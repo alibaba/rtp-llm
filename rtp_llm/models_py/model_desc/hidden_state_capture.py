@@ -1,4 +1,7 @@
+from __future__ import annotations
+
 from collections.abc import Callable, Sequence
+from typing import TYPE_CHECKING
 
 import torch
 
@@ -6,7 +9,8 @@ from rtp_llm.models_py.utils.profiler import (
     _NOOP_RECORD_FUNCTION_RANGE,
     record_function_ranges_enabled,
 )
-from rtp_llm.ops.compute_ops import PyModelOutputs
+if TYPE_CHECKING:
+    from rtp_llm.ops.compute_ops import PyModelOutputs
 
 CanonicalHiddenHook = Callable[
     [torch.Tensor, torch.Tensor | None],
@@ -155,6 +159,8 @@ class CaptureContext:
         hidden_states: torch.Tensor,
         residual: torch.Tensor | None = None,
     ) -> PyModelOutputs:
+        from rtp_llm.ops.compute_ops import PyModelOutputs
+
         canonical_final = self._canonical_final
         if canonical_final is None:
             if self._enabled:

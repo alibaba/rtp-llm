@@ -2,10 +2,11 @@ from typing import Any
 
 import torch
 
+from rtp_llm.models_py.kernels.cuda.scaled_rope import scaled_rope_qk_inplace
 from rtp_llm.models_py.modules.factory.attention.cuda_impl.base_rotary_embedding_op import (
     BaseRotaryEmbeddingOp,
 )
-from rtp_llm.ops import AttentionConfigs
+from rtp_llm.ops import AttentionConfigs, RopeStyle
 
 
 class MhaRotaryEmbeddingOp(BaseRotaryEmbeddingOp):
@@ -29,12 +30,21 @@ class MhaRotaryEmbeddingOp(BaseRotaryEmbeddingOp):
                           dtype should be torch.float32 for numerical stability.
                           If None, will auto-generate using attn_config.rope_config.
         """
+        # Base/YaRN caches cannot represent Llama3 or request-dependent NTK.
+        # Keep positions and sequence lengths device-resident, including replay.
+        self.scaled_rope_config = (
+            attn_config.rope_config
+            if attn_config.rope_config.style in (RopeStyle.Llama3, RopeStyle.DynamicNTK)
+            else None
+        )
         super().__init__(
             attn_config.size_per_head,
             cos_sin_cache,
             attn_config.kernel_tokens_per_block,
             is_neox_style=False,
-            rope_config=attn_config.rope_config,
+            rope_config=(
+                attn_config.rope_config if self.scaled_rope_config is None else None
+            ),
             max_position_embeddings=attn_config.max_seq_len
             + attn_config.gen_num_per_cycle
             + 1,
@@ -84,6 +94,23 @@ class MhaRotaryEmbeddingOp(BaseRotaryEmbeddingOp):
         value = v.reshape(v.shape[0], self.num_kv_heads, self.head_size)
 
         # Apply RoPE to Q and K
-        self._apply_rope(query, key, self.params)
+        if self.scaled_rope_config is None:
+            self._apply_rope(query, key, self.params)
+        else:
+            config = self.scaled_rope_config
+            scaled_rope_qk_inplace(
+                query,
+                key,
+                self.params.positions_d,
+                self.params.batch_indice_d,
+                self.params.kvlen_d,
+                rotary_dim=config.dim,
+                base=config.base,
+                scale=config.scale,
+                original_max_position=config.max_pos,
+                llama3=config.style == RopeStyle.Llama3,
+                low_freq_factor=config.factor1,
+                high_freq_factor=config.factor2,
+            )
 
         return query, key, value

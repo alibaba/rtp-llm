@@ -84,13 +84,13 @@ class V41PrefillTopKCPU(unittest.TestCase):
 
     def test_native_availability_and_test_only_reference_hook(self):
         logits, visible = self.fixture()
-        with patch.object(topk, "_TOPK_V3_OK", True):
+        with patch.object(topk, "_has_topk_v3", return_value=True):
             self.assertTrue(topk.is_supported(logits, visible))
-        with patch.object(topk, "_TOPK_V3_OK", False):
+        with patch.object(topk, "_has_topk_v3", return_value=False):
             self.assertIsNone(topk.try_select_tokens(logits, visible))
 
     def test_support_fallbacks(self):
-        with patch.object(topk, "_TOPK_V3_OK", True):
+        with patch.object(topk, "_has_topk_v3", return_value=True):
             for change in (
                 {"is_cuda": False},
                 {"dtype": torch.bfloat16},

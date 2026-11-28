@@ -2,6 +2,7 @@ import glob
 import importlib.metadata
 import json
 import logging
+import math
 import os
 import re
 import shutil
@@ -14,6 +15,7 @@ from typing import Any, List, Optional
 
 from smoke.base_comparer import BaseComparer
 from smoke.common_def import ABS_PATH, REL_PATH, QueryStatus, SmokeException
+from smoke.tau2_coverage import require_all_reviews
 
 TAU2_TARBALL_URL = os.environ.get(
     "TAU2_TARBALL_URL",
@@ -80,6 +82,7 @@ class Tau2BenchComparer(BaseComparer):
         host = "127.0.0.1"
         port = int(self.server_manager.port)
         log_path = os.path.join(out_dir, "tau2_regression.log")
+        work_dir = os.path.abspath(tempfile.mkdtemp(prefix="tau2-results-", dir=out_dir))
         stdout_text = self._run_tau2_script(
             extract_root,
             script_path,
@@ -89,6 +92,7 @@ class Tau2BenchComparer(BaseComparer):
             port,
             log_path,
             data_dir,
+            work_dir,
         )
 
         report_path = self._resolve_report_path(stdout_text, extract_root)
@@ -97,11 +101,15 @@ class Tau2BenchComparer(BaseComparer):
                 QueryStatus.OTHERS,
                 f"no 'Dump report to: ...json' line in tau2-bench stdout, see {log_path}",
             )
+        try:
+            require_all_reviews(work_dir, report_path, task_ids_path, model_arg)
+        except (OSError, KeyError, TypeError, ValueError) as e:
+            raise SmokeException(QueryStatus.COMPARE_FAILED, f"Incomplete tau2 evaluation: {e}") from e
         score = self._load_overall_score(report_path)
         logging.info(
             f"[TAU2] parsed score={score} from {report_path}, threshold={threshold}"
         )
-        if score is None:
+        if score is None or not math.isfinite(score):
             raise SmokeException(
                 QueryStatus.OTHERS,
                 f"failed to extract OVERALL score from report {report_path}, see {log_path}",
@@ -289,26 +297,18 @@ class Tau2BenchComparer(BaseComparer):
         if os.path.isabs(task_ids_file) and os.path.exists(task_ids_file):
             return task_ids_file
 
-        in_extract = os.path.join(extract_root, task_ids_file)
-        if os.path.exists(in_extract):
-            return in_extract
-
         taskinfo_rel_path = self.qr_info.get("_taskinfo_rel_path", "")
-        candidates = []
         if taskinfo_rel_path:
-            candidates.append(
-                os.path.join(os.path.dirname(taskinfo_rel_path), task_ids_file)
-            )
-        for cand in candidates:
-            if os.path.exists(cand):
-                dest = os.path.join(extract_root, os.path.basename(task_ids_file))
-                shutil.copy(cand, dest)
-                logging.info(f"[TAU2] copied {cand} -> {dest}")
-                return dest
+            # The checked-in manifest defines coverage, not an image or a past run.
+            candidate = os.path.join(os.path.dirname(taskinfo_rel_path), task_ids_file)
+        else:
+            candidate = os.path.join(extract_root, task_ids_file)
+        if os.path.isfile(candidate):
+            return os.path.abspath(candidate)
 
         raise SmokeException(
             QueryStatus.OTHERS,
-            f"task_ids_file {task_ids_file} not found; tried {[in_extract] + candidates}",
+            f"Required tau2 task manifest not found: {candidate}",
         )
 
     def _resolve_script_file(self, extract_root: str, script_file: str) -> str:
@@ -342,7 +342,8 @@ class Tau2BenchComparer(BaseComparer):
         host: str,
         port: int,
         log_path: str,
-        data_dir: Optional[str] = None,
+        data_dir: Optional[str],
+        work_dir: str,
     ) -> str:
 
         cmd = [
@@ -357,6 +358,8 @@ class Tau2BenchComparer(BaseComparer):
             str(port),
             "--task-ids-file",
             task_ids_path,
+            "--work-dir",
+            work_dir,
         ]
         logging.info(f"[TAU2] running: {' '.join(cmd)} (cwd={extract_root})")
 

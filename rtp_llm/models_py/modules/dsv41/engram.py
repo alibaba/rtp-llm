@@ -27,6 +27,7 @@ import os
 import shutil
 import uuid
 import weakref
+from contextlib import nullcontext
 from pathlib import Path
 from typing import Callable, Mapping, Optional
 
@@ -338,17 +339,13 @@ def _load_engram_tables(
 
     pair = []
     for name in (weight_name, scale_name):
-        with safe_open(
-            root / weight_map[name], framework="pt", device="cpu"
-        ) as file:
+        with safe_open(root / weight_map[name], framework="pt", device="cpu") as file:
             pair.append(file.get_tensor(name))
     weight, scales = pair
     reader = "per-tensor"
     rows, width = expected
     if tuple(weight.shape) != expected:
-        raise ValueError(
-            f"Engram table shape {weight.shape} does not match {expected}"
-        )
+        raise ValueError(f"Engram table shape {weight.shape} does not match {expected}")
     if tuple(scales.shape) != (rows, width // 32):
         raise ValueError(
             f"Engram scale shape {scales.shape} does not match {(rows, width // 32)}"
@@ -413,7 +410,14 @@ def _prune_expired_engram_tables() -> None:
                 # replaced it after our expiry verdict on the old inode);
                 # never let the prune unlink a live generation.
                 continue
-            table.unlink(missing_ok=True)
+            with table.open("rb") as candidate:
+                try:
+                    fcntl.flock(candidate, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except BlockingIOError:
+                    continue  # a resident store or engine still holds the table
+                if os.fstat(candidate.fileno()).st_ino != table.stat().st_ino:
+                    continue
+                table.unlink(missing_ok=True)
             logger.info("Pruned expired Engram shared table %s", table)
         except FileNotFoundError:
             continue
@@ -458,6 +462,7 @@ class _PinnedSharedTable:
 
     The copy source may be a lazy ``loader`` callable invoked only by the lock
     winner on a cache miss, so attaching readers never read the checkpoint.
+    Alternatively ``load_into`` fills the unpublished mapping in place.
     """
 
     def __init__(
@@ -469,12 +474,17 @@ class _PinnedSharedTable:
         *,
         loader: Optional[Callable[[], tuple]] = None,
         table_shape: Optional[tuple] = None,
+        load_into: Optional[Callable[[mmap.mmap], None]] = None,
+        require_existing: bool = False,
+        resident_manager=None,
     ):
         digest = hashlib.sha256(source_identity.encode()).hexdigest()[:24]
         data_path = Path("/dev/shm") / f"rtp_llm_engram_{os.getuid()}_{digest}"
         lock_path = Path("/tmp") / (data_path.name + ".lock")
         lease_path = Path(str(data_path) + f".lease.{os.getpid()}.{uuid.uuid4().hex}")
-        if loader is None:
+        if loader is not None and load_into is not None:
+            raise ValueError("Choose one shared Engram table source")
+        if loader is None and load_into is None:
             weight_bytes = weight.numel()
             scale_bytes = scales.numel()
             if weight.element_size() != 1 or scales.element_size() != 1:
@@ -505,6 +515,8 @@ class _PinnedSharedTable:
                     partial.unlink(missing_ok=True)
             _prune_expired_engram_tables()
             if not data_path.exists():
+                if require_existing:
+                    raise RuntimeError(f"Published resident Engram host table is missing: {data_path}")
                 free = shutil.disk_usage(data_path.parent).free
                 if free < total_bytes:
                     raise RuntimeError(
@@ -514,7 +526,6 @@ class _PinnedSharedTable:
                 # At most one invocation, by the flock winner, only on a miss;
                 # attaching processes (lock waiters that find the file present)
                 # never materialize the ~94 GiB pair from the checkpoint.
-                sources = (weight, scales) if loader is None else loader()
                 partial = Path(str(data_path) + f".partial.{os.getpid()}")
                 try:
                     with open(partial, "w+b") as file:
@@ -522,17 +533,32 @@ class _PinnedSharedTable:
                         file.truncate(total_bytes)
                         mapping = mmap.mmap(file.fileno(), total_bytes)
                         try:
-                            destination = np.frombuffer(mapping, dtype=np.uint8)
-                            offset = 0
-                            for tensor in sources:
-                                source = tensor.view(torch.uint8).reshape(-1).numpy()
-                                for begin in range(0, source.size, 64 * 1024**2):
-                                    end = min(begin + 64 * 1024**2, source.size)
-                                    destination[offset + begin : offset + end] = source[
-                                        begin:end
-                                    ]
-                                offset += source.size
-                            del destination, source, sources
+                            if load_into is not None:
+                                # Native FST fills the final unpublished pages.
+                                # Never allocate a second, table-sized CPU buffer.
+                                logger.info(
+                                    "Staging cold host Engram table %s (%.2f GiB) directly into shared RAM",
+                                    data_path,
+                                    total_bytes / 1024**3,
+                                )
+                                load_into(mapping)
+                            else:
+                                sources = (
+                                    (weight, scales) if loader is None else loader()
+                                )
+                                destination = np.frombuffer(mapping, dtype=np.uint8)
+                                offset = 0
+                                for tensor in sources:
+                                    source = (
+                                        tensor.view(torch.uint8).reshape(-1).numpy()
+                                    )
+                                    for begin in range(0, source.size, 64 * 1024**2):
+                                        end = min(begin + 64 * 1024**2, source.size)
+                                        destination[offset + begin : offset + end] = (
+                                            source[begin:end]
+                                        )
+                                    offset += source.size
+                                del destination, source, sources
                         finally:
                             mapping.close()
                     os.replace(partial, data_path)
@@ -549,7 +575,11 @@ class _PinnedSharedTable:
                     f"Engram shared table has an invalid size: {data_path}"
                 )
             with open(data_path, "r+b") as file:
+                fcntl.flock(file, fcntl.LOCK_SH)
                 mapping = mmap.mmap(file.fileno(), total_bytes)
+                # mmap retains a duplicate of the locked file description.
+            if resident_manager is not None:
+                resident_manager.retain_host_file(str(data_path), str(lock_path))
             lease_path.touch(mode=0o600)
             try:
                 os.utime(data_path)  # refresh LRU for the TTL prune
@@ -688,7 +718,7 @@ def mxfp8_activation_reference(x: torch.Tensor) -> torch.Tensor:
     return values.reshape(x.shape).to(x.dtype)
 
 
-def _engram_inject_supported(hidden, q_weight, k_weight, token_mask):
+def _engram_inject_supported(hidden, q_weight, k_weight, token_mask, *, dense=True):
     return (
         not torch.is_grad_enabled()
         and hidden.is_cuda
@@ -699,7 +729,8 @@ def _engram_inject_supported(hidden, q_weight, k_weight, token_mask):
         and all(
             value.dtype == torch.bfloat16
             and value.device == hidden.device
-            and value.is_contiguous()
+            and value.layout == torch.strided
+            and (not dense or value.is_contiguous())
             for value in (hidden, q_weight, k_weight)
         )
         and (
@@ -708,7 +739,8 @@ def _engram_inject_supported(hidden, q_weight, k_weight, token_mask):
                 token_mask.device == hidden.device
                 and token_mask.dtype == torch.bool
                 and token_mask.shape == hidden.shape[:-2]
-                and token_mask.is_contiguous()
+                and token_mask.layout == torch.strided
+                and (not dense or token_mask.is_contiguous())
             )
         )
     )
@@ -723,6 +755,7 @@ def gated_engram_residual(
     token_mask: Optional[torch.Tensor] = None,
     *,
     out: Optional[torch.Tensor] = None,
+    normalize_views: bool = False,
 ) -> torch.Tensor:
     """Exact normalized signed-square-root gate used by the reference.
 
@@ -730,12 +763,51 @@ def gated_engram_residual(
     owns disjoint rows; the reference materializes its result before copying.
     The caller supplies a contiguous output disjoint from the other inputs.
     """
-    if (
-        _engram_inject_supported(hidden, q_weight, k_weight, token_mask)
-        and kv.shape == hidden.shape[:-2] + (5 * 5120,)
+    kv_supported = (
+        kv.shape == hidden.shape[:-2] + (5 * 5120,)
         and kv.dtype == torch.bfloat16
         and kv.device == hidden.device
+        and kv.layout == torch.strided
+    )
+    if (
+        normalize_views
+        and kv_supported
+        and any(
+            v is not None and not v.is_contiguous()
+            for v in (hidden, kv, q_weight, k_weight, token_mask)
+        )
+        and _engram_inject_supported(
+            hidden, q_weight, k_weight, token_mask, dense=False
+        )
+        and torch.version.hip is None
+        and torch.cuda.get_device_capability(hidden.device)[0] >= 8
+    ):
+        # NewLoader may supply logical views. Tensor layout must not choose a
+        # different accumulation order for the same supported inference gate.
+        if not hidden.is_contiguous():
+            hidden = hidden.contiguous()
+            if out is None:
+                out = hidden  # An owned dense copy, not the caller's input.
+        kv, q_weight, k_weight = (
+            kv.contiguous(),
+            q_weight.contiguous(),
+            k_weight.contiguous(),
+        )
+        if token_mask is not None:
+            token_mask = token_mask.contiguous()
+    if (
+        kv_supported
+        and _engram_inject_supported(hidden, q_weight, k_weight, token_mask)
         and kv.is_contiguous()
+        and (
+            out is None
+            or (
+                out.is_contiguous()
+                and out.device == hidden.device
+                and out.shape == hidden.shape
+                and out.dtype == hidden.dtype
+            )
+        )
     ):
         from rtp_llm.models_py.modules.dsv41._engram_inject_triton import (
             engram_inject_kernel,
@@ -743,20 +815,28 @@ def gated_engram_residual(
 
         if out is None:
             out = torch.empty_like(hidden)
-        engram_inject_kernel[(hidden.numel() // (4 * 5120), 4)](
-            hidden,
-            kv,
-            q_weight,
-            k_weight,
-            hidden if token_mask is None else token_mask,
-            out,
-            DIM=5120,
-            HC=4,
-            HAS_MASK=token_mask is not None,
-            EPS=eps,
-            BLOCK=8192,
-            enable_fp_fusion=False,
+        # Triton chooses both target and stream from the thread's current
+        # device, not the pointer arguments. Preserve the caller's context.
+        guard = (
+            nullcontext()
+            if torch.cuda.current_device() == hidden.device.index
+            else torch.cuda.device(hidden.device)
         )
+        with guard:
+            engram_inject_kernel[(hidden.numel() // (4 * 5120), 4)](
+                hidden,
+                kv,
+                q_weight,
+                k_weight,
+                hidden if token_mask is None else token_mask,
+                out,
+                DIM=5120,
+                HC=4,
+                HAS_MASK=token_mask is not None,
+                EPS=eps,
+                BLOCK=8192,
+                enable_fp_fusion=False,
+            )
         return out
     tokens, copies, dim = hidden.shape
     key = kv[:, : copies * dim].reshape(tokens, copies, dim).float()
@@ -898,7 +978,14 @@ class Engram(nn.Module):
         rows = self.embed_tokens(hash_ids, hidden.device).flatten(-2)
         kv = self.wkv(rows)
         return gated_engram_residual(
-            hidden, kv, self.q_weight, self.k_weight, self.eps, token_mask, out=out
+            hidden,
+            kv,
+            self.q_weight,
+            self.k_weight,
+            self.eps,
+            token_mask,
+            out=out,
+            normalize_views=getattr(self, "_normalize_gate_views", False),
         )
 
 

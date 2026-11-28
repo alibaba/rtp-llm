@@ -151,6 +151,8 @@ TEST(PPStageCacheConfigTest, StagePartitionPreservesCacheReplayAndHashPolicy) {
     auto model                    = makeSingleModelConfig(8);
     model.cache_min_replay_tokens = 4;
     model.cache_key_hash_seed     = 123;
+    model.attn_config.rope_config.style   = RopeStyle::DynamicNTK;
+    model.attn_config.rope_config.max_pos = 256;
     for (int64_t rank = 0; rank < 2; ++rank) {
         SCOPED_TRACE(rank);
         const auto layout = makePpConfig(8, 2, rank);
@@ -160,6 +162,7 @@ TEST(PPStageCacheConfigTest, StagePartitionPreservesCacheReplayAndHashPolicy) {
             EXPECT_EQ(config.global_layer_begin, static_cast<uint32_t>(rank) * 4u);
             EXPECT_EQ(config.cache_min_replay_tokens, 4);
             EXPECT_EQ(config.cache_key_hash_seed, 123);
+            EXPECT_EQ(config.length_independent_rope_limit, 256);
             EXPECT_EQ(config.maxPrefixReuseTokens(16), 12);
         }
     }

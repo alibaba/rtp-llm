@@ -114,6 +114,7 @@ class WeightsConvertParallelismTest(unittest.TestCase):
                 ),
                 patch.object(weights_convert, "build_model_config"),
                 patch.object(weights_convert, "apply_layer_override_and_post_build"),
+                patch.object(weights_convert, "create_ft_export_job") as create_job,
             ):
                 self.assertEqual(converter.convert("/converted"), 0)
                 self.assertNotIn("WORLD_SIZE", os.environ)
@@ -121,7 +122,7 @@ class WeightsConvertParallelismTest(unittest.TestCase):
                 world_size = tp_size * dp_size
                 configs = [
                     call.kwargs["parallelism_config"]
-                    for call in converter.model_cls.from_config.call_args_list
+                    for call in converter.model_cls.call_args_list
                 ]
                 self.assertEqual(
                     [(c.world_size, c.tp_rank, c.dp_rank, c.ep_rank) for c in configs],
@@ -130,10 +131,87 @@ class WeightsConvertParallelismTest(unittest.TestCase):
                         for rank in range(world_size)
                     ],
                 )
-                model = converter.model_cls.from_config.return_value
-                loader = model.create_model_loader.return_value
-                self.assertEqual(loader.dump_weight_as_ft_style.call_count, world_size)
-                save_converted.assert_called_once_with("/model", "/converted")
+                self.assertEqual(create_job.call_count, world_size)
+                for call in create_job.call_args_list:
+                    self.assertIs(call.args[0], converter.model_cls.return_value)
+                converter.model_cls.from_config.assert_not_called()
+                converter.model_cls.return_value.load.assert_not_called()
+                self.assertEqual(
+                    create_job.return_value.dump_weight_as_ft_style.call_count, world_size
+                )
+                save_converted.assert_called_once_with(
+                    "/model", "/converted",
+                    [f"rank_{c.tp_rank:02d}_{c.dp_rank:02d}_{c.ep_rank:02d}" for c in configs],
+                )
+
+
+class FTExportJobTest(unittest.TestCase):
+    def test_fractional_heads_rejected_before_database_open(self):
+        from rtp_llm.tools.convert.ft_export_job import create_ft_export_job
+
+        model = Mock()
+        model.model_config.attn_config.head_num = 6
+        model.parallelism_config.get_attn_tp_size.return_value = 4
+        with patch("rtp_llm.utils.database.CkptDatabase") as database:
+            with self.assertRaisesRegex(ValueError, "head_num=6.*tp_size=4"):
+                create_ft_export_job(model)
+            database.assert_not_called()
+
+    def test_dspark_export_declares_sampler_and_proposal_fields(self):
+        import torch
+        from types import SimpleNamespace
+        from rtp_llm.models.qwen_3_dspark import Qwen3DSpark
+        from rtp_llm.models.qwen_v3 import QWenV3Weight
+        from rtp_llm.utils.model_weight import W
+
+        cls = Qwen3DSpark.get_weight_cls()
+        for key, expected in (("d2t", [1, 3]), ("model.d2t", [1, 2])):
+            descriptor = cls.__new__(cls)
+            with (
+                patch.object(QWenV3Weight, "_process_meta"),
+                patch.object(QWenV3Weight, "_get_weight_info", return_value=SimpleNamespace(weights=[])),
+            ):
+                descriptor._process_meta([], ["hidden_norm.weight", key])
+                fields = {f.name: f for f in descriptor._get_weight_info().weights}
+            self.assertEqual(
+                {name: f.weights[0].name for name, f in fields.items()},
+                {W.dspark_fc_w: "fc.weight", W.dspark_hidden_norm_gamma: "hidden_norm.weight",
+                 W.dspark_markov_w1: "markov_head.markov_w1.weight", W.dspark_markov_w2: "markov_head.markov_w2.weight",
+                 W.multi_tokens_predict_d2t_map: key},
+            )
+            d2t = fields[W.multi_tokens_predict_d2t_map]
+            self.assertEqual(d2t.data_type, torch.int64)
+            self.assertEqual(d2t.process_fun([torch.tensor([1, 2])]).tolist(), expected)
+
+    def test_custom_fields_and_adapter_metadata_without_serving_load(self):
+        from rtp_llm.tools.convert.ft_export_job import create_ft_export_job
+
+        model = Mock()
+        model.model_config.ckpt_path = "/checkpoint"
+        model.model_config.attn_config.head_num = 8
+        model.parallelism_config.get_attn_tp_size.return_value = 2
+        model.model_config.ptuning_path = "/prefix"
+        model.model_config.lora_infos = {"adapter": "/adapter"}
+        model.loader_recycle_handles = False
+        names = ("lm_head.weight", "classifier.bias")
+        handler = model._init_custom_module.return_value
+        handler.checkpoint_weight_mappings.return_value = [
+            ("__custom__." + name, name) for name in names
+        ]
+        with (
+            patch("rtp_llm.utils.database.CkptDatabase") as database,
+            patch("rtp_llm.tools.convert.ft_export_weights.FTExportWeights") as writer,
+        ):
+            self.assertIs(create_ft_export_job(model), writer.return_value)
+        database.assert_called_once_with("/checkpoint", "/prefix", recycle_handles=False)
+        database.return_value.load_lora.assert_called_once_with("adapter", "/adapter")
+        fields = writer.call_args.args[2]
+        self.assertEqual(
+            [(field.name, field.weights[0].name) for field in fields],
+            [("__custom__." + name, name) for name in names],
+        )
+        handler.init.assert_not_called()
+        model.load.assert_not_called()
 
 
 class WeightsConvertLayerOverrideTest(unittest.TestCase):

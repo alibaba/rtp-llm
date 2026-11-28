@@ -127,12 +127,12 @@ class JinaBertWeightInfo(ModelDeployWeightInfo):
                 W.pre_decoder_ln_gamma, [CkptWeightInfo(self._names.EMB_NORM_W)]
             ),
         ]
-        if self.config.use_attention_linear_bias:
+        if self.model_config.use_attention_linear_bias:
             weights.append(
                 AtomicWeight(
                     W.linear_bias_slopes,
                     [],
-                    functools.partial(slopes, n=self.config.head_num),
+                    functools.partial(slopes, n=self._head_num),
                     data_type=torch.float,
                 )
             )
@@ -174,7 +174,9 @@ class JinaBertWeightInfo(ModelDeployWeightInfo):
                 W.ffn_w1,
                 [CkptWeightInfo(self._names.FFN_GATE_W)],
                 functools.partial(
-                    slice_index_transepose, index=1, inter_size=self._inter_size
+                    slice_index_transepose,
+                    index=1,
+                    inter_size=self.model_config.inter_size,
                 ),
             ),
             # up
@@ -182,7 +184,9 @@ class JinaBertWeightInfo(ModelDeployWeightInfo):
                 W.ffn_w3,
                 [CkptWeightInfo(self._names.FFN_GATE_W)],
                 functools.partial(
-                    slice_index_transepose, index=0, inter_size=self._inter_size
+                    slice_index_transepose,
+                    index=0,
+                    inter_size=self.model_config.inter_size,
                 ),
             ),
             # down

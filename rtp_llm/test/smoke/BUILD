@@ -13,6 +13,18 @@ filegroup(
 )
 
 py_test(
+    name = "resident_checkpoint_logs_test",
+    srcs = ["resident_checkpoint_logs.py", "resident_checkpoint_logs_test.py"],
+)
+
+py_test(
+    name = "tau2_coverage_test",
+    srcs = ["tau2_coverage.py", "test/tau2_coverage_test.py"],
+    main = "test/tau2_coverage_test.py",
+    imports = [".."],
+)
+
+py_test(
     name = "disk_path_preparation_test",
     srcs = glob(
         ["*.py"],
@@ -180,6 +192,18 @@ test_suite(
     ],
 )
 
+custom_smoke_test(
+    name = "qwen3_235b_full_vocab_eagle3",
+    main = "qwen3_moe_eagle3_contract_test.py",
+    # Opt-in release-pair check; callers supply the target and draft checkpoints.
+    tags = ["manual"],
+    # Two serial cold starts (1800s each), generation, and process shutdown.
+    test_envs = {"RTP_TEST_WATCHDOG_SECONDS": "5400"},
+    smoke_args = "--tp_size 8 --ep_size 8 --world_size 8 --act_type BF16 --load_method fastsafetensors --max_seq_len 2048 --seq_size_per_block 128 --enable_cuda_graph 0 --reuse_cache 0",
+    gpu_type = ["H20_CU13"],
+    data = ["//rtp_llm:sdk", ":smoke_framework_srcs"],
+)
+
 # Supply QWEN4_EXP_CHECKPOINT for an expert-only ModelOpt NVFP4 checkpoint.
 # These profiles reuse the generation, golden, QSA and cache assertions.
 [
@@ -245,6 +269,7 @@ custom_smoke_test(
         "deepseek_v41_contract_test.py",
         "deepseek_v41_pd_contract_test.py",
         "deepseek_v41_dspark_contract_test.py",
+        "resident_checkpoint_logs.py",
     ],
     deps = ["//rtp_llm/resident_weights"],
 )

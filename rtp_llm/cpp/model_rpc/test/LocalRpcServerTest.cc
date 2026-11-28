@@ -220,12 +220,39 @@ public:
         return cache_status;
     }
 
+    MOCK_METHOD(bool, updateEplbConfig, (const EPLBConfig&), (override));
+
     std::vector<GenerateStreamPtr> streams;
     KVCacheInfo                    cache_status;
 
 private:
     EngineFailureMode mode_;
 };
+
+TEST(LocalRpcServerTest, UpdateEplbConfigReturnsEngineDecision) {
+    TestLocalRpcServer        server;
+    grpc::ServerContext       context;
+    UpdateEplbConfigRequestPB request;
+    EmptyPB                   response;
+    request.set_update_time(123);
+    request.set_mode("STATS");
+    EXPECT_EQ(server.UpdateEplbConfig(&context, &request, &response).error_code(), grpc::StatusCode::UNAVAILABLE);
+
+    auto engine = std::make_shared<FailingEngine>(EngineFailureMode::REJECT_ALL);
+    server.setEngineForTest(engine);
+    for (const auto mode : {EplbMode::EPLB, EplbMode::ALL, EplbMode::STATS, EplbMode::NONE}) {
+        const bool accepted = mode == EplbMode::STATS || mode == EplbMode::NONE;
+        EXPECT_CALL(*engine, updateEplbConfig(AllOf(Field(&EPLBConfig::eplb_mode, mode),
+                                                    Field(&EPLBConfig::eplb_update_time, 123))))
+            .WillOnce(Return(accepted));
+        request.set_mode(EPLBConfig::to_string(mode));
+        EXPECT_EQ(server.UpdateEplbConfig(&context, &request, &response).error_code(),
+                  accepted ? grpc::StatusCode::OK : grpc::StatusCode::FAILED_PRECONDITION);
+    }
+    EXPECT_CALL(*engine, updateEplbConfig(_)).Times(0);
+    request.set_mode("invalid");
+    EXPECT_EQ(server.UpdateEplbConfig(&context, &request, &response).error_code(), grpc::StatusCode::INVALID_ARGUMENT);
+}
 
 class WorkerStatusRpcTest: public ::testing::Test {
 protected:

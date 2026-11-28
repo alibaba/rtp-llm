@@ -8,8 +8,41 @@ _DSV4_FP8_TEST_DEPS = [
     "//rtp_llm:testlib",
 ]
 
+# Direct, CPU-side checkpoint contract tests; no GPU kernel claims.
+[
+    py_test(
+        name = name,
+        srcs = [name + ".py"],
+        env = {"GPU_COUNT": "0", "CUDA_VISIBLE_DEVICES": "", "HIP_VISIBLE_DEVICES": "",
+               "OMP_NUM_THREADS": "1", "MKL_NUM_THREADS": "1"},
+        # The other tests load the production owners and typed config but do
+        # not execute the serving bindings. Match the model checkpoint closure.
+        deps = (
+            ["//rtp_llm/models_py:modules", "//rtp_llm/models_py:new_loader_core"]
+            if name == "dsv4_fp8_checkpoint_test"
+            else ["//rtp_llm/models_py:new_weight_loader"]
+        ),
+    )
+    for name in [
+        "dsv4_attention_checkpoint_test",
+        "dsv4_compressor_checkpoint_test",
+        "dsv4_fp8_checkpoint_test",
+        "dsv4_indexer_checkpoint_test",
+    ]
+]
+
+py_test(
+    name = "dsv4_indexer_resident_test",
+    srcs = ["dsv4_indexer_resident_test.py", "dsv4_indexer_checkpoint_test.py"],
+    main = "dsv4_indexer_resident_test.py",
+    deps = ["//rtp_llm/models_py:new_weight_loader", "//rtp_llm/resident_weights"],
+    exec_properties = {"gpu": "L20_CU13", "gpu_count": "1"},
+    tags = ["L20_CU13"],
+)
+
 # Numerical kernels and the associated metadata/pool boundary regressions.
 _GPU_TESTS = [
+    "test_owned_shared_quant_linear",
     "test_bf16_gemm_fp32",
     "test_compressor_disable_raw_path",
     "test_compressor_forward_flat_input",
@@ -109,6 +142,13 @@ dsv4_py_test(
     ]
 ]
 
+# CPU tensor-layout equivalence. The optional NAS fixture is opt-in.
+py_test(
+    name = "test_mega_owned_weights",
+    srcs = ["test_mega_owned_weights.py"],
+    deps = _DSV4_FP8_TEST_DEPS,
+)
+
 # Compares locally constructed F.linear/cat expressions, not CompressorFP8.
 dsv4_py_test(
     name = "test_compressor_gemm_merge",
@@ -172,6 +212,7 @@ test_suite(
         ":test_indexer_cp_padded_gather_triton_x86",
         ":test_indexer_fp8_score_x86",
         ":test_no_recompile_x86",
+        ":test_owned_shared_quant_linear_x86",
         ":test_prefill_common_metadata_cuda_x86",
         ":test_swa_cp_packed_gather_triton_x86",
         ":test_swa_fp8_kv_roundtrip_x86",

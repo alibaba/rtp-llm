@@ -3,12 +3,7 @@ from typing import Optional
 
 import torch
 
-from rtp_llm.config.py_config_modules import PyEnvConfigs
 from rtp_llm.device.device_type import DeviceType, get_device_type
-from rtp_llm.ops.compute_ops import (
-    get_device_id,
-    preprocess_weight_scale,
-)
 
 
 class MemInfo:
@@ -21,11 +16,11 @@ class MemInfo:
 
 
 class DeviceBase:
-    def __init__(self):
+    def __init__(self, *, engine_args=None):
         from rtp_llm.config.server_config_setup import auto_configure_deepep
         from rtp_llm.server.server_args.server_args import setup_args
 
-        self.py_env_configs = setup_args()
+        self.py_env_configs = setup_args(engine_args)
         auto_configure_deepep(
             moe_config=self.py_env_configs.moe_config,
             deep_ep_config=self.py_env_configs.deep_ep_config,
@@ -37,6 +32,8 @@ class DeviceBase:
         return get_device_type()
 
     def get_device_id(self) -> int:
+        from rtp_llm.ops.compute_ops import get_device_id
+
         return get_device_id()
 
     @property
@@ -62,6 +59,7 @@ class DeviceBase:
         gptq: bool,
         awq: bool,
         weight_bits: int,
+        gptq_v2: bool = False,
     ):
         raise NotImplementedError(
             "preprocess_groupwise_weight_params is not implemented"
@@ -76,6 +74,7 @@ class DeviceBase:
         gptq: bool,
         awq: bool,
         weight_bits: int,
+        gptq_v2: bool = False,
     ):
         raise NotImplementedError(
             "preprocess_moe_groupwise_weight_params is not implemented"
@@ -94,6 +93,13 @@ class DeviceBase:
         use_swizzle_a: Optional[bool] = None,
     ) -> torch.Tensor:
         return weight
+
+    def shuffle_moe_weight(
+        self, x: torch.Tensor, datatype: torch.dtype, name: str
+    ) -> torch.Tensor:
+        # Portable CPU FT files and CUDA use canonical [expert, N, K] order.
+        # Backends with a specialized packed layout (ROCm) override this.
+        return x
 
     def maybe_prepare_static_weights_for_fp4_moe(
         self,

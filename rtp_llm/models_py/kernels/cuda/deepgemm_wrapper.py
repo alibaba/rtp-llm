@@ -92,7 +92,13 @@ def has_deep_gemm() -> bool:
 def is_deep_gemm_e8m0_used() -> bool:
     # Blackwell SM100 and SM120 DeepGEMM kernels consume packed UE8M0 scales.
     # SM120 support requires the vLLM-pinned DeepGEMM build (a6b593d or newer).
-    return torch.cuda.get_device_capability()[0] in (10, 12)
+    # This predicate is also used by the offline FT exporter. A CPU-only
+    # process must not initialize a CUDA context just to choose its file layout.
+    return (
+        torch.version.hip is None
+        and torch.cuda.is_available()
+        and torch.cuda.get_device_capability()[0] in (10, 12)
+    )
 
 
 @contextmanager

@@ -5,7 +5,17 @@ import logging
 import os
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, AsyncGenerator, Callable, Dict, List, Optional, Tuple, Union
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    AsyncGenerator,
+    Callable,
+    Dict,
+    List,
+    Optional,
+    Tuple,
+    Union,
+)
 
 import torch
 
@@ -39,7 +49,6 @@ from rtp_llm.openai.api_datatype import (
     UsageInfo,
 )
 from rtp_llm.ops import MMPreprocessConfig, MultimodalInput
-from rtp_llm.server.backend_rpc_server_visitor import BackendRPCServerVisitor
 from rtp_llm.server.request_headers import normalize_request_headers
 from rtp_llm.telemetry import CURRENT_TRACE_STATE
 from rtp_llm.utils.base_model_datatypes import (
@@ -57,6 +66,9 @@ from rtp_llm.utils.word_util import (
     is_truncated,
     truncate_response_with_stop_words,
 )
+
+if TYPE_CHECKING:
+    from rtp_llm.server.backend_rpc_server_visitor import BackendRPCServerVisitor
 
 
 def _build_prompt_tokens_details(
@@ -513,7 +525,7 @@ class CustomChatRenderer:
         input_ids: List[int],
         mm_inputs: List[MultimodalInput],
         generate_config: GenerateConfig,
-        backend_rpc_server_visitor: BackendRPCServerVisitor,
+        backend_rpc_server_visitor: "BackendRPCServerVisitor",
         request: ChatCompletionRequest,
         headers: Optional[Dict[str, str]] = None,
         v41_inputs=None,

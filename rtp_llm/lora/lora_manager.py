@@ -1,33 +1,48 @@
+from __future__ import annotations
+
 import logging
 import threading
-from typing import Any, Dict, Optional
+from typing import TYPE_CHECKING, Any, Dict, Optional
 
-from rtp_llm.async_decoder_engine.base_engine import BaseEngine
-from rtp_llm.async_decoder_engine.rpc_engine import LanguageCppEngine
 from rtp_llm.lora.lora_exception import LoraCountException, LoraException
-from rtp_llm.model_loader.loader import ModelLoader
 from rtp_llm.utils.time_util import Timer
+
+if TYPE_CHECKING:
+    from rtp_llm.async_decoder_engine.base_engine import BaseEngine
 
 
 class LoraManager:
-    thread_lock_ = threading.Lock()
+    """Request-scoped adapter bridge for engines which actually expose it.
+
+    Direct owners publish a distinct, rank-local checkpoint controller. Its
+    globally merged model storage cannot implement per-request selection.
+    """
+
     lora_infos_: Dict[str, str]
 
     engine_: BaseEngine
     lora_cpp_wrapper_: Any
-    weights_loader_: ModelLoader
 
     def __init__(
         self, engine: BaseEngine, max_lora_model_size: int = -1, local_rank: int = 0
     ) -> None:
         self.engine_ = engine
+        self.thread_lock_ = threading.Lock()
         self.lora_infos_ = {}
         self.max_lora_model_size_ = max_lora_model_size
         self.device: str = f"cuda:{local_rank}"
-        assert isinstance(self.engine_, LanguageCppEngine)
-        self.lora_cpp_wrapper_ = self.engine_.rtp_llm_op_.ft_op
-        assert isinstance(self.engine_.model.model_weights_loader, ModelLoader)
-        self.weights_loader_ = self.engine_.model.model_weights_loader
+        self.lora_cpp_wrapper_ = getattr(
+            getattr(engine, "rtp_llm_op_", None), "ft_op", None
+        )
+        self.weights_loader_ = engine.model.model_weights_loader
+        if not all(
+            callable(getattr(self.lora_cpp_wrapper_, op, None))
+            for op in ("add_lora", "remove_lora")
+        ) or not callable(getattr(self.weights_loader_, "load_lora_weights", None)):
+            raise NotImplementedError(
+                "Request-scoped LoRA requires a request-aware engine and a matching factor reader; "
+                "rank_local_lora changes shared weights and cannot select adapters per request"
+            )
         with Timer() as timer:
             model_lora_infos = self.engine_.model.model_config.lora_infos
             if model_lora_infos is not None and len(model_lora_infos) > 1:
@@ -71,17 +86,20 @@ class LoraManager:
 
     def add_lora(self, adapter_name: str, lora_path: str) -> Optional[LoraException]:
         with self.thread_lock_:
-            assert adapter_name not in self.lora_infos_.keys()
-            self.lora_infos_[adapter_name] = lora_path
+            if adapter_name in self.lora_infos_:
+                raise ValueError(f"Adapter {adapter_name!r} is already registered")
+            self._check_loraInfo_size({**self.lora_infos_, adapter_name: lora_path})
             weights = self.weights_loader_.load_lora_weights(
                 adapter_name, lora_path, "cpu"
             )
             self.lora_cpp_wrapper_.add_lora(
                 adapter_name, weights.lora_a_weights, weights.lora_b_weights
             )
+            self.lora_infos_[adapter_name] = lora_path
 
     def remove_lora(self, adapter_name: str) -> Optional[LoraException]:
         with self.thread_lock_:
-            assert adapter_name in self.lora_infos_.keys()
-            del self.lora_infos_[adapter_name]
+            if adapter_name not in self.lora_infos_:
+                raise KeyError(adapter_name)
             self.lora_cpp_wrapper_.remove_lora(adapter_name)
+            del self.lora_infos_[adapter_name]

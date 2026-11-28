@@ -276,10 +276,10 @@ class Qwen3NextPPAuxCaptureTest(unittest.TestCase):
             weights=[{} for _ in range(sum(counts))],
             get_global_weight=lambda name: torch.ones(4),
         )
-        with patch.object(
-            qn, "Embedding", side_effect=lambda *args: Embedding()
-        ), patch.object(
-            qn, "RMSResNorm", side_effect=lambda *args, **kwargs: Norm()
+        with patch(
+            "rtp_llm.models_py.modules.Embedding", return_value=Embedding()
+        ), patch(
+            "rtp_llm.models_py.modules.RMSResNorm", return_value=Norm()
         ), patch.object(
             qn.Qwen3NextModel,
             "_decoder_layer_cls",

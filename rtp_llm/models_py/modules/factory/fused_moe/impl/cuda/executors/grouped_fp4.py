@@ -41,7 +41,7 @@ from rtp_llm.models_py.triton_kernels.moe.silu_mul_fp8_quant import (
     silu_mul_fp8_quant_packed,
 )
 from rtp_llm.models_py.utils.math import align, ceil_div
-from rtp_llm.resident_weights import resident_init_tensors
+from rtp_llm.models_py.modules.fp8_fp4_weight_source import resident_init_tensors
 
 from .fp8_fp4_base import Fp8Fp4ExecutorBase, normalize_moe_w13_gate_up
 
@@ -99,8 +99,6 @@ class GroupedFp4Executor(Fp8Fp4ExecutorBase):
         FP4 blocks to the CUDA driver so they don't sit in PyTorch's
         caching allocator while KV-pool sizing measures available HBM.
         """
-        from rtp_llm.utils.model_weight import W
-
         cfg = self.cfg
         group = (
             f"fp8_fp4.grouped_fp4.routed:e{cfg.n_routed_experts}:d{cfg.dim}"
@@ -124,25 +122,25 @@ class GroupedFp4Executor(Fp8Fp4ExecutorBase):
                 f"{group}.s13_dense_t",
                 f"{group}.s2_dense_t",
             ),
-            consumed_names=(W.moe_w1, W.moe_s1, W.moe_w2, W.moe_s2),
+            consumed_names=("routed_w13", "routed_s13", "routed_w2", "routed_s2"),
             builder=lambda: self._build_weights(layer_weights),
         )
 
     def _build_weights(self, layer_weights: Dict):
-        from rtp_llm.utils.model_weight import W
+        from rtp_llm.models_py.modules.fp8_fp4_weight_source import take_weight
 
         cfg = self.cfg
         E, D, inter = cfg.n_routed_experts, cfg.dim, cfg.moe_inter_dim
-        w13 = layer_weights.pop(W.moe_w1)
-        s13_raw = layer_weights.pop(W.moe_s1)
+        w13 = take_weight(layer_weights, "routed_w13")
+        s13_raw = take_weight(layer_weights, "routed_s13")
         w13, s13_raw = normalize_moe_w13_gate_up(
             w13,
             s13_raw,
             inter,
             cfg.moe_w1_layout,
         )
-        w2 = layer_weights.pop(W.moe_w2)
-        s2_raw = layer_weights.pop(W.moe_s2)
+        w2 = take_weight(layer_weights, "routed_w2")
+        s2_raw = take_weight(layer_weights, "routed_s2")
 
         s13 = prepare_fp4_weight_scale_for_deepgemm(s13_raw, 2 * inter, D, E)
         s2 = prepare_fp4_weight_scale_for_deepgemm(s2_raw, D, inter, E)

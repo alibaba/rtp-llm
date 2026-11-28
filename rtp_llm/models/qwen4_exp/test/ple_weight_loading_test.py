@@ -4,15 +4,12 @@ from unittest import mock
 
 import torch
 
-from rtp_llm.model_loader.load_config import LoadMethod
-from rtp_llm.model_loader.loader import ModelLoader
-from rtp_llm.model_loader.model_weight_info import ModelWeights
 from rtp_llm.model_loader.tensor_source import TensorSource
-from rtp_llm.model_loader.weight_module import AtomicWeight
 from rtp_llm.models.qwen4_exp.qwen4_exp_weight import (
     Qwen4ExpPleNgramWeight,
     Qwen4ExpWeight,
 )
+from rtp_llm.models_py.checkpoint_reader_test_support import checkpoint_readers, requires_native_fst
 from rtp_llm.models_py.modules.qwen4_exp.ple.ple import Qwen4ExpNGramEmbedding
 from rtp_llm.utils.model_weight import CkptWeightInfo, W
 
@@ -94,38 +91,9 @@ class Qwen4ExpPleNgramWeightTest(unittest.TestCase):
             self.assertEqual(shard.element_size(), 1)
             self.assertEqual(shard.device.type, "cpu")
 
-    def test_scratch_fp8_scale_preserves_cpu_residency(self):
-        loader = object.__new__(ModelLoader)
-        weight = _ngram_weight(preserve_fp8=True, scale_weight=CkptWeightInfo("scale"))
-        loader._model_weights_info = SimpleNamespace(
-            weights=[], layer_weights=[[weight]]
-        )
-        loader._misc_weights_info = []
-        model_weights = mock.Mock()
-        scale = torch.tensor([0.25])
-        with (
-            mock.patch.object(
-                loader, "_create_model_weights", return_value=model_weights
-            ),
-            mock.patch.object(
-                loader, "_choose_weight_convert_device", return_value="cpu"
-            ),
-            mock.patch.object(
-                loader,
-                "prepare_weights",
-                return_value=iter(
-                    [
-                        (0, W.qwen4_ple_ngram_scale, scale),
-                        (0, "auxiliary", torch.ones(1)),
-                    ]
-                ),
-            ),
-        ):
-            loader._load_from_scratch("meta")
-        scale_call, auxiliary_call = model_weights.set_layer_weight.call_args_list
-        self.assertIs(scale_call.args[2], scale)
-        self.assertEqual(scale_call.args[2].device.type, "cpu")
-        self.assertEqual(auxiliary_call.args[2].device.type, "meta")
+    def test_real_scratch_preserves_host_scale_and_other_destinations(self):
+        from rtp_llm.models_py.new_models.qwen4_exp.ple_residency_test import check_local_ple
+        check_local_ple(self, "scratch", exported=False)
 
     def test_fixed_host_table_keeps_fp8_scale_on_cpu(self):
         class Source(_RecordingTensorSource):
@@ -166,68 +134,12 @@ class Qwen4ExpPleNgramWeightTest(unittest.TestCase):
 
         self.assertEqual(updated[next(iter(updated))].device.type, "cpu")
 
-    def test_scratch_cpu_conversion_preserves_only_offloaded_weights(self):
-        loader = object.__new__(ModelLoader)
-        loader._model_weights_info = SimpleNamespace(
-            weights=[], layer_weights=[[_ngram_weight()]]
-        )
-        loader._misc_weights_info = []
-        table_name = f"{W.qwen4_ple_ngram_shards}.0"
-        model_weights = mock.Mock()
-        with (
-            mock.patch.object(
-                loader, "_create_model_weights", return_value=model_weights
-            ),
-            mock.patch.object(
-                loader, "_choose_weight_convert_device", return_value="cpu"
-            ),
-            mock.patch.object(
-                loader,
-                "prepare_weights",
-                return_value=iter(
-                    [(0, table_name, torch.ones(2, 1)), (0, "auxiliary", torch.ones(1))]
-                ),
-            ),
-        ):
-            loader._load_from_scratch("meta")
-
-        table_call, auxiliary_call = model_weights.set_layer_weight.call_args_list
-        self.assertEqual(table_call.args[2].device.type, "cpu")
-        self.assertEqual(auxiliary_call.args[2].device.type, "meta")
-
-    def test_exported_checkpoint_preserves_cpu_table_and_device_auxiliary(self):
-        loader = object.__new__(ModelLoader)
-        loader._model_weights_info = SimpleNamespace(
-            weights=[], layer_weights=[[_ngram_weight()]]
-        )
-        loader._misc_weights_info = []
-        loader._global_weight_aliases = {}
-        database = mock.Mock()
-        loader._load_config = SimpleNamespace(
-            database=database,
-            num_layers=1,
-            layer_range=range(1),
-            tp_rank=0,
-            dp_rank=0,
-            ep_rank=0,
-            compute_dtype=torch.float32,
-            exported_device=SimpleNamespace(support_dio_load=True),
-        )
-        database.get_pretrain_tensor_names.return_value = []
-        database.preshuffled_keys = frozenset()
-        prefix = ModelWeights.layer_weight_prefix(0, 0, 0)
-        table_name = f"{W.qwen4_ple_ngram_shards}.0"
-        database.load_tensors_by_prefix.return_value = {
-            f"{prefix}0.{table_name}": [torch.ones(2, 1)],
-            f"{prefix}0.auxiliary": [torch.ones(1)],
-        }
-
-        loaded = loader._load_from_ft_style("meta")
-
-        self.assertEqual(loaded.weights[0][table_name].device.type, "cpu")
-        self.assertEqual(loaded.weights[0]["auxiliary"].device.type, "meta")
-        self.assertEqual(database.load_tensors_by_prefix.call_args.args[1], "cpu")
-        self.assertFalse(database.load_tensors_by_prefix.call_args.kwargs["direct_io"])
+    def test_rank_local_ft_preserves_host_table_and_auxiliary(self):
+        from rtp_llm.models_py.new_models.qwen4_exp.ple_residency_test import check_local_ple
+        for method in checkpoint_readers("scratch", "fastsafetensors"):
+            for preserved in (False, True):
+                with self.subTest(method=method,preserve_fp8=preserved):
+                    check_local_ple(self, method, exported=True, preserve=preserved)
 
     def test_fp8_global_scale_matches_lookup_cast_order(self):
         scalar = torch.tensor([0.00019931793212890625], dtype=torch.bfloat16)
@@ -357,35 +269,10 @@ class Qwen4ExpPleNgramWeightTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "not divisible by tp_size=3"):
             _ngram_weight().get_tensor_names(1, _load_config(3, 0))
 
-    def test_rank_local_descriptor_disables_unfiltered_fast_iteration(self):
-        loader = object.__new__(ModelLoader)
-        loader._model_weights_info = SimpleNamespace(
-            weights=[], layer_weights=[[_ngram_weight()]]
-        )
-        loader._misc_weights_info = []
-
-        self.assertFalse(loader._supports_fastsafetensors_iteration())
-
-    def test_plain_descriptors_remain_fast_iteration_compatible(self):
-        loader = object.__new__(ModelLoader)
-        loader._model_weights_info = SimpleNamespace(
-            weights=[AtomicWeight("plain", [CkptWeightInfo("plain.weight")])],
-            layer_weights=[],
-        )
-        loader._misc_weights_info = []
-
-        self.assertTrue(loader._supports_fastsafetensors_iteration())
-
-    def test_explicit_fast_iteration_is_rejected_before_loading(self):
-        loader = object.__new__(ModelLoader)
-        loader._load_method = LoadMethod.FASTSAFETENSORS
-        loader._model_weights_info = SimpleNamespace(
-            weights=[], layer_weights=[[_ngram_weight()]]
-        )
-        loader._misc_weights_info = []
-
-        with self.assertRaisesRegex(ValueError, "use load_method=scratch"):
-            loader._load_weight("cpu")
+    @requires_native_fst
+    def test_explicit_fst_reads_only_local_ple_and_still_loads_normal_weights(self):
+        from rtp_llm.models_py.new_models.qwen4_exp.ple_residency_test import check_local_ple
+        check_local_ple(self, "fastsafetensors", exported=False)
 
 
 class Qwen4ExpPleWeightGateTest(unittest.TestCase):

@@ -25,12 +25,12 @@ from typing import Any, Dict, NamedTuple, Optional, Tuple, Union
 # call.  Matches vLLM's ``deepseek_v4_attention.py:325`` exactly (same
 # API, same recipe).  Validated by ``test/test_wo_a_batched_vs_loop.py``
 # — bit-identical output + 3.5-4.4× speedup at decode B∈{1..256}.
-import deep_gemm  # noqa: E402
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
 from rtp_llm.config.quant_config import Fp8BlockWiseQuantConfig
+from rtp_llm.models_py.module_base import RtpModule, copy_weight_
 from rtp_llm.models_py.modules.dsv4._fused_inv_rope_fp8_quant_triton import (
     fused_inv_rope_fp8_quant,
 )
@@ -69,11 +69,15 @@ from rtp_llm.models_py.modules.dsv4.fp8._swa_cp_byte_sliced import (
     CPByteSlicedSlotCompaction,
     build_cp_byte_sliced_slot_compaction,
 )
+from rtp_llm.models_py.modules.dsv4.fp8._wo_a_layout import (
+    prepare_wo_a_stacked as _prepare_wo_a_stacked,
+)
 from rtp_llm.models_py.modules.dsv4.fp8.compressor import CompressorFP8, CompressorMeta
 from rtp_llm.models_py.modules.dsv4.fp8.indexer import IndexerFP8
 from rtp_llm.models_py.modules.dsv4.prefill_workspace import PrefillWorkspace
 from rtp_llm.models_py.modules.dsv4.rope import precompute_freqs_cis
 from rtp_llm.models_py.modules.factory.linear import LinearFactory
+from rtp_llm.models_py.read_spec import make_sharded_read_spec, unwrap_checkpoint_tensor
 from rtp_llm.models_py.utils.memory import dispose_tensor
 
 
@@ -331,36 +335,6 @@ def _repack_v4_fp8_scale_to_int32(scale: torch.Tensor) -> torch.Tensor:
     idx = torch.arange(N, device=scale.device) // 128
     scale_rep = scale.float().index_select(-2, idx)
     return get_mn_major_tma_aligned_packed_ue8m0_tensor(scale_rep)
-
-
-def _prepare_wo_a_stacked(
-    weight_fp8: torch.Tensor,
-    scale_raw: torch.Tensor,
-    G: int,
-    R: int,
-    K: int,
-) -> tuple:
-    """Stack V4 wo_a ckpt (``[G*R, K]`` fp8 + ``[G*R/128, K/128]`` e8m0fnu)
-    into the ``fp8_einsum``-expected layout, computed once at init:
-
-    - weight: ``[G, R, K]`` fp8 contiguous (free view)
-    - scale : ``[G, R, K/512]`` int32 UE8M0 packed, MN-major TMA-aligned
-      (stride ``(K/512 * tma_R, 1, tma_R)``)
-
-    Cast e8m0fnu → fp32, row-repeat by 128 along R so
-    ``get_mn_major_tma_aligned_packed_ue8m0_tensor`` (which operates on
-    fp32 ``[*, mn, k/128]``) sees the full [G, R, K/128] grid.  The helper
-    floor-log2 bitcasts each block scale and packs 4 UE8M0 bytes per
-    int32; output shape ``[G, R, K/512]`` matches
-    ``deep_gemm.fp8_einsum(..., recipe=(1, 1, 128))`` expectations."""
-    from deep_gemm.utils.layout import get_mn_major_tma_aligned_packed_ue8m0_tensor
-
-    w_stk = weight_fp8.view(G, R, K).contiguous()
-    scale_fp32 = scale_raw.float().view(G, R // 128, K // 128)
-    idx = torch.arange(R, device=scale_raw.device) // 128
-    scale_rep = scale_fp32.index_select(-2, idx).contiguous()  # [G, R, K/128]
-    s_stk = get_mn_major_tma_aligned_packed_ue8m0_tensor(scale_rep)
-    return w_stk, s_stk
 
 
 def _v4_fp8_linear(w: torch.Tensor, s: torch.Tensor):
@@ -821,7 +795,7 @@ class PrefillQKV(NamedTuple):
     kv_full: torch.Tensor
 
 
-class AttentionFP8(nn.Module):
+class AttentionFP8(RtpModule):
     def __init__(
         self,
         layer_id: int,
@@ -855,7 +829,9 @@ class AttentionFP8(nn.Module):
         (``ModelWeights.weights[layer_id]``) keyed by ``W.v4_*`` enum.
         Reads ``W.v4_attn_*`` for dense attention weights, ``W.v4_compressor_*``
         for the outer compressor, ``W.v4_indexer_*`` (forwarded) for the
-        indexer."""
+        indexer. With ``layer_weights=None``, allocate checkpoint-owned
+        Parameters and defer device-specific preparation until after loading.
+        """
         super().__init__()
         self.layer_id = layer_id
         self.dim = dim
@@ -896,171 +872,265 @@ class AttentionFP8(nn.Module):
         )
         attn_sink_slice = slice(tp_rank * n_heads_local, (tp_rank + 1) * n_heads_local)
 
-        from rtp_llm.utils.model_weight import W
+        self._checkpoint_owned = layer_weights is None
+        if self._checkpoint_owned:
+            from rtp_llm.models_py.modules.dsv4.fp8.linear_owner import Dsv4FP8Linear
 
-        # Q / KV / O — FP8 linears go through LinearFactory →
-        # CudaFp8DeepGEMMLinear → DeepGEMM fp8_gemm_nt.
-        def _fp8_w_s(w_tag, s_tag, row_slice=None, col_slice=None):
-            """Pull (weight, scale) by W tag with optional TP slicing,
-            then build a CudaFp8DeepGEMMLinear via ``_v4_fp8_linear``.
-
-            Scale slicing depends on layout:
-              * legacy raw UE8M0 [N//128, K//128]: row/col strides are
-                block-128 → ``slice.start // 128``.
-              * framework packed int32 [N, K//128//4]: N is fully
-                expanded (slice by full N stride) and K is packed 4×
-                (slice by ``slice.start // 512``)."""
-            w = layer_weights[w_tag]
-            s = layer_weights[s_tag]
-            scale_is_packed_int32 = s.dtype == torch.int32
-            if row_slice is not None:
-                w = w[row_slice]
-                if scale_is_packed_int32:
-                    s = s[row_slice]
-                else:
-                    s = s[row_slice.start // 128 : row_slice.stop // 128]
-            if col_slice is not None:
-                w = w[:, col_slice]
-                if scale_is_packed_int32:
-                    assert col_slice.start % 512 == 0 and col_slice.stop % 512 == 0, (
-                        f"col_slice {col_slice} not aligned to 512 for "
-                        f"packed int32 scale; framework path requires "
-                        f"K-slices on 512-byte boundaries"
-                    )
-                    s = s[:, col_slice.start // 512 : col_slice.stop // 512]
-                else:
-                    s = s[:, col_slice.start // 128 : col_slice.stop // 128]
-            if row_slice is not None or col_slice is not None:
-                w = w.contiguous()
-                s = s.contiguous()
-            return _v4_fp8_linear(w, s)
-
-        self.wq_a = _fp8_w_s(W.v4_attn_wq_a_w, W.v4_attn_wq_a_s)
-        # wq_b is row-split along N (n_heads * head_dim)
-        self.wq_b = _fp8_w_s(
-            W.v4_attn_wq_b_w,
-            W.v4_attn_wq_b_s,
-            row_slice=wq_b_row_slice if tp_size > 1 else None,
-        )
-        # MQA single KV head — replicate.
-        self.wkv = _fp8_w_s(W.v4_attn_wkv_w, W.v4_attn_wkv_s)
-
-        # wo_a grouped projection: row-split along (n_groups*o_lora_rank).
-        # Stored as plain ``[N, K]`` fp8 weight + UE8M0 scale tensors;
-        # the ``fp8_einsum`` production path uses the pre-stacked
-        # ``_wo_a_stk_w`` / ``_wo_a_stk_s`` buffers below, the BF16
-        # fallback path inline-dequants from these via
-        # ``dequantize_fp8_weight``.
-        assert (n_heads * head_dim) % o_groups == 0
-        wo_a_w = layer_weights[W.v4_attn_wo_a_w]
-        wo_a_s = layer_weights[W.v4_attn_wo_a_s]
-        if tp_size > 1:
-            wo_a_w = wo_a_w[wo_a_row_slice].contiguous()
-            if wo_a_s.dtype == torch.int32:
-                # framework path: scale is already (N, K//128//4) int32
-                wo_a_s = wo_a_s[wo_a_row_slice].contiguous()
-            else:
-                wo_a_s = wo_a_s[
-                    wo_a_row_slice.start // 128 : wo_a_row_slice.stop // 128
-                ].contiguous()
-        self.wo_a_w = wo_a_w
-        self.wo_a_s = wo_a_s
-        K_local = n_heads_local * head_dim // n_groups_local
-        _stk_w, _stk_s = _prepare_wo_a_stacked(
-            wo_a_w, wo_a_s, n_groups_local, o_lora_rank, K_local
-        )
-        self.register_buffer("_wo_a_stk_w", _stk_w, persistent=False)
-        self.register_buffer("_wo_a_stk_s", _stk_s, persistent=False)
-
-        # wo_b row-split along K (cols), all_reduce after forward
-        self.wo_b = _fp8_w_s(
-            W.v4_attn_wo_b_w,
-            W.v4_attn_wo_b_s,
-            col_slice=wo_b_col_slice if tp_size > 1 else None,
-        )
-
-        # Non-quantized norm weights — plain BF16 tensors (loader cast
-        # via compute_dtype).  BF16 dtype is required by
-        # FlashInfer RMSNorm (which can produce silent NaNs with fp32). attn_sink loads
-        # as fp32 via descriptor data_type.
-        self.q_norm = layer_weights[W.v4_attn_q_norm]
-        self.kv_norm = layer_weights[W.v4_attn_kv_norm]
-        attn_sink_full = layer_weights[W.v4_attn_sink]
-        self.attn_sink = (
-            attn_sink_full[attn_sink_slice].contiguous()
-            if tp_size > 1
-            else attn_sink_full
-        )
-
-        assert (n_heads * head_dim) % o_groups == 0
-
-        # Compressor + Indexer (only for compressed layers)
-        if compress_ratio:
-            outer_cmp_weights = {
-                "ape": layer_weights[W.v4_compressor_ape],
-                "wkv": layer_weights[W.v4_compressor_wkv],
-                "wgate": layer_weights[W.v4_compressor_wgate],
-                "norm": layer_weights[W.v4_compressor_norm],
+            self.wq_a = Dsv4FP8Linear(dim, q_lora_rank)
+            self.wq_b = Dsv4FP8Linear(
+                q_lora_rank,
+                n_heads * head_dim,
+                tp_size=tp_size,
+                tp_rank=tp_rank,
+                partition="column",
+            )
+            self.wkv = Dsv4FP8Linear(dim, head_dim)
+            self.wo_b = Dsv4FP8Linear(
+                o_groups * o_lora_rank,
+                dim,
+                tp_size=tp_size,
+                tp_rank=tp_rank,
+                partition="row",
+            )
+            if (n_heads * head_dim) % o_groups or o_lora_rank % 128:
+                raise ValueError(
+                    "V4 grouped output projection requires aligned, whole groups"
+                )
+            grouped_k = n_heads * head_dim // o_groups
+            if grouped_k % 128:
+                raise ValueError("V4 grouped output K must align to 128")
+            self.wo_a_w = nn.Parameter(
+                torch.empty(
+                    (self.n_groups * o_lora_rank, grouped_k), dtype=torch.float8_e4m3fn
+                ),
+                requires_grad=False,
+            )
+            self.wo_a_s = nn.Parameter(
+                torch.empty(
+                    (self.n_groups * o_lora_rank // 128, grouped_k // 128),
+                    dtype=torch.float8_e8m0fnu,
+                ),
+                requires_grad=False,
+            )
+            self.q_norm = nn.Parameter(
+                torch.empty(q_lora_rank, dtype=torch.bfloat16), requires_grad=False
+            )
+            self.kv_norm = nn.Parameter(
+                torch.empty(head_dim, dtype=torch.bfloat16), requires_grad=False
+            )
+            self.attn_sink = nn.Parameter(
+                torch.empty(self.n_heads, dtype=torch.float32), requires_grad=False
+            )
+            self._checkpoint_shapes = {
+                "wo_a.weight": (o_groups * o_lora_rank, grouped_k),
+                "wo_a.scale": (o_groups * o_lora_rank // 128, grouped_k // 128),
+                "attn_sink": (n_heads,),
             }
-            from rtp_llm.models_py.modules.dsv4.fp8.compressor import CompressorFP8
+            self.register_buffer("_wo_a_stk_w", None, persistent=False)
+            self.register_buffer("_wo_a_stk_s", None, persistent=False)
+            self.compressor = None
+            self.indexer = None
+            if compress_ratio:
+                from rtp_llm.models_py.modules.dsv4.fp8.compressor import CompressorFP8
 
-            self.compressor = CompressorFP8(
-                dim=dim,
-                head_dim=head_dim,
-                rope_head_dim=rope_head_dim,
-                compress_ratio=compress_ratio,
-                max_batch_size=max_batch_size,
-                cp_role=_CP_ROLE_MAIN,
-                norm_eps=norm_eps,
-                compressor_weights=outer_cmp_weights,
-            )
-            self.compressor._profile_label = (
-                f"L{layer_id:02d}.csa_main"
-                if compress_ratio == 4
-                else f"L{layer_id:02d}.hca_main"
-            )
-
-            # Phase E5: Compressor.kv_cache is self-managed (was an alias
-            # into ``Attention.kv_cache[:, win:]``).  Configure shape here
-            # because the Compressor doesn't know ``max_seq_len``.
-            self.compressor.configure_kv_cache_shape(max_seq_len // compress_ratio)
-            # #50 standalone / warmup fallback: nested indexer compressor
-            # shares the INDEXER_KV pool with Indexer; when pool context is
-            # absent (warmup, unit tests), keep the T hint available for
-            # legacy shape fallbacks.
-            if compress_ratio == 4:
-                from rtp_llm.models_py.modules.dsv4.fp8.indexer import IndexerFP8
-
-                self.indexer = IndexerFP8(
+                self.compressor = CompressorFP8(
                     dim=dim,
-                    q_lora_rank=q_lora_rank,
-                    index_n_heads=index_n_heads,
-                    index_head_dim=index_head_dim,
+                    head_dim=head_dim,
                     rope_head_dim=rope_head_dim,
-                    index_topk=index_topk,
                     compress_ratio=compress_ratio,
                     max_batch_size=max_batch_size,
-                    max_seq_len=max_seq_len,
+                    cp_role=_CP_ROLE_MAIN,
                     norm_eps=norm_eps,
-                    layer_weights=layer_weights,
                 )
+                self.compressor._profile_label = f"L{layer_id:02d}.{'csa_main' if compress_ratio == 4 else 'hca_main'}"
+                self.compressor.configure_kv_cache_shape(max_seq_len // compress_ratio)
+                if compress_ratio == 4:
+                    from rtp_llm.models_py.modules.dsv4.fp8.indexer import IndexerFP8
 
-                # Configure nested indexer compressor shape hint so warmup
-                # (where pool context is absent) can still allocate an
-                # ephemeral zero kv_cache for the write at the tail of
-                # ``_forward_scalar_impl``.
-                if self.indexer.compressor is not None:
+                    self.indexer = IndexerFP8(
+                        dim=dim,
+                        q_lora_rank=q_lora_rank,
+                        index_n_heads=index_n_heads,
+                        index_head_dim=index_head_dim,
+                        rope_head_dim=rope_head_dim,
+                        index_topk=index_topk,
+                        compress_ratio=compress_ratio,
+                        max_batch_size=max_batch_size,
+                        max_seq_len=max_seq_len,
+                        norm_eps=norm_eps,
+                    )
                     self.indexer.compressor._profile_label = (
                         f"L{layer_id:02d}.csa_nested_indexer"
                     )
                     self.indexer.compressor.configure_kv_cache_shape(
                         max_seq_len // compress_ratio
                     )
-            else:
-                self.indexer = None
         else:
-            self.compressor = None
-            self.indexer = None
+            from rtp_llm.utils.model_weight import W
+
+            # Q / KV / O — FP8 linears go through LinearFactory →
+            # CudaFp8DeepGEMMLinear → DeepGEMM fp8_gemm_nt.
+            def _fp8_w_s(w_tag, s_tag, row_slice=None, col_slice=None):
+                """Pull (weight, scale) by W tag with optional TP slicing,
+                then build a CudaFp8DeepGEMMLinear via ``_v4_fp8_linear``.
+
+                Scale slicing depends on layout:
+                  * legacy raw UE8M0 [N//128, K//128]: row/col strides are
+                    block-128 → ``slice.start // 128``.
+                  * framework packed int32 [N, K//128//4]: N is fully
+                    expanded (slice by full N stride) and K is packed 4×
+                    (slice by ``slice.start // 512``)."""
+                w = layer_weights[w_tag]
+                s = layer_weights[s_tag]
+                scale_is_packed_int32 = s.dtype == torch.int32
+                if row_slice is not None:
+                    w = w[row_slice]
+                    if scale_is_packed_int32:
+                        s = s[row_slice]
+                    else:
+                        s = s[row_slice.start // 128 : row_slice.stop // 128]
+                if col_slice is not None:
+                    w = w[:, col_slice]
+                    if scale_is_packed_int32:
+                        assert col_slice.start % 512 == 0 and col_slice.stop % 512 == 0, (
+                            f"col_slice {col_slice} not aligned to 512 for "
+                            f"packed int32 scale; framework path requires "
+                            f"K-slices on 512-byte boundaries"
+                        )
+                        s = s[:, col_slice.start // 512 : col_slice.stop // 512]
+                    else:
+                        s = s[:, col_slice.start // 128 : col_slice.stop // 128]
+                if row_slice is not None or col_slice is not None:
+                    w = w.contiguous()
+                    s = s.contiguous()
+                return _v4_fp8_linear(w, s)
+
+            self.wq_a = _fp8_w_s(W.v4_attn_wq_a_w, W.v4_attn_wq_a_s)
+            # wq_b is row-split along N (n_heads * head_dim)
+            self.wq_b = _fp8_w_s(
+                W.v4_attn_wq_b_w,
+                W.v4_attn_wq_b_s,
+                row_slice=wq_b_row_slice if tp_size > 1 else None,
+            )
+            # MQA single KV head — replicate.
+            self.wkv = _fp8_w_s(W.v4_attn_wkv_w, W.v4_attn_wkv_s)
+
+            # wo_a grouped projection: row-split along (n_groups*o_lora_rank).
+            # Stored as plain ``[N, K]`` fp8 weight + UE8M0 scale tensors;
+            # the ``fp8_einsum`` production path uses the pre-stacked
+            # ``_wo_a_stk_w`` / ``_wo_a_stk_s`` buffers below, the BF16
+            # fallback path inline-dequants from these via
+            # ``dequantize_fp8_weight``.
+            assert (n_heads * head_dim) % o_groups == 0
+            wo_a_w = layer_weights[W.v4_attn_wo_a_w]
+            wo_a_s = layer_weights[W.v4_attn_wo_a_s]
+            if tp_size > 1:
+                wo_a_w = wo_a_w[wo_a_row_slice].contiguous()
+                if wo_a_s.dtype == torch.int32:
+                    # framework path: scale is already (N, K//128//4) int32
+                    wo_a_s = wo_a_s[wo_a_row_slice].contiguous()
+                else:
+                    wo_a_s = wo_a_s[
+                        wo_a_row_slice.start // 128 : wo_a_row_slice.stop // 128
+                    ].contiguous()
+            self.wo_a_w = wo_a_w
+            self.wo_a_s = wo_a_s
+            K_local = n_heads_local * head_dim // n_groups_local
+            _stk_w, _stk_s = _prepare_wo_a_stacked(
+                wo_a_w, wo_a_s, n_groups_local, o_lora_rank, K_local
+            )
+            self.register_buffer("_wo_a_stk_w", _stk_w, persistent=False)
+            self.register_buffer("_wo_a_stk_s", _stk_s, persistent=False)
+
+            # wo_b row-split along K (cols), all_reduce after forward
+            self.wo_b = _fp8_w_s(
+                W.v4_attn_wo_b_w,
+                W.v4_attn_wo_b_s,
+                col_slice=wo_b_col_slice if tp_size > 1 else None,
+            )
+
+            # Non-quantized norm weights — plain BF16 tensors (loader cast
+            # via compute_dtype).  BF16 dtype is required by
+            # FlashInfer RMSNorm (which can produce silent NaNs with fp32). attn_sink loads
+            # as fp32 via descriptor data_type.
+            self.q_norm = layer_weights[W.v4_attn_q_norm]
+            self.kv_norm = layer_weights[W.v4_attn_kv_norm]
+            attn_sink_full = layer_weights[W.v4_attn_sink]
+            self.attn_sink = (
+                attn_sink_full[attn_sink_slice].contiguous()
+                if tp_size > 1
+                else attn_sink_full
+            )
+
+            assert (n_heads * head_dim) % o_groups == 0
+
+            # Compressor + Indexer (only for compressed layers)
+            if compress_ratio:
+                outer_cmp_weights = {
+                    "ape": layer_weights[W.v4_compressor_ape],
+                    "wkv": layer_weights[W.v4_compressor_wkv],
+                    "wgate": layer_weights[W.v4_compressor_wgate],
+                    "norm": layer_weights[W.v4_compressor_norm],
+                }
+                from rtp_llm.models_py.modules.dsv4.fp8.compressor import CompressorFP8
+
+                self.compressor = CompressorFP8(
+                    dim=dim,
+                    head_dim=head_dim,
+                    rope_head_dim=rope_head_dim,
+                    compress_ratio=compress_ratio,
+                    max_batch_size=max_batch_size,
+                    cp_role=_CP_ROLE_MAIN,
+                    norm_eps=norm_eps,
+                    compressor_weights=outer_cmp_weights,
+                )
+                self.compressor._profile_label = (
+                    f"L{layer_id:02d}.csa_main"
+                    if compress_ratio == 4
+                    else f"L{layer_id:02d}.hca_main"
+                )
+
+                # Phase E5: Compressor.kv_cache is self-managed (was an alias
+                # into ``Attention.kv_cache[:, win:]``).  Configure shape here
+                # because the Compressor doesn't know ``max_seq_len``.
+                self.compressor.configure_kv_cache_shape(max_seq_len // compress_ratio)
+                # #50 standalone / warmup fallback: nested indexer compressor
+                # shares the INDEXER_KV pool with Indexer; when pool context is
+                # absent (warmup, unit tests), keep the T hint available for
+                # legacy shape fallbacks.
+                if compress_ratio == 4:
+                    from rtp_llm.models_py.modules.dsv4.fp8.indexer import IndexerFP8
+
+                    self.indexer = IndexerFP8(
+                        dim=dim,
+                        q_lora_rank=q_lora_rank,
+                        index_n_heads=index_n_heads,
+                        index_head_dim=index_head_dim,
+                        rope_head_dim=rope_head_dim,
+                        index_topk=index_topk,
+                        compress_ratio=compress_ratio,
+                        max_batch_size=max_batch_size,
+                        max_seq_len=max_seq_len,
+                        norm_eps=norm_eps,
+                        layer_weights=layer_weights,
+                    )
+
+                    # Configure nested indexer compressor shape hint so warmup
+                    # (where pool context is absent) can still allocate an
+                    # ephemeral zero kv_cache for the write at the tail of
+                    # ``_forward_scalar_impl``.
+                    if self.indexer.compressor is not None:
+                        self.indexer.compressor._profile_label = (
+                            f"L{layer_id:02d}.csa_nested_indexer"
+                        )
+                        self.indexer.compressor.configure_kv_cache_shape(
+                            max_seq_len // compress_ratio
+                        )
+                else:
+                    self.indexer = None
+            else:
+                self.compressor = None
+                self.indexer = None
 
         # Phase E5b: kv_cache register_buffer retired.  KV storage now lives
         # exclusively in the framework BlockPools (SWA_KV + CSA_KV / HCA_KV);
@@ -1155,6 +1225,89 @@ class AttentionFP8(nn.Module):
             HCA_STATE: (torch.float32, 2 * head_dim),
             INDEXER_STATE: (torch.float32, 2 * coff_idx * idx_hd),
         }
+
+    def checkpoint_read_spec(self, name, shape):
+        if not self._checkpoint_owned:
+            return None
+        if name in self._checkpoint_shapes:
+            expected = self._checkpoint_shapes[name]
+            if tuple(shape) != expected:
+                raise ValueError(
+                    f"V4 attention {name} shape must be {expected}, got {tuple(shape)}"
+                )
+            return make_sharded_read_spec(name, expected, 0, self.tp_size, self.tp_rank)
+        prefix, _, suffix = name.partition(".")
+        if prefix in ("wq_a", "wq_b", "wkv", "wo_b"):
+            spec = getattr(self, prefix).checkpoint_read_spec(suffix, shape)
+            return spec.for_checkpoint_name(name) if spec is not None else None
+        return None
+
+    def load_weights(self, weights):
+        if not self._checkpoint_owned:
+            raise RuntimeError("Checkpoint loading requires an owned AttentionFP8")
+        items = weights.items() if isinstance(weights, dict) else weights
+        direct_names = {
+            "wo_a.weight": "wo_a_w",
+            "wo_a.scale": "wo_a_s",
+            "attn_sink": "attn_sink",
+        }
+        for name, value in items:
+            if name in direct_names:
+                parameter_name = direct_names[name]
+                if parameter_name in getattr(self, "_rtp_loaded_weight_names", set()):
+                    raise RuntimeError(f"Duplicate V4 attention parameter {name}")
+                tensor, applied = unwrap_checkpoint_tensor(value)
+                spec = self.checkpoint_read_spec(
+                    name, applied.source_shape if applied else tuple(tensor.shape)
+                )
+                if applied is None:
+                    tensor, _ = unwrap_checkpoint_tensor(spec.materialize(tensor))
+                elif (
+                    applied.slices != spec.slices
+                    or applied.shard_rank != spec.shard_rank
+                ):
+                    raise ValueError(
+                        f"V4 attention {name} ReadSpec belongs to a different shard"
+                    )
+                copy_weight_(getattr(self, parameter_name), tensor, name)
+                self._mark_weight_loaded(parameter_name)
+            else:
+                mapped = {"q_norm.weight": "q_norm", "kv_norm.weight": "kv_norm"}.get(
+                    name, name
+                )
+                super().load_weights([(mapped, value)])
+
+    def validate_runtime_device(self, device):
+        if not self._checkpoint_owned:
+            return
+        self.wq_a.validate_runtime_device(device)
+        try:
+            import deep_gemm
+        except (ImportError, OSError, AttributeError) as exc:
+            raise RuntimeError("V4 attention cannot import DeepGEMM") from exc
+        if not callable(getattr(deep_gemm, "fp8_einsum", None)):
+            raise RuntimeError("V4 attention requires deep_gemm.fp8_einsum")
+
+    def process_weights_after_loading(self):
+        if not self._checkpoint_owned or self._wo_a_stk_w is not None:
+            return
+        self.validate_weights_loaded()
+        self.validate_runtime_device(self.wo_a_w.device)
+        self._wo_a_stk_w, self._wo_a_stk_s = _prepare_wo_a_stacked(
+            self.wo_a_w,
+            self.wo_a_s,
+            self.n_groups,
+            self.o_lora_rank,
+            self.n_heads * self.head_dim // self.n_groups,
+        )
+        self.init_rope_cache(self.wo_a_w.device)
+
+    def _apply(self, fn, recurse=True):
+        result = super()._apply(fn, recurse=recurse)
+        if getattr(self, "_checkpoint_owned", False):
+            self._wo_a_stk_w = None
+            self._wo_a_stk_s = None
+        return result
 
     def set_cp_ctx(self, cp_ctx: Optional[CPContext]) -> None:
         """Bind CP context.  When active on a prefill call, ``forward``
@@ -1926,6 +2079,8 @@ class AttentionFP8(nn.Module):
     ) -> bool:
         return (
             self._can_reuse_qkv_input_quant()
+            and getattr(self.wq_a, "supports_fused_prefill_norm_quant", True)
+            and getattr(self.wkv, "supports_fused_prefill_norm_quant", True)
             and getattr(self.wq_a, "scale_ue8m0", False)
             and x.dim() == 2
             and x.dtype == torch.bfloat16
@@ -1977,6 +2132,8 @@ class AttentionFP8(nn.Module):
         M, G, _K = o_fp8.shape
         R = self.o_lora_rank
         out = torch.empty(M, G, R, dtype=torch.bfloat16, device=o_fp8.device)
+        import deep_gemm
+
         deep_gemm.fp8_einsum(
             "bhr,hdr->bhd",
             (o_fp8, o_scale),

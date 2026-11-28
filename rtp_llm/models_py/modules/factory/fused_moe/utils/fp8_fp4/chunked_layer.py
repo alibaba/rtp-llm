@@ -317,9 +317,10 @@ class ChunkedFp8Fp4MoeLayer(nn.Module):
         has_shared_expert_gate: bool = False,
         observer_factory: Optional[ObserverFactory] = None,
         record_function_scope: Callable[[], ContextManager] = nullcontext,
+        weight_owner=None,
     ) -> None:
         super().__init__()
-        if layer_weights is None:
+        if layer_weights is None and weight_owner is None:
             raise ValueError("ChunkedFp8Fp4MoeLayer requires per-layer weights")
         self.layer_id = int(layer_id)
         self.dim = int(dim)
@@ -341,6 +342,7 @@ class ChunkedFp8Fp4MoeLayer(nn.Module):
             n_hash_layers=n_hash_layers,
             vocab_size=vocab_size,
             layer_weights=layer_weights,
+            weight_owner=weight_owner,
             ep_size=ep_size,
             ep_rank=ep_rank,
             world_size=world_size,
@@ -359,6 +361,9 @@ class ChunkedFp8Fp4MoeLayer(nn.Module):
     @property
     def fused_moe(self):
         return self._moe.fused_moe
+
+    def set_route_stats(self, stats):
+        self._moe.eplb_stats = stats
 
     @property
     def gate(self):

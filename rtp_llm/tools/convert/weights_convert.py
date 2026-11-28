@@ -9,7 +9,6 @@ import shutil
 from typing import Dict, Optional
 
 import torch
-from safetensors import safe_open
 
 from rtp_llm.config.kv_cache_config import KVCacheConfig
 from rtp_llm.config.model_args import ModelArgs
@@ -28,11 +27,12 @@ from rtp_llm.ops import (
     MoeConfig,
     ParallelismConfig,
     ProfilingDebugLoggingConfig,
+    TaskType,
 )
-from rtp_llm.tools.api.model_basic_info_analyzer import (
-    parse_ft_model_type,
-    parse_model_basic_info,
-)
+from rtp_llm.server.server_args.util import str2bool
+from rtp_llm.tools.api.hf_model_helper import HfStyleModelInfo
+from rtp_llm.tools.convert.ft_export_job import DraftFTDescriptor, create_ft_export_job
+from rtp_llm.tools.convert.ft_export_metadata import generate_ft_index
 from rtp_llm.tools.convert.weights_convert_utils import (
     apply_layer_override_and_post_build,
 )
@@ -47,24 +47,27 @@ class WeightConverter:
     def __init__(
         self, model_path: str, model_type: Optional[str], env_params: Dict[str, str]
     ) -> None:
-        self.model_basic_info = parse_model_basic_info(model_path, {})
-        if self.model_basic_info is not None and not model_type:
-            self.model_type = self.model_basic_info.ft_model_type
-        elif model_type:
-            self.model_type = model_type
-        else:
-            logging.error(
-                f"not set model_type and cannot get model_type from {model_path}"
-            )
-            raise RuntimeError("model_type is None")
-
-        self.model_path: str | None = fetch_remote_file_to_local(model_path)
+        self.model_path = os.path.abspath(fetch_remote_file_to_local(model_path))
         self.env_params = env_params
-
-        assert self.model_path
+        # The worker budget needs checkpoint bytes, not a serving model's
+        # runtime/KV cache size. Read the mounted checkpoint's own metadata.
+        checkpoint = HfStyleModelInfo(self.model_path)
+        self.checkpoint_size = checkpoint.total_size
         if not model_type:
-            model_type = parse_ft_model_type(self.model_path).get("ft_model_type", None)
-            assert model_type
+            model_type = checkpoint.ft_model_type
+            if not model_type:
+                raw = checkpoint.model_config
+                if raw.get("architectures") == ["LlamaForCausalLMEagle3"]:
+                    # This architecture also labels incompatible reduced-vocab
+                    # drafts. Accept only the serving adapter's exact contract.
+                    from rtp_llm.models_py.new_models.qwen3_moe_eagle3.proposal import (
+                        Eagle3FullVocabularyDraft,
+                    )
+
+                    Eagle3FullVocabularyDraft.capture_ids(raw)
+                    model_type = "qwen_3_moe_eagle3"
+            if not model_type:
+                raise ValueError("Cannot infer FT model type; specify --model_type")
         self.model_type = model_type
         self.model_cls = ModelFactory.get_model_cls(self.model_type)
 
@@ -72,6 +75,17 @@ class WeightConverter:
         output_dir_base = fetch_remote_file_to_local(
             output_dir_base, MountRwMode.RWMODE_RW
         )
+        if os.path.commonpath(
+            (os.path.realpath(self.model_path), os.path.realpath(output_dir_base))
+        ) == os.path.realpath(self.model_path):
+            raise ValueError("FT output must not be inside the source checkpoint")
+        # A previous index, shard, or completion marker must never be attributed
+        # to this conversion, including when a job fails partway through.
+        if os.path.isdir(output_dir_base) and any(
+            name == "done" or name == "model.safetensors.index.json"
+            or name.endswith((".safetensors", "-preshuffled.json")) for name in os.listdir(output_dir_base)
+        ):
+            raise FileExistsError("FT destination already contains a checkpoint; use a fresh directory")
         # 确定并发进程数，不超过tp_size
         pool_size = self._estimate_convert_parallel_num()
         logging.info(f"now start [{pool_size}] process tor convert")
@@ -84,12 +98,11 @@ class WeightConverter:
         if pool_size > 1:
             ctx = multiprocessing.get_context("spawn")
             with ctx.Pool(processes=pool_size) as pool:
-                pool.starmap(self._convert, args_list)
+                ranks = pool.starmap(self._convert, args_list)
         else:
-            for tp_rank, dp_rank, world_rank, _ in args_list:
-                self._convert(tp_rank, dp_rank, world_rank, output_dir_base)
+            ranks = [self._convert(*args) for args in args_list]
         # copy other files:
-        self._save_converted(self.model_path, output_dir_base)
+        self._save_converted(self.model_path, output_dir_base, ranks)
 
         return 0
 
@@ -120,46 +133,20 @@ class WeightConverter:
     def _estimate_max_convert_parallel_num(self):
         # Get converter_num_per_gpu from environment variable, default to 4
         converter_num_per_gpu = int(os.environ.get("CONVERTER_NUM_PER_GPU", "4"))
-        try:
-            cuda_count = torch.cuda.device_count()
-            assert cuda_count >= 1
+        cuda_count = torch.cuda.device_count() if torch.cuda.is_available() else 0
+        if cuda_count:
             return cuda_count * converter_num_per_gpu
-        except Exception as _:
-            logging.info("no cuda device convert by cpu")
-            free_mb = self.get_free_mem_MB() * 0.8
-            dump_buffer_size_mb = 10 * 1024  # 10G dump once
-            if self.model_basic_info.model_size:
-                model_size_mb = self.model_basic_info.model_size / ONE_MB
-
-                env_params = copy.deepcopy(self.env_params)
-                # Get quantization from env_params (compatibility logic)
-                quantization = env_params.get("QUANTIZATION", "")
-                if not quantization:
-                    int8_mode = env_params.get("INT8_MODE", "0")
-                    weight_type = env_params.get("WEIGHT_TYPE", "").upper()
-                    if int(int8_mode) == 1 or weight_type == "INT8":
-                        quantization = "INT8"
-                config: ModelConfig = self.model_cls._create_config(self.model_path)
-                # Apply settings from env_params
-                config.model_type = self.model_type
-                config.ckpt_path = self.model_path
-                config.tokenizer_path = self.model_path
-                config.act_type = env_params.get("ACT_TYPE", "")
-                config.quantization = quantization
-                config.max_seq_len = 0
-
-                one_layer_model_size_mb = model_size_mb / config.num_layers
-                if model_size_mb < dump_buffer_size_mb:
-                    need_size_mb = model_size_mb
-                else:
-                    need_size_mb = dump_buffer_size_mb + one_layer_model_size_mb
-                if free_mb // need_size_mb > self.tp_size:
-                    return int(free_mb // need_size_mb)
-                else:
-                    return int(
-                        free_mb // need_size_mb if free_mb // need_size_mb > 1 else 1
-                    )
+        logging.info("no CUDA device; converting on CPU")
+        model_size = self.checkpoint_size
+        if not model_size:
             return 1
+        model_size_mb = model_size / ONE_MB
+        dump_buffer_mb = 10 * 1024
+        need_mb = model_size_mb
+        if model_size_mb >= dump_buffer_mb:
+            config = self.model_cls._create_config(self.model_path)
+            need_mb = dump_buffer_mb + model_size_mb / max(1, config.num_layers)
+        return max(1, int(self.get_free_mem_MB() * 0.8 // need_mb))
 
     def _build_parallelism_config(self) -> ParallelismConfig:
         """Build parallelism_config by reading env vars directly (TP_SIZE, WORLD_SIZE, etc.)."""
@@ -255,6 +242,8 @@ class WeightConverter:
 
         quantization_config = QuantizationConfig()
         quantization_config.quantization = quantization
+        if "W8A8_QUANT_CHUNK_ROWS" in env_params:
+            quantization_config.w8a8_quant_chunk_rows = int(env_params["W8A8_QUANT_CHUNK_ROWS"])
 
         # Build model config
         build_model_config(
@@ -269,31 +258,52 @@ class WeightConverter:
 
         parallelism_config = self._build_parallelism_config()
 
-        # Create other required configs
+        # _convert has already overlaid the explicit --env_params on the
+        # worker environment. Honor the same reader knobs for score and draft.
+        reader_options = {
+            "loader_recycle_handles": str2bool(os.environ.get("LOADER_RECYCLE_HANDLES", "1")),
+            "moe_pure_tp_preshard": str2bool(os.environ.get("MOE_PURE_TP_PRESHARD", "0")),
+        }
         hw_kernel_config = HWKernelConfig()
-        fmha_config = FMHAConfig()
-        moe_config = MoeConfig()
-        vit_config = VitConfig()
-
-        model = self.model_cls.from_config(
-            model_config=model_config,
-            parallelism_config=parallelism_config,
-            hw_kernel_config=hw_kernel_config,
-            kv_cache_config=kv_cache_config,
-            fmha_config=fmha_config,
-            moe_config=moe_config,
-            load_method=LoadMethod.AUTO,
-            max_generate_batch_size=0,
-            vit_config=vit_config,
-            merge_lora=False,
-            skip_python_model=True,
+        if (
+            self.model_type in (
+                "qwen_3_moe_eagle3", "qwen_3_dflash", "qwen_2-mtp", "qwen_3_dspark"
+            )
+            and model_config.task_type == TaskType.LANGUAGE_MODEL
+            and not model_config.enable_output_vocab_pruning
+        ):
+            model = DraftFTDescriptor(
+                model_config=model_config,
+                parallelism_config=parallelism_config,
+                hw_kernel_config=hw_kernel_config,
+                kv_cache_config=kv_cache_config,
+                get_weight_cls=self.model_cls.get_weight_cls,
+                **reader_options,
+            )
+        else:
+            # Ordinary models still need their tokenizer's task/vocab metadata.
+            # Construct the unloaded descriptor, not a serving model.
+            model = self.model_cls(
+                model_config=model_config,
+                parallelism_config=parallelism_config,
+                hw_kernel_config=hw_kernel_config,
+                kv_cache_config=kv_cache_config,
+                fmha_config=FMHAConfig(),
+                moe_config=MoeConfig(),
+                load_method=LoadMethod.AUTO,
+                max_generate_batch_size=0,
+                vit_config=VitConfig(),
+                merge_lora=False,
+                **reader_options,
+            )
+        writer = create_ft_export_job(model)
+        device_str = (
+            f"cuda:{parallelism_config.local_rank}" if torch.cuda.is_available() else "cpu"
         )
-        loader = model.create_model_loader()
-        device_str = f"cuda:{parallelism_config.local_rank}"
         max_retry_times = 3
         for i in range(max_retry_times):
             try:
-                loader.dump_weight_as_ft_style(device_str, output_dir_base)
+                writer.dump_weight_as_ft_style(device_str, output_dir_base)
                 logging.info(f"dump rank:[{world_rank}] done")
                 break
             except Exception as e:
@@ -304,98 +314,40 @@ class WeightConverter:
                     logging.error(
                         f"dump rank:[{world_rank}] retry {i} times, but still failed"
                     )
-                    raise RuntimeError(f"Failed after 10 retries: {str(e)}") from e
+                    raise RuntimeError(f"FT export failed after {max_retry_times} attempts") from e
                 continue
         logging.info(f"convert model rank:{world_rank} done")
+        return f"rank_{tp_rank:02d}_{dp_rank:02d}_{parallelism_config.ep_rank:02d}"
 
     @timer_wrapper("save convert result")
-    def _save_converted(self, input_path, output_path: str):
+    def _save_converted(self, input_path, output_path: str, ranks):
         self._copy_filtered_files(
             input_path,
             output_path,
             [
                 "pytorch_model.bin.index.json",
                 "model.safetensors.index.json",
+                "*-preshuffled.json",
                 "*.safetensors",
                 "*.bin",
                 "*.pth",
                 "*.pt",
                 "*.gguf",
+                "done",
             ],
         )
-        self._generate_safetensor_meta_info(output_path)
+        if self.model_type == "deepseek_v41":
+            from rtp_llm.tools.convert.ft_export_engram import export_v41_engram
+
+            export_v41_engram(input_path, output_path)
+        self._generate_safetensor_meta_info(output_path, ranks)
         # touch done
         done_file = os.path.join(output_path, "done")
         with open(done_file, "w") as f:
             pass
 
-    @timer_wrapper("generate safetensors meta info")
-    def _generate_safetensor_meta_info(self, output_path: str):
-        weight_map = {}
-        total_size = 0
-
-        # 获取所有 .safetensor 文件，并按名称排序
-        safetensor_files = sorted(
-            [f for f in os.listdir(output_path) if f.endswith(".safetensors")]
-        )
-
-        if not safetensor_files:
-            logging.info("指定目录下没有找到任何 .safetensors 文件。")
-            return -1
-
-        for st_file in safetensor_files:
-            st_path = os.path.join(output_path, st_file)
-            total_size += os.path.getsize(st_path)
-
-            # 使用 safetensors 库打开文件并读取所有键（权重名称）
-            try:
-                with safe_open(st_path, framework="pt") as f:
-                    keys = f.keys()
-                    for key in keys:
-                        if key in weight_map:
-                            logging.warning(
-                                f"警告: 权重 '{key}' 已经映射到 '{weight_map[key]}', 现在尝试映射到 '{st_file}'。"
-                            )
-                        weight_map[key] = st_file
-            except Exception as e:
-                logging.warning(f"无法读取文件 '{st_file}': {e}")
-
-        # Merge the per-rank preshuffle sidecars written by
-        # dump_weight_as_ft_style: safetensors cannot persist the Python
-        # tensor attribute, so the ft-style replay restores it from this
-        # index entry (see _load_from_ft_style).
-        moe_weights_preshuffled: list = []
-        for sidecar_file in sorted(
-            f for f in os.listdir(output_path) if f.endswith("-preshuffled.json")
-        ):
-            try:
-                with open(
-                    os.path.join(output_path, sidecar_file), encoding="utf-8"
-                ) as sidecar:
-                    moe_weights_preshuffled.extend(
-                        json.load(sidecar).get("moe_weights_preshuffled", [])
-                    )
-            except Exception as e:
-                logging.warning(f"无法读取 preshuffle sidecar '{sidecar_file}': {e}")
-
-        index = {
-            "metadata": {"total_size": total_size},
-            "weight_map": weight_map,
-            "is_ft_style_weight": True,
-            "moe_weights_preshuffled": moe_weights_preshuffled,
-            "__env__params__": self.env_params,
-        }
-
-        # 将索引数据写入 JSON 文件
-        output_file = "model.safetensors.index.json"
-        output_path = os.path.join(output_path, output_file)
-        try:
-            with open(output_path, "w", encoding="utf-8") as f:
-                json.dump(index, f, indent=4, ensure_ascii=False)
-            logging.info(f"索引文件已成功生成: {output_file}")
-        except Exception as e:
-            logging.info(f"写入索引文件失败: {e}")
-            return -1
+    def _generate_safetensor_meta_info(self, output_path, expected_ranks=None):
+        generate_ft_index(output_path, self.env_params, expected_ranks=expected_ranks)
 
     @staticmethod
     def _copy_filtered_files(src_dir, dst_dir, exclude_patterns):

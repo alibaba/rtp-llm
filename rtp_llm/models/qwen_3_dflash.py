@@ -2,24 +2,22 @@
 
 from __future__ import annotations
 
-from typing import Any, List
-
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.model_factory_register import register_model
-from rtp_llm.model_loader.model_weight_info import ModelWeightInfo
 from rtp_llm.model_loader.weight_module import AtomicWeight
 from rtp_llm.models.qwen_v3 import QwenV3, QWenV3Weight
 from rtp_llm.utils.model_weight import CkptWeightInfo, W, identity, transpose
 from rtp_llm.utils.util import get_config_from_path
 
 
-class Qwen3DFlashWeight(QWenV3Weight):
-    """DFlash omits embedding/lm-head and borrows those target tensors."""
+class Qwen3DFlashFTWeights(QWenV3Weight):
+    """FT writer only: the draft archive owns the feature combiner, not vocabulary."""
 
-    def _get_weight_info(self) -> ModelWeightInfo:
+    def _get_weight_info(self):
         info = super()._get_weight_info()
-        # Keep embedding/lm-head descriptors so ModelLoader can validate the
-        # target aliases and skip their absent draft checkpoint tensors.
+        info.weights = [
+            w for w in info.weights if w.name not in (W.embedding, W.lm_head)
+        ]
         info.weights.extend(
             (
                 AtomicWeight(
@@ -37,6 +35,10 @@ class Qwen3DFlashWeight(QWenV3Weight):
 
 class Qwen3DFlash(QwenV3):
     """Dense mixed-mask Qwen3 DFlash draft model."""
+
+    @staticmethod
+    def get_weight_cls():
+        return Qwen3DFlashFTWeights
 
     @classmethod
     def _create_config(cls, ckpt_path: str) -> ModelConfig:
@@ -80,10 +82,6 @@ class Qwen3DFlash(QwenV3):
         # treating this mixed checkpoint as globally causal or non-causal.
         config.attn_config.is_causal = False
         return config
-
-    @staticmethod
-    def get_weight_cls():
-        return Qwen3DFlashWeight
 
     @classmethod
     def speculative_weight_alias_names(cls, target_model, draft_model_config):
@@ -134,21 +132,11 @@ class Qwen3DFlash(QwenV3):
                 "DFlash cannot share semantically incompatible target embedding/lm-head: "
                 + details
             )
-        return (W.embedding, W.lm_head)
-
-    def _create_python_model(self):
-        from rtp_llm.models_py.model_desc.qwen3_dflash_model import Qwen3DFlashModel
-
-        self.py_model = Qwen3DFlashModel(
-            self.model_config,
-            self.parallelism_config,
-            self.weight,
-            max_generate_batch_size=self.max_generate_batch_size,
-            quant_config=self.model_config.quant_config,
-            fmha_config=self.fmha_config,
-            py_hw_kernel_config=self.hw_kernel_config,
-        )
-        return self.py_model
+        if (getattr(target_config, "input_vocab_size", 0) or target_config.vocab_size) != (
+            getattr(draft_model_config, "input_vocab_size", 0) or draft_model_config.vocab_size
+        ):
+            raise ValueError("DFlash target and draft input vocabularies differ")
+        return ("embedding", "lm_head")
 
 
 register_model("qwen_3_dflash", Qwen3DFlash, ["DFlashDraftModel"])

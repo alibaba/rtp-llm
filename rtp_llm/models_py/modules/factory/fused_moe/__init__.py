@@ -80,6 +80,7 @@ else:
         CudaFp8PerBlockNoDPStrategy,
         CudaFp8PerBlockPureCPStrategy,
         CudaFp8PerBlockPureDPStrategy,
+        CudaFp8PerChannelNoDPStrategy,
         CudaFp8PerTensorEpLowLatencyStrategy,
         CudaFp8PerTensorEpNormalStrategy,
         CudaFp8PerTensorNoDPStrategy,
@@ -118,6 +119,7 @@ else:
     registry.register(CudaFp8PerBlockNoDPMaskedStrategy())
     registry.register(CudaFp8PerBlockNoDPStrategy())
     registry.register(CudaFp8PerTensorNoDPStrategy())
+    registry.register(CudaFp8PerChannelNoDPStrategy())
     registry.register(CudaNoQuantEpLowLatencyStrategy())
     registry.register(CudaNoQuantDpNormalStrategy())
     registry.register(CudaNoQuantCppStrategy())

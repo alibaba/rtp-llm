@@ -250,6 +250,25 @@ class DeepSeekVLV2VitWeight(BaseVitWeights):
 
 
 class DeepSeekVLV2Mixin(BaseMultiModalMixin):
+    @classmethod
+    def from_new_loader(
+        cls, compute_dtype, device, mm_related_params, load_method, vit_config, ckpt_path
+    ):
+        from rtp_llm.models_py.new_models.deepseek_vl2.vision import load_vision
+
+        result = cls.__new__(cls)
+        result.compute_dtype = compute_dtype
+        result.mm_related_params = mm_related_params
+        result.load_method = load_method
+        result.vit_config = vit_config
+        result.ckpt_path = ckpt_path
+        with torch.device("cpu"):
+            embedding = DeepSeekVLV2ImageEmbedding(mm_related_params)
+        result.mm_part = load_vision(
+            embedding, ckpt_path, compute_dtype, device, load_method
+        )
+        return result
+
     # override
     def _init_multimodal(self):
         self.mm_part = DeepSeekVLV2ImageEmbedding(self.mm_related_params)

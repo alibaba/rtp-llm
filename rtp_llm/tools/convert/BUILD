@@ -1,12 +1,50 @@
 package(default_visibility = ["//:__subpackages__"])
 
 py_library(
+    name = "ft_export_engram",
+    srcs = ["ft_export_engram.py"],
+    deps = ["//rtp_llm:checkpoint_file_utils", "//rtp_llm:safetensors_torch"],
+)
+
+py_library(
+    name = "ft_export_metadata",
+    srcs = ["ft_export_metadata.py"],
+    deps = ["//rtp_llm:safetensors_torch"],
+)
+
+py_library(
+    name = "ft_export_writer",
+    srcs = ["ft_export_writer.py"],
+    deps = ["//rtp_llm:safetensors_torch"],
+)
+
+py_test(
+    name = "ft_draft_contract_test",
+    srcs = ["ft_draft_contract_test.py"],
+    env = {"CUDA_VISIBLE_DEVICES": "", "OMP_NUM_THREADS": "1"},
+    deps = [
+        ":convert",
+        "//rtp_llm:safetensors_torch",
+        "//rtp_llm:transformers",
+        "//rtp_llm/models_py:new_weight_loader",
+        "//rtp_llm/models_py/new_models/qwen3_moe_eagle3:draft_body",
+    ],
+)
+
+py_test(
+    name = "ft_export_metadata_test",
+    srcs = ["ft_export_metadata_test.py"],
+    deps = [":ft_export_metadata", "//rtp_llm:torch"],
+)
+
+py_library(
     name = "convert",
     srcs = glob([
         "*.py",
     ]),
     deps = [
         "//rtp_llm:config",
+        "//rtp_llm:model_factory",
         "//rtp_llm:models",
         "//rtp_llm:openai_api",
         "//rtp_llm:structure",

@@ -7,6 +7,7 @@ from unittest.mock import patch
 import torch
 
 from rtp_llm.config.quant_config import Fp8BlockWiseQuantConfig
+from rtp_llm.model_loader.per_block_fp8_quant_weight import V4PerBlockFp8Weight
 from rtp_llm.models.deepseek_v4 import DeepSeekV4MtpWeight
 from rtp_llm.utils.model_weight import W
 
@@ -59,6 +60,7 @@ class MtpProjectionWeightTest(unittest.TestCase):
         for module in info.weights:
             if module.name not in expected:
                 continue
+            self.assertIsInstance(module, V4PerBlockFp8Weight)
             values = module.load(source, None, "cpu", config)
             self.assertFalse(set(loaded) & set(values), "duplicate global writer")
             loaded.update(values)

@@ -24,7 +24,7 @@ from typing import Any, Dict
 
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.model_factory_register import register_model
-from rtp_llm.models.deepseek_v2 import DeepSeekV2
+from rtp_llm.models.deepseek_v2 import DeepSeekV2, configure_mla_rope
 from rtp_llm.models.kimi_k25.kimi_k25_weight import KimiK25Weight
 
 _DEFAULT_MEDIA_PLACEHOLDER_ID = 163605
@@ -75,7 +75,7 @@ class KimiK25(DeepSeekV2):
         # the loaded JSON: write a flattened version to a tmp file and
         # point `ckpt_path` at it would be invasive, so instead replicate
         # the small subset of `_from_hf` we need on `text_config`.
-        cls._populate_text_config(config, text_config or top_config)
+        cls._populate_text_config(config, text_config or top_config, top_config)
         cls._populate_vision_config(config, top_config)
 
         # Mark this as multimodal so `BaseModel._may_init_multimodal`
@@ -87,7 +87,7 @@ class KimiK25(DeepSeekV2):
 
     @classmethod
     def _populate_text_config(
-        cls, config: ModelConfig, text_config: Dict[str, Any]
+        cls, config: ModelConfig, text_config: Dict[str, Any], top_config=None
     ) -> None:
         """Apply DeepSeekV2._from_hf-style parsing to `text_config`.
 
@@ -104,7 +104,10 @@ class KimiK25(DeepSeekV2):
             "num_key_value_heads", config.attn_config.head_num
         )
         config.num_layers = text_config["num_hidden_layers"]
-        config.attn_config.rope_config.base = int(text_config.get("rope_theta", 50000))
+        # Match the text owner's top-level/text_config precedence for RoPE.
+        configure_mla_rope(
+            config, {**(top_config or {}), **text_config}, default_base=50000
+        )
         config.vocab_size = text_config["vocab_size"]
         config.layernorm_eps = text_config.get("rms_norm_eps", 1e-6)
         config.tie_word_embeddings = text_config.get("tie_word_embeddings", False)
@@ -126,32 +129,6 @@ class KimiK25(DeepSeekV2):
         config.attn_config.rope_config.is_neox_style = not text_config.get(
             "rope_interleave", True
         )
-
-        # YaRN scaling
-        rope_scaling = text_config.get("rope_scaling")
-        if rope_scaling is not None:
-            from rtp_llm.utils.model_weight import yarn_get_mscale
-
-            config.attn_config.rope_config.scale = rope_scaling["factor"]
-            config.attn_config.rope_config.factor1 = float(
-                rope_scaling.get("beta_slow", 1)
-            )
-            config.attn_config.rope_config.factor2 = float(
-                rope_scaling.get("beta_fast", 32)
-            )
-            config.attn_config.rope_config.max_pos = rope_scaling[
-                "original_max_position_embeddings"
-            ]
-            scaling_factor = rope_scaling["factor"]
-            mscale = rope_scaling["mscale"]
-            mscale_all_dim = rope_scaling["mscale_all_dim"]
-            config.deepseek_rope_mscale = mscale
-            config.deepseek_mscale_all_dim = mscale_all_dim
-            config.attn_config.rope_config.mscale = yarn_get_mscale(
-                scaling_factor, mscale
-            ) / yarn_get_mscale(scaling_factor, mscale_all_dim)
-            softmax_mscale = yarn_get_mscale(scaling_factor, mscale_all_dim)
-            config.attn_config.softmax_extra_scale = softmax_mscale * softmax_mscale
 
         config.max_seq_len = text_config.get(
             "max_position_embeddings", config.max_seq_len or 8192

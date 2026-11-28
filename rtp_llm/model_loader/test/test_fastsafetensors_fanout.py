@@ -1,168 +1,100 @@
+"""The direct loader must deliver shared sources to all local parameter owners."""
+
+import tempfile
 import unittest
-from types import SimpleNamespace
-from unittest.mock import patch
+from pathlib import Path
 
 import torch
+from safetensors.torch import save_file
 
-from rtp_llm.config.quant_config import (
-    Fp8BlockWiseQuantConfig,
-    Fp8PerChannelCompressedQuantConfig,
-)
-from rtp_llm.model_loader.load_config import LoadMethod
-from rtp_llm.model_loader.loader import ModelLoader
-from rtp_llm.ops import TaskType
+from rtp_llm.models_py import weight_mapper
+from rtp_llm.models_py.model_loader import NewModelLoader
+from rtp_llm.models_py.module_base import RtpModule
 
 
-class _Weight:
-    def __init__(self, name, keys):
-        self.name = name
-        self.keys = set(keys)
-        self.loads = 0
+class SharedRow:
+    def handles_safetensor(self, name):
+        return name == "shared"
 
-    def get_components(self):
-        return [self]
-
-    def get_tensor_names(self, layer_id, load_config):
-        return self.keys
-
-    def load(self, tensor_source, layer_id, device, load_config):
-        self.loads += 1
-        return {self.name: sum(tensor_source.load_tensor(key)[0] for key in self.keys)}
+    def expand_safetensor(self, name, shape):
+        return [("first", 0), ("second", 0)]
 
 
-class _Database:
-    def __init__(self, iterated, fallback=None):
-        self.iterated = iterated
-        self.fallback = fallback or {}
-        self.fallback_reads = []
-        self.copyout_filter = None
-
-    def fastsafetensors_weights_iterator(self, device, collective, **kwargs):
-        self.copyout_filter = kwargs["local_copyout_filter"]
-        yield from self.iterated
-
-    def load_tensor(self, name, dtype):
-        self.fallback_reads.append(name)
-        return [self.fallback[name].to(dtype)]
+class TwoOwners(RtpModule):
+    def __init__(self, incomplete):
+        super().__init__()
+        self.first = torch.nn.Parameter(torch.empty(3))
+        self.second = torch.nn.Parameter(torch.empty(3))
+        if incomplete:
+            self.missing = torch.nn.Parameter(torch.empty(3))
 
 
-class FastSafeTensorsFanoutTest(unittest.TestCase):
-    def loader(self, weights, database):
-        loader = ModelLoader.__new__(ModelLoader)
-        loader._task_type = TaskType.LANGUAGE_MODEL
-        loader._global_weight_aliases = {}
-        loader._load_config = SimpleNamespace(
-            num_layers=1, layer_range=range(1), database=database
-        )
-        loader._model_weights_info = SimpleNamespace(
-            layer_weights=[weights], weights=[]
-        )
-        loader._misc_weights_info = []
-        loader._is_online_ptpc = lambda: False
-        loader._build_stacked_key_config = lambda _, misc: {}
-        result = {}
-        loader._create_model_weights = lambda _: SimpleNamespace(
-            set_layer_weight=lambda layer, name, tensor: result.__setitem__(
-                name, tensor
+def check_shared_source(case, native, incomplete):
+    expected = torch.tensor([[3.0, 5.0, 7.0]])
+    with tempfile.TemporaryDirectory() as temp:
+        path = str(Path(temp) / "model.safetensors")
+        save_file({"shared": expected, "unused": torch.ones(1)}, path)
+        opts = {"name_filter": lambda key: key == "shared"}
+        if native:
+            from rtp_llm.models_py.fst_range_reader import iter_fst_range_tensors
+
+            rows = iter_fst_range_tensors([path], slice_expander=SharedRow(), **opts)
+        else:
+            rows = weight_mapper.get_all_weights(
+                [path], safetensor_slice_expander=SharedRow(), **opts
             )
-        )
-        return loader, result
+        delivered = []
 
-    def test_shared_checkpoint_tensor_reaches_every_consumer_once(self):
-        first, second = _Weight("first", {"shared"}), _Weight("second", {"shared"})
-        database = _Database(
-            [("shared", torch.tensor([3.0])), ("shared", torch.tensor([4.0]))]
-        )
-        loader, result = self.loader([first, second], database)
-        loader._load_from_fastsafetensor("cpu")
-        self.assertEqual((first.loads, second.loads), (1, 1))
-        self.assertEqual(result["first"].item(), 3.0)
-        self.assertEqual(result["second"].item(), 3.0)
-        self.assertFalse(database.fallback_reads)
-        self.assertTrue(database.copyout_filter("shared"))
-        self.assertFalse(database.copyout_filter("unused"))
+        def observe():
+            for key, tensor in rows:
+                delivered.append(key)
+                yield key, tensor
 
-    def test_incomplete_consumer_falls_back_without_reloading_completed_units(self):
-        first = _Weight("complete", {"shared"})
-        second = _Weight("incomplete", {"shared", "missing"})
-        database = _Database(
-            [("shared", torch.tensor([3.0]))],
-            {"shared": torch.tensor([5.0]), "missing": torch.tensor([7.0])},
-        )
-        loader, result = self.loader([first, second], database)
-        loader._load_from_fastsafetensor("cpu")
-        self.assertEqual((first.loads, second.loads), (1, 1))
-        self.assertEqual(result["complete"].item(), 3.0)
-        self.assertEqual(result["incomplete"].item(), 12.0)
-        self.assertCountEqual(database.fallback_reads, ["shared", "missing"])
+        model = TwoOwners(incomplete)
+        model.load_weights(observe())
+        case.assertEqual(delivered, ["first", "second"])
+        for param in (model.first, model.second):
+            torch.testing.assert_close(param, expected[0])
+        if incomplete:
+            with case.assertRaisesRegex(RuntimeError, "missing"):
+                model.validate_weights_loaded()
+        else:
+            model.validate_weights_loaded()
 
 
-class FastSafeTensorsMemoryTest(unittest.TestCase):
-    def choose_load_method(self, quant_config, free_gib, moe_params=0):
-        gib = 1024**3
-        loader = ModelLoader.__new__(ModelLoader)
-        loader._load_method = LoadMethod.AUTO
-        loader._model_weights_info = SimpleNamespace(weights=[], layer_weights=[])
-        loader._misc_weights_info = []
-        loader.is_global_weight_local = lambda _: True
-        loader._weights_info = SimpleNamespace(
-            _quant_config=quant_config,
-            model_config=SimpleNamespace(
-                eval_model_weight_size_parts=lambda layers, moe_layers, vocab: (
-                    8 * gib * (1 - moe_params / 100),
-                    8 * gib * moe_params / 100,
-                ),
-                moe_layer_index=[0],
-                _extra_weight_bytes=0,
-                _replicated_extra_weight_bytes=0,
-                quant_algo=SimpleNamespace(getWeightBits=lambda: 8),
-                moe_weight_param_count=lambda: moe_params,
-                layer_weight_param_count=lambda: 100,
-            ),
-        )
-        loader._load_config = SimpleNamespace(
-            ep_size=1,
-            tp_size=1,
-            ffn_tp_size=1,
-            layer_range=range(1),
-            exported_device=SimpleNamespace(
-                get_mem_info=lambda: SimpleNamespace(free=free_gib * gib)
-            ),
-            database=SimpleNamespace(
-                is_safetensor=True,
-                get_max_file_size=lambda: gib,
-                get_pretrain_tensor_names=lambda: ["weight"],
-            ),
-        )
-        loader._choose_weight_convert_device = lambda _: "cuda"
-        loader._load_from_fastsafetensor = lambda _: LoadMethod.FASTSAFETENSORS
-        loader._load_from_scratch = lambda _: LoadMethod.SCRATCH
-        with patch("rtp_llm.model_loader.loader.has_module", return_value=True):
-            return loader._load_weight("cuda")
+class DirectFanoutTest(unittest.TestCase):
+    def test_shared_and_incomplete(self):
+        for incomplete in (False, True):
+            with self.subTest(incomplete=incomplete):
+                check_shared_source(self, False, incomplete)
 
-    def test_online_block_quantization_reserves_bf16_inputs(self):
-        online = Fp8BlockWiseQuantConfig(is_quanted=False)
-        self.assertEqual(self.choose_load_method(online, 16), LoadMethod.SCRATCH)
-        self.assertEqual(
-            self.choose_load_method(online, 24), LoadMethod.FASTSAFETENSORS
-        )
+    def test_budget_counts_actual_quantization_storage_and_shared_owners(self):
+        # Online conversion owners hold BF16 inputs; offline owners hold packed
+        # inputs. Count actual registered storage, including mixed expert ranks.
+        for bf16_rows in (0, 2, 4):
+            with self.subTest(bf16_rows=bf16_rows):
+                owner = torch.nn.Module()
+                owner.register_buffer(
+                    "online", torch.empty(bf16_rows, 8, dtype=torch.bfloat16)
+                )
+                owner.register_buffer(
+                    "offline", torch.empty(4 - bf16_rows, 8, dtype=torch.uint8)
+                )
+                owner.register_buffer("tied", owner.online)
+                size = NewModelLoader._model_storage_bytes(owner)
+                self.assertEqual(size, 32 + 8 * bf16_rows)
+                for shard, bounce in ((12, 4), (4, 12)):
+                    self.assertEqual(
+                        NewModelLoader.fst_staging_required_bytes(size, shard, bounce),
+                        size + 36,
+                    )
 
-    def test_prequantized_checkpoint_does_not_reserve_bf16_inputs(self):
-        offline = Fp8BlockWiseQuantConfig(is_quanted=True)
-        self.assertEqual(
-            self.choose_load_method(offline, 16), LoadMethod.FASTSAFETENSORS
-        )
 
-    def test_inline_ptpc_reserves_only_non_inline_weight_fraction(self):
-        online = Fp8PerChannelCompressedQuantConfig(is_quanted=False)
-        self.assertEqual(self.choose_load_method(online, 16), LoadMethod.SCRATCH)
-        self.assertEqual(
-            self.choose_load_method(online, 16, moe_params=50), LoadMethod.SCRATCH
-        )
-        self.assertEqual(
-            self.choose_load_method(online, 16, moe_params=75),
-            LoadMethod.FASTSAFETENSORS,
-        )
+class NativeFanoutTest(unittest.TestCase):
+    def test_real_fst_shared_and_incomplete(self):
+        for incomplete in (False, True):
+            with self.subTest(incomplete=incomplete):
+                check_shared_source(self, True, incomplete)
 
 
 if __name__ == "__main__":

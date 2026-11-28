@@ -11,6 +11,7 @@ from pathlib import Path
 from rtp_llm.resident_weights import store
 from rtp_llm.test.smoke import deepseek_v41_dspark_contract_test as dspark
 from rtp_llm.test.smoke import deepseek_v41_pd_contract_test as pd
+from rtp_llm.test.smoke.resident_checkpoint_logs import cold_checkpoint_owners
 
 EXPECTED_SLOTS = 8  # 4 GPUs (2 prefill + 2 decode) x 2 roles (target + draft)
 
@@ -63,6 +64,10 @@ class DeepSeekV41FullContractTest(
         return "\n".join(chunks)
 
     def _assert_resident_weights_restart(self, cold_short: dict) -> None:
+        # A positive control keeps a missing/renamed load message from silently
+        # disabling the warm-start check for either resident owner.
+        cold_owners = cold_checkpoint_owners(self._all_role_logs())
+        self.assertTrue({"deepseek_v41", "deepseek_v41_dspark"} <= cold_owners, cold_owners)
         slots = dict(store.list_store(self.store_name).slots or {})
         self.assertEqual(len(slots), EXPECTED_SLOTS, sorted(slots))
         for key, summary in slots.items():
@@ -89,6 +94,10 @@ class DeepSeekV41FullContractTest(
             attached, set(slots), "Not every rank/role attached from store"
         )
         self.assertNotIn("load weights took", warm_logs)
+        # The standalone vision tower is not stored in a target/draft slot.
+        # Only its own checkpoint reads are allowed on a warm restart.
+        unexpected = cold_checkpoint_owners(warm_logs) - {"deepseek_v41_vision"}
+        self.assertFalse(unexpected, f"Warm restart read non-vision checkpoints: {unexpected}")
         self.assertIn("DeepSeek V4.1 Engram initialized on layers", warm_logs)
         self.assertIn("capture success for batch size", warm_logs)
 

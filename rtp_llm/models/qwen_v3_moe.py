@@ -1,3 +1,5 @@
+import json
+import os
 from typing import TYPE_CHECKING, Any, List, Optional
 
 from rtp_llm.config.model_config import ModelConfig
@@ -27,7 +29,7 @@ class QWenV3MoeWeight(QWenV2MoeWeight):
         merge_lora=False,
         vit_config=None,
         prefix="",
-        **kwargs: Any
+        **kwargs: Any,
     ):
         super().__init__(
             model_config=model_config,
@@ -37,7 +39,7 @@ class QWenV3MoeWeight(QWenV2MoeWeight):
             merge_lora=merge_lora,
             vit_config=vit_config,
             prefix=prefix,
-            **kwargs
+            **kwargs,
         )
         self.bias = False
 
@@ -178,8 +180,32 @@ class Qwen3MoeEagle3Weight(QWenV2Weight):
 class Qwen3MoeEagle3(QWenV2):
     @classmethod
     def _create_config(cls, ckpt_path: str):
-        config = super()._create_config(ckpt_path)
+        from rtp_llm.models_py.new_models.qwen3_moe_eagle3.proposal import (
+            Eagle3FullVocabularyDraft,
+        )
+
+        with open(os.path.join(ckpt_path, "config.json")) as reader:
+            raw = json.load(reader)
+        ids = Eagle3FullVocabularyDraft.capture_ids(raw)
+        config = cls._create_config_from_json(ckpt_path, raw)
+        config.capture_aux_hidden_layer_ids = list(ids)
+        scaling = raw.get("rope_scaling") or {}
+        if scaling:
+            if scaling.get("rope_type", scaling.get("type")) != "llama3":
+                raise ValueError("unsupported EAGLE3 RoPE scaling")
+            rope = config.attn_config.rope_config
+            rope.style = 6
+            rope.scale = scaling["factor"]
+            rope.factor1 = scaling["low_freq_factor"]
+            rope.factor2 = scaling["high_freq_factor"]
+            rope.max_pos = scaling["original_max_position_embeddings"]
         return config
+
+    @classmethod
+    def speculative_weight_alias_names(cls, target_model, draft_config):
+        from rtp_llm.models_py.new_models.qwen3_moe_eagle3.proposal import target_vocabulary_loans
+
+        return target_vocabulary_loans(target_model.model_config)
 
     @staticmethod
     def get_weight_cls():

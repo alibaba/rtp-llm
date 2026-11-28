@@ -5,9 +5,8 @@ under the `language_model.model.layers.{i}.*` HF prefix (with the
 `language_model.` wrapper). We rewrite the checkpoint names produced by
 DeepSeekV2Weight to add this prefix.
 
-The ViT / patchmerger weight info has moved out — it is now declared by
-``KimiK25VitWeight`` in :mod:`rtp_llm.multimodal.multimodal_mixins.kimi_k25.kimi_k25_mixin`
-and loaded through the unified multimodal-mixin factory path.
+The multimodal mixin loads the vision tower and projector separately through
+``load_kimi_k25_vision``; they are not part of this text weight mapping.
 """
 
 from rtp_llm.model_loader.weight_module import CompositeWeight, WeightModule

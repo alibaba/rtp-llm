@@ -275,6 +275,25 @@ class DeepGemmHybridExecutor(FusedMoeExpertExecutor):
         )
 
         self.num_gemm_sms = get_num_device_sms()
+        self.use_deterministic_eplb_gather = False
+
+    @staticmethod
+    def _eplb_topk_expert_outputs(
+        down_output: torch.Tensor,
+        topk_idx: torch.Tensor,
+        output_index: torch.Tensor,
+    ) -> torch.Tensor:
+        """Keep one unweighted BF16 expert output per token/top-k position."""
+        flat_index = output_index.reshape(-1).to(torch.int64)
+        flat_topk = topk_idx.reshape(-1)
+        valid = (
+            (flat_topk >= 0) & (flat_index >= 0) & (flat_index < down_output.shape[0])
+        )
+        safe_index = flat_index.clamp(0, down_output.shape[0] - 1)
+        selected = down_output.index_select(0, safe_index).reshape(
+            *topk_idx.shape, down_output.shape[-1]
+        )
+        return selected.masked_fill(~valid.reshape(*topk_idx.shape, 1), 0)
 
     def execute(
         self,
@@ -627,6 +646,12 @@ class DeepGemmHybridExecutor(FusedMoeExpertExecutor):
             dispose_tensor(down_input)
             dispose_tensor(down_input_scale)
 
+            if self.use_deterministic_eplb_gather:
+                return CombineForwardPayload(
+                    fused_expert_output=self._eplb_topk_expert_outputs(
+                        down_output.view(-1, self.K), topk_idx, output_index
+                    )
+                )
             gather_out = torch.empty(
                 hidden_states_fp8_shape,
                 device=hidden_states_fp8_device,
@@ -689,7 +714,11 @@ class DeepGemmHybridExecutor(FusedMoeExpertExecutor):
         if routed_tokens == 0:
             return CombineForwardPayload(
                 fused_expert_output=torch.zeros(
-                    hidden_states_fp8.shape,
+                    (
+                        (*topk_idx.shape, hidden_states_fp8.shape[-1])
+                        if self.use_deterministic_eplb_gather
+                        else hidden_states_fp8.shape
+                    ),
                     device=hidden_states_fp8.device,
                     dtype=torch.bfloat16,
                 )
@@ -734,7 +763,11 @@ class DeepGemmHybridExecutor(FusedMoeExpertExecutor):
             if all_tokens == 0:
                 return CombineForwardPayload(
                     fused_expert_output=torch.zeros(
-                        hidden_states_fp8.shape,
+                        (
+                            (*topk_idx.shape, hidden_states_fp8.shape[-1])
+                            if self.use_deterministic_eplb_gather
+                            else hidden_states_fp8.shape
+                        ),
                         device=hidden_states_fp8.device,
                         dtype=torch.bfloat16,
                     )
@@ -869,6 +902,12 @@ class DeepGemmHybridExecutor(FusedMoeExpertExecutor):
                 disable_ue8m0_cast=not is_deep_gemm_e8m0_used(),
             )
         del down_input_fp8, down_input_scale
+        if self.use_deterministic_eplb_gather:
+            return CombineForwardPayload(
+                fused_expert_output=self._eplb_topk_expert_outputs(
+                    down_output, topk_idx, output_index
+                )
+            )
         gather_out = torch.empty(
             hidden_states_fp8_shape,
             device=hidden_states_fp8_device,
