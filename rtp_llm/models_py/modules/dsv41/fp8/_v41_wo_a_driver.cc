@@ -7,7 +7,17 @@
 struct EpilogueArgs {
     uint32_t* sfd;
     uint32_t  stride, m, n;
-    float     legacy;
+#if V41_POLICY_ABI
+    const int64_t* index_positions;
+    const void*    index_frequencies;
+    int64_t        index_num_positions;
+#endif
+    float legacy;
+#if V41_POLICY_ABI
+    float     clamp_value;
+    uint32_t* clamped_count;
+    uint32_t* clamp_count_ready;
+#endif
 };
 
 struct V41Module {
@@ -140,7 +150,12 @@ extern "C" int v41_wo_a_launch(void*    handle,
     V41_CHECK(make3(md, q, m, 1024, 8192, 1024, small ? 16 : 128));
     V41_CHECK(make_sf(msa, sa, (m + 3) / 4 * 4, 128));
     V41_CHECK(make_sf(msb, sb, 1024, small ? 128 : 256));
-    EpilogueArgs      epilogue{static_cast<uint32_t*>(sq), (m + 3) / 4 * 4, m, 1024, legacy ? 1.0f : 0.0f};
+    EpilogueArgs epilogue{};
+    epilogue.sfd    = static_cast<uint32_t*>(sq);
+    epilogue.stride = (m + 3) / 4 * 4;
+    epilogue.m      = m;
+    epilogue.n      = 1024;
+    epilogue.legacy = legacy ? 1.0f : 0.0f;
     CUlaunchAttribute attr{};
     attr.id               = CU_LAUNCH_ATTRIBUTE_CLUSTER_DIMENSION;
     attr.value.clusterDim = {2, 1, 1};

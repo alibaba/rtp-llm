@@ -34,6 +34,33 @@ _VENDOR_HASHES = {
     "common/math.cuh": "576e9db1a1889087f77b3f74d74d011bf452f16c0e5c030bdd661e961c074ddc",
 }
 
+# DeepGEMM 2.8.2+541b2e2 moves FP8 conversion into a policy and extends
+# EpilogueOperatorArgs. Select the device and host sides of that ABI together.
+_POLICY_VENDOR_HASHES = {
+    "impls/sm100_fp8_fp4_gemm_1d1d.cuh": "e141902e31178c1e54785e81a8afdd92599668dd43e5a7f431d1c8e6d4e6adb5",
+    "epilogue/sm100_store_cd.cuh": "0b23dcc32c4d08b1efb641844806dd92ebffd4697c8157bdfc5ca64238fe489b",
+    "epilogue/sm100_store_cd_swap_ab.cuh": "7d71c6630ba4d9376266cbdfdbe8fb38544cb1ac7ef2437d32ce52bdb2c76f6a",
+    "common/math.cuh": "a28f4dfe0340b62dbdb3e9c1286d5e7332d81bd5936ef7cbec13e8e447a2e51a",
+    "epilogue/operators.cuh": "603dbce5f18b533034c9a178f9014f3bdaeefc904bc27739b0387bd71ffa4dad",
+    "common/types.cuh": "deafe232c13a5e7ddb3fc7156f4c3d0c15d36f9966fad5f3a5e8b10a36af58ab",
+    "layout/gemm.cuh": "24535e829391efcb320b590b6b841ad5258a470999411b0d3f2347ad21410c32",
+    "impls/sm100_fp8_gemm_local_policy.cuh": "470da6d88dae81b48bcafc0fc0c79dd197c35721a8ddb077fa557165ffc93f46",
+}
+
+
+def _policy_abi(include):
+    for policy_abi, hashes in ((False, _VENDOR_HASHES), (True, _POLICY_VENDOR_HASHES)):
+        for name, expected in hashes.items():
+            header = include / "deep_gemm" / name
+            if (
+                not header.is_file()
+                or hashlib.sha256(header.read_bytes()).hexdigest() != expected
+            ):
+                break
+        else:
+            return policy_abi
+    return None
+
 
 def _device_supported(device):
     if device.type != "cuda":
@@ -93,15 +120,14 @@ def _dependencies():
     # Bazel may symlink individual package files into the runfiles tree.
     # Look beside the imported package before following its __init__.py symlink.
     module = Path(deep_gemm.__file__)
-    for include in dict.fromkeys((module.parent / "include", module.resolve().parent / "include")):
-        for name, expected in _VENDOR_HASHES.items():
-            header = include / "deep_gemm" / name
-            if not header.is_file() or hashlib.sha256(header.read_bytes()).hexdigest() != expected:
-                logging.warning("Missing or incompatible V41 epilogue header: %s", header)
-                break
-        else:
+    for include in dict.fromkeys(
+        (module.parent / "include", module.resolve().parent / "include")
+    ):
+        policy_abi = _policy_abi(include)
+        if policy_abi is not None:
             break
     else:
+        logging.warning("Missing or incompatible V41 epilogue headers for %s", module)
         return None
     cuda = os.environ.get("CUDA_HOME") or os.environ.get("CUDA_PATH")
     nvcc = str(Path(cuda) / "bin/nvcc") if cuda else shutil.which("nvcc")
@@ -112,11 +138,12 @@ def _dependencies():
     release = re.search(r"release (\d+)\.(\d+)", version)
     if release is None or int(release[1]) < 13:
         return None
-    return include, Path(nvcc).resolve().parent.parent, nvcc, cxx
+    return include, Path(nvcc).resolve().parent.parent, nvcc, cxx, policy_abi
 
 
 def _build_library(sms, dependencies):
-    include, cuda, nvcc, cxx = dependencies
+    include, cuda, nvcc, cxx, policy_abi = dependencies
+    abi_flag = f"-DV41_POLICY_ABI={int(policy_abi)}"
     source = Path(__file__).resolve().parent
     digest = hashlib.sha256(str(sms).encode())
     # driver.so is host code: shared caches must not mix ARM and x86 builds
@@ -160,6 +187,7 @@ def _build_library(sms, dependencies):
                         "--ptxas-options=--verbose",
                         "--diag-suppress=39,161,174,177,186,940",
                         f"-DV41_NUM_SMS={sms}",
+                        abi_flag,
                         "-I" + str(include),
                     ],
                     [
@@ -171,6 +199,7 @@ def _build_library(sms, dependencies):
                         "-fPIC",
                         "-O2",
                         "-std=c++17",
+                        abi_flag,
                         "-I" + str(cuda / "include"),
                         "-L" + str(cuda / "lib64/stubs"),
                         "-lcuda",

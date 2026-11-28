@@ -38,6 +38,44 @@ __device__ __forceinline__ unsigned v41_quant4(nv_bfloat162 a, nv_bfloat162 b, n
 
 }  // namespace deep_gemm::math
 
+#if V41_POLICY_ABI
+#include <deep_gemm/epilogue/operators.cuh>
+
+namespace deep_gemm::epilogue::operators {
+
+template<bool Legacy>
+struct V41ScalePolicy {
+    CUTLASS_DEVICE static uint32_t scale_exp(const nv_bfloat16& value) {
+        return math::V41QuantPolicy(Legacy).scale_exp<nv_bfloat16>(value);
+    }
+    CUTLASS_DEVICE static uint32_t pack(const nv_bfloat162& a, const nv_bfloat162& b, const nv_bfloat162& inv) {
+        return math::v41_quant4(a, b, inv, inv);
+    }
+};
+
+// Both modes use the same BF16 rounding, FP8 packing and SFD layout.
+// Only the scale calculation changes, once per uniform launch argument.
+struct V41QuantizeToFP8: CastToFP8<V41ScalePolicy<false>, false> {
+    using Base = CastToFP8<V41ScalePolicy<false>, false>;
+    using Base::Base;
+
+    template<bool SwapAB, uint32_t N>
+    CUTLASS_DEVICE void prepare_fp8(const uint32_t (&values)[N],
+                                    nv_bfloat162 (&rounded)[N / 2],
+                                    uint2&          scales,
+                                    const uint32_t& row,
+                                    const uint32_t& col) {
+        if (args.alpha != 0.0f) {
+            CastToFP8<V41ScalePolicy<true>, false> legacy(args);
+            legacy.template prepare_fp8<SwapAB>(values, rounded, scales, row, col);
+        } else {
+            Base::template prepare_fp8<SwapAB>(values, rounded, scales, row, col);
+        }
+    }
+};
+
+}  // namespace deep_gemm::epilogue::operators
+#else
 // Override only these two epilogue operations in this translation unit.
 // The vendor mainloop, BF16 rounding, reductions and TMA stores stay intact.
 #define get_ue8m0_sf_exp V41QuantPolicy(epilogue_operator.alpha).template scale_exp
@@ -46,3 +84,4 @@ __device__ __forceinline__ unsigned v41_quant4(nv_bfloat162 a, nv_bfloat162 b, n
 #include <deep_gemm/epilogue/sm100_store_cd_swap_ab.cuh>
 #undef scale_bf16x2_into_fp8x4
 #undef get_ue8m0_sf_exp
+#endif

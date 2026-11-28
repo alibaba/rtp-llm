@@ -152,7 +152,7 @@ class WoAQuantCPUContractTest(unittest.TestCase):
             root = Path(directory)
             include = root / "include"
             include.mkdir()
-            dependencies = (include, root, "nvcc", "c++")
+            dependencies = (include, root, "nvcc", "c++", False)
             with mock.patch.dict(
                 os.environ, {"DG_JIT_CACHE_DIR": directory}
             ), mock.patch.object(
