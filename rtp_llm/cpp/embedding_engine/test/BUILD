@@ -1,0 +1,33 @@
+load("//:def.bzl", "cc_test_wrapper", "copts")
+load("@arch_config//:arch_select.bzl", "torch_deps")
+
+cc_test = cc_test_wrapper
+
+cc_import(
+    name = "cuda13_torch_nvshmem",
+    shared_library = "@pip_gpu_cuda13_torch_torch//:site-packages/torch/lib/libtorch_nvshmem.so",
+)
+
+cuda13_torch_link_deps = select({
+    "@//:using_cuda13_x86": [
+        ":cuda13_torch_nvshmem",
+    ],
+    "//conditions:default": [],
+})
+
+cc_test(
+    name = "embedding_scheduler_batch_guard_test",
+    srcs = ["EmbeddingSchedulerBatchGuardTest.cc"],
+    copts = copts(),
+    deps = [
+        "//rtp_llm/cpp/config:config_modules",
+        "//rtp_llm/cpp/embedding_engine:embedding_engine",
+        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
+    ] + torch_deps() + cuda13_torch_link_deps,
+    env = {
+        "TEST_USING_DEVICE": "CUDA",
+    },
+    exec_properties = {"gpu": "L20_CU13"},
+    tags = ["L20_CU13"],
+)

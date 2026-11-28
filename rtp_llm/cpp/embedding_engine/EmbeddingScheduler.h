@@ -12,7 +12,8 @@ public:
     explicit EmbeddingScheduler(const ModelConfig&                 model_config,
                                 const ConcurrencyConfig&           concurrency_config,
                                 const RuntimeConfig&               runtime_config,
-                                const kmonitor::MetricsReporterPtr metrics_reporter = nullptr);
+                                const kmonitor::MetricsReporterPtr metrics_reporter = nullptr,
+                                const FMHAConfig&                  fmha_config      = FMHAConfig{});
 
     ~EmbeddingScheduler();
 
@@ -32,6 +33,7 @@ private:
     const ModelConfig             model_config_;
     const ConcurrencyConfig       concurrency_config_;
     const RuntimeConfig           runtime_config_;
+    const FMHAConfig              fmha_config_;
     std::list<EmbeddingStreamPtr> waiting_streams_;
     std::atomic<bool>             stop_ = false;
     std::mutex                    lock_;

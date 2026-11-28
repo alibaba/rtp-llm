@@ -4,12 +4,154 @@
 #include "rtp_llm/cpp/utils/StatusUtil.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
+#include <algorithm>
+#include <array>
+#include <cctype>
+#include <cstdlib>
 #include <c10/core/InferenceMode.h>
+#include <c10/util/Exception.h>
 #include <exception>
 #include <utility>
 
+#if defined(USING_CUDA) && USING_CUDA
+#include <c10/cuda/CUDACachingAllocator.h>
+#include <cuda_runtime.h>
+#elif defined(USING_ROCM) && USING_ROCM
+#include <hip/hip_runtime.h>
+#endif
+
 using namespace std;
 namespace rtp_llm {
+
+namespace {
+
+std::string toLowerCase(const std::string& input) {
+    std::string lower = input;
+    std::transform(lower.begin(), lower.end(), lower.begin(), [](unsigned char ch) {
+        return static_cast<char>(std::tolower(ch));
+    });
+    return lower;
+}
+
+bool containsAnyMarker(const std::string& haystack, const char* const* markers, size_t count) {
+    for (size_t i = 0; i < count; ++i) {
+        if (haystack.find(markers[i]) != std::string::npos) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool isRecoverableGpuOomMessage(const std::string& error_msg) {
+    static constexpr std::array<const char*, 10> kOomMarkers = {
+        "cuda out of memory",
+        "cuda error: out of memory",
+        "cuda runtime error: out of memory",
+        "cudaerrormemoryallocation",
+        "cublas_status_alloc_failed",
+        "hip out of memory",
+        "hip error: out of memory",
+        "hip runtime error: out of memory",
+        "hiperroroutofmemory",
+        "trackerallocator failed to allocate",
+    };
+    return containsAnyMarker(toLowerCase(error_msg), kOomMarkers.data(), kOomMarkers.size());
+}
+
+bool isRecoverableGpuOomException(const std::exception& e) {
+    if (dynamic_cast<const c10::OutOfMemoryError*>(&e) != nullptr) {
+        return true;
+    }
+    return isRecoverableGpuOomMessage(e.what() ? e.what() : "");
+}
+
+bool isFatalGpuRuntimeError(const std::string& error_msg) {
+    static constexpr std::array<const char*, 5> kFatalMarkers = {
+        "CUDA Driver error",
+        "CUDA error",
+        "CUDA runtime error",
+        "HIP error",
+        "HIP runtime error",
+    };
+    return containsAnyMarker(error_msg, kFatalMarkers.data(), kFatalMarkers.size());
+}
+
+void clearStickyGpuOomState() {
+#if defined(USING_CUDA) && USING_CUDA
+    constexpr int kMaxStickyErrorsToDrain = 16;
+    for (int i = 0; i < kMaxStickyErrorsToDrain; ++i) {
+        const cudaError_t err = cudaGetLastError();
+        if (err == cudaSuccess) {
+            break;
+        }
+        if (err != cudaErrorMemoryAllocation) {
+            RTP_LLM_LOG_ERROR("detect non-OOM sticky CUDA error after OOM (%d: %s), do abort",
+                              static_cast<int>(err),
+                              cudaGetErrorString(err));
+            abort();
+        }
+    }
+    const cudaError_t sync_err = cudaDeviceSynchronize();
+    if (sync_err == cudaErrorMemoryAllocation) {
+        (void)cudaGetLastError();
+    } else if (sync_err != cudaSuccess) {
+        RTP_LLM_LOG_ERROR("cudaDeviceSynchronize failed after OOM (%d: %s), do abort",
+                          static_cast<int>(sync_err),
+                          cudaGetErrorString(sync_err));
+        abort();
+    }
+    try {
+        c10::cuda::CUDACachingAllocator::emptyCache();
+    } catch (const std::exception& cache_err) {
+        RTP_LLM_LOG_WARNING("CUDACachingAllocator::emptyCache failed after OOM: %s", cache_err.what());
+    }
+#elif defined(USING_ROCM) && USING_ROCM
+    constexpr int kMaxStickyErrorsToDrain = 16;
+    for (int i = 0; i < kMaxStickyErrorsToDrain; ++i) {
+        const hipError_t err = hipGetLastError();
+        if (err == hipSuccess) {
+            break;
+        }
+        if (err != hipErrorOutOfMemory) {
+            RTP_LLM_LOG_ERROR("detect non-OOM sticky HIP error after OOM (%d: %s), do abort",
+                              static_cast<int>(err),
+                              hipGetErrorString(err));
+            abort();
+        }
+    }
+    const hipError_t sync_err = hipDeviceSynchronize();
+    if (sync_err == hipErrorOutOfMemory) {
+        (void)hipGetLastError();
+    } else if (sync_err != hipSuccess) {
+        RTP_LLM_LOG_ERROR("hipDeviceSynchronize failed after OOM (%d: %s), do abort",
+                          static_cast<int>(sync_err),
+                          hipGetErrorString(sync_err));
+        abort();
+    }
+#endif
+}
+
+bool handleStepFailure(const std::list<EmbeddingStreamPtr>& streams,
+                       const std::string&                   error_msg,
+                       bool                                 recoverable_oom) {
+    RTP_LLM_LOG_WARNING("run engine failed, stream size: %d, error: %s", streams.size(), error_msg.c_str());
+    for (const auto& stream : streams) {
+        stream->setError(error_msg);
+        RTP_LLM_LOG_WARNING("error_stream_info: length: %d", stream->inputLength());
+    }
+    if (recoverable_oom) {
+        RTP_LLM_LOG_WARNING("detect recoverable GPU OOM in embedding step, isolating failed batch and resetting runtime state");
+        clearStickyGpuOomState();
+        return true;
+    }
+    if (isFatalGpuRuntimeError(error_msg)) {
+        RTP_LLM_LOG_ERROR("detect fatal GPU runtime error, do abort: %s", error_msg.c_str());
+        abort();
+    }
+    return false;
+}
+
+}  // namespace
 
 EmbeddingEngine::EmbeddingEngine(const EngineInitParams& params, py::object handler):
     model_config_(params.model_config_),
@@ -24,8 +166,8 @@ EmbeddingEngine::EmbeddingEngine(const EngineInitParams& params, py::object hand
     }
     warmupNoBlockCopy();
     executor_.reset(new EmbeddingExecutor(params, handler));
-    scheduler_.reset(
-        new EmbeddingScheduler(model_config_, concurrency_config, params.runtime_config, metrics_reporter_));
+    scheduler_.reset(new EmbeddingScheduler(
+        model_config_, concurrency_config, params.runtime_config, metrics_reporter_, params.fmha_config));
     step_profiler_.configureFromConfig(params.profiling_debug_logging_config);
 
     (void)startLoop();
@@ -129,23 +271,15 @@ absl::Status EmbeddingEngine::step() {
         try {
             auto status = executor_->process(streams);
             if (!status.ok()) {
-                for (auto& stream : streams) {
-                    stream->setError(status.ToString());
-                    RTP_LLM_LOG_WARNING("error_stream_info: length: %d, exception: %s",
-                                        stream->inputLength(),
-                                        status.ToString().c_str());
+                const std::string error_msg = status.ToString();
+                if (handleStepFailure(streams, error_msg, isRecoverableGpuOomMessage(error_msg))) {
+                    return absl::OkStatus();
                 }
             }
         } catch (const exception& e) {
-            std::string error_msg = e.what();
-            RTP_LLM_LOG_WARNING("run engine failed, stream size: %d, error: %s", streams.size(), error_msg.c_str());
-            for (auto& stream : streams) {
-                stream->setError(error_msg);
-                RTP_LLM_LOG_WARNING("error_stream_info: length: %d", stream->inputLength());
-            }
-            if (error_msg.find("CUDA Driver error") != string::npos || error_msg.find("CUDA error") != string::npos) {
-                RTP_LLM_LOG_ERROR("detect CUDA error, do abort");
-                abort();
+            const std::string error_msg = e.what() ? e.what() : "";
+            if (handleStepFailure(streams, error_msg, isRecoverableGpuOomException(e))) {
+                return absl::OkStatus();
             }
         }
         cudaSyncAndCheck();
