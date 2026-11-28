@@ -50,21 +50,65 @@ std::vector<int64_t> sortedCacheGroupRows(const std::vector<std::string>& tags) 
     return rows;
 }
 
-torch::Tensor reorderCacheRows(const torch::Tensor& tensor, const std::vector<int64_t>& rows, bool block_table) {
+bool isIdentityRows(const std::vector<int64_t>& rows) {
+    for (size_t i = 0; i < rows.size(); ++i) {
+        if (rows[i] != static_cast<int64_t>(i)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+torch::Tensor copyInt64RowsToDeviceAsync(const std::vector<int64_t>& rows, torch::Device device) {
+    auto cpu_idx = torch::empty({static_cast<int64_t>(rows.size())},
+                                torch::TensorOptions(torch::kInt64).pinned_memory(true));
+    std::memcpy(cpu_idx.data_ptr<int64_t>(), rows.data(), rows.size() * sizeof(int64_t));
+    if (!device.is_cuda()) {
+        return cpu_idx;
+    }
+    // Pinned host storage allows non-blocking async H2D without cudaStreamSynchronize;
+    // PyTorch CachingHostAllocator records a stream event before reusing cpu_idx's block.
+    return cpu_idx.to(device, /*non_blocking=*/true);
+}
+
+void validateCacheRowsTensor(const torch::Tensor& tensor, const std::vector<int64_t>& rows, bool block_table) {
     if (!tensor.defined()) {
-        return tensor;
+        return;
     }
     if (block_table && tensor.dim() == 2) {
         RTP_LLM_CHECK_WITH_INFO(rows.size() == 1, "2-D cache table requires exactly one group");
-        return tensor;
+        return;
     }
     RTP_LLM_CHECK_WITH_INFO(tensor.dim() == (block_table ? 3 : 1)
                                 && tensor.size(0) == static_cast<int64_t>(rows.size()),
                             "cache payload row count must match its group tags (groups)");
-    if (rows.size() <= 1) {
+}
+
+torch::Tensor reorderCacheRows(const torch::Tensor& tensor, const std::vector<int64_t>& rows, bool block_table) {
+    if (!tensor.defined()) {
         return tensor;
     }
-    auto result = tensor.index_select(0, torch::tensor(rows, torch::kInt64).to(tensor.device()));
+    validateCacheRowsTensor(tensor, rows, block_table);
+    if (block_table && tensor.dim() == 2) {
+        return tensor;
+    }
+    if (rows.size() <= 1 || isIdentityRows(rows)) {
+        return tensor;
+    }
+    if (tensor.dim() == 1 && !tensor.is_cuda()) {
+        const auto elem_bytes = static_cast<size_t>(tensor.element_size());
+        auto       contig     = tensor.contiguous();
+        auto       result     = torch::empty(
+            {static_cast<int64_t>(rows.size())},
+            torch::TensorOptions(tensor.dtype()).pinned_memory(tensor.is_pinned()));
+        const auto* src = static_cast<const uint8_t*>(contig.data_ptr());
+        auto*       dst = static_cast<uint8_t*>(result.data_ptr());
+        for (size_t i = 0; i < rows.size(); ++i) {
+            std::memcpy(dst + i * elem_bytes, src + static_cast<size_t>(rows[i]) * elem_bytes, elem_bytes);
+        }
+        return result;
+    }
+    auto result = tensor.index_select(0, copyInt64RowsToDeviceAsync(rows, tensor.device()));
     return tensor.is_pinned() && !result.is_pinned() ? result.pin_memory() : result;
 }
 
@@ -82,11 +126,35 @@ torch::Tensor reorderCacheCopyRows(const torch::Tensor& mapping, const std::vect
     if (mapping.size(0) == 0) {
         return mapping;
     }
+    const int64_t row_limit = static_cast<int64_t>(rows.size());
+    const bool    identity  = rows.size() <= 1 || isIdentityRows(rows);
+    if (!mapping.is_cuda()) {
+        const int64_t  count = mapping.size(0);
+        const int32_t* src   = mapping.data_ptr<int32_t>();
+        for (int64_t i = 0; i < count; ++i) {
+            const int32_t src_row = src[i * 3];
+            RTP_LLM_CHECK_WITH_INFO(src_row >= 0 && static_cast<int64_t>(src_row) < row_limit,
+                                    "cache copy payload row is out of range");
+        }
+        if (identity) {
+            return mapping;
+        }
+        auto     result = torch::empty(mapping.sizes(), mapping.options());
+        int32_t* dst    = result.data_ptr<int32_t>();
+        for (int64_t i = 0; i < count; ++i) {
+            dst[i * 3]     = static_cast<int32_t>(rows[src[i * 3]]);
+            dst[i * 3 + 1] = src[i * 3 + 1];
+            dst[i * 3 + 2] = src[i * 3 + 2];
+        }
+        return mapping.is_pinned() && !result.is_pinned() ? result.pin_memory() : result;
+    }
     const auto source_rows = mapping.select(1, 0).to(torch::kInt64);
-    RTP_LLM_CHECK_WITH_INFO(
-        torch::logical_and(source_rows.ge(0), source_rows.lt(static_cast<int64_t>(rows.size()))).all().item<bool>(),
-        "cache copy payload row is out of range");
-    const auto row_map = torch::tensor(rows, torch::TensorOptions().dtype(torch::kInt64).device(mapping.device()));
+    RTP_LLM_CHECK_WITH_INFO(torch::logical_and(source_rows.ge(0), source_rows.lt(row_limit)).all().item<bool>(),
+                            "cache copy payload row is out of range");
+    if (identity) {
+        return mapping;
+    }
+    const auto row_map = copyInt64RowsToDeviceAsync(rows, mapping.device());
     auto       result  = mapping.clone();
     result.select(1, 0).copy_(row_map.index_select(0, source_rows).to(torch::kInt32));
     return result;
@@ -298,6 +366,7 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
         local_rows[sorted_rows[i]] = static_cast<int64_t>(i);
     }
     torch::Tensor wire_blocks, wire_kernel_blocks, wire_group_types, wire_copy_mapping;
+    const bool    needs_group_reorder = sorted_rows.size() > 1 && !isIdentityRows(sorted_rows);
     if (parallelism_config.tp_rank == 0 && !inputs.skip_run) {
         if (legacy_untagged_cache) {
             RTP_LLM_CHECK_WITH_INFO(
@@ -308,9 +377,15 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
                                         || inputs.kv_cache_update_mapping.numel() == 0,
                                     "cache update mapping requires cache group tags");
         }
-        wire_blocks        = reorderCacheRows(inputs.kv_cache_block_id, sorted_rows, true);
-        wire_kernel_blocks = reorderCacheRows(inputs.kv_cache_kernel_block_id, sorted_rows, true);
-        wire_group_types   = reorderCacheRows(inputs.kv_cache_group_types, sorted_rows, false);
+        // Validate group-table shapes synchronously on rank 0 before the collective;
+        // actual row permutation happens during packed-buffer pack/unpack below so
+        // CUDA block tables never allocate extra tensors or trigger index_select syncs.
+        validateCacheRowsTensor(inputs.kv_cache_block_id, sorted_rows, true);
+        validateCacheRowsTensor(inputs.kv_cache_kernel_block_id, sorted_rows, true);
+        validateCacheRowsTensor(inputs.kv_cache_group_types, sorted_rows, false);
+        wire_blocks        = inputs.kv_cache_block_id;
+        wire_kernel_blocks = inputs.kv_cache_kernel_block_id;
+        wire_group_types   = inputs.kv_cache_group_types;
         wire_copy_mapping  = legacy_untagged_cache && inputs.kv_cache_update_mapping.defined()
                                     && inputs.kv_cache_update_mapping.numel() == 0 ?
                                  inputs.kv_cache_update_mapping :
@@ -627,11 +702,24 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
 
     // Collect all tensors that participate in broadcast.
     // The collect order must be deterministic and identical across all ranks.
-    std::vector<torch::Tensor*> tensor_ptrs;
-    auto                        collect = [&](torch::Tensor& t) {
+    struct CollectedTensor {
+        torch::Tensor*              tensor;
+        const std::vector<int64_t>* row_order;
+    };
+    std::vector<CollectedTensor> tensor_ptrs;
+    auto                         collect = [&](torch::Tensor& t, const std::vector<int64_t>* row_order = nullptr) {
         if (t.defined() && t.numel() > 0) {
-            tensor_ptrs.push_back(&t);
+            tensor_ptrs.push_back({&t, row_order});
         }
+    };
+    auto cache_row_order = [&](const torch::Tensor& t, bool block_table) -> const std::vector<int64_t>* {
+        if (!needs_group_reorder || !t.defined()) {
+            return nullptr;
+        }
+        if (block_table && t.dim() != 3) {
+            return nullptr;
+        }
+        return &sorted_rows;
     };
 
     collect(inputs.combo_tokens);
@@ -646,14 +734,14 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
     collect(inputs.prefix_lengths);
     collect(inputs.cache_store_publish_start_tokens);
     if (max_kernel_blocks || max_blocks) {
-        collect(wire_kernel_blocks);
-        collect(wire_blocks);
+        collect(wire_kernel_blocks, cache_row_order(wire_kernel_blocks, true));
+        collect(wire_blocks, cache_row_order(wire_blocks, true));
         if (inputs.pd_separation) {
             collect(inputs.cache_keys);
         }
     }
     if (group_types_len) {
-        collect(wire_group_types);
+        collect(wire_group_types, cache_row_order(wire_group_types, false));
     }
     collect(wire_copy_mapping);
     collect(inputs.kv_cache_copy_token_lengths);
@@ -695,26 +783,28 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
     };
 
     struct PackEntry {
-        torch::Tensor* tensor;
-        int64_t        offset;
-        int64_t        nbytes;
+        torch::Tensor*              tensor;
+        int64_t                     offset;
+        int64_t                     nbytes;
+        const std::vector<int64_t>* row_order;
     };
     std::vector<PackEntry> cpu_entries, gpu_entries;
     int64_t                cpu_total_bytes = 0, gpu_total_bytes = 0;
 
-    for (auto* tp : tensor_ptrs) {
+    for (const auto& ct : tensor_ptrs) {
+        auto*      tp         = ct.tensor;
         const auto raw_nbytes = tp->nbytes();
         RTP_LLM_CHECK_WITH_INFO(raw_nbytes <= static_cast<size_t>(std::numeric_limits<int64_t>::max()),
                                 "tpSyncModelInputs tensor byte size exceeds int64");
         const auto nb      = static_cast<int64_t>(raw_nbytes);
         const auto aligned = align_up(nb, kPackAlignment);
         if (tp->is_cuda()) {
-            gpu_entries.push_back({tp, gpu_total_bytes, nb});
+            gpu_entries.push_back({tp, gpu_total_bytes, nb, ct.row_order});
             RTP_LLM_CHECK_WITH_INFO(gpu_total_bytes <= std::numeric_limits<int64_t>::max() - aligned,
                                     "tpSyncModelInputs GPU packed-buffer size overflow");
             gpu_total_bytes += aligned;
         } else {
-            cpu_entries.push_back({tp, cpu_total_bytes, nb});
+            cpu_entries.push_back({tp, cpu_total_bytes, nb, ct.row_order});
             RTP_LLM_CHECK_WITH_INFO(cpu_total_bytes <= std::numeric_limits<int64_t>::max() - aligned,
                                     "tpSyncModelInputs CPU packed-buffer size overflow");
             cpu_total_bytes += aligned;
@@ -733,7 +823,17 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
             auto* base = static_cast<uint8_t*>(cpu_packed.data_ptr());
             for (auto& e : cpu_entries) {
                 auto contig = e.tensor->contiguous();
-                std::memcpy(base + e.offset, contig.data_ptr(), e.nbytes);
+                if (e.row_order != nullptr) {
+                    const auto& rows      = *e.row_order;
+                    const auto  row_count = static_cast<int64_t>(rows.size());
+                    const auto  row_bytes = e.nbytes / row_count;
+                    const auto* src_base  = static_cast<const uint8_t*>(contig.data_ptr());
+                    for (int64_t w = 0; w < row_count; ++w) {
+                        std::memcpy(base + e.offset + w * row_bytes, src_base + rows[w] * row_bytes, row_bytes);
+                    }
+                } else {
+                    std::memcpy(base + e.offset, contig.data_ptr(), e.nbytes);
+                }
             }
         }
     }
@@ -741,20 +841,41 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
     if (gpu_total_bytes > 0) {
         gpu_packed = torch::empty({gpu_total_bytes}, torch::TensorOptions(torch::kUInt8).device(torch::kCUDA));
         if (is_root) {
-            auto*              packed_base = static_cast<uint8_t*>(gpu_packed.data_ptr());
-            FusedD2DCopyParams fused_params;
-            auto               flush_fused_copy = [&]() {
+            auto*                      packed_base = static_cast<uint8_t*>(gpu_packed.data_ptr());
+            FusedD2DCopyParams         fused_params;
+            std::vector<torch::Tensor> temp_contigs;
+            auto                       flush_fused_copy = [&]() {
                 if (fused_params.num_copies > 0) {
                     fusedCopy(fused_params);
                     fused_params.clear();
                 }
             };
+            auto enqueue_fused_copy = [&](const void* src_ptr, void* dst_ptr, size_t nbytes) {
+                if (fused_params.num_copies == MAX_FUSED_D2D_COPIES) {
+                    flush_fused_copy();
+                }
+                fused_params.add(src_ptr, dst_ptr, nbytes);
+            };
             for (auto& e : gpu_entries) {
-                if (e.tensor->is_contiguous()) {
-                    if (fused_params.num_copies == MAX_FUSED_D2D_COPIES) {
-                        flush_fused_copy();
+                if (e.row_order != nullptr) {
+                    const auto& rows      = *e.row_order;
+                    const auto  row_count = static_cast<int64_t>(rows.size());
+                    const auto  row_bytes = e.nbytes / row_count;
+                    const uint8_t* src_base = nullptr;
+                    if (e.tensor->is_contiguous()) {
+                        src_base = static_cast<const uint8_t*>(e.tensor->data_ptr());
+                    } else {
+                        temp_contigs.push_back(e.tensor->contiguous());
+                        src_base = static_cast<const uint8_t*>(temp_contigs.back().data_ptr());
                     }
-                    fused_params.add(e.tensor->data_ptr(), packed_base + e.offset, static_cast<size_t>(e.nbytes));
+                    for (int64_t w = 0; w < row_count; ++w) {
+                        enqueue_fused_copy(
+                            src_base + rows[w] * row_bytes, packed_base + e.offset + w * row_bytes, static_cast<size_t>(row_bytes));
+                    }
+                    continue;
+                }
+                if (e.tensor->is_contiguous()) {
+                    enqueue_fused_copy(e.tensor->data_ptr(), packed_base + e.offset, static_cast<size_t>(e.nbytes));
                     continue;
                 }
 
@@ -784,7 +905,17 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
         if (cpu_total_bytes > 0) {
             auto* base = static_cast<const uint8_t*>(cpu_packed.data_ptr());
             for (auto& e : cpu_entries) {
-                std::memcpy(e.tensor->data_ptr(), base + e.offset, e.nbytes);
+                if (e.row_order != nullptr) {
+                    const auto& rows      = *e.row_order;
+                    const auto  row_count = static_cast<int64_t>(rows.size());
+                    const auto  row_bytes = e.nbytes / row_count;
+                    auto*       dst_base  = static_cast<uint8_t*>(e.tensor->data_ptr());
+                    for (int64_t w = 0; w < row_count; ++w) {
+                        std::memcpy(dst_base + rows[w] * row_bytes, base + e.offset + w * row_bytes, row_bytes);
+                    }
+                } else {
+                    std::memcpy(e.tensor->data_ptr(), base + e.offset, e.nbytes);
+                }
             }
         }
         if (gpu_total_bytes > 0) {
@@ -796,12 +927,26 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
                     fused_params.clear();
                 }
             };
+            auto enqueue_fused_copy = [&](const void* src_ptr, void* dst_ptr, size_t nbytes) {
+                if (fused_params.num_copies == MAX_FUSED_D2D_COPIES) {
+                    flush_fused_copy();
+                }
+                fused_params.add(src_ptr, dst_ptr, nbytes);
+            };
             for (auto& e : gpu_entries) {
-                if (e.tensor->is_contiguous()) {
-                    if (fused_params.num_copies == MAX_FUSED_D2D_COPIES) {
-                        flush_fused_copy();
+                if (e.row_order != nullptr && e.tensor->is_contiguous()) {
+                    const auto& rows      = *e.row_order;
+                    const auto  row_count = static_cast<int64_t>(rows.size());
+                    const auto  row_bytes = e.nbytes / row_count;
+                    auto*       dst_base  = static_cast<uint8_t*>(e.tensor->data_ptr());
+                    for (int64_t w = 0; w < row_count; ++w) {
+                        enqueue_fused_copy(
+                            packed_base + e.offset + w * row_bytes, dst_base + rows[w] * row_bytes, static_cast<size_t>(row_bytes));
                     }
-                    fused_params.add(packed_base + e.offset, e.tensor->data_ptr(), static_cast<size_t>(e.nbytes));
+                    continue;
+                }
+                if (e.tensor->is_contiguous()) {
+                    enqueue_fused_copy(packed_base + e.offset, e.tensor->data_ptr(), static_cast<size_t>(e.nbytes));
                     continue;
                 }
 
@@ -827,10 +972,7 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
         RTP_LLM_CHECK_WITH_INFO(legacy_untagged_cache || kv_cache_group_num == static_cast<int64_t>(sorted_rows.size()),
                                 "TP cache payload group count differs from configured identities (groups)");
         if (is_non_root) {
-            inputs.kv_cache_block_id        = reorderCacheRows(wire_blocks, local_rows, true);
-            inputs.kv_cache_kernel_block_id = reorderCacheRows(wire_kernel_blocks, local_rows, true);
-            inputs.kv_cache_group_types     = reorderCacheRows(wire_group_types, local_rows, false);
-            inputs.kv_cache_update_mapping  = reorderCacheCopyRows(wire_copy_mapping, sorted_rows);
+            inputs.kv_cache_update_mapping = reorderCacheCopyRows(wire_copy_mapping, sorted_rows);
         }
     }
 }

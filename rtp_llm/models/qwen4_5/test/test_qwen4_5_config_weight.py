@@ -728,6 +728,379 @@ class TestQwen4_5ConfigWeightKVCache(unittest.TestCase):
         self.assertEqual(p_dp2_tpsp2.layers[0].ssm_state_shape, p_dp2_tp2.layers[0].ssm_state_shape)
         self.assertEqual(p_dp2_tpsp2.layers[0].gdn_conv_channels, 6144)
 
+    def test_11_decode_rolling_opaque_pool_and_1109_capacity(self) -> None:
+        from types import SimpleNamespace
+        from unittest.mock import patch
+
+        from rtp_llm.models.qwen4_5.qwen4_5_kv_cache import (
+            DECODE_STATE_ACTIVE_TAIL_BLOCKS_ENV,
+            DECODE_STATE_GROUP_TYPE_ENV,
+            DECODE_STATE_POOL_BLOCKS_ENV,
+            DECODE_STATE_ROLLING_ENV,
+            FULL_ATTN_KV_TAG,
+            GDN_CONSUMER_Q_CONV_TAG,
+            GDN_CONV_STATE_TAG,
+            GDN_SSM_STATE_TAG,
+            build_qwen4_5_kv_cache_plan,
+            build_qwen4_5_kv_cache_spec_descs,
+            resolve_decode_opaque_state_pool_policy,
+        )
+
+        nine_opaque_tags = {
+            GDN_SSM_STATE_TAG,
+            GDN_CONV_STATE_TAG,
+            GDN_CONSUMER_Q_CONV_TAG,
+            FULL_ATTN_KV_SCONV_TAG,
+            FULL_ATTN_OUTPUT_SCONV_TAG,
+            LINEAR_ATTN_OUTPUT_SCONV_TAG,
+            FFN_OUTPUT_SCONV_TAG,
+            PLE_STATE_TAG,
+            PLE_NGRAM_CTX_TAG,
+        }
+
+        with patch.dict(os.environ, {}, clear=False):
+            for k in (
+                "ROLE_TYPE",
+                DECODE_STATE_ROLLING_ENV,
+                DECODE_STATE_GROUP_TYPE_ENV,
+                DECODE_STATE_POOL_BLOCKS_ENV,
+                DECODE_STATE_ACTIVE_TAIL_BLOCKS_ENV,
+            ):
+                os.environ.pop(k, None)
+
+            prefill_pol = resolve_decode_opaque_state_pool_policy(role_type="PREFILL")
+            self.assertFalse(prefill_pol.is_decode_role)
+            self.assertFalse(prefill_pol.rolling_enabled)
+            self.assertEqual(prefill_pol.mode, "full")
+            self.assertTrue(prefill_pol.enable_prefix_reuse)
+            self.assertEqual(prefill_pol.active_tail_blocks, 0)
+            self.assertTrue(prefill_pol.reservable)
+
+            dec_pol = resolve_decode_opaque_state_pool_policy(role_type="DECODE")
+            self.assertTrue(dec_pol.is_decode_role)
+            self.assertTrue(dec_pol.rolling_enabled)
+            self.assertEqual(dec_pol.mode, "linear")
+            self.assertFalse(dec_pol.enable_prefix_reuse)
+            self.assertEqual(dec_pol.active_tail_blocks, 1)
+            self.assertFalse(dec_pol.validate_tail_blocks)
+            self.assertFalse(dec_pol.reservable)
+            self.assertEqual(dec_pol.explicit_block_num, 256)
+            self.assertTrue(dec_pol.charge_to_paged_budget)
+
+            dec_spec_pol = resolve_decode_opaque_state_pool_policy(
+                SimpleNamespace(gen_num_per_cycle=8), role_type="DECODE"
+            )
+            self.assertEqual(dec_spec_pol.explicit_block_num, 512)
+
+            with patch.dict(os.environ, {DECODE_STATE_GROUP_TYPE_ENV: "swa"}):
+                swa_pol = resolve_decode_opaque_state_pool_policy(
+                    SimpleNamespace(gen_num_per_cycle=8), role_type="DECODE"
+                )
+                self.assertEqual(swa_pol.mode, "swa")
+                self.assertEqual(swa_pol.active_tail_blocks, 2)
+                self.assertEqual(swa_pol.explicit_block_num, 256)
+
+            with patch.dict(os.environ, {DECODE_STATE_POOL_BLOCKS_ENV: "384"}):
+                ov_pol = resolve_decode_opaque_state_pool_policy(role_type="DECODE")
+                self.assertEqual(ov_pol.explicit_block_num, 384)
+
+            for dis_env in (
+                {DECODE_STATE_ROLLING_ENV: "0"},
+                {DECODE_STATE_GROUP_TYPE_ENV: "full"},
+            ):
+                with patch.dict(os.environ, dis_env):
+                    rb_pol = resolve_decode_opaque_state_pool_policy(role_type="DECODE")
+                    self.assertFalse(rb_pol.rolling_enabled)
+                    self.assertEqual(rb_pol.mode, "full")
+                    self.assertTrue(rb_pol.enable_prefix_reuse)
+                    self.assertEqual(rb_pol.active_tail_blocks, 0)
+                    self.assertTrue(rb_pol.reservable)
+
+            cfg_lin = SimpleNamespace(
+                linear_pool_blocks=320, swa_pool_blocks=192, kv_cache_mem_mb=0, test_block_num=0
+            )
+            self.assertEqual(
+                resolve_decode_opaque_state_pool_policy(
+                    role_type="DECODE", kv_cache_config=cfg_lin
+                ).explicit_block_num,
+                320,
+            )
+            with patch.dict(os.environ, {DECODE_STATE_GROUP_TYPE_ENV: "swa"}):
+                self.assertEqual(
+                    resolve_decode_opaque_state_pool_policy(
+                        role_type="DECODE", kv_cache_config=cfg_lin
+                    ).explicit_block_num,
+                    192,
+                )
+
+            plan_tp4 = build_qwen4_5_kv_cache_plan(
+                self.arch_cfg, tp_size=4, parallel_mode="tp4_ep4", enable_yoco_decode=True
+            )
+            small_mem_cfg = SimpleNamespace(
+                linear_pool_blocks=0, swa_pool_blocks=0, kv_cache_mem_mb=512, test_block_num=0
+            )
+            small_pol = resolve_decode_opaque_state_pool_policy(
+                role_type="DECODE",
+                kv_cache_config=small_mem_cfg,
+                per_block_opaque_bytes=plan_tp4.opaque_state_bytes_per_block,
+            )
+            self.assertGreaterEqual(small_pol.explicit_block_num, 2)
+            self.assertLessEqual(
+                small_pol.explicit_block_num * plan_tp4.opaque_state_bytes_per_block,
+                512 * 1024 * 1024 // 2,
+            )
+
+            with patch.dict(os.environ, {DECODE_STATE_POOL_BLOCKS_ENV: "1"}):
+                with self.assertRaises(ValueError):
+                    resolve_decode_opaque_state_pool_policy(role_type="DECODE")
+            with patch.dict(os.environ, {DECODE_STATE_GROUP_TYPE_ENV: "invalid_gt"}):
+                with self.assertRaises(ValueError):
+                    resolve_decode_opaque_state_pool_policy(role_type="DECODE")
+
+        # 1109 KV capacity scaling check on 77.28 GiB budget (BF16 vs FP8, shared FULL vs Decode rolling)
+        plan_tp4_fp8 = build_qwen4_5_kv_cache_plan(
+            self.arch_cfg,
+            tp_size=4,
+            parallel_mode="tp4_ep4",
+            kv_dtype="fp8_e4m3",
+            enable_yoco_decode=True,
+        )
+        budget_77g = int(77.28 * (1024**3))
+        cap_shared_bf16 = plan_tp4.estimate_capacity(
+            budget_77g, tokens_per_block=128, is_decode_rolling=False
+        )
+        cap_roll_bf16 = plan_tp4.estimate_capacity(
+            budget_77g, tokens_per_block=128, is_decode_rolling=True, opaque_pool_blocks=256
+        )
+        cap_roll_fp8 = plan_tp4_fp8.estimate_capacity(
+            budget_77g, tokens_per_block=128, is_decode_rolling=True, opaque_pool_blocks=256
+        )
+        self.assertGreater(cap_roll_bf16["full_kv_blocks"], 115000)
+        self.assertLess(cap_shared_bf16["full_kv_blocks"], 8000)
+        self.assertGreater(cap_roll_fp8["full_kv_blocks"], 230000)
+        self.assertAlmostEqual(
+            cap_roll_bf16["opaque_pool_bytes"] / float(1024**3), 2.70, delta=0.20
+        )
+
+        # Verify compiled C++ KVCacheSpecDesc descriptors if rtp_llm.ops is present
+        try:
+            from rtp_llm.ops import CacheGroupType, RoleType
+        except Exception:
+            return
+
+        dummy_cfg = SimpleNamespace(
+            qwen4_5_arch_config=self.arch_cfg,
+            attn_config=SimpleNamespace(tokens_per_block=128, kernel_tokens_per_block=128),
+            gen_num_per_cycle=0,
+        )
+        with patch.dict(os.environ, {}, clear=False):
+            for k in (DECODE_STATE_ROLLING_ENV, DECODE_STATE_GROUP_TYPE_ENV, DECODE_STATE_POOL_BLOCKS_ENV):
+                os.environ.pop(k, None)
+            p_descs = build_qwen4_5_kv_cache_spec_descs(
+                dummy_cfg, self.arch_cfg, tp_size=4, parallel_mode="tp4_ep4", role_type=RoleType.PREFILL
+            )
+            d_descs = build_qwen4_5_kv_cache_spec_descs(
+                dummy_cfg, self.arch_cfg, tp_size=4, parallel_mode="tp4_ep4", role_type=RoleType.DECODE
+            )
+            with patch.dict(os.environ, {DECODE_STATE_GROUP_TYPE_ENV: "swa"}):
+                d_swa_descs = build_qwen4_5_kv_cache_spec_descs(
+                    dummy_cfg, self.arch_cfg, tp_size=4, parallel_mode="tp4_ep4", role_type=RoleType.DECODE
+                )
+
+        seen_opaque = set()
+        for layer_d in p_descs:
+            for d in layer_d:
+                self.assertIn(d.group_type, (None, CacheGroupType.FULL))
+                if d.tag in nine_opaque_tags:
+                    self.assertEqual(d.group_type, CacheGroupType.FULL)
+                    self.assertTrue(d.reuse.enable_prefix_reuse)
+                    self.assertEqual(d.tail.active_tail_blocks, 0)
+        for layer_d in d_descs:
+            for d in layer_d:
+                if d.tag == FULL_ATTN_KV_TAG:
+                    self.assertIn(d.group_type, (None, CacheGroupType.FULL))
+                elif d.tag in nine_opaque_tags:
+                    seen_opaque.add(d.tag)
+                    self.assertEqual(d.group_type, CacheGroupType.LINEAR)
+                    self.assertFalse(d.reuse.enable_prefix_reuse)
+                    self.assertEqual(d.tail.active_tail_blocks, 1)
+                    self.assertFalse(d.tail.validate_tail_blocks)
+                    self.assertFalse(d.capacity.reservable)
+                    self.assertEqual(d.capacity.explicit_block_num, 256)
+                    self.assertTrue(d.capacity.charge_to_paged_budget)
+        self.assertEqual(seen_opaque, nine_opaque_tags)
+
+        for layer_d in d_swa_descs:
+            for d in layer_d:
+                if d.tag in nine_opaque_tags:
+                    self.assertEqual(d.group_type, CacheGroupType.SWA)
+                    self.assertEqual(d.tail.active_tail_blocks, 2)
+                    self.assertFalse(d.capacity.reservable)
+                    self.assertEqual(d.capacity.explicit_block_num, 256)
+
+    def test_12_fp8_kv_cache_ple_mode_and_load_wiring(self) -> None:
+        import tempfile
+        from types import SimpleNamespace
+        from unittest.mock import patch
+
+        from rtp_llm.config.quant_config import MXFp4QuarkQuantConfig, QuantizationConfig
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            (Path(tmpdir) / "config.json").write_text(
+                json.dumps(self.raw_config), encoding="utf-8"
+            )
+            qcfg = QuantizationConfig.load_from_ckpt(tmpdir)
+            self.assertIsInstance(qcfg, MXFp4QuarkQuantConfig)
+            self.assertEqual(qcfg.bits, 4)
+            self.assertEqual(qcfg.group_size(), 32)
+            self.assertTrue(qcfg.is_quanted())
+            try:
+                import torch
+
+                qcfg.verify_compute_dtype_and_kv_cache_dtype(
+                    torch.bfloat16, torch.float8_e4m3fn
+                )
+            except ImportError:
+                pass
+
+        # Verify _resolve_kv_dtype and _resolve_ple_mode
+        try:
+            from rtp_llm.ops import KvCacheDataType, RoleType
+            from rtp_llm.config.kv_cache_config import KVCacheConfig
+        except Exception:
+            return
+
+        import torch
+
+        mc = Qwen4_5.create_config(REF_CONFIG_PATH)
+        kv_cfg = KVCacheConfig()
+        kv_cfg.fp8_kv_cache = True
+        kv_cfg.seq_size_per_block = 128
+        mc.init_precision_config(kv_cfg, "bf16")
+        Qwen4_5._apply_kv_cache_config(mc, kv_cfg)
+        self.assertEqual(mc.attn_config.kv_cache_dtype, KvCacheDataType.FP8)
+        self.assertEqual(Qwen4_5._resolve_kv_dtype(mc), "fp8_e4m3")
+        self.assertEqual(mc.qwen4_5_kv_cache_plan.kv_dtype, "FP8_E4M3")
+        self.assertEqual(mc.qwen4_5_kv_cache_plan.kv_dtype_bytes, 1)
+        self.assertEqual(mc.qwen4_5_param_and_state_estimate.kv_dtype_bytes, 1)
+
+        with patch.dict(os.environ, {"QWEN4_5_PLE_MODE": "shm"}):
+            self.assertEqual(Qwen4_5._resolve_ple_mode(mc), "shm")
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("QWEN4_5_PLE_MODE", None)
+            self.assertEqual(Qwen4_5._resolve_ple_mode(mc), "gpu_sharded")
+
+        # Verify _load rebuilds plan & specs unconditionally even when tp_size == 1 (dp4_ep4 + DECODE + FP8 + PLE mode)
+        captured: dict = {}
+
+        class _FakeParam:
+            def __init__(self, shape):
+                self.weight = torch.zeros(shape, dtype=torch.bfloat16)
+
+        class _FakeCausalLM:
+            def __init__(self, *args, **kwargs):
+                captured["causal_kwargs"] = kwargs
+                self.model = SimpleNamespace(embed_tokens=_FakeParam((self.vocab_size(args[0]), 8)))
+                self.lm_head = _FakeParam((self.vocab_size(args[0]), 8))
+                self.layers = []
+
+            @staticmethod
+            def vocab_size(arch):
+                return int(arch.vocab_size)
+
+        def _fake_loader(causal_lm, ckpt_path, *, ple_mode="gpu_sharded", **kwargs):
+            captured["ple_mode"] = ple_mode
+            captured["ckpt_path"] = ckpt_path
+
+        dummy_self = SimpleNamespace(
+            model_config=mc,
+            parallelism_config=SimpleNamespace(
+                tp_size=1,
+                tp_rank=0,
+                dp_size=4,
+                dp_rank=1,
+                ep_size=4,
+                ep_rank=1,
+                role_type=RoleType.DECODE,
+                parallel_mode="dp4_ep4",
+            ),
+            kv_cache_config=kv_cfg,
+            build_kv_cache_plan=Qwen4_5.build_kv_cache_plan,
+            _resolve_load_parallel_topology=Qwen4_5._resolve_load_parallel_topology,
+            _resolve_kv_dtype=Qwen4_5._resolve_kv_dtype,
+            _resolve_role_type=Qwen4_5._resolve_role_type,
+            _resolve_ple_mode=Qwen4_5._resolve_ple_mode,
+        )
+        with (
+            patch.dict(os.environ, {"QWEN4_5_PLE_MODE": "cpu_uva"}),
+            patch("rtp_llm.models_py.model_desc.qwen4_5.Qwen4_5ForCausalLM", _FakeCausalLM),
+            patch(
+                "rtp_llm.models_py.modules.qwen4_5.checkpoint_loader.load_qwen4_5_from_checkpoint",
+                _fake_loader,
+            ),
+        ):
+            Qwen4_5._load(dummy_self, "cpu")
+
+        self.assertEqual(captured["causal_kwargs"]["kv_dtype"], "fp8_e4m3")
+        self.assertEqual(captured["ple_mode"], "cpu_uva")
+        self.assertEqual(mc.qwen4_5_kv_cache_plan.kv_dtype, "FP8_E4M3")
+        self.assertEqual(mc.qwen4_5_kv_cache_plan.layers[0].ssm_state_shape, (128, 64, 64))
+        from rtp_llm.ops import CacheGroupType
+
+        state_descs = [d for layer_d in mc.kv_cache_spec_descs for d in layer_d if d.is_state_cache]
+        self.assertTrue(all(d.group_type == CacheGroupType.LINEAR for d in state_descs))
+
+    def test_13_parallel_modes_kv_plan_and_cachestore_transfer_contract(self) -> None:
+        from rtp_llm.models.qwen4_5.qwen4_5_kv_cache import (
+            build_qwen4_5_kv_cache_spec_descs,
+            resolve_kv_cache_tp_size,
+        )
+
+        self.assertEqual(resolve_kv_cache_tp_size(1, "dp4_ep4"), 1)
+        self.assertEqual(resolve_kv_cache_tp_size(1, "dp2_tp2_ep4"), 2)
+        self.assertEqual(resolve_kv_cache_tp_size(1, "dp2_tpsp2_ep4"), 2)
+        self.assertEqual(resolve_kv_cache_tp_size(1, "tpsp4"), 4)
+        self.assertEqual(resolve_kv_cache_tp_size(1, "sp4_tp4_ep4"), 4)
+
+        try:
+            from rtp_llm.ops import RoleType
+        except Exception:
+            return
+
+        from types import SimpleNamespace
+
+        dummy_cfg = SimpleNamespace(
+            qwen4_5_arch_config=self.arch_cfg,
+            attn_config=SimpleNamespace(tokens_per_block=128, kernel_tokens_per_block=128),
+            gen_num_per_cycle=0,
+        )
+        for pmode in ("tp4_ep4", "sp4_tp4_ep4", "dp2_tpsp2_ep4", "dp2_tp2_ep4", "dp4_ep4"):
+            p_specs = build_qwen4_5_kv_cache_spec_descs(
+                dummy_cfg,
+                self.arch_cfg,
+                parallel_mode=pmode,
+                kv_dtype="fp8_e4m3",
+                role_type=RoleType.PREFILL,
+            )
+            d_specs = build_qwen4_5_kv_cache_spec_descs(
+                dummy_cfg,
+                self.arch_cfg,
+                parallel_mode=pmode,
+                kv_dtype="fp8_e4m3",
+                role_type=RoleType.DECODE,
+            )
+            self.assertEqual(len(p_specs), len(d_specs))
+            for layer_p, layer_d in zip(p_specs, d_specs):
+                self.assertEqual(len(layer_p), len(layer_d))
+                for dp, dd in zip(layer_p, layer_d):
+                    self.assertEqual(dp.tag, dd.tag)
+                    self.assertEqual(dp.cache_type, dd.cache_type)
+                    self.assertEqual(dp.dtype, dd.dtype)
+                    self.assertEqual(dp.entry_dtype, dd.entry_dtype)
+                    self.assertEqual(dp.entry_elems, dd.entry_elems)
+                    self.assertEqual(dp.explicit_entry_count, dd.explicit_entry_count)
+                    self.assertEqual(dp.tp_transfer_mode, dd.tp_transfer_mode)
+
 
 if __name__ == "__main__":
     unittest.main()

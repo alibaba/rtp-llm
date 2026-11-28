@@ -1079,6 +1079,9 @@ def _situ_glu_fp8_quant_packed_1d_kernel(
     q_ptr,
     sc_ptr,
     m_indptr_ptr,
+    m_indices_ptr,
+    offsets_ptr,
+    counts_ptr,
     M,
     D: tl.constexpr,
     stride_g_row: tl.int64,
@@ -1096,6 +1099,7 @@ def _situ_glu_fp8_quant_packed_1d_kernel(
     SCALE_FMT: tl.constexpr,
     HAS_INDPTR: tl.constexpr,
     HAS_ACTIVE_ROWS: tl.constexpr,
+    HAS_ROW_BOUNDS: tl.constexpr,
     NUM_EP_GROUPS: tl.constexpr,
     BSEARCH_ITERS: tl.constexpr,
 ):
@@ -1106,6 +1110,12 @@ def _situ_glu_fp8_quant_packed_1d_kernel(
             return
     if row >= M:
         return
+    if HAS_ROW_BOUNDS:
+        e = tl.load(m_indices_ptr + row)
+        if e < 0:
+            return
+        if row >= tl.load(offsets_ptr + e).to(tl.int64) + tl.load(counts_ptr + e).to(tl.int64):
+            return
     TILES: tl.constexpr = D // BLOCK_D
     GROUPS: tl.constexpr = BLOCK_D // 32
     PACKS: tl.constexpr = GROUPS // 4
@@ -1624,7 +1634,7 @@ def per_token_group_quant_fp8_ue8m0(
         HAS_INDPTR=(m_indptr is not None),
         NUM_EP_GROUPS=num_ep_groups,
         BSEARCH_ITERS=max(1, (num_ep_groups - 1).bit_length()),
-        num_warps=4,
+        num_warps=(2 if M >= 4096 else 4),
     )
     if scale_format == "raw":
         return q.reshape(*orig_prefix, K), sc.reshape(*orig_prefix, num_groups)
@@ -1645,6 +1655,7 @@ def situ_glu_fp8_quant_packed(
     eps: float = _QUANT_EPS,
     zero_unused_scales: bool = True,
     max_active_rows: Optional[torch.Tensor] = None,
+    active_row_bounds: Optional[Tuple[torch.Tensor, torch.Tensor, torch.Tensor]] = None,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """Fused SiTU-GLU(gate_beta=4.0, up_beta=25.0) + block-32 UE8M0 FP8 quantization.
 
@@ -1724,15 +1735,25 @@ def situ_glu_fp8_quant_packed(
                 break
     has_active_rows = max_active_rows is not None
     active_rows_t = max_active_rows if has_active_rows else q
+    has_row_bounds = (
+        active_row_bounds is not None and not zero_unused_scales
+    )
+    if has_row_bounds:
+        rb_m_idx, rb_offs, rb_cnts = active_row_bounds
+    else:
+        rb_m_idx = rb_offs = rb_cnts = q
     with _cuda_device_ctx(g_2d.device):
         if bd_1d > 0 and D // bd_1d <= 16:
-            nw_1d = 4
+            nw_1d = 2 if (has_row_bounds or M >= 4096) else 4
             _situ_glu_fp8_quant_packed_1d_kernel[(M,)](
                 g_2d,
                 u_2d,
                 q,
                 sc,
                 indptr_t,
+                rb_m_idx,
+                rb_offs,
+                rb_cnts,
                 M,
                 D=D,
                 stride_g_row=g_2d.stride(0),
@@ -1750,6 +1771,7 @@ def situ_glu_fp8_quant_packed(
                 SCALE_FMT=fmt_code,
                 HAS_INDPTR=(m_indptr is not None),
                 HAS_ACTIVE_ROWS=has_active_rows,
+                HAS_ROW_BOUNDS=has_row_bounds,
                 NUM_EP_GROUPS=num_ep_groups,
                 BSEARCH_ITERS=bsearch_iters,
                 num_warps=nw_1d,
@@ -1802,6 +1824,7 @@ def situ_glu_fp8_quant_masked_packed(
     out_q: Optional[torch.Tensor] = None,
     out_sc: Optional[torch.Tensor] = None,
     actual_m: Optional[int] = None,
+    actual_rows: Optional[int] = None,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """Fused SiTU-GLU + block-32 UE8M0 FP8 quant for 3D masked MoE ``[E, max_m, 2*D]``."""
     if group_size != 32:
@@ -1843,8 +1866,9 @@ def situ_glu_fp8_quant_masked_packed(
     BLOCK_D = _pick_block_d(D)
     d_tiles = triton.cdiv(D, BLOCK_D)
     mm_c = masked_m if masked_m.is_contiguous() else masked_m.contiguous()
-    use_row_tile = (actual_m is not None and actual_m <= 1024) or (
-        actual_m is None and max_m <= 1024
+    row_est = actual_rows if actual_rows is not None else actual_m
+    use_row_tile = (row_est is not None and row_est <= 640) or (
+        row_est is None and max_m <= 128
     )
     if E <= _MASKED_PERSIST_MAX_E and D >= 512 and D % 512 == 0 and E > 0 and max_m > 0:
         sm_count = _get_sm_count(int(x_c.device.index or 0))
@@ -1856,7 +1880,7 @@ def situ_glu_fp8_quant_masked_packed(
             num_ctas = min(sm_count * 4, E * max_m * d_tiles_512)
             kernel = _situ_glu_fp8_quant_masked_row_tile_persistent_kernel
         else:
-            num_ctas = min(sm_count * 4, E * max_m)
+            num_ctas = min(sm_count * 6, E * max_m)
             kernel = _situ_glu_fp8_quant_masked_row_persistent_kernel
         with _cuda_device_ctx(x_c.device):
             kernel[(num_ctas,)](

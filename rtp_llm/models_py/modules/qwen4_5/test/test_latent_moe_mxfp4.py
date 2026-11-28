@@ -4053,6 +4053,155 @@ def test_r12_norm_router_and_prequant_scatter(device: torch.device) -> None:
     print("  PASS test_r12_norm_router_and_prequant_scatter")
 
 
+def test_r13_router_contig_skip_and_masked_tuning(device: torch.device) -> None:
+    """Verify R13-M0 contig blocking env toggle, direct fp32 router nw2, inactive skip, and HC nw2."""
+    import os
+    from rtp_llm.models_py.modules.qwen4_5 import hyper_connection, moe as moe_mod, mxfp4_ops
+
+    dev_idx = int(device.index or 0)
+
+    # 1. Contig sync blocking default False & QWEN4_5_CONTIG_SYNC_BLOCKING=1 toggle
+    saved_blk = os.environ.pop("QWEN4_5_CONTIG_SYNC_BLOCKING", None)
+    try:
+        mxfp4_ops._CONTIG_TLS.by_stream = {}
+        _, ev_def, _ = mxfp4_ops._get_contig_sync_state(device, 65)
+        os.environ["QWEN4_5_CONTIG_SYNC_BLOCKING"] = "1"
+        _, ev_blk, _ = mxfp4_ops._get_contig_sync_state(device, 65)
+        assert ev_blk is not ev_def
+        os.environ["QWEN4_5_CONTIG_SYNC_BLOCKING"] = "0"
+        _, ev_unblk, _ = mxfp4_ops._get_contig_sync_state(device, 65)
+        assert ev_unblk is not ev_blk
+    finally:
+        mxfp4_ops._CONTIG_TLS.by_stream = {}
+        if saved_blk is not None:
+            os.environ["QWEN4_5_CONTIG_SYNC_BLOCKING"] = saved_blk
+        else:
+            os.environ.pop("QWEN4_5_CONTIG_SYNC_BLOCKING", None)
+
+    # 2. Direct fp32 top-k router (rtr=9, M=128/512/1024) parity + tie-breaking (bias on/off)
+    E_rt, K_rt = 640, 10
+    moe_ln = Qwen4_5LatentMoE(
+        hidden_size=5120,
+        routed_expert_hidden_size=2560,
+        moe_intermediate_size=2560,
+        shared_expert_intermediate_size=1280,
+        num_experts=E_rt,
+        num_experts_per_tok=K_rt,
+        use_triton_mxfp4=False,
+        dtype=torch.bfloat16,
+        device=device,
+    )
+    logits_tie = torch.full((520, E_rt), -5.0, dtype=torch.bfloat16, device=device)
+    logits_tie[0, [500, 12, 7]] = 1.0
+    logits_tie[-1, [300, 3]] = -0.5
+    ids_f32 = torch.empty((520, K_rt), dtype=torch.int32, device=device)
+    w_f32 = torch.empty((520, K_rt), dtype=torch.float32, device=device)
+    moe_mod._qwen45_sigmoid_topk_router_kernel[(520,)](
+        logits_tie,
+        logits_tie,
+        ids_f32,
+        w_f32,
+        E_rt,
+        logits_tie.stride(0),
+        E_PAD=1024,
+        TOP_K=K_rt,
+        TOP_K_PAD=16,
+        HAS_BIAS=False,
+        NORMALIZE=True,
+        ROUND_BF16=True,
+        num_warps=2,
+    )
+    assert ids_f32[0, :3].tolist() == [7, 12, 500]
+    assert ids_f32[-1, :2].tolist() == [3, 300]
+
+    for use_bias in (True, False):
+        moe_ln.moe_router_enable_expert_bias = use_bias
+        moe_ln.expert_bias = (
+            torch.nn.Parameter(torch.randn((E_rt,), dtype=torch.float32, device=device) * 0.05)
+            if use_bias
+            else None
+        )
+        for M_rt in (128, 512, 1024):
+            r_in = torch.randn((M_rt, 2560), dtype=torch.bfloat16, device=device) * 0.4
+            ids_t, w_t = moe_ln.route(r_in, use_triton=True)
+            ids_r, w_r = moe_ln.route(r_in, use_triton=False)
+            assert _diff_stats(w_t.sort(dim=-1).values, w_r.sort(dim=-1).values)[2] >= 0.999999
+            if use_bias:
+                assert torch.equal(ids_t, ids_r), f"Direct router mismatch bias=True M={M_rt}"
+
+    # 3. per_token_group_quant_fp8_ue8m0 large-M nw=2 parity
+    xq_4k, xsc_4k = per_token_group_quant_fp8_ue8m0(
+        torch.randn((4096, 2560), dtype=torch.bfloat16, device=device) * 0.3,
+        scale_format="raw",
+    )
+    assert xq_4k.shape == (4096, 2560) and xsc_4k.shape == (4096, 80)
+
+    # 4. Contig active-row skip + vec_sc scatter + gather nw2 parity & masked row_persistent 6x parity
+    if has_deepgemm_fp8_fp4(dev_idx):
+        L_m, I_m, E_m = 2560, 2560, 32
+        w13_u8, w13_sc = quantize_mxfp4(
+            torch.randn((E_m, 2 * I_m, L_m), dtype=torch.bfloat16, device=device) * 0.02
+        )
+        w2_u8, w2_sc = quantize_mxfp4(
+            torch.randn((E_m, L_m, I_m), dtype=torch.bfloat16, device=device) * 0.02
+        )
+        mw_m = prepare_mxfp4_moe_weights(
+            w13_u8=w13_u8, w13_scale=w13_sc, w2_u8=w2_u8, w2_scale=w2_sc
+        )
+        del w13_u8, w13_sc, w2_u8, w2_sc
+
+        for M_c in (256, 1024):
+            xc = torch.randn((M_c, L_m), dtype=torch.bfloat16, device=device) * 0.3
+            ids_c = torch.randint(0, E_m * 4, (M_c, 10), dtype=torch.int32, device=device)
+            tw_c = torch.softmax(torch.randn((M_c, 10), dtype=torch.float32, device=device), dim=-1)
+            y_ct = mxfp4_ops.mxfp4_moe_deepgemm_contiguous(xc, ids_c, tw_c, mw_m, ep_start=E_m, ep_size=4)
+            y_ct_ref = mxfp4_moe_forward_ref(
+                xc, ids_c, tw_c, mw_m, ep_start=E_m, ep_size=4, fp8_activations=True
+            )
+            assert _diff_stats(y_ct, y_ct_ref)[2] >= 0.9999, f"Contig skip/vec_sc mismatch M={M_c}"
+
+        # Unaligned x_sc_raw fallback path parity (offset by 1 byte so (ptr & 3) != 0)
+        xm_u = torch.randn((64, L_m), dtype=torch.bfloat16, device=device) * 0.3
+        xq_u, xsc_u = per_token_group_quant_fp8_ue8m0(xm_u, scale_format="raw")
+        pad_sc = torch.empty((64, L_m // 32 + 1), dtype=torch.uint8, device=device)
+        pad_sc[:, 1:].copy_(xsc_u)
+        xsc_unaligned = pad_sc[:, 1:]
+        assert (xsc_unaligned.data_ptr() & 3) != 0
+        ids_u = torch.randint(0, E_m * 2, (64, 10), dtype=torch.int32, device=device)
+        tw_u = torch.softmax(torch.randn((64, 10), dtype=torch.float32, device=device), dim=-1)
+        y_ua = mxfp4_ops.mxfp4_moe_deepgemm_contiguous(
+            None, ids_u, tw_u, mw_m, ep_start=0, ep_size=2, prequant_fp8=(xq_u, xsc_unaligned)
+        )
+        y_ua_ref = mxfp4_ops.mxfp4_moe_deepgemm_contiguous(
+            None, ids_u, tw_u, mw_m, ep_start=0, ep_size=2, prequant_fp8=(xq_u, xsc_u)
+        )
+        assert torch.equal(y_ua, y_ua_ref)
+
+        # Masked high-M actual_rows row_persistent(6x) + gather nw=2 parity
+        xm_h = torch.randn((256, L_m), dtype=torch.bfloat16, device=device) * 0.3
+        ids_h = torch.randint(0, E_m, (256, 10), dtype=torch.int32, device=device)
+        tw_h = torch.softmax(torch.randn((256, 10), dtype=torch.float32, device=device), dim=-1)
+        y_mh = mxfp4_ops.mxfp4_moe_deepgemm_masked(xm_h, ids_h, tw_h, mw_m, ep_start=0, ep_size=1)
+        y_mh_ref = mxfp4_moe_forward_ref(
+            xm_h, ids_h, tw_h, mw_m, ep_start=0, ep_size=1, fp8_activations=True
+        )
+        assert _diff_stats(y_mh, y_mh_ref)[2] >= 0.9999
+
+    # 5. HyperConnection mix_reduce_with_down_inject nw=2 parity (M=256 vs reference)
+    hc_t = hyper_connection.Qwen4_5HyperConnection(5120, 4, 128, dtype=torch.bfloat16, device=device)
+    norm_t = torch.randn((256, 20480), dtype=torch.bfloat16, device=device) * 0.2
+    gl_t = torch.randn((256, 20480), dtype=torch.bfloat16, device=device) * 0.2
+    raw_t = torch.randn((256, 144), dtype=torch.bfloat16, device=device) * 0.2
+    out_hc, lat_hc, inj_hc = hyper_connection.hc_mix_reduce_with_down_inject_triton(
+        gl_t, norm_t, raw_t, 128, 4
+    )
+    out_hc_ref = (torch.sigmoid(gl_t.float()).view(256, 4, 5120) * norm_t.float().view(256, 4, 5120)).mean(dim=1).to(torch.bfloat16)
+    assert _diff_stats(out_hc, out_hc_ref)[2] >= 0.999999
+    assert lat_hc is not None and inj_hc is not None
+
+    print("  PASS test_r13_router_contig_skip_and_masked_tuning")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Qwen 4.5-Flash LatentMoE & SM100 MXFP4 test suite")
     parser.add_argument("--distributed", action="store_true", help="Run multi-GPU FastAllReduce/TP/EP tests")
@@ -4122,6 +4271,7 @@ def main() -> int:
         test_r10_dg_jit_dedup_and_shared_tgv(device)
         test_r11_warmup_mem_and_masked_kernels(device)
         test_r12_norm_router_and_prequant_scatter(device)
+        test_r13_router_contig_skip_and_masked_tuning(device)
 
     if args.distributed:
         test_distributed_fast_comm_tp_ep(world_size=args.world_size)

@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -519,6 +520,14 @@ __global__ void crc32cBatchedKernel(unsigned char* __restrict__ staging,
     }
 }
 
+__global__ void markDoneKernel(uint64_t* __restrict__ done, uint64_t seq) {
+    // System fence guarantees prior mapped-host failure flags and D2H/H2D
+    // transfers on this stream are globally visible before seq updates.
+    __threadfence_system();
+    *reinterpret_cast<volatile uint64_t*>(done) = seq;
+    __threadfence_system();
+}
+
 }  // namespace
 
 namespace crc_block_copy_internal {
@@ -573,8 +582,12 @@ struct CrcCopyWorkspace::Impl {
     Allocation   staging, results;
     Allocation   pack_host, pack_device, crc_tables, shift_powers, partials, aliases, host_aliases;
     Allocation   fold_mats, final_consts, fold_mats_host, final_consts_host;
-    Allocation   host_results, host_failed;
+    Allocation   host_results, host_failed, host_done;
     bool*        device_failed{nullptr};
+    uint64_t*    device_done{nullptr};
+    uint64_t     next_done_seq{1};
+    uint64_t     active_done_seq{0};
+    std::chrono::steady_clock::time_point last_query_time{};
     // The signature tracks the valid prefix of the per-message GPU tables.
     // Host matrices depend only on (length, blocks), independent of batch size,
     // tile addresses and message contents. Keep a bounded cache per workspace;
@@ -648,6 +661,9 @@ struct CrcCopyWorkspace::Impl {
         checkCuda(cudaMemcpy(shift_powers.pointer, powers_host.data(), layout.power_bytes, cudaMemcpyHostToDevice));
         host_failed.allocate(items * sizeof(bool), true, cudaHostAllocMapped);
         checkCuda(cudaHostGetDevicePointer(reinterpret_cast<void**>(&device_failed), host_failed.pointer, 0));
+        host_done.allocate(sizeof(uint64_t), true, cudaHostAllocMapped);
+        *host_done.as<uint64_t>() = 0;
+        checkCuda(cudaHostGetDevicePointer(reinterpret_cast<void**>(&device_done), host_done.pointer, 0));
         // Create streams and events last: no constructor-failure path can strand work.
         try {
             checkCuda(cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking));
@@ -1050,7 +1066,11 @@ struct CrcCopyWorkspace::Impl {
         diagnostic_pending    = false;
         // Even a failing first CUDA API may have started work. Any exception
         // from here drains both streams before releasing workspace ownership.
-        state = CrcCopyState::PENDING;
+        const uint64_t done_seq = next_done_seq == 0 ? 1 : next_done_seq;
+        next_done_seq           = done_seq + 1 == 0 ? 1 : done_seq + 1;
+        active_done_seq         = done_seq;
+        last_query_time         = std::chrono::steady_clock::now();
+        state                   = CrcCopyState::PENDING;
         try {
             checkCuda(cudaMemcpyAsync(pack_device.pointer,
                                       pack_host.pointer,
@@ -1062,6 +1082,8 @@ struct CrcCopyWorkspace::Impl {
                 enqueueEvict(*prepared);
             else
                 enqueueLoad(*prepared);
+            markDoneKernel<<<1, 1, 0, stream>>>(device_done, active_done_seq);
+            checkCuda(cudaGetLastError());
         } catch (...) {
             failDevice();
             return finish();
@@ -1081,12 +1103,31 @@ struct CrcCopyWorkspace::Impl {
             throw std::invalid_argument("CRC workspace has no active operation");
         if (state == CrcCopyState::PENDING) {
             try {
-                checkCuda(cudaSetDevice(device));
-                checkpoint("query");
-                const auto ready = cudaStreamQuery(stream);
-                if (ready == cudaErrorNotReady)
-                    return CrcCopyState::PENDING;
-                checkCuda(ready);
+                if (test_hook) {
+                    checkCuda(cudaSetDevice(device));
+                    checkpoint("query");
+                    const auto ready = cudaStreamQuery(stream);
+                    if (ready == cudaErrorNotReady)
+                        return CrcCopyState::PENDING;
+                    checkCuda(ready);
+                } else {
+                    const uint64_t done = __atomic_load_n(host_done.as<const uint64_t>(), __ATOMIC_ACQUIRE);
+                    if (done != active_done_seq) {
+                        const auto now = std::chrono::steady_clock::now();
+                        if (now - last_query_time < std::chrono::microseconds(500)) {
+#if defined(__x86_64__) || defined(_M_X64)
+                            __builtin_ia32_pause();
+#endif
+                            return CrcCopyState::PENDING;
+                        }
+                        last_query_time = now;
+                    }
+                    checkCuda(cudaSetDevice(device));
+                    const auto ready = cudaStreamQuery(stream);
+                    if (ready == cudaErrorNotReady)
+                        return CrcCopyState::PENDING;
+                    checkCuda(ready);
+                }
                 state = CrcCopyState::OK;
                 for (size_t index = 0; index < batch.size(); ++index)
                     if (host_failed.as<bool>()[index]) {

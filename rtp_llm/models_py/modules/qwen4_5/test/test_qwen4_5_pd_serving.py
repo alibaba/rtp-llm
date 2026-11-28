@@ -455,6 +455,292 @@ class TestQwen4_5PDServing(unittest.TestCase):
         self.assertEqual(pd_tokens, ref_tokens[0])
         self.assertGreater(min_cos, 0.999)
 
+    @torch.no_grad()
+    def test_05_decode_rolling_opaque_pool_and_fp8_kv_pd_equivalence(self) -> None:
+        """Verify Decode fixed rolling OPAQUE_STATE pool + single tail-block handoff + FP8 KV."""
+        p_causal = Qwen4_5ForCausalLM(
+            self.cfg, dtype=torch.bfloat16, kv_dtype="fp8_e4m3", device=self.dev0
+        )
+        p_causal.init_synthetic_weights(seed=4049, ple_mode="gpu_full")
+        _stabilize_router_margins(p_causal)
+        p_causal.prepare_weights()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            save_qwen4_5_safetensors_checkpoint(p_causal, tmpdir)
+            d_causal = Qwen4_5ForCausalLM(
+                self.cfg, dtype=torch.bfloat16, kv_dtype="fp8_e4m3", device=self.dev1
+            )
+            load_qwen4_5_from_checkpoint(d_causal, tmpdir, ple_mode="gpu_full")
+
+        p_rtp = Qwen4_5RTPModel.from_causal_lm(p_causal)
+        d_rtp = Qwen4_5RTPModel.from_causal_lm(d_causal)
+        tok = SimpleByteTokenizer(
+            self.cfg.vocab_size,
+            bos_id=self.cfg.bos_token_id,
+            eos_id=self.cfg.eos_token_id,
+        )
+
+        # Prompt 0 has length == 32 (exact 2*16 block boundary); prompt 1 has length == 29 (crosses 32 during decode).
+        tpb = 16
+        prompts = [
+            tok.encode("Exact boundary length 32 prompt!")[:32],
+            tok.encode("Rolling state decode test!"),
+        ]
+        while len(prompts[0]) < 32:
+            prompts[0].append(42)
+        in_lens = [len(p) for p in prompts]
+        max_new = 20
+
+        bf16_ref_tokens, bf16_ref_logits = _run_unified_baseline(
+            p_causal, prompts, max_new, enable_yoco_decode=True
+        )
+
+        # Unified FP8 KV FULL-group reference (non-rolling) to verify rolling eviction & single-tail transfer exactness.
+        plan_fp8_full = build_qwen4_5_kv_cache_plan(
+            self.cfg, kv_dtype="fp8_e4m3", enable_yoco_decode=True
+        )
+        ref_kv_fp8 = LocalKVCache(
+            plan_fp8_full,
+            tokens_per_block=tpb,
+            num_blocks_per_tag={t: 64 for t in QWEN4_5_CACHE_TAGS},
+            device=self.dev0,
+            dtype=torch.bfloat16,
+            kv_dtype=torch.float8_e4m3fn,
+        )
+        p_rtp.kv_cache = ref_kv_fp8
+        ref_tables = build_block_tables_for_requests(
+            ref_kv_fp8, [ln + max_new for ln in in_lens]
+        )
+        ref_flat_ids = torch.tensor(
+            [t for seq in prompts for t in seq], dtype=torch.int64, device=self.dev0
+        )
+        ref_p_out = p_rtp.forward(
+            LocalPyModelInputs(
+                input_ids=ref_flat_ids,
+                attention_inputs=make_tagged_attention_inputs(
+                    ref_tables,
+                    is_prefill=True,
+                    input_lengths=in_lens,
+                    sequence_lengths=in_lens,
+                    prefix_lengths=[0] * len(prompts),
+                    device=self.dev0,
+                ),
+            ),
+            enable_yoco_decode=True,
+        )
+        ref_last = [in_lens[0] - 1, in_lens[0] + in_lens[1] - 1]
+        ref_first_lg = p_rtp.compute_logits(
+            ref_p_out.hidden_states[torch.tensor(ref_last, dtype=torch.long, device=self.dev0)]
+        )
+        ref_cur_toks = torch.argmax(ref_first_lg, dim=-1).tolist()
+        fp8_ref_tokens = [[int(t)] for t in ref_cur_toks]
+        fp8_ref_logits = [ref_first_lg.detach().cpu()]
+        ref_cur_lens = list(in_lens)
+        for _ in range(max_new - 1):
+            ref_d_out = p_rtp.forward(
+                LocalPyModelInputs(
+                    input_ids=torch.tensor(ref_cur_toks, dtype=torch.int64, device=self.dev0),
+                    attention_inputs=make_tagged_attention_inputs(
+                        ref_tables,
+                        is_prefill=False,
+                        input_lengths=[1] * len(prompts),
+                        sequence_lengths=ref_cur_lens,
+                        prefix_lengths=[0] * len(prompts),
+                        device=self.dev0,
+                    ),
+                ),
+                enable_yoco_decode=True,
+            )
+            lg = p_rtp.compute_logits(ref_d_out.hidden_states)
+            fp8_ref_logits.append(lg.detach().cpu())
+            ref_cur_toks = torch.argmax(lg, dim=-1).tolist()
+            for b in range(len(prompts)):
+                fp8_ref_tokens[b].append(int(ref_cur_toks[b]))
+                ref_cur_lens[b] += 1
+
+        rolling_pool_blocks = 8  # Smaller than total logical pages across both reqs to force rolling reuse
+
+        def _run_pd_rolling(enable_yoco: bool) -> tuple[list[list[int]], list[torch.Tensor]]:
+            plan_fp8 = build_qwen4_5_kv_cache_plan(
+                self.cfg, kv_dtype="fp8_e4m3", enable_yoco_decode=enable_yoco
+            )
+            # Create Prefill first so active tags exclude unused QSA tags (e.g., indexer_kv).
+            p_kv = LocalKVCache(
+                plan_fp8,
+                tokens_per_block=tpb,
+                num_blocks_per_tag={t: 64 for t in QWEN4_5_CACHE_TAGS},
+                device=self.dev0,
+                dtype=torch.bfloat16,
+                kv_dtype=torch.float8_e4m3fn,
+            )
+            active_tags = p_kv.group_tags()
+            state_tags = [t for t in active_tags if t != FULL_ATTN_KV_TAG]
+            d_num_blocks = {FULL_ATTN_KV_TAG: 64}
+            for t in state_tags:
+                d_num_blocks[t] = rolling_pool_blocks
+
+            d_kv = LocalKVCache(
+                plan_fp8,
+                tokens_per_block=tpb,
+                num_blocks_per_tag=d_num_blocks,
+                device=self.dev1,
+                dtype=torch.bfloat16,
+                kv_dtype=torch.float8_e4m3fn,
+            )
+            p_rtp.kv_cache = p_kv
+            d_rtp.kv_cache = d_kv
+
+            p_tables = build_block_tables_for_requests(p_kv, in_lens)
+            flat_ids = torch.tensor(
+                [t for seq in prompts for t in seq], dtype=torch.int64, device=self.dev0
+            )
+            writer = LocalMemoryCacheStoreWriter(record_payload=True)
+            p_attn = make_tagged_attention_inputs(
+                p_tables,
+                is_prefill=True,
+                input_lengths=in_lens,
+                sequence_lengths=in_lens,
+                prefix_lengths=[0] * len(prompts),
+                device=self.dev0,
+                cache_store_writer=writer,
+            )
+            p_out = p_rtp.forward(
+                LocalPyModelInputs(input_ids=flat_ids, attention_inputs=p_attn),
+                enable_yoco_decode=enable_yoco,
+            )
+            last_idx = [in_lens[0] - 1, in_lens[0] + in_lens[1] - 1]
+            first_logits = p_rtp.compute_logits(
+                p_out.hidden_states[torch.tensor(last_idx, dtype=torch.long, device=self.dev0)]
+            )
+            first_toks = torch.argmax(first_logits, dim=-1).tolist()
+
+            # Build Decode block tables: full FULL_ATTN_KV_TAG + 2-slot rolling OPAQUE_STATE pools (blocks 1..rolling_pool_blocks-1)
+            max_seq_total = max(in_lens) + max_new + 2
+            max_pages = (max_seq_total + tpb - 1) // tpb
+            d_tables: dict[str, list[list[int]]] = {
+                t: [[0] * max_pages for _ in prompts] for t in active_tags
+            }
+            full_next = 1
+            for b, ln in enumerate(in_lens):
+                req_pages = (ln + max_new + tpb - 1) // tpb
+                p_pages = (ln + tpb - 1) // tpb
+                for pg in range(req_pages):
+                    d_tables[FULL_ATTN_KV_TAG][b][pg] = full_next
+                    if pg < p_pages:
+                        src_blk = p_tables[FULL_ATTN_KV_TAG][b][pg]
+                        for layer_id in range(p_kv.layer_count()):
+                            if FULL_ATTN_KV_TAG not in p_kv.layer_caches[layer_id]:
+                                continue
+                            dst_c = d_kv.get_layer_cache(layer_id, FULL_ATTN_KV_TAG)
+                            dst_c.kv_cache_base[full_next].copy_(
+                                writer.published[(layer_id, FULL_ATTN_KV_TAG)][1][
+                                    writer.published[(layer_id, FULL_ATTN_KV_TAG)][0].index(src_blk)
+                                ].to(self.dev1)
+                            )
+                            p_c = p_kv.get_layer_cache(layer_id, FULL_ATTN_KV_TAG)
+                            if dst_c.kv_scale_base is not None and p_c.kv_scale_base is not None:
+                                dst_c.kv_scale_base[full_next].copy_(
+                                    p_c.kv_scale_base[src_blk].to(self.dev1)
+                                )
+                    full_next += 1
+
+            # Each rolling tag keeps an independent ring allocator of slots 1..rolling_pool_blocks-1,
+            # loading ONLY the single tail block (k_tail = (ln - 1) // tpb) from Prefill CacheStore.
+            free_slots = {t: list(range(1, rolling_pool_blocks)) for t in state_tags}
+            active_prev_slot = {t: [0] * len(prompts) for t in state_tags}
+            active_cur_slot = {t: [0] * len(prompts) for t in state_tags}
+            for t in state_tags:
+                for b, ln in enumerate(in_lens):
+                    k_tail = (ln - 1) // tpb
+                    src_blk = p_tables[t][b][k_tail]
+                    slot = free_slots[t].pop(0)
+                    d_tables[t][b][k_tail] = slot
+                    active_cur_slot[t][b] = slot
+                    for layer_id in range(p_kv.layer_count()):
+                        if t not in p_kv.layer_caches[layer_id]:
+                            continue
+                        dst_c = d_kv.get_layer_cache(layer_id, t)
+                        pub_blks, pub_payload = writer.published[(layer_id, t)]
+                        dst_c.kv_cache_base[slot].copy_(
+                            pub_payload[pub_blks.index(src_blk)].to(self.dev1)
+                        )
+
+            gen_tokens = [[int(t)] for t in first_toks]
+            step_logits = [first_logits.detach().cpu()]
+            cur_lens = list(in_lens)
+            cur_toks = list(first_toks)
+            for _ in range(max_new - 1):
+                # Mirror FIFOScheduler incrKVBlock + LINEAR retainedDecodeBlocks ([prev_blk, cur_blk]) eviction
+                for b, cur_len in enumerate(cur_lens):
+                    write_pg = cur_len // tpb
+                    for t in state_tags:
+                        if d_tables[t][b][write_pg] == 0:
+                            old_evicted = active_prev_slot[t][b]
+                            if old_evicted != 0:
+                                evict_pg = write_pg - 2
+                                if evict_pg >= 0:
+                                    d_tables[t][b][evict_pg] = 0
+                                free_slots[t].append(old_evicted)
+                            new_slot = free_slots[t].pop(0)
+                            d_tables[t][b][write_pg] = new_slot
+                            active_prev_slot[t][b] = active_cur_slot[t][b]
+                            active_cur_slot[t][b] = new_slot
+
+                d_attn = make_tagged_attention_inputs(
+                    d_tables,
+                    is_prefill=False,
+                    input_lengths=[1] * len(prompts),
+                    sequence_lengths=cur_lens,
+                    prefix_lengths=[0] * len(prompts),
+                    device=self.dev1,
+                )
+                d_out = d_rtp.forward(
+                    LocalPyModelInputs(
+                        input_ids=torch.tensor(cur_toks, dtype=torch.int64, device=self.dev1),
+                        attention_inputs=d_attn,
+                    ),
+                    enable_yoco_decode=enable_yoco,
+                )
+                lg = d_rtp.compute_logits(d_out.hidden_states)
+                step_logits.append(lg.detach().cpu())
+                cur_toks = torch.argmax(lg, dim=-1).tolist()
+                for b in range(len(prompts)):
+                    gen_tokens[b].append(int(cur_toks[b]))
+                    cur_lens[b] += 1
+            return gen_tokens, step_logits
+
+        pd_tokens, pd_logits = _run_pd_rolling(True)
+        ny_tokens, ny_logits = _run_pd_rolling(False)
+        min_cos_fp8_ref = min(
+            _cos_sim(pd_logits[s], fp8_ref_logits[s]) for s in range(max_new)
+        )
+        prefill_cos_vs_bf16 = _cos_sim(pd_logits[0], bf16_ref_logits[0])
+        matched_fp8 = sum(
+            int(pd_tokens[b][s] == fp8_ref_tokens[b][s])
+            for b in range(len(prompts))
+            for s in range(max_new)
+        )
+        matched_bf16 = sum(
+            int(pd_tokens[b][s] == bf16_ref_tokens[b][s])
+            for b in range(len(prompts))
+            for s in range(max_new)
+        )
+        yoco_diff = max(
+            float((pd_logits[s].float() - ny_logits[s].float()).abs().max().item())
+            for s in range(max_new)
+        )
+        print(
+            f"[PD Rolling OPAQUE_STATE + FP8 KV B=2x{max_new}] "
+            f"vs_fp8_ref={matched_fp8}/{len(prompts)*max_new} (min_cos={min_cos_fp8_ref:.6f}), "
+            f"vs_bf16_ref={matched_bf16}/{len(prompts)*max_new} (p0_cos={prefill_cos_vs_bf16:.6f}), "
+            f"YoCo_ON_vs_OFF={yoco_diff:.6f}"
+        )
+        self.assertGreater(prefill_cos_vs_bf16, 0.999)
+        self.assertGreater(min_cos_fp8_ref, 0.9999)
+        self.assertEqual(pd_tokens, fp8_ref_tokens)
+        self.assertEqual(pd_tokens, ny_tokens)
+        self.assertEqual(yoco_diff, 0.0)
+
 
 @torch.no_grad()
 def run_two_process_nccl_pd_test() -> None:

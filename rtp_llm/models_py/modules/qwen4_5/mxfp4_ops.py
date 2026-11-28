@@ -71,18 +71,26 @@ def _get_contig_sync_state(
         cache = {}
         _CONTIG_TLS.by_stream = cache
     dev_idx = int(dev.index if dev.index is not None else torch.cuda.current_device())
+    blocking = os.environ.get("QWEN4_5_CONTIG_SYNC_BLOCKING", "0") == "1"
     with _cuda_device_ctx(dev):
         stream_id = int(torch.cuda.current_stream(dev).cuda_stream)
         key = (dev_idx, stream_id)
         entry = cache.get(key)
         if entry is None:
             pinned = torch.empty((1,), dtype=torch.int32, pin_memory=True)
-            ev = torch.cuda.Event(blocking=True)
+            ev = torch.cuda.Event(blocking=blocking)
             slab = torch.empty((need_i32,), dtype=torch.int32, device=dev)
-            entry = [pinned, ev, slab]
+            entry = [pinned, ev, slab, blocking]
             cache[key] = entry
-        elif int(entry[2].numel()) < need_i32:
-            entry[2] = torch.empty((need_i32,), dtype=torch.int32, device=dev)
+        else:
+            if len(entry) < 4 or entry[3] != blocking:
+                entry[1] = torch.cuda.Event(blocking=blocking)
+                if len(entry) < 4:
+                    entry.append(blocking)
+                else:
+                    entry[3] = blocking
+            if int(entry[2].numel()) < need_i32:
+                entry[2] = torch.empty((need_i32,), dtype=torch.int32, device=dev)
     return entry[0], entry[1], entry[2]
 
 
@@ -2851,6 +2859,77 @@ def _init_m_indices_kernel(
             tl.store(m_indices_ptr + offs, -1, mask=(offs < cap_tokens))
 
 
+@triton.jit
+def _claim_contig_slot(
+    topk_ids_ptr,
+    offsets_ptr,
+    write_cnt_ptr,
+    dst_slots_ptr,
+    idx: tl.int64,
+    top_k,
+    ep_start,
+    num_experts,
+):
+    """Assign contiguous expert row slot for routing entry ``idx``; return ``-1`` if non-local."""
+    gid = tl.load(topk_ids_ptr + idx).to(tl.int32)
+    local_e = gid - ep_start
+    if local_e < 0 or local_e >= num_experts:
+        tl.store(dst_slots_ptr + idx, -1)
+        return tl.cast(-1, tl.int64)
+    pos = tl.atomic_add(write_cnt_ptr + local_e, 1)
+    slot = (tl.load(offsets_ptr + local_e) + pos).to(tl.int64)
+    tl.store(dst_slots_ptr + idx, slot.to(tl.int32))
+    return slot
+
+
+@triton.jit(do_not_specialize=["stride_q_row", "stride_sc_row", "stride_out_q_row", "stride_out_sc_k"])
+def _scatter_fp8_to_contig_1shot_kernel(
+    x_q_ptr,
+    x_sc_ptr,
+    topk_ids_ptr,
+    offsets_ptr,
+    write_cnt_ptr,
+    out_q_ptr,
+    out_sc_ptr,
+    dst_slots_ptr,
+    M_total,
+    top_k,
+    K: tl.constexpr,
+    num_packs: tl.constexpr,
+    ep_start,
+    num_experts,
+    stride_q_row: tl.int64,
+    stride_sc_row: tl.int64,
+    stride_out_q_row: tl.int64,
+    stride_out_sc_k: tl.int64,
+    BLOCK_K: tl.constexpr,
+    PACKS_PAD: tl.constexpr,
+):
+    """Single-shot FP8 + 32-bit aligned scale scatter for contiguous DeepGEMM (K <= 4096)."""
+    idx = tl.program_id(0).to(tl.int64)
+    if idx >= M_total:
+        return
+    slot = _claim_contig_slot(
+        topk_ids_ptr, offsets_ptr, write_cnt_ptr, dst_slots_ptr, idx, top_k, ep_start, num_experts
+    )
+    if slot < 0:
+        return
+    tok = idx // top_k
+    offs_k = tl.arange(0, BLOCK_K)
+    mk = offs_k < K
+    vals = tl.load(x_q_ptr + tok * stride_q_row + offs_k, mask=mk, other=0)
+    tl.store(out_q_ptr + slot * stride_out_q_row + offs_k, vals, mask=mk)
+    offs_p = tl.arange(0, PACKS_PAD)
+    mp = offs_p < num_packs
+    sc_i32_ptr = tl.cast(x_sc_ptr + tok * stride_sc_row, tl.pointer_type(tl.int32))
+    p_vals = tl.load(sc_i32_ptr + offs_p, mask=mp, other=0)
+    tl.store(
+        out_sc_ptr + offs_p.to(tl.int64) * stride_out_sc_k + slot,
+        p_vals,
+        mask=mp,
+    )
+
+
 @triton.jit(do_not_specialize=["stride_q_row", "stride_sc_row", "stride_out_q_row", "stride_out_sc_k"])
 def _scatter_fp8_to_contig_kernel(
     x_q_ptr,
@@ -2877,16 +2956,12 @@ def _scatter_fp8_to_contig_kernel(
     idx = tl.program_id(0).to(tl.int64)
     if idx >= M_total:
         return
-    tok = idx // top_k
-    gid = tl.load(topk_ids_ptr + idx).to(tl.int32)
-    local_e = gid - ep_start
-    if local_e < 0 or local_e >= num_experts:
-        tl.store(dst_slots_ptr + idx, -1)
+    slot = _claim_contig_slot(
+        topk_ids_ptr, offsets_ptr, write_cnt_ptr, dst_slots_ptr, idx, top_k, ep_start, num_experts
+    )
+    if slot < 0:
         return
-
-    pos = tl.atomic_add(write_cnt_ptr + local_e, 1)
-    slot = (tl.load(offsets_ptr + local_e) + pos).to(tl.int64)
-    tl.store(dst_slots_ptr + idx, slot.to(tl.int32))
+    tok = idx // top_k
 
     for k0 in range(0, K, BLOCK_K):
         offs_k = k0 + tl.arange(0, BLOCK_K)
@@ -3125,29 +3200,61 @@ def mxfp4_moe_deepgemm_contiguous(
         num_warps=4,
     )
 
-    _scatter_fp8_to_contig_kernel[(M_total,)](
-        x_q.view(torch.uint8),
-        x_sc_raw,
-        ids_c,
-        offsets,
-        write_cnt,
-        a_fp8.view(torch.uint8),
-        a_scale,
-        dst_slots.view(-1),
-        M_total,
-        top_k,
-        L,
-        num_groups,
-        num_packs,
-        e_lo,
-        E_local,
-        x_q.stride(0),
-        x_sc_raw.stride(0),
-        a_fp8.stride(0),
-        a_scale.stride(1),
-        BLOCK_K=512,
-        num_warps=4,
-    )
+    xq_c = x_q if x_q.stride(-1) == 1 else x_q.contiguous()
+    xsc_c = x_sc_raw if x_sc_raw.stride(-1) == 1 else x_sc_raw.contiguous()
+    if (
+        L <= 4096
+        and num_groups % 4 == 0
+        and (xsc_c.data_ptr() & 3) == 0
+        and (xsc_c.stride(0) & 3) == 0
+    ):
+        _scatter_fp8_to_contig_1shot_kernel[(M_total,)](
+            xq_c.view(torch.uint8),
+            xsc_c,
+            ids_c,
+            offsets,
+            write_cnt,
+            a_fp8.view(torch.uint8),
+            a_scale,
+            dst_slots.view(-1),
+            M_total,
+            top_k,
+            K=L,
+            num_packs=num_packs,
+            ep_start=e_lo,
+            num_experts=E_local,
+            stride_q_row=xq_c.stride(0),
+            stride_sc_row=xsc_c.stride(0),
+            stride_out_q_row=a_fp8.stride(0),
+            stride_out_sc_k=a_scale.stride(1),
+            BLOCK_K=max(128, triton.next_power_of_2(L)),
+            PACKS_PAD=max(16, triton.next_power_of_2(num_packs)),
+            num_warps=4,
+        )
+    else:
+        _scatter_fp8_to_contig_kernel[(M_total,)](
+            xq_c.view(torch.uint8),
+            xsc_c,
+            ids_c,
+            offsets,
+            write_cnt,
+            a_fp8.view(torch.uint8),
+            a_scale,
+            dst_slots.view(-1),
+            M_total,
+            top_k,
+            L,
+            num_groups,
+            num_packs,
+            e_lo,
+            E_local,
+            xq_c.stride(0),
+            xsc_c.stride(0),
+            a_fp8.stride(0),
+            a_scale.stride(1),
+            BLOCK_K=512,
+            num_warps=4,
+        )
 
     gate_up = torch.empty((all_tokens, 2 * I), dtype=torch.bfloat16, device=dev)
     with _dg_jit_serialize("contig", int(w13_i8.shape[0]), int(w13_i8.shape[1]), int(a_fp8.shape[-1])):
@@ -3168,6 +3275,7 @@ def mxfp4_moe_deepgemm_contiguous(
         scale_format="deepgemm",
         zero_unused_scales=False,
         max_active_rows=active_rows_t,
+        active_row_bounds=(m_indices, offsets, counts),
     )
     del gate_up
 
@@ -3195,7 +3303,7 @@ def mxfp4_moe_deepgemm_contiguous(
         out.stride(0),
         TOP_K=top_k,
         BLOCK_K=BLOCK_K,
-        num_warps=4,
+        num_warps=(2 if M >= 1024 else 4),
     )
     return out
 
@@ -4038,6 +4146,7 @@ def mxfp4_moe_deepgemm_masked(
         out_q=h_fp8,
         out_sc=h_scale,
         actual_m=M,
+        actual_rows=max(1, (M * top_k) // max(ep_size, 1)),
     )
 
     with _dg_jit_serialize("masked", int(w2_i8.shape[0]), int(w2_i8.shape[1]), int(h_fp8.shape[-1])):
@@ -4106,7 +4215,7 @@ def mxfp4_moe_deepgemm_masked(
         HAS_SCALE_GATE=has_sg,
         TOP_K=top_k,
         BLOCK_K=BLOCK_K,
-        num_warps=4,
+        num_warps=(2 if M >= 128 else 4),
     )
     return out
 

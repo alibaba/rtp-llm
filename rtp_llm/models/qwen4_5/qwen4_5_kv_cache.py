@@ -15,6 +15,7 @@ and inside the compiled RTP-LLM engine (via ``build_qwen4_5_kv_cache_spec_descs`
 from __future__ import annotations
 
 import math
+import os
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -31,6 +32,7 @@ try:
         KVCacheSpecDesc,
         KVCacheSpecType,
         OpaqueBlockEntryCountMode,
+        RoleType,
         TpCacheTransferMode,
     )
 
@@ -44,10 +46,18 @@ try:
     _HAS_RTP_OPS = True
 except Exception:  # pragma: no cover - pure-Python fallback without C++ ops
     _HAS_RTP_OPS = False
+    RoleType = None  # type: ignore[assignment,misc]
     INDEXER_KV_TAG = "indexer_kv"
     INDEXER_STATE_TAG = "indexer_state"
     indexer_kv_desc = None
     indexer_state_desc = None
+
+DEFAULT_DECODE_OPAQUE_POOL_BLOCKS = 256
+DEFAULT_DECODE_SPEC_LINEAR_POOL_BLOCKS = 512
+DECODE_STATE_ROLLING_ENV = "QWEN4_5_DECODE_STATE_ROLLING"
+DECODE_STATE_GROUP_TYPE_ENV = "QWEN4_5_DECODE_STATE_GROUP_TYPE"
+DECODE_STATE_POOL_BLOCKS_ENV = "QWEN4_5_DECODE_STATE_POOL_BLOCKS"
+DECODE_STATE_ACTIVE_TAIL_BLOCKS_ENV = "QWEN4_5_DECODE_STATE_ACTIVE_TAIL_BLOCKS"
 
 FULL_ATTN_KV_TAG = "full"
 LINEAR_ATTN_TAG = "linear"
@@ -279,6 +289,47 @@ class Qwen4_5KVCachePlan:
             + self.ple_ngram_ctx_bytes_per_req
         )
 
+    @property
+    def opaque_state_bytes_per_block(self) -> int:
+        return self.total_fixed_state_bytes_per_req
+
+    def estimate_capacity(
+        self,
+        total_budget_bytes: int,
+        *,
+        tokens_per_block: int = 128,
+        is_decode_rolling: bool = False,
+        opaque_pool_blocks: int = DEFAULT_DECODE_OPAQUE_POOL_BLOCKS,
+    ) -> Dict[str, Any]:
+        """Estimate FullAttn KV block capacity with or without Decode rolling opaque pool."""
+        if total_budget_bytes < 0 or tokens_per_block <= 0 or opaque_pool_blocks < 0:
+            raise ValueError(
+                "total_budget_bytes and opaque_pool_blocks must be >= 0, tokens_per_block > 0"
+            )
+        per_block_full_kv_bytes = int(self.kv_bytes_per_token) * int(tokens_per_block)
+        per_block_opaque_bytes = int(self.opaque_state_bytes_per_block)
+        if is_decode_rolling:
+            opaque_pool_bytes = int(opaque_pool_blocks) * per_block_opaque_bytes
+            full_budget_bytes = max(0, int(total_budget_bytes) - opaque_pool_bytes)
+            full_kv_blocks = (
+                full_budget_bytes // per_block_full_kv_bytes
+                if per_block_full_kv_bytes > 0
+                else 0
+            )
+        else:
+            combined = per_block_full_kv_bytes + per_block_opaque_bytes
+            full_kv_blocks = int(total_budget_bytes) // combined if combined > 0 else 0
+            opaque_pool_blocks = full_kv_blocks
+            opaque_pool_bytes = full_kv_blocks * per_block_opaque_bytes
+        return {
+            "full_kv_blocks": full_kv_blocks,
+            "full_kv_tokens": full_kv_blocks * int(tokens_per_block),
+            "opaque_pool_blocks": int(opaque_pool_blocks),
+            "opaque_pool_bytes": opaque_pool_bytes,
+            "per_block_full_kv_bytes": per_block_full_kv_bytes,
+            "per_block_opaque_bytes": per_block_opaque_bytes,
+        }
+
     def total_bytes_for_seq_len(self, seq_len: int, batch_size: int = 1) -> int:
         if seq_len < 0 or batch_size < 0:
             raise ValueError("seq_len and batch_size must be non-negative")
@@ -292,9 +343,9 @@ def resolve_kv_cache_tp_size(tp_size: int = 1, parallel_mode: Optional[str] = No
         pm = str(parallel_mode).strip().lower()
         if pm == "dp4_ep4":
             return 1
-        if pm == "dp2_tp2_ep4":
+        if pm in ("dp2_tp2_ep4", "dp2_tpsp2_ep4"):
             return 2 if int(tp_size or 1) <= 1 else int(tp_size)
-        if pm in ("tp4_ep4", "sp4_tp4_ep4"):
+        if pm in ("tp4_ep4", "tpsp4", "tpsp4_ep4", "sp4_tp4_ep4"):
             return 4 if int(tp_size or 1) <= 1 else int(tp_size)
     return max(1, int(tp_size or 1))
 
@@ -563,13 +614,198 @@ def build_qwen4_5_kv_cache_plan(
     )
 
 
-def _make_full_group_opaque_desc(
+@dataclass(frozen=True)
+class DecodeOpaqueStatePoolPolicy:
+    """Resolved pool/tail/reuse policy for the 9 Qwen 4.5 ``OPAQUE_STATE`` tags."""
+
+    is_decode_role: bool
+    rolling_enabled: bool
+    mode: str
+    group_type: Any
+    enable_prefix_reuse: bool
+    active_tail_blocks: int
+    validate_tail_blocks: bool
+    reservable: bool
+    explicit_block_num: int
+    charge_to_paged_budget: bool
+
+
+def _parse_bool_env(raw: Optional[str], *, default: bool = True) -> bool:
+    if raw is None or not raw.strip():
+        return default
+    norm = raw.strip().lower()
+    if norm in ("1", "true", "yes", "on"):
+        return True
+    if norm in ("0", "false", "no", "off"):
+        return False
+    raise ValueError(f"Invalid boolean flag {raw!r} for {DECODE_STATE_ROLLING_ENV}")
+
+
+def _parse_int_env(name: str) -> Optional[int]:
+    raw = os.environ.get(name)
+    if raw is None or not raw.strip():
+        return None
+    try:
+        return int(raw.strip())
+    except ValueError as exc:
+        raise ValueError(f"Invalid integer for {name}={raw!r}") from exc
+
+
+def _resolve_is_decode_role(config: Any = None, role_type: Optional[Any] = None) -> bool:
+    candidate = role_type
+    if candidate is None and config is not None:
+        par_cfg = getattr(config, "parallelism_config", None)
+        if par_cfg is not None:
+            candidate = getattr(par_cfg, "role_type", None)
+        if candidate is None:
+            candidate = getattr(config, "role_type", None)
+    if candidate is None:
+        env_role = os.environ.get("ROLE_TYPE", "").strip()
+        candidate = env_role if env_role else None
+    if candidate is None:
+        return False
+    if RoleType is not None and candidate == RoleType.DECODE:
+        return True
+    norm = str(getattr(candidate, "name", candidate)).strip().upper()
+    return norm == "DECODE" or norm.endswith(".DECODE")
+
+
+def _resolve_gen_num_per_cycle(config: Any = None) -> int:
+    if config is not None:
+        val = int(getattr(config, "gen_num_per_cycle", 0) or 0)
+        if val > 0:
+            return val
+        sp_cfg = getattr(config, "sp_config", None)
+        if sp_cfg is not None:
+            val = int(getattr(sp_cfg, "gen_num_per_cycle", 0) or 0)
+            if val > 0:
+                return val
+    env_val = _parse_int_env("GEN_NUM_PER_CYCLE")
+    return max(0, env_val or 0)
+
+
+def resolve_decode_opaque_state_pool_policy(
+    config: Any = None,
+    *,
+    role_type: Optional[Any] = None,
+    kv_cache_config: Optional[Any] = None,
+    per_block_opaque_bytes: int = 0,
+) -> DecodeOpaqueStatePoolPolicy:
+    """Resolve rolling pool policy for Decode ``OPAQUE_STATE`` tags while preserving Prefill ``FULL``."""
+    is_decode = _resolve_is_decode_role(config, role_type)
+    full_gt = CacheGroupType.FULL if _HAS_RTP_OPS else "FULL"
+    if not is_decode:
+        return DecodeOpaqueStatePoolPolicy(
+            is_decode_role=False,
+            rolling_enabled=False,
+            mode="full",
+            group_type=full_gt,
+            enable_prefix_reuse=True,
+            active_tail_blocks=0,
+            validate_tail_blocks=False,
+            reservable=True,
+            explicit_block_num=0,
+            charge_to_paged_budget=True,
+        )
+
+    rolling_flag = _parse_bool_env(os.environ.get(DECODE_STATE_ROLLING_ENV), default=True)
+    raw_mode = os.environ.get(DECODE_STATE_GROUP_TYPE_ENV, "").strip().lower()
+    mode = raw_mode if raw_mode else "linear"
+    if mode not in ("linear", "swa", "full"):
+        raise ValueError(
+            f"Unsupported {DECODE_STATE_GROUP_TYPE_ENV}={raw_mode!r}; "
+            "expected 'linear', 'swa', or 'full'"
+        )
+    if not rolling_flag or mode == "full":
+        return DecodeOpaqueStatePoolPolicy(
+            is_decode_role=True,
+            rolling_enabled=False,
+            mode="full",
+            group_type=full_gt,
+            enable_prefix_reuse=True,
+            active_tail_blocks=0,
+            validate_tail_blocks=False,
+            reservable=True,
+            explicit_block_num=0,
+            charge_to_paged_budget=True,
+        )
+
+    env_pool = _parse_int_env(DECODE_STATE_POOL_BLOCKS_ENV)
+    if env_pool is not None and (env_pool < 0 or env_pool == 1):
+        raise ValueError(
+            f"{DECODE_STATE_POOL_BLOCKS_ENV} must be >= 2 (or 0 for auto), got {env_pool}"
+        )
+
+    cfg_pool = 0
+    if kv_cache_config is not None:
+        pool_attr = "linear_pool_blocks" if mode == "linear" else "swa_pool_blocks"
+        cfg_pool = int(getattr(kv_cache_config, pool_attr, 0) or 0)
+        if cfg_pool < 0 or cfg_pool == 1:
+            raise ValueError(
+                f"kv_cache_config.{pool_attr} must be >= 2 (or 0 for auto), got {cfg_pool}"
+            )
+
+    if env_pool is not None and env_pool >= 2:
+        pool_blocks = env_pool
+    elif cfg_pool >= 2:
+        pool_blocks = cfg_pool
+    else:
+        gen_num_per_cycle = _resolve_gen_num_per_cycle(config)
+        pool_blocks = (
+            DEFAULT_DECODE_SPEC_LINEAR_POOL_BLOCKS
+            if (mode == "linear" and gen_num_per_cycle > 0)
+            else DEFAULT_DECODE_OPAQUE_POOL_BLOCKS
+        )
+        if kv_cache_config is not None:
+            test_block_num = int(getattr(kv_cache_config, "test_block_num", 0) or 0)
+            if test_block_num > 0:
+                pool_blocks = max(2, min(pool_blocks, test_block_num))
+            mem_mb = int(getattr(kv_cache_config, "kv_cache_mem_mb", 0) or 0)
+            if mem_mb > 0 and per_block_opaque_bytes > 0:
+                budget_bytes = mem_mb * 1024 * 1024
+                max_auto = max(2, (budget_bytes // 2) // int(per_block_opaque_bytes))
+                pool_blocks = max(2, min(pool_blocks, max_auto))
+
+    tail_override = _parse_int_env(DECODE_STATE_ACTIVE_TAIL_BLOCKS_ENV)
+    if tail_override is not None and tail_override < 1:
+        raise ValueError(
+            f"{DECODE_STATE_ACTIVE_TAIL_BLOCKS_ENV} must be >= 1 in rolling mode, got {tail_override}"
+        )
+    # LINEAR retains max(2, activeTailBlocks()) + reserve_step in LinearCacheManager while loading 1 tail block;
+    # SWA evicts blocks outside activeTailBlocks() + reserve_step, so default to 2 blocks across TPB boundaries.
+    active_tail = (
+        tail_override
+        if tail_override is not None
+        else (1 if mode == "linear" else 2)
+    )
+    gt = (
+        (CacheGroupType.LINEAR if mode == "linear" else CacheGroupType.SWA)
+        if _HAS_RTP_OPS
+        else mode.upper()
+    )
+    return DecodeOpaqueStatePoolPolicy(
+        is_decode_role=True,
+        rolling_enabled=True,
+        mode=mode,
+        group_type=gt,
+        enable_prefix_reuse=False,
+        active_tail_blocks=active_tail,
+        validate_tail_blocks=False,
+        reservable=False,
+        explicit_block_num=int(pool_blocks),
+        charge_to_paged_budget=True,
+    )
+
+
+def _make_opaque_state_desc(
     tag: str,
     entry_elems: int,
     entry_count: int,
     dtype_str: str,
+    *,
+    pool_policy: Optional[DecodeOpaqueStatePoolPolicy] = None,
 ) -> Any:
-    """Create a FULL-group EXPLICIT ``OPAQUE_STATE`` ``KVCacheSpecDesc``."""
+    """Create an EXPLICIT ``OPAQUE_STATE`` ``KVCacheSpecDesc`` (FULL on Prefill, rolling on Decode)."""
     dtype_map = {
         "BF16": DataType.TYPE_BF16,
         "F16": DataType.TYPE_FP16,
@@ -587,15 +823,40 @@ def _make_full_group_opaque_desc(
     desc.entry_elems = entry_elems
     desc.entry_count_mode = OpaqueBlockEntryCountMode.EXPLICIT
     desc.explicit_entry_count = entry_count
-    desc.group_type = CacheGroupType.FULL
-    reuse = CacheReusePolicyDesc()
-    reuse.enable_prefix_reuse = True
-    desc.reuse = reuse
-    tail = CacheTailPolicyDesc()
-    tail.active_tail_blocks = 0
-    desc.tail = tail
+    if pool_policy is not None and pool_policy.rolling_enabled:
+        desc.group_type = pool_policy.group_type
+        reuse = CacheReusePolicyDesc()
+        reuse.enable_prefix_reuse = bool(pool_policy.enable_prefix_reuse)
+        desc.reuse = reuse
+        tail = CacheTailPolicyDesc()
+        tail.active_tail_blocks = int(pool_policy.active_tail_blocks)
+        tail.validate_tail_blocks = bool(pool_policy.validate_tail_blocks)
+        desc.tail = tail
+        cap = CacheCapacityPolicyDesc()
+        cap.reservable = bool(pool_policy.reservable)
+        cap.explicit_block_num = int(pool_policy.explicit_block_num)
+        cap.charge_to_paged_budget = bool(pool_policy.charge_to_paged_budget)
+        desc.capacity = cap
+    else:
+        desc.group_type = CacheGroupType.FULL
+        reuse = CacheReusePolicyDesc()
+        reuse.enable_prefix_reuse = True
+        desc.reuse = reuse
+        tail = CacheTailPolicyDesc()
+        tail.active_tail_blocks = 0
+        desc.tail = tail
     desc.tp_transfer_mode = TpCacheTransferMode.REPLICATED
     return desc
+
+
+def _make_full_group_opaque_desc(
+    tag: str,
+    entry_elems: int,
+    entry_count: int,
+    dtype_str: str,
+) -> Any:
+    """Create a FULL-group EXPLICIT ``OPAQUE_STATE`` ``KVCacheSpecDesc``."""
+    return _make_opaque_state_desc(tag, entry_elems, entry_count, dtype_str)
 
 
 def build_qwen4_5_kv_cache_spec_descs(
@@ -607,6 +868,8 @@ def build_qwen4_5_kv_cache_spec_descs(
     kv_dtype: str = "BF16",
     enable_yoco_decode: Optional[bool] = None,
     allow_small_block_explicit: bool = False,
+    role_type: Optional[Any] = None,
+    kv_cache_config: Optional[Any] = None,
 ) -> List[List[Any]]:
     """Build per-layer RTP-LLM ``KVCacheSpecDesc`` lists mirroring ``qwen4_exp_kv_cache``.
 
@@ -633,6 +896,12 @@ def build_qwen4_5_kv_cache_spec_descs(
         parallel_mode=parallel_mode,
         kv_dtype=kv_dtype,
         enable_yoco_decode=enable_yoco_decode,
+    )
+    pool_policy = resolve_decode_opaque_state_pool_policy(
+        config,
+        role_type=role_type,
+        kv_cache_config=kv_cache_config,
+        per_block_opaque_bytes=plan.opaque_state_bytes_per_block,
     )
 
     layer_descs: List[List[Any]] = []
@@ -704,30 +973,33 @@ def build_qwen4_5_kv_cache_spec_descs(
                 assert lp.ssm_state_shape is not None
                 ssm_heads, ssm_k, ssm_v = lp.ssm_state_shape
                 descs.append(
-                    _make_full_group_opaque_desc(
+                    _make_opaque_state_desc(
                         tag=GDN_SSM_STATE_TAG,
                         entry_elems=ssm_k * ssm_v,
                         entry_count=ssm_heads,
                         dtype_str="F32",
+                        pool_policy=pool_policy,
                     )
                 )
                 if lp.has_gdn_conv:
                     descs.append(
-                        _make_full_group_opaque_desc(
+                        _make_opaque_state_desc(
                             tag=GDN_CONV_STATE_TAG,
                             entry_elems=lp.gdn_conv_channels,
                             entry_count=lp.gdn_conv_state_len,
                             dtype_str="BF16",
+                            pool_policy=pool_policy,
                         )
                     )
             elif lp.has_gdn_conv:
                 # YoCo decode consumer: no SSM state, only Q-conv [2048, k-1=3]
                 descs.append(
-                    _make_full_group_opaque_desc(
+                    _make_opaque_state_desc(
                         tag=GDN_CONSUMER_Q_CONV_TAG,
                         entry_elems=lp.gdn_conv_channels,
                         entry_count=lp.gdn_conv_state_len,
                         dtype_str="BF16",
+                        pool_policy=pool_policy,
                     )
                 )
 
@@ -744,11 +1016,12 @@ def build_qwen4_5_kv_cache_spec_descs(
                 entry_elems = reg.shape[0]
                 entry_count = reg.shape[1]
             descs.append(
-                _make_full_group_opaque_desc(
+                _make_opaque_state_desc(
                     tag=reg.tag,
                     entry_elems=entry_elems,
                     entry_count=entry_count,
                     dtype_str=reg.dtype,
+                    pool_policy=pool_policy,
                 )
             )
         layer_descs.append(descs)

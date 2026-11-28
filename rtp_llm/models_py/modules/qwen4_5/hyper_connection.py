@@ -1996,7 +1996,7 @@ def hc_mix_reduce_with_down_inject_triton(
             "HC_COUNT": hc_count, "HAS_LATENT": has_latent, "HAS_INJ": has_inj,
             "BLOCK": block, "BLOCK_L": block_l, "BLOCK_H": block_h, "SWAP_GRID": swap_grid,
         },
-        num_warps=4,
+        num_warps=(2 if rows >= 128 else 4),
     )
     return out, latent, inject_w
 

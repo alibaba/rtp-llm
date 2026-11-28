@@ -836,6 +836,24 @@ void NormalExecutor::publishNormalDeviceState(const StreamGroups& stream_groups,
         return;
     }
 
+    torch::Tensor last_tokens_col =
+        token_ids_gpu.dim() == 1 ? token_ids_gpu : token_ids_gpu.select(-1, token_ids_gpu.size(-1) - 1);
+    if (last_tokens_col.scalar_type() != torch::kInt32) {
+        last_tokens_col = last_tokens_col.to(torch::kInt32);
+    }
+
+    struct PendingPublishItem {
+        GenerateStreamPtr stream;
+        int64_t           batch_idx_out;
+        int               cur_real_seq_len;
+        torch::Tensor     cur_seq_len_gpu;
+        int               missing_idx;
+        torch::Tensor     prev_engram;
+    };
+    std::vector<PendingPublishItem> pending_items;
+    pending_items.reserve(all_streams.size());
+    std::vector<int32_t> missing_seq_lens;
+
     int64_t batch_idx_out = 0;
     for (auto& stream : all_streams) {
         // Middle chunks do not commit a token or advance logits processor state.
@@ -843,28 +861,69 @@ void NormalExecutor::publishNormalDeviceState(const StreamGroups& stream_groups,
             batch_idx_out += 1;
             continue;
         }
-        torch::Tensor last_sample_token_gpu;
-        if (token_ids_gpu.dim() == 1) {
-            last_sample_token_gpu = token_ids_gpu.narrow(0, batch_idx_out, 1).to(torch::kInt32);
-        } else {
-            const int64_t last_col = token_ids_gpu.size(-1) - 1;
-            last_sample_token_gpu =
-                token_ids_gpu.narrow(0, batch_idx_out, 1).select(-1, last_col).reshape({1}).to(torch::kInt32);
-        }
-
-        // Mirror next_seq_len_gpu on host for the next iter's scheduler.
-        // Fall back to live seqLength only on first publish (no prior worker).
         const auto& prev_state = stream->getNormalAsyncDeviceState();
         const int   cur_real_seq_len =
             prev_state.next_real_seq_len > 0 ? prev_state.next_real_seq_len : stream->seqLength();
 
         torch::Tensor cur_seq_len_gpu;
+        int           missing_idx = -1;
         const auto&   prev_next_seq_len = prev_state.next_seq_len_gpu;
         if (prev_next_seq_len.defined() && prev_next_seq_len.is_cuda()) {
-            cur_seq_len_gpu = prev_next_seq_len;
+            cur_seq_len_gpu =
+                prev_next_seq_len.scalar_type() == torch::kInt32 ? prev_next_seq_len : prev_next_seq_len.to(cuda_i32);
         } else {
-            cur_seq_len_gpu = torch::full({1}, static_cast<int64_t>(cur_real_seq_len), cuda_i32);
+            missing_idx = static_cast<int>(missing_seq_lens.size());
+            missing_seq_lens.push_back(static_cast<int32_t>(cur_real_seq_len));
         }
+        pending_items.push_back({
+            stream,
+            batch_idx_out,
+            cur_real_seq_len,
+            std::move(cur_seq_len_gpu),
+            missing_idx,
+            prev_state.engram_token_window_gpu,
+        });
+        batch_idx_out += 1;
+    }
+
+    if (pending_items.empty()) {
+        return;
+    }
+
+    torch::Tensor init_seq_len_gpu;
+    if (!missing_seq_lens.empty()) {
+        if (missing_seq_lens.size() == 1) {
+            init_seq_len_gpu = torch::full({1}, static_cast<int64_t>(missing_seq_lens[0]), cuda_i32);
+        } else {
+            auto pinned = torch::empty({static_cast<int64_t>(missing_seq_lens.size())},
+                                       torch::TensorOptions(torch::kInt32).pinned_memory(true));
+            std::memcpy(
+                pinned.data_ptr<int32_t>(), missing_seq_lens.data(), missing_seq_lens.size() * sizeof(int32_t));
+            init_seq_len_gpu = pinned.to(torch::kCUDA, /*non_blocking=*/true);
+        }
+    }
+
+    torch::Tensor batched_next_seq_len_gpu;
+    if (pending_items.size() > 1) {
+        std::vector<torch::Tensor> cur_seq_slices;
+        cur_seq_slices.reserve(pending_items.size());
+        for (auto& item : pending_items) {
+            if (item.missing_idx >= 0) {
+                cur_seq_slices.push_back(init_seq_len_gpu.narrow(0, item.missing_idx, 1));
+            } else {
+                cur_seq_slices.push_back(item.cur_seq_len_gpu.reshape({1}));
+            }
+        }
+        // Fresh tensor from cat(); in-place add_(1) keeps every stream's prior next_seq_len_gpu immutable
+        // and replaces B per-stream add launches with two batched kernels.
+        batched_next_seq_len_gpu = torch::cat(cur_seq_slices, 0);
+        batched_next_seq_len_gpu.add_(1);
+    }
+
+    for (size_t i = 0; i < pending_items.size(); ++i) {
+        auto&         item                  = pending_items[i];
+        auto&         stream                = item.stream;
+        torch::Tensor last_sample_token_gpu = last_tokens_col.narrow(0, item.batch_idx_out, 1);
 
         for (const auto& processor : stream->getAllLogitsProcessorPtr()) {
             if (processor != nullptr && processor->supportsNormalAsyncDeviceState()) {
@@ -874,9 +933,15 @@ void NormalExecutor::publishNormalDeviceState(const StreamGroups& stream_groups,
 
         GenerateStream::NormalAsyncDeviceState state;
         state.last_sample_token_gpu = std::move(last_sample_token_gpu);
-        state.next_seq_len_gpu      = (cur_seq_len_gpu + 1).to(torch::kInt32);
+        if (batched_next_seq_len_gpu.defined()) {
+            state.next_seq_len_gpu = batched_next_seq_len_gpu.narrow(0, static_cast<int64_t>(i), 1);
+        } else {
+            torch::Tensor single_cur =
+                item.missing_idx >= 0 ? init_seq_len_gpu : item.cur_seq_len_gpu;
+            state.next_seq_len_gpu = (single_cur + 1).to(torch::kInt32);
+        }
         if (has_engram_) {
-            torch::Tensor previous = prev_state.engram_token_window_gpu;
+            torch::Tensor previous = item.prev_engram;
             if (!previous.defined()) {
                 // The first publication (including PD admission) owns stable
                 // host history. Later rounds use the immutable GPU tail.
@@ -890,10 +955,9 @@ void NormalExecutor::publishNormalDeviceState(const StreamGroups& stream_groups,
             state.engram_token_window_gpu =
                 torch::cat({state.last_sample_token_gpu.reshape({1, 1}), previous.narrow(1, 0, 3)}, 1);
         }
-        state.last_real_seq_len = cur_real_seq_len;
-        state.next_real_seq_len = cur_real_seq_len + 1;
+        state.last_real_seq_len = item.cur_real_seq_len;
+        state.next_real_seq_len = item.cur_real_seq_len + 1;
         stream->setNormalAsyncDeviceState(std::move(state));
-        batch_idx_out += 1;
     }
 }
 

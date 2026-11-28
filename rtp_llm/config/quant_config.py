@@ -221,6 +221,10 @@ class QuantizationConfig(ABC):
             return None
         group_size = quant_config["group_size"] if "group_size" in quant_config else 0
         bits = quant_config["bits"] if "bits" in quant_config else 0
+        if quant_method == "mxfp4":
+            bits = bits or 4
+            group_size = group_size or 32
+            quant_method = MXFp4QuarkQuantConfig.get_method()
         if quant_method == "fp8":
             bits = 8
             if "weight_block_size" in quant_config:
@@ -420,8 +424,13 @@ class QuantizationConfig(ABC):
         if quant_config.get("scale_fmt") is not None:
             normalized_config["scale_fmt"] = quant_config["scale_fmt"]
         result = cls.from_config(normalized_config)
-        if quant_config and "exclude" in quant_config:
-            result.exclude_modules = set(quant_config["exclude"])
+        if quant_config:
+            if "exclude" in quant_config:
+                result.exclude_modules = set(quant_config["exclude"])
+            elif "modules_to_not_convert" in quant_config and isinstance(
+                quant_config["modules_to_not_convert"], (list, tuple, set)
+            ):
+                result.exclude_modules = set(quant_config["modules_to_not_convert"])
         return result
 
 

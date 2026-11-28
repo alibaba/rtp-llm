@@ -448,68 +448,101 @@ def _gemma_rmsnorm_partial_rope_d256_r64_kernel(
     Pos_ptr,
     InvFreq_ptr,
     Out_ptr,
-    stride_xb,
-    stride_xt,
-    stride_xh,
-    stride_xd,
-    stride_pb,
-    stride_pt,
-    stride_ob,
-    stride_ot,
-    stride_oh,
-    stride_od,
+    stride_xb: tl.int64,
+    stride_xt: tl.int64,
+    stride_xh: tl.int64,
+    stride_xd: tl.int64,
+    stride_pb: tl.int64,
+    stride_pt: tl.int64,
+    stride_ob: tl.int64,
+    stride_ot: tl.int64,
+    stride_oh: tl.int64,
+    stride_od: tl.int64,
     T,
     eps,
+    H_TOTAL: tl.constexpr = 1,
+    BLOCK_H: tl.constexpr = 1,
 ):
     """Fused GemmaRMSNorm (1 + w in FP32) + partial NeoX RoPE (rotary_dim=64) for head_dim=256."""
-    bt = tl.program_id(0)
-    h = tl.program_id(1)
+    bt = tl.program_id(0).to(tl.int64)
     b = bt // T
     t = bt % T
 
     offs_32 = tl.arange(0, 32)
     offs_64 = tl.arange(0, 64)
     offs_128 = tl.arange(0, 128)
-
-    x_base = X_ptr + b * stride_xb + t * stride_xt + h * stride_xh
-    x0 = tl.load(x_base + offs_32 * stride_xd).to(tl.float32)
-    x1 = tl.load(x_base + (32 + offs_32) * stride_xd).to(tl.float32)
-    x2 = tl.load(x_base + (64 + offs_64) * stride_xd).to(tl.float32)
-    x3 = tl.load(x_base + (128 + offs_128) * stride_xd).to(tl.float32)
-
-    sum_sq = (
-        tl.sum(x0 * x0, axis=0)
-        + tl.sum(x1 * x1, axis=0)
-        + tl.sum(x2 * x2, axis=0)
-        + tl.sum(x3 * x3, axis=0)
-    )
-    rstd = tl.rsqrt(sum_sq * (1.0 / 256.0) + eps)
-
     w0 = tl.load(W_ptr + offs_32).to(tl.float32)
     w1 = tl.load(W_ptr + 32 + offs_32).to(tl.float32)
     w2 = tl.load(W_ptr + 64 + offs_64).to(tl.float32)
     w3 = tl.load(W_ptr + 128 + offs_128).to(tl.float32)
-
-    y0 = (x0 * rstd) * (1.0 + w0)
-    y1 = (x1 * rstd) * (1.0 + w1)
-    y2 = (x2 * rstd) * (1.0 + w2)
-    y3 = (x3 * rstd) * (1.0 + w3)
 
     pos = tl.load(Pos_ptr + b * stride_pb + t * stride_pt).to(tl.float32)
     inv_freq = tl.load(InvFreq_ptr + offs_32).to(tl.float32)
     freqs = pos * inv_freq
     c = tl.cos(freqs)
     s = tl.sin(freqs)
-
-    r0 = y0 * c - y1 * s
-    r1 = y1 * c + y0 * s
-
-    out_base = Out_ptr + b * stride_ob + t * stride_ot + h * stride_oh
     out_dtype = Out_ptr.dtype.element_ty
-    tl.store(out_base + offs_32 * stride_od, r0.to(out_dtype))
-    tl.store(out_base + (32 + offs_32) * stride_od, r1.to(out_dtype))
-    tl.store(out_base + (64 + offs_64) * stride_od, y2.to(out_dtype))
-    tl.store(out_base + (128 + offs_128) * stride_od, y3.to(out_dtype))
+
+    if BLOCK_H == 1:
+        h = tl.program_id(1).to(tl.int64)
+        x_base = X_ptr + b * stride_xb + t * stride_xt + h * stride_xh
+        x0 = tl.load(x_base + offs_32 * stride_xd).to(tl.float32)
+        x1 = tl.load(x_base + (32 + offs_32) * stride_xd).to(tl.float32)
+        x2 = tl.load(x_base + (64 + offs_64) * stride_xd).to(tl.float32)
+        x3 = tl.load(x_base + (128 + offs_128) * stride_xd).to(tl.float32)
+
+        sum_sq = (
+            tl.sum(x0 * x0, axis=0)
+            + tl.sum(x1 * x1, axis=0)
+            + tl.sum(x2 * x2, axis=0)
+            + tl.sum(x3 * x3, axis=0)
+        )
+        rstd = tl.rsqrt(sum_sq * (1.0 / 256.0) + eps)
+
+        y0 = (x0 * rstd) * (1.0 + w0)
+        y1 = (x1 * rstd) * (1.0 + w1)
+        y2 = (x2 * rstd) * (1.0 + w2)
+        y3 = (x3 * rstd) * (1.0 + w3)
+
+        r0 = y0 * c - y1 * s
+        r1 = y1 * c + y0 * s
+
+        out_base = Out_ptr + b * stride_ob + t * stride_ot + h * stride_oh
+        tl.store(out_base + offs_32 * stride_od, r0.to(out_dtype))
+        tl.store(out_base + (32 + offs_32) * stride_od, r1.to(out_dtype))
+        tl.store(out_base + (64 + offs_64) * stride_od, y2.to(out_dtype))
+        tl.store(out_base + (128 + offs_128) * stride_od, y3.to(out_dtype))
+    else:
+        h0 = tl.program_id(1).to(tl.int64) * BLOCK_H
+        hs = h0 + tl.arange(0, BLOCK_H)
+        h_mask = hs < H_TOTAL
+        x_base = X_ptr + b * stride_xb + t * stride_xt + hs[:, None] * stride_xh
+        x0 = tl.load(x_base + offs_32[None, :] * stride_xd, mask=h_mask[:, None], other=0.0).to(tl.float32)
+        x1 = tl.load(x_base + (32 + offs_32)[None, :] * stride_xd, mask=h_mask[:, None], other=0.0).to(tl.float32)
+        x2 = tl.load(x_base + (64 + offs_64)[None, :] * stride_xd, mask=h_mask[:, None], other=0.0).to(tl.float32)
+        x3 = tl.load(x_base + (128 + offs_128)[None, :] * stride_xd, mask=h_mask[:, None], other=0.0).to(tl.float32)
+
+        sum_sq = (
+            tl.sum(x0 * x0, axis=1)
+            + tl.sum(x1 * x1, axis=1)
+            + tl.sum(x2 * x2, axis=1)
+            + tl.sum(x3 * x3, axis=1)
+        )
+        rstd = tl.rsqrt(sum_sq * (1.0 / 256.0) + eps)[:, None]
+
+        y0 = (x0 * rstd) * (1.0 + w0[None, :])
+        y1 = (x1 * rstd) * (1.0 + w1[None, :])
+        y2 = (x2 * rstd) * (1.0 + w2[None, :])
+        y3 = (x3 * rstd) * (1.0 + w3[None, :])
+
+        r0 = y0 * c[None, :] - y1 * s[None, :]
+        r1 = y1 * c[None, :] + y0 * s[None, :]
+
+        out_base = Out_ptr + b * stride_ob + t * stride_ot + hs[:, None] * stride_oh
+        tl.store(out_base + offs_32[None, :] * stride_od, r0.to(out_dtype), mask=h_mask[:, None])
+        tl.store(out_base + (32 + offs_32)[None, :] * stride_od, r1.to(out_dtype), mask=h_mask[:, None])
+        tl.store(out_base + (64 + offs_64)[None, :] * stride_od, y2.to(out_dtype), mask=h_mask[:, None])
+        tl.store(out_base + (128 + offs_128)[None, :] * stride_od, y3.to(out_dtype), mask=h_mask[:, None])
 
 
 class GemmaRMSNorm(nn.Module):
@@ -599,6 +632,15 @@ def gemma_rmsnorm_and_partial_rope(
             seq_len,
             float(eps),
         )
+        block_h = (
+            4
+            if (
+                num_heads % 4 == 0
+                and (bsz * seq_len >= 2048 or (bsz * seq_len >= 256 and num_heads >= 16))
+            )
+            else 1
+        )
+        nw_rope = 2 if block_h > 1 else 4
         ckey = (
             x.device.index,
             1,
@@ -607,18 +649,21 @@ def gemma_rmsnorm_and_partial_rope(
             positions.dtype,
             inv_freq.dtype,
             tuple(_triton_int_spec(v) for v in rt_args[5:16]),
+            num_heads,
+            block_h,
+            nw_rope,
         )
         triton_fast_launch(
             _ATTN_TRITON_CACHE,
             ckey,
             _gemma_rmsnorm_partial_rope_d256_r64_kernel,
             bsz * seq_len,
-            num_heads,
+            triton.cdiv(num_heads, block_h),
             1,
             x.data_ptr() | weight.data_ptr() | positions.data_ptr() | inv_freq.data_ptr() | out.data_ptr(),
             rt_args,
-            {},
-            num_warps=4,
+            {"H_TOTAL": num_heads, "BLOCK_H": block_h},
+            num_warps=nw_rope,
         )
         return out
 
@@ -647,30 +692,56 @@ def _fused_attn_output_gate_kernel(
     T,
     D: tl.constexpr,
     BLOCK_D: tl.constexpr,
+    H_TOTAL: tl.constexpr = 1,
+    BLOCK_T: tl.constexpr = 1,
 ):
     """Fused [B, H_q, T, D] transpose + sigmoid(strided gate) + [B, T, H_q*D] flatten."""
-    bt = tl.program_id(0).to(tl.int64)
-    h = tl.program_id(1).to(tl.int64)
-    b = bt // T
-    t = bt % T
     offs = tl.arange(0, BLOCK_D)
-    mask = offs < D
-    a = tl.load(
-        ATTN_ptr + b * stride_ab + h * stride_ah + t * stride_at + offs * stride_ad,
-        mask=mask,
-        other=0.0,
-    ).to(tl.float32)
-    g = tl.load(
-        GATE_ptr + b * stride_gb + t * stride_gt + h * stride_gh + offs * stride_gd,
-        mask=mask,
-        other=0.0,
-    ).to(tl.float32)
-    out = a * tl.sigmoid(g)
-    tl.store(
-        OUT_ptr + b * stride_ob + t * stride_ot + h * stride_oh + offs * stride_od,
-        out.to(OUT_ptr.dtype.element_ty),
-        mask=mask,
-    )
+    if BLOCK_T == 1:
+        bt = tl.program_id(0).to(tl.int64)
+        h = tl.program_id(1).to(tl.int64)
+        b = bt // T
+        t = bt % T
+        mask = offs < D
+        a = tl.load(
+            ATTN_ptr + b * stride_ab + h * stride_ah + t * stride_at + offs * stride_ad,
+            mask=mask,
+            other=0.0,
+        ).to(tl.float32)
+        g = tl.load(
+            GATE_ptr + b * stride_gb + t * stride_gt + h * stride_gh + offs * stride_gd,
+            mask=mask,
+            other=0.0,
+        ).to(tl.float32)
+        out = a * tl.sigmoid(g)
+        tl.store(
+            OUT_ptr + b * stride_ob + t * stride_ot + h * stride_oh + offs * stride_od,
+            out.to(OUT_ptr.dtype.element_ty),
+            mask=mask,
+        )
+    else:
+        t0 = tl.program_id(0).to(tl.int64) * BLOCK_T
+        bh = tl.program_id(1).to(tl.int64)
+        b = bh // H_TOTAL
+        h = bh % H_TOTAL
+        ts = t0 + tl.arange(0, BLOCK_T)
+        mask = (ts[:, None] < T) & (offs[None, :] < D)
+        a = tl.load(
+            ATTN_ptr + b * stride_ab + h * stride_ah + ts[:, None] * stride_at + offs[None, :] * stride_ad,
+            mask=mask,
+            other=0.0,
+        ).to(tl.float32)
+        g = tl.load(
+            GATE_ptr + b * stride_gb + ts[:, None] * stride_gt + h * stride_gh + offs[None, :] * stride_gd,
+            mask=mask,
+            other=0.0,
+        ).to(tl.float32)
+        out = a * tl.sigmoid(g)
+        tl.store(
+            OUT_ptr + b * stride_ob + ts[:, None] * stride_ot + h * stride_oh + offs[None, :] * stride_od,
+            out.to(OUT_ptr.dtype.element_ty),
+            mask=mask,
+        )
 
 
 def apply_attn_output_gate_flatten(
@@ -711,6 +782,10 @@ def apply_attn_output_gate_flatten(
             1,
             seq_len,
         )
+        block_t = 2 if (seq_len >= 64 and head_dim == 256) else 1
+        nw_gate = 2 if block_t > 1 else 4
+        gx = triton.cdiv(seq_len, block_t) if block_t > 1 else (bsz * seq_len)
+        gy = (bsz * num_heads) if block_t > 1 else num_heads
         ckey = (
             attn_bhtd.device.index,
             2,
@@ -719,18 +794,21 @@ def apply_attn_output_gate_flatten(
             tuple(_triton_int_spec(v) for v in rt_args[3:]),
             head_dim,
             block_d,
+            num_heads,
+            block_t,
+            nw_gate,
         )
         triton_fast_launch(
             _ATTN_TRITON_CACHE,
             ckey,
             _fused_attn_output_gate_kernel,
-            bsz * seq_len,
-            num_heads,
+            gx,
+            gy,
             1,
             attn_bhtd.data_ptr() | gate_bthd.data_ptr() | out.data_ptr(),
             rt_args,
-            {"D": head_dim, "BLOCK_D": block_d},
-            num_warps=4,
+            {"D": head_dim, "BLOCK_D": block_d, "H_TOTAL": num_heads, "BLOCK_T": block_t},
+            num_warps=nw_gate,
         )
         return out
     attn_out = attn_bhtd.transpose(1, 2) * torch.sigmoid(gate_bthd)

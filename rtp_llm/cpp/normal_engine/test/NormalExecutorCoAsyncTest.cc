@@ -440,6 +440,63 @@ TEST_F(NormalExecutorCoAsyncTest, NonRootRankSkipsSyncAndDoubleReleaseOnlyOnAsyn
     ASSERT_TRUE(prefill_future.get().ok());
     EXPECT_EQ(probe_ptr->release_buffers_calls.load(), 2);
 }
+
+TEST_F(NormalExecutorCoAsyncTest, MultiStreamPublishNormalDeviceStateBatchesUpdatesAndPreservesPriorSeqLen) {
+    ASSERT_STREQ(std::getenv("RTP_LLM_DEVICE_INPUT"), "1");
+
+    ModelConfig   model_config;
+    RuntimeConfig runtime_config;
+    KVCacheConfig kv_cache_config;
+    auto          params            = createEngineInitParams(CustomConfig{}, model_config, runtime_config, kv_cache_config);
+    params.model_config_.vocab_size = 128;
+
+    NormalExecutor::test_model_factory = [&](const GptModelInitParams&) {
+        return std::make_unique<ProbeModel>(128);
+    };
+    struct FactoryResetGuard {
+        ~FactoryResetGuard() {
+            NormalExecutor::test_model_factory = nullptr;
+        }
+    } factory_guard;
+
+    NormalExecutor executor(params, nullptr, /*warm_up=*/false);
+    ResourceContext resource_context;
+    const auto      cuda_i32 = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
+
+    auto s0 = makeDecodeStream(params.model_config_, params.runtime_config, resource_context, 'a', 4);
+    auto s1 = makeDecodeStream(params.model_config_, params.runtime_config, resource_context, 'b', 7);
+    auto s2 = makeDecodeStream(params.model_config_, params.runtime_config, resource_context, 'c', 10);
+    // Exercise mixed missing initial device state alongside populated decode streams.
+    s1->setNormalAsyncDeviceState(GenerateStream::NormalAsyncDeviceState{});
+
+    const auto prev_s0_seq = s0->getNormalAsyncDeviceState().next_seq_len_gpu;
+    const auto prev_s2_seq = s2->getNormalAsyncDeviceState().next_seq_len_gpu;
+
+    std::list<GenerateStreamPtr> stream_list{s0, s1, s2};
+    StreamGroups                 groups(stream_list);
+    SamplerOutput                sampler_output;
+    sampler_output.token_ids = torch::tensor({11, 22, 33}, cuda_i32);
+
+    executor.publishNormalDeviceState(groups, sampler_output);
+    cudaSyncAndCheck();
+
+    // Prior next_seq_len_gpu tensors must remain immutable for concurrent readers.
+    EXPECT_EQ(prev_s0_seq.cpu().item<int32_t>(), 4);
+    EXPECT_EQ(prev_s2_seq.cpu().item<int32_t>(), 10);
+
+    EXPECT_EQ(s0->getNormalAsyncDeviceState().last_sample_token_gpu.cpu().item<int32_t>(), 11);
+    EXPECT_EQ(s0->getNormalAsyncDeviceState().next_seq_len_gpu.cpu().item<int32_t>(), 5);
+    EXPECT_EQ(s0->getNormalAsyncDeviceState().next_real_seq_len, 5);
+
+    EXPECT_EQ(s1->getNormalAsyncDeviceState().last_sample_token_gpu.cpu().item<int32_t>(), 22);
+    // s1 had no prior state and stream->seqLength() == 1 (1 initial token), so next == 2.
+    EXPECT_EQ(s1->getNormalAsyncDeviceState().next_seq_len_gpu.cpu().item<int32_t>(), 2);
+    EXPECT_EQ(s1->getNormalAsyncDeviceState().next_real_seq_len, 2);
+
+    EXPECT_EQ(s2->getNormalAsyncDeviceState().last_sample_token_gpu.cpu().item<int32_t>(), 33);
+    EXPECT_EQ(s2->getNormalAsyncDeviceState().next_seq_len_gpu.cpu().item<int32_t>(), 11);
+    EXPECT_EQ(s2->getNormalAsyncDeviceState().next_real_seq_len, 11);
+}
 #endif
 
 }  // namespace

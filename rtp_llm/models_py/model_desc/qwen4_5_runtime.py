@@ -369,10 +369,12 @@ class LocalKVCache:
 
 
 _PINNED_DMA_LOCAL = threading.local()
+_PIN_SLAB_BYTES = 262144  # 256 KiB per thread-local pinned staging slab
+_PIN_SLAB_MAX_COUNT = 32
 
 
 def _pin_stage_copy_to_device(cpu_flat: torch.Tensor, device: torch.device) -> torch.Tensor:
-    """Copy a 1D contiguous CPU tensor into a fresh CUDA tensor using a pooled pinned event ring."""
+    """Copy a 1D contiguous CPU tensor into a fresh CUDA tensor using a pinned slab bump ring."""
     n = int(cpu_flat.numel())
     if n == 0:
         return torch.empty((0,), dtype=cpu_flat.dtype, device=device)
@@ -382,51 +384,102 @@ def _pin_stage_copy_to_device(cpu_flat: torch.Tensor, device: torch.device) -> t
         return cpu_flat.to(device=device)
     elem_bytes = cpu_flat.element_size()
     need_bytes = n * elem_bytes
-    dev_idx = int(device.index if device.index is not None else torch.cuda.current_device())
-    rings: Dict[int, Tuple[List[Tuple[Optional[torch.Tensor], Optional[torch.cuda.Event]]], int]] = getattr(
-        _PINNED_DMA_LOCAL, "rings", None
-    )
-    if rings is None:
-        rings = {}
-        _PINNED_DMA_LOCAL.rings = rings
-    entry = rings.get(dev_idx)
-    n_slots = 16
-    if entry is None:
-        slots: List[Tuple[Optional[torch.Tensor], Optional[torch.cuda.Event]]] = [(None, None) for _ in range(n_slots)]
-        idx = 0
-    else:
-        slots, idx = entry
-    buf_u8, ev = slots[idx]
-    if ev is not None and not ev.query():
-        found = -1
-        for k in range(1, n_slots):
-            cand = (idx + k) % n_slots
-            c_ev = slots[cand][1]
-            if c_ev is None or c_ev.query():
-                found = cand
-                break
-        if found >= 0:
-            idx = found
-            buf_u8, ev = slots[idx]
-        else:
-            ev.synchronize()
-    if buf_u8 is None or int(buf_u8.numel()) < need_bytes or (buf_u8.data_ptr() % max(4, elem_bytes)) != 0:
-        cap = 4096
-        while cap < need_bytes:
-            cap *= 2
+    if need_bytes > _PIN_SLAB_BYTES:
+        # Large staging fallback uses PyTorch CachingHostAllocator (event-tracked on free).
+        if cpu_flat.is_pinned():
+            return cpu_flat.to(device=device, non_blocking=True)
         try:
-            buf_u8 = torch.empty((cap,), dtype=torch.uint8, device="cpu", pin_memory=True)
+            pin_large = torch.empty((n,), dtype=cpu_flat.dtype, device="cpu", pin_memory=True)
         except Exception:
             return cpu_flat.to(device=device)
-    pin_typed = buf_u8[:need_bytes].view(cpu_flat.dtype)
+        pin_large.copy_(cpu_flat)
+        dev_large = torch.empty((n,), dtype=cpu_flat.dtype, device=device)
+        dev_large.copy_(pin_large, non_blocking=True)
+        return dev_large
+
+    dev_idx = int(device.index if device.index is not None else torch.cuda.current_device())
+    # state[dev_idx] = [slabs, active_idx], where each slab is [buf_u8, offset, event, stream_obj, stream_ptr]
+    states = getattr(_PINNED_DMA_LOCAL, "slab_states", None)
+    if states is None:
+        states = {}
+        _PINNED_DMA_LOCAL.slab_states = states
+
+    cur_stream = torch.cuda.current_stream(device)
+    cur_stream_ptr = int(cur_stream.cuda_stream)
+    align = max(16, elem_bytes)
+
+    state = states.get(dev_idx)
+    if state is None:
+        try:
+            first_buf = torch.empty((_PIN_SLAB_BYTES,), dtype=torch.uint8, device="cpu", pin_memory=True)
+        except Exception:
+            return cpu_flat.to(device=device)
+        slabs: List[List[Any]] = [[first_buf, 0, None, None, 0]]
+        active_idx = 0
+        state = [slabs, active_idx]
+        states[dev_idx] = state
+    else:
+        slabs, active_idx = state
+
+    slab = slabs[active_idx]
+    slab_off = slab[1]
+    aligned_off = (slab_off + align - 1) & ~(align - 1)
+    need_rotate = (
+        aligned_off + need_bytes > _PIN_SLAB_BYTES
+        or (slab_off > 0 and slab[4] != cur_stream_ptr)
+    )
+    if need_rotate:
+        # Seal the outgoing slab once on its owning stream rather than recording an event per copy.
+        if slab_off > 0:
+            ev = slab[2]
+            if ev is None:
+                ev = torch.cuda.Event(enable_timing=False)
+                slab[2] = ev
+            ev.record(slab[3] if slab[3] is not None else cur_stream)
+
+        found = -1
+        n_slabs = len(slabs)
+        for step in range(1, n_slabs):
+            cand_idx = (active_idx + step) % n_slabs
+            cand = slabs[cand_idx]
+            cand_ev = cand[2]
+            if cand_ev is None or cand_ev.query():
+                cand[1] = 0
+                cand[3] = None
+                cand[4] = 0
+                found = cand_idx
+                break
+        if found >= 0:
+            active_idx = found
+        elif n_slabs < _PIN_SLAB_MAX_COUNT:
+            try:
+                new_buf = torch.empty((_PIN_SLAB_BYTES,), dtype=torch.uint8, device="cpu", pin_memory=True)
+            except Exception:
+                return cpu_flat.to(device=device)
+            slabs.append([new_buf, 0, None, None, 0])
+            active_idx = n_slabs
+        else:
+            next_idx = (active_idx + 1) % n_slabs
+            next_slab = slabs[next_idx]
+            if next_slab[2] is not None:
+                next_slab[2].synchronize()
+            next_slab[1] = 0
+            next_slab[3] = None
+            next_slab[4] = 0
+            active_idx = next_idx
+        state[1] = active_idx
+        slab = slabs[active_idx]
+        aligned_off = 0
+
+    buf_u8 = slab[0]
+    pin_typed = buf_u8[aligned_off : aligned_off + need_bytes].view(cpu_flat.dtype)
     pin_typed.copy_(cpu_flat)
     dev_u8 = torch.empty((need_bytes,), dtype=torch.uint8, device=device)
     dev_typed = dev_u8.view(cpu_flat.dtype)
     dev_typed.copy_(pin_typed, non_blocking=True)
-    new_ev = ev if ev is not None else torch.cuda.Event(enable_timing=False)
-    new_ev.record(torch.cuda.current_stream(device))
-    slots[idx] = (buf_u8, new_ev)
-    rings[dev_idx] = (slots, (idx + 1) % n_slots)
+    slab[1] = aligned_off + need_bytes
+    slab[3] = cur_stream
+    slab[4] = cur_stream_ptr
     return dev_typed
 
 
@@ -6912,9 +6965,16 @@ class Qwen4_5PagedStateBridge:
                 device=device,
             )
 
+        _act_bt_cache: Dict[str, torch.Tensor] = {}
+
         def _active_bt(tag: str) -> torch.Tensor:
+            hit = _act_bt_cache.get(tag)
+            if hit is not None:
+                return hit
             bt = _block_table_for_tag(attention_inputs, tag)
-            return bt if plan.act_idx_dev is None else bt.index_select(0, plan.act_idx_dev)
+            res_bt = bt if plan.act_idx_dev is None else bt.index_select(0, plan.act_idx_dev)
+            _act_bt_cache[tag] = res_bt
+            return res_bt
 
         _snap_phys_cache: Dict[
             Tuple[int, int, int, int, int],
@@ -7081,7 +7141,7 @@ class Qwen4_5PagedStateBridge:
             assert isinstance(layer, Qwen4_5DecoderLayer)
             lid = layer.layer_idx
             layer_caches = (
-                {str(c.tag): c for c in kv_cache.get_layer_cache_groups(lid)}
+                {(c.tag if isinstance(c.tag, str) else str(c.tag)): c for c in kv_cache.get_layer_cache_groups(lid)}
                 if kv_cache is not None
                 else {}
             )
@@ -7325,6 +7385,7 @@ class Qwen4_5PagedStateBridge:
                     c_dst_col_off = 0
                     s_req_start = s_loc_end = s_phys_ssm = s_pool_fp32 = None
                     c_direct_64 = False
+                    c_a16 = False
 
                     if kv_cache is not None and LINEAR_ATTN_TAG in layer_caches:
                         lin_c = layer_caches[LINEAR_ATTN_TAG]
@@ -7347,7 +7408,7 @@ class Qwen4_5PagedStateBridge:
                                 .view(plan.bsz, *self.gdn_consumer_conv_shape)
                                 .to(dtype)
                             )
-                        s_tok, s_req, s_end, r_sstart, s_phys, _, _ = _snap_phys_for(lin_c, bt_lin_c)
+                        s_tok, s_req, s_end, r_sstart, s_phys, c_a16, _ = _snap_phys_for(lin_c, bt_lin_c)
                         c_snap_tok, c_snap_req, c_snap_phys = s_tok, s_req, s_phys
                         c_pool_bf16, _ = _view_opaque_pool_2d(lin_c.kv_cache_base, dtype)
                         c_dst_col_off = 2 * ssm_n
@@ -7363,7 +7424,7 @@ class Qwen4_5PagedStateBridge:
                         init_c_ssm = _read_init_state(
                             c_ssm, bt_ssm, GDN_SSM_STATE_TAG, lid, self.ssm_shape, torch.float32
                         )
-                        _, _, s_end, r_sstart, s_phys, _, _ = _snap_phys_for(c_ssm, bt_ssm)
+                        _, _, s_end, r_sstart, s_phys, c_a16, _ = _snap_phys_for(c_ssm, bt_ssm)
                         s_req_start, s_loc_end, s_phys_ssm = r_sstart, s_end, s_phys
                         s_pool_fp32, _ = _view_opaque_pool_2d(c_ssm.kv_cache_base, torch.float32)
                         c_direct_64 = (
@@ -7413,6 +7474,7 @@ class Qwen4_5PagedStateBridge:
                         ssm_snap_phys=s_phys_ssm,
                         skip_invalid_phys=True,
                         snaps_direct_chunk64=c_direct_64,
+                        snaps_aligned_16=c_a16,
                         block_t=32,
                         enable_yoco_decode=yoco_on,
                         skip_allreduce=sp_active,
@@ -7424,6 +7486,7 @@ class Qwen4_5PagedStateBridge:
                     c_dst_col_off = 0
                     s_req_start = s_loc_end = s_phys_ssm = s_pool_fp32 = None
                     s_direct_64 = False
+                    s_a16 = False
 
                     if kv_cache is not None and GDN_SSM_STATE_TAG in layer_caches:
                         c_ssm = layer_caches[GDN_SSM_STATE_TAG]
@@ -7431,7 +7494,7 @@ class Qwen4_5PagedStateBridge:
                         init_ssm = _read_init_state(
                             c_ssm, bt_ssm, GDN_SSM_STATE_TAG, lid, self.ssm_shape, torch.float32
                         )
-                        _, _, s_end, r_sstart, s_phys, _, _ = _snap_phys_for(c_ssm, bt_ssm)
+                        _, _, s_end, r_sstart, s_phys, s_a16, _ = _snap_phys_for(c_ssm, bt_ssm)
                         s_req_start, s_loc_end, s_phys_ssm = r_sstart, s_end, s_phys
                         s_pool_fp32, _ = _view_opaque_pool_2d(c_ssm.kv_cache_base, torch.float32)
                         s_direct_64 = (
@@ -7468,7 +7531,7 @@ class Qwen4_5PagedStateBridge:
                                 .view(plan.bsz, *self.gdn_conv_shape)
                                 .to(dtype)
                             )
-                        s_tok, s_req, s_end, r_sstart, s_phys, _, _ = _snap_phys_for(lin_c, bt_lin)
+                        s_tok, s_req, s_end, r_sstart, s_phys, s_a16, _ = _snap_phys_for(lin_c, bt_lin)
                         c_snap_tok, c_snap_req, c_snap_phys = s_tok, s_req, s_phys
                         c_pool_bf16, _ = _view_opaque_pool_2d(lin_c.kv_cache_base, dtype)
                         c_dst_col_off = 2 * ssm_n
@@ -7480,7 +7543,7 @@ class Qwen4_5PagedStateBridge:
                         )
 
                     if layer.is_source:
-                        source_prefix_ssm[lid] = init_ssm.clone() if init_ssm is not None else None
+                        source_prefix_ssm[lid] = init_ssm
 
                     attn_out, published = layer.linear_attn.forward_packed_prefill(
                         attn_in,
@@ -7504,6 +7567,7 @@ class Qwen4_5PagedStateBridge:
                         ssm_snap_phys=s_phys_ssm,
                         skip_invalid_phys=True,
                         snaps_direct_chunk64=s_direct_64,
+                        snaps_aligned_16=s_a16,
                         block_t=32,
                         enable_yoco_decode=yoco_on,
                         skip_allreduce=sp_active,

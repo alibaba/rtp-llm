@@ -9,6 +9,7 @@ import torch.nn.functional as F
 from rtp_llm.models_py.modules.qwen4_5.attention import (
     GemmaRMSNorm,
     Qwen4_5Attention,
+    apply_attn_output_gate_flatten,
     apply_partial_neox_rope,
     gemma_rmsnorm_and_partial_rope,
 )
@@ -2210,6 +2211,93 @@ def test_r9_bf16_tgv_buckets_and_gdn_qkvz_ba_fusion() -> None:
     print("  [R9 BF16 TGV PASS] Strict-win buckets, zero-copy qkvz+ba fusion, autograd/inference_mode & reload verified.")
 
 
+@torch.no_grad()
+def test_r13_parallel_snap_and_tiled_attn_gate() -> None:
+    print("\n=== [3k] R13 Parallel Chunk Snap & Tiled Attention RoPE/Gate ===")
+    device = torch.device("cuda")
+    dtype = torch.bfloat16
+    torch.manual_seed(202613)
+
+    # 1. Parallel Chunk Snapshot vs Stage-2 inline snapshots (aligned tpb=16 + ragged tail + tpb=32)
+    hv, hk = 32, 8
+    lens = [1003, 640]
+    N = sum(lens)
+    q = torch.randn((N, hk, 64), device=device, dtype=dtype) * 0.2
+    k = torch.randn((N, hk, 64), device=device, dtype=dtype) * 0.2
+    v = torch.randn((N, hv, 64), device=device, dtype=dtype) * 0.2
+    g = -torch.rand((N, hv), device=device, dtype=torch.float32) * 0.5
+    beta = torch.sigmoid(torch.randn((N, hv), device=device, dtype=torch.float32))
+    cu_h = [0]
+    cr_h, ct0_h, rcs_h = [], [], [0]
+    for bi, ln in enumerate(lens):
+        cu_h.append(cu_h[-1] + ln)
+        for t0 in range(0, ln, 64):
+            cr_h.append(bi)
+            ct0_h.append(t0)
+        rcs_h.append(len(cr_h))
+    cu = torch.tensor(cu_h, device=device, dtype=torch.int32)
+    chunk_req = torch.tensor(cr_h, device=device, dtype=torch.int32)
+    chunk_t0 = torch.tensor(ct0_h, device=device, dtype=torch.int32)
+    req_chunk_start = torch.tensor(rcs_h, device=device, dtype=torch.int32)
+
+    for tpb in (16, 32):
+        ends_h, rss_h = [], [0]
+        for ln in lens:
+            c_e = 0
+            while c_e < ln:
+                c_e = min(ln, c_e + tpb)
+                ends_h.append(c_e)
+            rss_h.append(len(ends_h))
+        req_snap_start = torch.tensor(rss_h, device=device, dtype=torch.int32)
+        snap_local_end = torch.tensor(ends_h, device=device, dtype=torch.int32)
+        snap_phys = torch.arange(1, len(ends_h) + 1, device=device, dtype=torch.int32)
+        pool_ref = torch.zeros((len(ends_h) + 2, hv * 64 * 64), device=device, dtype=torch.float32)
+        pool_par = torch.zeros_like(pool_ref)
+
+        out_ref, _ = gdn_chunk_prefill_ragged_with_snapshots_triton(
+            q, k, v, g, beta, cu, chunk_req, chunk_t0, req_chunk_start,
+            req_snap_start=req_snap_start, snap_local_end=snap_local_end,
+            snap_phys=snap_phys, ssm_dst_pool=pool_ref, skip_invalid_phys=True,
+            snaps_direct_chunk64=False, snaps_aligned_16=False, output_final_states=False,
+        )
+        out_par, _ = gdn_chunk_prefill_ragged_with_snapshots_triton(
+            q, k, v, g, beta, cu, chunk_req, chunk_t0, req_chunk_start,
+            req_snap_start=req_snap_start, snap_local_end=snap_local_end,
+            snap_phys=snap_phys, ssm_dst_pool=pool_par, skip_invalid_phys=True,
+            snaps_direct_chunk64=False, snaps_aligned_16=True, output_final_states=False,
+        )
+        cos_o = F.cosine_similarity(out_par.float().flatten(), out_ref.float().flatten(), dim=0).item()
+        cos_s = F.cosine_similarity(
+            pool_par[1 : len(ends_h) + 1].flatten(),
+            pool_ref[1 : len(ends_h) + 1].flatten(),
+            dim=0,
+        ).item()
+        assert cos_o >= 0.99999, f"tpb={tpb} out cos={cos_o}"
+        assert cos_s >= 0.99999, f"tpb={tpb} snap cos={cos_s}"
+
+    # 2. Tiled GemmaRMSNorm + Partial RoPE (BH=4) vs PyTorch ref
+    norm_ref = GemmaRMSNorm(256, eps=1e-6).to(device=device, dtype=dtype)
+    norm_ref.weight.normal_(0.0, 0.2)
+    inv_f = torch.randn((32,), device=device, dtype=torch.float32)
+    for bsz, sl, nh in ((1, 1024, 32), (2, 256, 16)):
+        xr = torch.randn((bsz, sl, nh, 256), device=device, dtype=dtype)
+        pos = torch.arange(sl, device=device, dtype=torch.int64).unsqueeze(0).expand(bsz, sl)
+        yr = apply_partial_neox_rope(norm_ref(xr), pos, inv_f, 64)
+        yf = gemma_rmsnorm_and_partial_rope(xr, norm_ref.weight, pos, inv_f, 64, 1e-6)
+        cos_r = F.cosine_similarity(yf.float().flatten(), yr.float().flatten(), dim=0).item()
+        assert cos_r >= 0.99999, f"rope ({bsz},{sl},{nh}) cos={cos_r}"
+
+    # 3. Tiled Fused Attn Output Gate (BT=2, including odd seq_len=513 tail) vs PyTorch ref
+    attn_b = torch.randn((2, 32, 513, 256), device=device, dtype=dtype)
+    gate_p = torch.randn((2, 513, 32, 512), device=device, dtype=dtype)
+    gate_s = gate_p[..., 256:]
+    g_ref = (attn_b.transpose(1, 2).float() * torch.sigmoid(gate_s.float())).to(dtype).reshape(2, 513, 32 * 256)
+    g_out = apply_attn_output_gate_flatten(attn_b, gate_s)
+    assert float((g_out - g_ref).abs().max().item()) <= 1.6e-2
+    assert F.cosine_similarity(g_out.float().flatten(), g_ref.float().flatten(), dim=0).item() >= 0.999999
+    print("  [R13 PASS] Parallel GDN chunk snap (tpb=16/32 + ragged tail) & tiled attn RoPE/gate parity verified.")
+
+
 def main() -> None:
     t0 = time.time()
     test_yoco_sharing_plan_and_param_shapes()
@@ -2224,6 +2312,7 @@ def main() -> None:
     test_r7_ple_sp_and_sharded_table()
     test_r8_gdn_prefill_fast_launch_and_ple_halo_parity()
     test_r9_bf16_tgv_buckets_and_gdn_qkvz_ba_fusion()
+    test_r13_parallel_snap_and_tiled_attn_gate()
     run_b300_benchmarks()
     print(f"\nALL TESTS & BENCHMARKS PASSED in {time.time() - t0:.2f}s")
 

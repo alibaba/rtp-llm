@@ -408,6 +408,7 @@ TEST(ModelInputTpSyncChild, DISABLED_RunRank) {
     broadcaster.initialize(rank, 2, base_env);
     GptModelInputs inputs;
     checkGroupedTpRound(inputs, rank, {"z_group", "a_group", std::string("\x80") + "_group"}, false);
+    checkGroupedTpRound(inputs, rank, {"a_group", "b_group", "c_group"}, false);
     checkGroupedTpRound(inputs, rank, {"single_group"}, false);
     checkGroupedTpRound(inputs, rank, {"z_group", "a_group"}, true);
     checkLegacyUntaggedTpRound(inputs, rank);

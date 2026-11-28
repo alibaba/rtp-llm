@@ -2588,6 +2588,131 @@ def _gdn_chunk_output_ragged_kernel(
     )
 
 
+@triton.jit
+def _gdn_parallel_chunk_snap_kernel(
+    K_ptr,
+    GCum_ptr,
+    HAll_ptr,
+    VNewAll_ptr,
+    CU_SEQLENS_ptr,
+    CHUNK_REQ_ptr,
+    CHUNK_T0_ptr,
+    REQ_SNAP_START_ptr,
+    SNAP_LOCAL_END_ptr,
+    SNAP_PHYS_ptr,
+    DST_SSM_ptr,
+    stride_kn: tl.int64,
+    stride_khk: tl.int64,
+    stride_kd: tl.int64,
+    stride_gch: tl.int64,
+    stride_gcc: tl.int64,
+    stride_gct: tl.int64,
+    stride_hah: tl.int64,
+    stride_hac: tl.int64,
+    stride_hak: tl.int64,
+    stride_hav: tl.int64,
+    stride_vnh: tl.int64,
+    stride_vnc: tl.int64,
+    stride_vnt: tl.int64,
+    stride_vnd: tl.int64,
+    dst_ssm_stride_blk: tl.int64,
+    dst_ssm_rows: tl.int64,
+    H_V: tl.constexpr,
+    l2_eps,
+    GQA_RATIO: tl.constexpr,
+    D_K: tl.constexpr,
+    D_V: tl.constexpr,
+    SKIP_INVALID_PHYS: tl.constexpr,
+    BLOCK_DV: tl.constexpr = 64,
+):
+    """Parallel over (h_v, chunk, dv_blk): scatter 16-aligned + tail SSM snapshots off critical path."""
+    h_v = tl.program_id(0)
+    c = tl.program_id(1)
+    dv_blk = tl.program_id(2)
+    h_k = h_v // GQA_RATIO
+
+    b = tl.load(CHUNK_REQ_ptr + c)
+    t0 = tl.load(CHUNK_T0_ptr + c)
+    req_snap_s = tl.load(REQ_SNAP_START_ptr + b)
+    req_snap_e = tl.load(REQ_SNAP_START_ptr + b + 1)
+    if req_snap_s >= req_snap_e:
+        return
+
+    req_start = tl.load(CU_SEQLENS_ptr + b)
+    req_end = tl.load(CU_SEQLENS_ptr + b + 1)
+    req_len = req_end - req_start
+    chunk_end = tl.minimum(req_len, t0 + 64)
+
+    lo = req_snap_s
+    hi = req_snap_e
+    while lo < hi:
+        mid = (lo + hi) >> 1
+        val = tl.load(SNAP_LOCAL_END_ptr + mid)
+        if val <= t0:
+            lo = mid + 1
+        else:
+            hi = mid
+    if lo >= req_snap_e:
+        return
+    if tl.load(SNAP_LOCAL_END_ptr + lo) > chunk_end:
+        return
+
+    ok = tl.arange(0, D_K)
+    o16 = tl.arange(0, 16)
+    ov = dv_blk * BLOCK_DV + tl.arange(0, BLOCK_DV)
+    h_cur = tl.load(
+        HAll_ptr
+        + h_v * stride_hah
+        + c * stride_hac
+        + ok[:, None] * stride_hak
+        + ov[None, :] * stride_hav
+    ).to(tl.float32)
+
+    k_base = K_ptr + req_start.to(tl.int64) * stride_kn + h_k * stride_khk
+    gc_head = GCum_ptr + h_v * stride_gch + c * stride_gcc
+    vn_head = VNewAll_ptr + h_v * stride_vnh + c * stride_vnc
+
+    snap_ptr = lo
+    g_prev = 0.0
+    for s_idx in tl.static_range(4):
+        sub_lo = s_idx * 16
+        if snap_ptr < req_snap_e:
+            cur_s_end = tl.load(SNAP_LOCAL_END_ptr + snap_ptr)
+            if cur_s_end <= chunk_end:
+                gc_sub = tl.load(gc_head + (sub_lo + o16) * stride_gct).to(tl.float32)
+                g_sub_end = tl.sum(tl.where(o16 == 15, gc_sub, 0.0), axis=0)
+                t_sub = t0 + sub_lo + o16
+                m_sub = t_sub < req_len
+                k_sub = tl.load(
+                    k_base + t_sub[:, None] * stride_kn + ok[None, :] * stride_kd,
+                    mask=m_sub[:, None],
+                    other=0.0,
+                ).to(tl.float32)
+                k_sub = k_sub * tl.rsqrt(tl.sum(k_sub * k_sub, axis=1) + l2_eps)[:, None]
+                v_sub = tl.load(vn_head + (sub_lo + o16)[:, None] * stride_vnt + ov[None, :] * stride_vnd)
+                k_sub_dec = k_sub * tl.exp(g_sub_end - gc_sub)[:, None]
+                h_cur = h_cur * tl.exp(g_sub_end - g_prev) + tl.dot(
+                    tl.trans(k_sub_dec.to(tl.bfloat16)),
+                    v_sub.to(tl.bfloat16),
+                    out_dtype=tl.float32,
+                )
+                g_prev = g_sub_end
+                sub_abs_hi = tl.minimum(req_len, t0 + sub_lo + 16)
+                if cur_s_end == sub_abs_hi:
+                    phys = tl.load(SNAP_PHYS_ptr + snap_ptr).to(tl.int64)
+                    valid_phys = (phys > 0) & (phys < dst_ssm_rows) if SKIP_INVALID_PHYS else True
+                    if valid_phys:
+                        tl.store(
+                            DST_SSM_ptr
+                            + phys * dst_ssm_stride_blk
+                            + h_v * (D_K * D_V)
+                            + ok[:, None] * D_V
+                            + ov[None, :],
+                            h_cur,
+                        )
+                    snap_ptr += 1
+
+
 def gdn_chunk_prefill_ragged_with_snapshots_triton(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -2606,6 +2731,7 @@ def gdn_chunk_prefill_ragged_with_snapshots_triton(
     ssm_dst_pool: Optional[torch.Tensor] = None,
     skip_invalid_phys: bool = True,
     snaps_direct_chunk64: bool = False,
+    snaps_aligned_16: bool = False,
     output_final_states: bool = False,
     l2_eps: float = 1e-6,
 ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
@@ -2754,13 +2880,31 @@ def gdn_chunk_prefill_ragged_with_snapshots_triton(
         dst_stride_blk = int(ssm_dst_pool.stride(0)) * elem_scale
 
     direct_chunk_snap = bool(has_snaps and snaps_direct_chunk64)
-    if has_snaps and not direct_chunk_snap:
-        block_dv_s2 = (
-            16
-            if (bsz * num_v_heads <= 128 and num_chunks >= 32)
-            else (32 if (bsz * num_v_heads <= 512 and num_chunks >= 32) else 64)
-        )
-        ns_s2 = 2
+    use_parallel_snap = bool(
+        has_snaps
+        and not direct_chunk_snap
+        and snaps_aligned_16
+        and bsz * num_v_heads <= 64
+        and num_chunks >= 8
+    )
+    stage2_has_snaps = bool(has_snaps and not use_parallel_snap)
+    if use_parallel_snap:
+        block_dv_s2 = 16 if (bsz * num_v_heads <= 32 and num_chunks >= 16) else 32
+        nw_s2 = 4 if block_dv_s2 == 32 else 2
+        ns_s2 = 3
+    elif stage2_has_snaps and not direct_chunk_snap:
+        if bsz * num_v_heads > 128 and num_chunks >= 32:
+            block_dv_s2 = 64
+            nw_s2 = 4
+            ns_s2 = 2
+        elif bsz * num_v_heads > 64 and num_chunks >= 32:
+            block_dv_s2 = 32
+            nw_s2 = 8
+            ns_s2 = 3
+        else:
+            block_dv_s2 = 16 if (bsz * num_v_heads <= 128 and num_chunks >= 32) else 32
+            nw_s2 = 4 if (bsz * num_v_heads <= 64 and num_chunks >= 32) else 2
+            ns_s2 = 3 if (bsz * num_v_heads <= 64 and num_chunks >= 32) else 2
     else:
         block_dv_s2 = (
             16
@@ -2768,7 +2912,7 @@ def gdn_chunk_prefill_ragged_with_snapshots_triton(
             else (32 if (bsz * num_v_heads <= 512 and num_chunks >= 32) else 64)
         )
         ns_s2 = 3 if (not has_snaps or bsz * num_v_heads <= 64) else 2
-    nw_s2 = 2 if (block_dv_s2 < 64 or bsz >= 4) else 4
+        nw_s2 = 2 if (block_dv_s2 < 64 or bsz >= 4) else 4
     dst_rows_s2 = int(ssm_dst_pool.shape[0]) if has_snaps and ssm_dst_pool is not None else 0
     rt_s2 = (
         k, g_cum, w_buf, u_buf, cu_seqlens, req_chunk_start, init_arg, h_all, v_new_all,
@@ -2800,7 +2944,7 @@ def gdn_chunk_prefill_ragged_with_snapshots_triton(
         cu_seqlens.dtype, init_arg.dtype, h_all.dtype, v_new_all.dtype, fs_arg.dtype,
         rss_arg.dtype, sp_arg.dtype, dst_arg.dtype,
         tuple(_triton_int_spec(v_s) for v_s in rt_s2[14:47]),
-        float(l2_eps), gqa_ratio, has_init, output_final_states, has_snaps,
+        float(l2_eps), gqa_ratio, has_init, output_final_states, stage2_has_snaps,
         skip_invalid_phys, direct_chunk_snap, block_dv_s2, nw_s2, ns_s2,
     )
     triton_fast_launch(
@@ -2809,11 +2953,42 @@ def gdn_chunk_prefill_ragged_with_snapshots_triton(
         {
             "GQA_RATIO": gqa_ratio, "D_K": 64, "D_V": 64,
             "HAS_INIT_STATE": has_init, "STORE_FINAL_STATE": output_final_states,
-            "HAS_SNAPS": has_snaps, "SKIP_INVALID_PHYS": skip_invalid_phys,
+            "HAS_SNAPS": stage2_has_snaps, "SKIP_INVALID_PHYS": skip_invalid_phys,
             "DIRECT_CHUNK_SNAP": direct_chunk_snap, "BLOCK_DV": block_dv_s2,
         },
         num_warps=nw_s2, num_stages=ns_s2,
     )
+
+    if use_parallel_snap:
+        rt_ps = (
+            k, g_cum, h_all, v_new_all, cu_seqlens, chunk_req, chunk_t0,
+            rss_arg, sle_arg, sp_arg, dst_arg,
+            k.stride(0), k.stride(1), k.stride(2),
+            g_cum.stride(0), g_cum.stride(1), g_cum.stride(2),
+            h_all.stride(0), h_all.stride(1), h_all.stride(2), h_all.stride(3),
+            v_new_all.stride(0), v_new_all.stride(1), v_new_all.stride(2), v_new_all.stride(3),
+            dst_stride_blk, dst_rows_s2, num_v_heads, float(l2_eps),
+        )
+        ptr_ps = (
+            k.data_ptr() | g_cum.data_ptr() | h_all.data_ptr() | v_new_all.data_ptr()
+            | cu_seqlens.data_ptr() | chunk_req.data_ptr() | chunk_t0.data_ptr()
+            | rss_arg.data_ptr() | sle_arg.data_ptr() | sp_arg.data_ptr() | dst_arg.data_ptr()
+        )
+        ck_ps = (
+            device.index, 104, k.dtype, g_cum.dtype, h_all.dtype, v_new_all.dtype,
+            cu_seqlens.dtype, rss_arg.dtype, sp_arg.dtype, dst_arg.dtype,
+            tuple(_triton_int_spec(v_s) for v_s in rt_ps[11:28]),
+            float(l2_eps), gqa_ratio, skip_invalid_phys, 64, 4, 2,
+        )
+        triton_fast_launch(
+            _GDN_TRITON_CACHE, ck_ps, _gdn_parallel_chunk_snap_kernel,
+            num_v_heads, num_chunks, 1, ptr_ps, rt_ps,
+            {
+                "GQA_RATIO": gqa_ratio, "D_K": 64, "D_V": 64,
+                "SKIP_INVALID_PHYS": skip_invalid_phys, "BLOCK_DV": 64,
+            },
+            num_warps=4, num_stages=2,
+        )
 
     nw_out = 8 if num_chunks >= 64 else 4
     ns_out = 1 if (bsz >= 4 and num_chunks >= 128) else 2
@@ -3622,8 +3797,9 @@ class Qwen4_5GatedDeltaNet(nn.Module):
         )
         num_tiles = int(tile_req.numel())
         if num_tiles > 0:
-            sub_num = 2 if block_t % 2 == 0 else 1
+            sub_num = 1 if self.conv_dim >= 4096 else (2 if block_t % 2 == 0 else 1)
             sub_t = block_t // sub_num
+            nw_conv = 2
             rt_args = (
                 projected_2d, self.conv1d.weight, init_c_arg, q, k_arg, v_arg,
                 cu_seqlens, tile_req, tile_t0,
@@ -3637,7 +3813,7 @@ class Qwen4_5GatedDeltaNet(nn.Module):
                 projected_2d.device.index, 7, projected_2d.dtype, self.conv1d.weight.dtype, init_c_arg.dtype,
                 q.dtype, k_arg.dtype, v_arg.dtype, cu_seqlens.dtype, tile_req.dtype, tile_t0.dtype,
                 tuple(_triton_int_spec(x) for x in rt_args[9:]),
-                self.key_dim, self.gqa_ratio, group_stride, is_consumer, has_init_c, self.gdn_conv_residual, sub_t, sub_num,
+                self.key_dim, self.gqa_ratio, group_stride, is_consumer, has_init_c, self.gdn_conv_residual, sub_t, sub_num, nw_conv,
             )
             ptr_or = (
                 projected_2d.data_ptr() | self.conv1d.weight.data_ptr() | init_c_arg.data_ptr()
@@ -3651,7 +3827,7 @@ class Qwen4_5GatedDeltaNet(nn.Module):
                     "GROUP_STRIDE": group_stride, "IS_CONSUMER": is_consumer, "HAS_INIT": has_init_c,
                     "RESIDUAL": self.gdn_conv_residual, "SUB_T": sub_t, "SUB_NUM": sub_num, "BLOCK_C": 64,
                 },
-                num_warps=4,
+                num_warps=nw_conv,
             )
         if (
             snap_tok_idx is not None
@@ -4137,6 +4313,7 @@ class Qwen4_5GatedDeltaNet(nn.Module):
         ssm_snap_phys: Optional[torch.Tensor] = None,
         skip_invalid_phys: bool = True,
         snaps_direct_chunk64: bool = False,
+        snaps_aligned_16: bool = False,
         block_t: int = 32,
         enable_yoco_decode: Optional[bool] = None,
         skip_allreduce: bool = False,
@@ -4222,6 +4399,7 @@ class Qwen4_5GatedDeltaNet(nn.Module):
                 ssm_dst_pool=ssm_dst_pool,
                 skip_invalid_phys=skip_invalid_phys,
                 snaps_direct_chunk64=snaps_direct_chunk64,
+                snaps_aligned_16=snaps_aligned_16,
                 output_final_states=False,
             )
             out = self.norm(core_out.unsqueeze(0), z_view).squeeze(0)
@@ -4307,6 +4485,7 @@ class Qwen4_5GatedDeltaNet(nn.Module):
             ssm_dst_pool=ssm_dst_pool,
             skip_invalid_phys=skip_invalid_phys,
             snaps_direct_chunk64=snaps_direct_chunk64,
+            snaps_aligned_16=snaps_aligned_16,
             output_final_states=False,
         )
 

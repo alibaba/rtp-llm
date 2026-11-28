@@ -1435,5 +1435,36 @@ TEST_F(CrcBatchTest, InvalidGeometryNeverWritesTargets) {
     CrcCopyWorkspace two(0, 2, 35, 6);
     EXPECT_EQ(two.evict({valid, valid}, failures_), CrcCopyState::INVALID_ARGS);  // aliasing host backing
 }
+
+TEST_F(CrcBatchTest, AsyncHostDoneSignalPollSpinsAndTransitionsWithoutTestHook) {
+    // Exercise the non-hook production poll() path across multiple back-to-back evict/load cycles
+    // so both the in-flight host_done check, periodic steady-clock query, and sequence rollover run.
+    std::vector<size_t> sizes(16, 262144);
+    auto                blocks = makeGuardedBlocks(16, sizes);
+    CrcCopyWorkspace    copy(0, 16, sizes.back(), 16 * 3);
+    const auto          items = itemsFor(blocks, 16);
+
+    for (int round = 0; round < 3; ++round) {
+        ASSERT_EQ(copy.trySubmit(items, CrcCopyDirection::EVICT), CrcCopyState::PENDING);
+        CrcCopyState state = CrcCopyState::PENDING;
+        while ((state = copy.poll()) == CrcCopyState::PENDING) {}
+        ASSERT_EQ(state, CrcCopyState::OK);
+        EXPECT_TRUE(copy.failures().empty());
+        ASSERT_EQ(copy.finish(), CrcCopyState::OK);
+        for (const auto& block : blocks) {
+            block->expectRecord(true);
+            block->resetDevice(false);
+        }
+
+        ASSERT_EQ(copy.trySubmit(items, CrcCopyDirection::LOAD), CrcCopyState::PENDING);
+        while ((state = copy.poll()) == CrcCopyState::PENDING) {}
+        ASSERT_EQ(state, CrcCopyState::OK);
+        EXPECT_TRUE(copy.failures().empty());
+        ASSERT_EQ(copy.finish(), CrcCopyState::OK);
+        for (const auto& block : blocks) {
+            block->expectDevice(true);
+        }
+    }
+}
 }  // namespace
 }  // namespace rtp_llm

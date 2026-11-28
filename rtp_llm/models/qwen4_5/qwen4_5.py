@@ -26,6 +26,7 @@ from rtp_llm.models.qwen4_5.qwen4_5_kv_cache import (
     Qwen4_5KVCachePlan,
     build_qwen4_5_kv_cache_plan,
     build_qwen4_5_kv_cache_spec_descs,
+    resolve_kv_cache_tp_size,
 )
 from rtp_llm.models.qwen4_5.qwen4_5_weight import (
     Qwen4_5Weight,
@@ -130,10 +131,20 @@ class Qwen4_5(_BaseModel):
         config.tie_word_embeddings = arch_cfg.tie_word_embeddings
         cls._populate_qsa_fields(config, arch_cfg)
 
+        kv_dtype = cls._resolve_kv_dtype(config)
+        role_type = cls._resolve_role_type(config)
+        tp_size, parallel_mode = cls._resolve_config_parallel_mode_and_tp()
+
         # Attach pure-Python KV cache plan and exact sizing summary
-        config.qwen4_5_kv_cache_plan = build_qwen4_5_kv_cache_plan(arch_cfg)
+        config.qwen4_5_kv_cache_plan = build_qwen4_5_kv_cache_plan(
+            arch_cfg,
+            tp_size=tp_size,
+            parallel_mode=parallel_mode,
+            kv_dtype=kv_dtype,
+        )
         config.qwen4_5_param_and_state_estimate = estimate_qwen4_5_params_and_state(
-            arch_cfg
+            arch_cfg,
+            kv_dtype_bytes=config.qwen4_5_kv_cache_plan.kv_dtype_bytes,
         )
 
         # Populate compiled RTP-LLM ModelConfig sub-structures when ops are available
@@ -163,9 +174,14 @@ class Qwen4_5(_BaseModel):
                 if hasattr(config, "linear_attention_config"):
                     config.linear_attention_config.linear_num_value_heads = 0
                 config.kv_cache_spec_descs = build_qwen4_5_kv_cache_spec_descs(
-                    config, arch_cfg
+                    config,
+                    arch_cfg,
+                    tp_size=tp_size,
+                    parallel_mode=parallel_mode,
+                    kv_dtype=kv_dtype,
+                    role_type=role_type,
                 )
-            except Exception:
+            except ImportError:
                 pass
 
     @staticmethod
@@ -192,6 +208,89 @@ class Qwen4_5(_BaseModel):
                 arch_cfg.indexer_budget // arch_cfg.indexer_compress_ratio
             )
 
+    @staticmethod
+    def _resolve_kv_dtype(model_config: Any) -> str:
+        attn = getattr(model_config, "attn_config", None)
+        kv_enum = getattr(attn, "kv_cache_dtype", None) if attn is not None else None
+        if kv_enum is not None:
+            enum_name = str(getattr(kv_enum, "name", kv_enum)).strip().upper()
+            if enum_name == "FP8" or enum_name.endswith(".FP8"):
+                return "fp8_e4m3"
+        raw = getattr(model_config, "kv_dtype", None)
+        if raw is not None and str(raw).strip():
+            norm = str(raw).strip().lower()
+            if norm in ("fp8", "fp8_e4m3", "f8_e4m3"):
+                return "fp8_e4m3"
+            return norm
+        return "bf16"
+
+    @staticmethod
+    def _resolve_role_type(
+        model_config: Any = None, parallelism_config: Any = None
+    ) -> Optional[Any]:
+        for source in (parallelism_config, model_config):
+            if source is not None:
+                rt = getattr(source, "role_type", None)
+                if rt is not None:
+                    return rt
+        env_rt = os.environ.get("ROLE_TYPE", "").strip()
+        return env_rt if env_rt else None
+
+    @staticmethod
+    def _resolve_ple_mode(model_config: Any = None) -> str:
+        cfg_ple = (
+            getattr(model_config, "ple_mode", None)
+            if model_config is not None
+            else None
+        )
+        if cfg_ple is not None and str(cfg_ple).strip():
+            raw = str(cfg_ple).strip().lower()
+        else:
+            raw = os.environ.get("QWEN4_5_PLE_MODE", "").strip().lower()
+        if not raw:
+            return "gpu_sharded"
+        if raw in (
+            "gpu_sharded",
+            "gpu_full",
+            "auto",
+            "cpu_uva",
+            "shm",
+            "mmap",
+            "cpu_uva_shared",
+            "host_shared",
+        ):
+            return raw
+        raise ValueError(
+            f"Unsupported ple_mode={raw!r}; expected one of "
+            "('gpu_sharded', 'gpu_full', 'cpu_uva', 'shm', 'mmap', "
+            "'cpu_uva_shared', 'host_shared', 'auto')"
+        )
+
+    @staticmethod
+    def _resolve_config_parallel_mode_and_tp(
+        parallelism_config: Any = None,
+    ) -> tuple[int, Optional[str]]:
+        raw_pm = (
+            getattr(parallelism_config, "parallel_mode", None)
+            if parallelism_config is not None
+            else None
+        )
+        if raw_pm is None or not str(raw_pm).strip():
+            raw_pm = os.environ.get("QWEN4_5_PARALLEL_MODE", "").strip() or None
+        pm: Optional[str] = None
+        if raw_pm is not None:
+            norm = str(raw_pm).strip().lower()
+            if norm in ("tpsp4", "tpsp4_ep4"):
+                pm = "sp4_tp4_ep4"
+            elif norm:
+                pm = norm
+        raw_tp = (
+            int(getattr(parallelism_config, "tp_size", 1) or 1)
+            if parallelism_config is not None
+            else 1
+        )
+        return resolve_kv_cache_tp_size(raw_tp, pm), pm
+
     @classmethod
     def _apply_kv_cache_config(
         cls, model_config: Any, kv_cache_config: Any
@@ -209,10 +308,16 @@ class Qwen4_5(_BaseModel):
                 None,
             ):
                 attn.kernel_tokens_per_block = kernel_seq_size
-        cls._post_build_model_config(model_config)
+        cls._post_build_model_config(model_config, kv_cache_config=kv_cache_config)
 
     @classmethod
-    def _post_build_model_config(cls, model_config: Any) -> None:
+    def _post_build_model_config(
+        cls,
+        model_config: Any,
+        *,
+        kv_cache_config: Optional[Any] = None,
+        parallelism_config: Optional[Any] = None,
+    ) -> None:
         """Finalize RTP-LLM runtime config, hybrid KV cache specs, and PD cache tags."""
         arch_cfg = getattr(model_config, "qwen4_5_arch_config", None) or getattr(
             model_config, "arch_config", None
@@ -242,7 +347,21 @@ class Qwen4_5(_BaseModel):
         model_config.has_lm_head = True
         model_config.has_post_decoder_layernorm = False
         model_config.has_pre_decoder_layernorm = False
-        model_config.qwen4_5_kv_cache_plan = cls.build_kv_cache_plan(arch_cfg)
+        kv_dtype = cls._resolve_kv_dtype(model_config)
+        role_type = cls._resolve_role_type(model_config, parallelism_config)
+        tp_size, parallel_mode = cls._resolve_config_parallel_mode_and_tp(
+            parallelism_config
+        )
+        model_config.qwen4_5_kv_cache_plan = cls.build_kv_cache_plan(
+            arch_cfg,
+            tp_size=tp_size,
+            parallel_mode=parallel_mode,
+            kv_dtype=kv_dtype,
+        )
+        model_config.qwen4_5_param_and_state_estimate = estimate_qwen4_5_params_and_state(
+            arch_cfg,
+            kv_dtype_bytes=model_config.qwen4_5_kv_cache_plan.kv_dtype_bytes,
+        )
         try:
             if hasattr(model_config, "hybrid_attention_config"):
                 model_config.hybrid_attention_config.enable_hybrid_attention = False
@@ -252,9 +371,14 @@ class Qwen4_5(_BaseModel):
             model_config.kv_cache_spec_descs = build_qwen4_5_kv_cache_spec_descs(
                 model_config,
                 arch_cfg,
+                tp_size=tp_size,
+                parallel_mode=parallel_mode,
+                kv_dtype=kv_dtype,
+                role_type=role_type,
+                kv_cache_config=kv_cache_config,
                 allow_small_block_explicit=True,
             )
-        except Exception:
+        except ImportError:
             # Pure-Python environment without compiled rtp_llm.ops
             pass
 
@@ -495,7 +619,9 @@ class Qwen4_5(_BaseModel):
 
         self.device = device
         arch_cfg = self.model_config.arch_config
-        kv_dtype = str(getattr(self.model_config, "kv_dtype", "bf16") or "bf16")
+        kv_dtype = self._resolve_kv_dtype(self.model_config)
+        role_type = self._resolve_role_type(self.model_config, self.parallelism_config)
+        kv_cache_config = getattr(self, "kv_cache_config", None)
         topo_cfg = self._resolve_load_parallel_topology(
             self.parallelism_config, dist_module=dist
         )
@@ -528,21 +654,26 @@ class Qwen4_5(_BaseModel):
                 dp_attn,
             )
 
-        # Refresh TP-aware KV/GDN cache plan and KVCacheSpecDescs before engine pool creation.
-        if tp_size > 1:
-            self.model_config.qwen4_5_kv_cache_plan = self.build_kv_cache_plan(
-                arch_cfg, tp_size=tp_size, parallel_mode=parallel_mode
+        # Refresh topology-, role-, and KV-dtype-aware KV/GDN cache plan and KVCacheSpecDescs before engine pool creation.
+        self.model_config.qwen4_5_kv_cache_plan = self.build_kv_cache_plan(
+            arch_cfg,
+            tp_size=tp_size,
+            parallel_mode=parallel_mode,
+            kv_dtype=kv_dtype,
+        )
+        try:
+            self.model_config.kv_cache_spec_descs = build_qwen4_5_kv_cache_spec_descs(
+                self.model_config,
+                arch_cfg,
+                tp_size=tp_size,
+                parallel_mode=parallel_mode,
+                kv_dtype=kv_dtype,
+                role_type=role_type,
+                kv_cache_config=kv_cache_config,
+                allow_small_block_explicit=True,
             )
-            try:
-                self.model_config.kv_cache_spec_descs = build_qwen4_5_kv_cache_spec_descs(
-                    self.model_config,
-                    arch_cfg,
-                    tp_size=tp_size,
-                    parallel_mode=parallel_mode,
-                    allow_small_block_explicit=True,
-                )
-            except Exception:
-                pass
+        except ImportError:
+            pass
 
         torch_dev = torch.device(device)
         if torch_dev.type == "cuda":
@@ -589,10 +720,11 @@ class Qwen4_5(_BaseModel):
             fast_all_reduce=fast_all_reduce,
         )
         num_workers = int(os.environ.get("QWEN4_5_LOAD_WORKERS", "8"))
+        ple_mode = self._resolve_ple_mode(self.model_config)
         load_qwen4_5_from_checkpoint(
             causal_lm,
             self.model_config.ckpt_path,
-            ple_mode="gpu_sharded",
+            ple_mode=ple_mode,
             num_workers=num_workers,
             verbose=True,
         )
