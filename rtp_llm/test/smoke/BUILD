@@ -171,7 +171,6 @@ test_suite(
         ":smoke_pp_ci",
         ":smoke_h20_kimi_linear",
         ":smoke_h20_grammar_heavy",
-        ":qwen3_235b_full_vocab_eagle3",
         ":smoke_cuda_remote_cache",
         ":smoke_h20_jit_remote_cache",
         ":smoke_rocm_basic",
@@ -196,12 +195,10 @@ test_suite(
 custom_smoke_test(
     name = "qwen3_235b_full_vocab_eagle3",
     main = "qwen3_moe_eagle3_contract_test.py",
+    # Opt-in release-pair check; callers supply the target and draft checkpoints.
+    tags = ["manual"],
     # Two serial cold starts (1800s each), generation, and process shutdown.
-    test_envs = {
-        "RTP_TEST_WATCHDOG_SECONDS": "5400",
-        "QWEN3_235B_TARGET_CHECKPOINT": "/mnt/nas1/hf/Qwen3-235B-A22B-nanjun",
-        "QWEN3_235B_EAGLE3_CHECKPOINT": "/mnt/nas1/hf/nvidia-Qwen3-235B-A22B-Eagle3/modelscope-master-cec20fc666c",
-    },
+    test_envs = {"RTP_TEST_WATCHDOG_SECONDS": "5400"},
     smoke_args = "--tp_size 8 --ep_size 8 --world_size 8 --act_type BF16 --load_method fastsafetensors --max_seq_len 2048 --seq_size_per_block 128 --enable_cuda_graph 0 --reuse_cache 0",
     gpu_type = ["H20_CU13"],
     data = ["//rtp_llm:sdk", ":smoke_framework_srcs"],
