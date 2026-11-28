@@ -223,6 +223,58 @@ def test_zero_length_row():
     _assert_equiv(out, logits, rs, re, K=128, tag="zero-len rows")
 
 
+def test_relu_sparse_ties_and_step0_filter_edges():
+    """Heavy 0.0/-0.0/-inf ties, tiny positive sub-threshold values, and Step0/Step1 boundary."""
+    N, T, K = 16, 10240, 2048
+    g = torch.Generator(device="cuda").manual_seed(77)
+    logits = torch.zeros((N, T), device="cuda", dtype=torch.float32)
+    # Mix +0.0, -0.0, tiny positive floats sharing FP16 +0.0 bin, and sparse ReLU positives.
+    logits[:, ::5] = torch.randn((N, T // 5), device="cuda", generator=g).clamp_min(0.0)
+    logits[0, :3000] = 0.0
+    logits[0, 3000:6000] = -0.0
+    logits[1, :5000] = -0.0
+    logits[1, 5000:5200] = 1e-8  # rounds to +0.0h in Step 0, strictly > 0 in FP32
+    logits[2, :4000] = float("-inf")
+    # Row 3: >2048 ties at 1.0 + 100 larger values 1.1 that share FP32 Step-1 bin [31:21]
+    logits[3, :3500] = 1.0
+    logits[3, 3500:3600] = 1.1
+    # Row 4: tiny differences only in low mantissa bits (forces multi-step + radix select)
+    logits[4, :3000] = (
+        1.0 + torch.arange(3000, device="cuda", dtype=torch.float32) * 1e-7
+    )
+    rs = torch.zeros(N, dtype=torch.int32, device="cuda")
+    re = torch.full((N,), T, dtype=torch.int32, device="cuda")
+    re[-1] = 1234  # row_len < K
+    for force_radix_sort in (False, True):
+        out = _run(logits, rs, re, K=K, force_radix_sort=force_radix_sort)
+        _assert_equiv(
+            out,
+            logits,
+            rs,
+            re,
+            K=K,
+            tag=f"relu ties & step0 filter force_radix={force_radix_sort}",
+        )
+
+    # Also test strided (stride1=2) with heavy 0.0 ties + nonzero row_start.
+    storage = torch.full((4, 16384), 1e6, device="cuda", dtype=torch.float32)
+    strided = storage[:, ::2]
+    strided.zero_()
+    strided[:, 10:1510] = torch.randn((4, 1500), device="cuda", generator=g).relu()
+    srs = torch.full((4,), 10, dtype=torch.int32, device="cuda")
+    sre = torch.full((4,), 6010, dtype=torch.int32, device="cuda")
+    for force_radix_sort in (False, True):
+        out = _run(strided, srs, sre, K=2048, force_radix_sort=force_radix_sort)
+        _assert_equiv(
+            out,
+            strided,
+            srs,
+            sre,
+            K=2048,
+            tag=f"strided relu ties force_radix={force_radix_sort}",
+        )
+
+
 # ---------------------------------------------------------------------------
 # Bench vs torch.topk
 # ---------------------------------------------------------------------------
@@ -300,6 +352,7 @@ if __name__ == "__main__":
     test_strided_nonzero_windows()
     test_fast_topk_v2_short_inputs_topk_512_1024()
     test_zero_length_row()
+    test_relu_sparse_ties_and_step0_filter_edges()
     print("\n== Benchmark ==")
     bench_prefill_sweep()
     print("\nOK")

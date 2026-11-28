@@ -61,7 +61,7 @@ void dsv4_top_k_per_row_prefill_impl(const torch::Tensor&                logits,
     }
 
     constexpr int      kSortingAlgorithmThreshold = 12288;
-    constexpr int      kNumThreadsPerBlock        = 512;
+    constexpr int      kNumThreadsPerBlock        = 256;
     const cudaStream_t stream                     = at::cuda::getCurrentCUDAStream();
 
     int numInsertionBlocks = force_radix_sort ? 0 : std::min(static_cast<int>(num_rows), kSortingAlgorithmThreshold);

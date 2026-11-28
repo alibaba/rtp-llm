@@ -295,3 +295,18 @@ cuda13_sm100_py_test(
         "//rtp_llm/models_py:tile_kernels_mhc",
     ],
 )
+
+dsv4_py_test(
+    name = "w4_3_prefill_perf",
+    src = "w4_3_prefill_perf_test.py",
+    args = ["-s"],
+    tags = [
+        "manual",
+        "perf",
+    ],
+    deps = _MODEL_TEST_DEPS + [
+        ":dsv4_kernel_perf_utils",
+        "//rtp_llm/models_py:tile_kernels_mhc",
+        "//rtp_llm/models_py/standalone:py_standalone_testlib",
+    ],
+)

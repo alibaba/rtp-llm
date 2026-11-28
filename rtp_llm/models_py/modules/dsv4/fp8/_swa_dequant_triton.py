@@ -1501,16 +1501,16 @@ def _restore_dequantize_scatter_packed_k_cache_flat_kernel(
     n_quant_blocks: tl.constexpr,
     n_scale_groups: tl.constexpr,
     BATCH_BLOCK: tl.constexpr,
+    TILE_T_RESTORE: tl.constexpr,
     HAS_CU_DST_OFFSETS: tl.constexpr,
 ):
-    """Restore, dequantize, and scatter one packed row per program.
+    """Restore, dequantize, and scatter TILE_T_RESTORE packed rows per program.
 
     Every metadata-derived address is independently masked. The host validates
     the expected total before launch, while these guards keep stale or divergent
     device metadata from turning into gathered/output OOB accesses.
     """
-    token_idx = tl.program_id(0).to(tl.int64)
-    token_valid = token_idx < n_tokens
+    t_base = tl.program_id(0).to(tl.int64) * TILE_T_RESTORE
 
     batch_offsets = tl.arange(0, BATCH_BLOCK)
     batch_mask = batch_offsets < batch_size
@@ -1518,90 +1518,103 @@ def _restore_dequantize_scatter_packed_k_cache_flat_kernel(
         tl.int64
     )
     seq_ends = tl.cumsum(seq_lens, axis=0)
-    batch_idx = tl.sum((token_idx >= seq_ends).to(tl.int32), axis=0)
-    valid_batch = token_valid & (batch_idx >= 0) & (batch_idx < batch_size)
-    selected_seq_len = tl.sum(tl.where(batch_offsets == batch_idx, seq_lens, 0), axis=0)
-    seq_start = tl.sum(
-        tl.where(batch_offsets == batch_idx, seq_ends - seq_lens, 0), axis=0
-    )
-    token_in_request = token_idx - seq_start
-    safe_batch_idx = tl.where(valid_batch, batch_idx, 0).to(tl.int64)
-    if HAS_CU_DST_OFFSETS:
-        dst_base = tl.load(
-            cu_dst_offsets_ptr + safe_batch_idx, mask=valid_batch, other=0
-        ).to(tl.int64)
-        destination_row = dst_base + offset.to(tl.int64) + token_in_request
-        valid_destination = (
-            valid_batch
-            & (selected_seq_len >= 0)
-            & (token_in_request >= 0)
-            & (token_in_request < selected_seq_len)
-            & (destination_row >= 0)
-            & (destination_row < out_rows_per_batch)
-        )
-        safe_destination_row = tl.where(valid_destination, destination_row, 0)
-        output_row_ptr = out_ptr + safe_destination_row * out_stride0.to(tl.int64)
-    else:
-        destination_row = offset.to(tl.int64) + token_in_request
-        valid_destination = (
-            valid_batch
-            & (batch_idx < out_batch_size)
-            & (selected_seq_len >= 0)
-            & (token_in_request >= 0)
-            & (token_in_request < selected_seq_len)
-            & (destination_row >= 0)
-            & (destination_row < out_rows_per_batch)
-        )
-        safe_destination_row = tl.where(valid_destination, destination_row, 0)
-        output_row_ptr = (
-            out_ptr
-            + safe_batch_idx * out_stride0.to(tl.int64)
-            + safe_destination_row * out_stride1.to(tl.int64)
-        )
+    seq_starts = seq_ends - seq_lens
 
-    restored_idx = tl.load(
-        restore_indices_ptr + token_idx, mask=token_valid, other=-1
-    ).to(tl.int64)
-    valid_restore = token_valid & (restored_idx >= 0) & (restored_idx < gathered_rows)
-    valid_row = valid_destination & valid_restore
-    safe_restored_idx = tl.where(valid_restore, restored_idx, 0)
-    token_ptr = gathered_ptr + safe_restored_idx * entry_bytes
-
+    offset_i64 = offset.to(tl.int64)
+    out_stride0_i64 = out_stride0.to(tl.int64)
+    out_stride1_i64 = out_stride1.to(tl.int64)
     fp8_cols = tl.arange(0, fp8_dim_pow2)
-    fp8_mask = valid_row & (fp8_cols < fp8_dim)
-    x_uint8 = tl.load(token_ptr + fp8_cols, mask=fp8_mask, other=0)
-    x_float = x_uint8.to(tl.float8e4nv, bitcast=True).to(tl.float32)
-
     scale_cols = tl.arange(0, n_scale_groups)
-    encoded_scale = tl.load(
-        token_ptr + token_data_size + scale_cols,
-        mask=valid_row & (scale_cols < n_quant_blocks),
-        other=0,
-    )
-    scale = tl.exp2(encoded_scale.to(tl.float32) - 127.0)
-    x_groups = tl.reshape(x_float, (n_scale_groups, quant_block))
-    x_out = tl.reshape(x_groups * scale[:, None], (fp8_dim_pow2,)).to(tl.bfloat16)
-    tl.store(output_row_ptr + fp8_cols, x_out, mask=fp8_mask)
-
     bf16_output_offset = fp8_dim
-    bf16_cache_ptr = (token_ptr + fp8_dim).to(tl.pointer_type(tl.bfloat16))
-    if bf16_dim == 64:
-        rope_offsets = tl.arange(0, 64)
-        bf16_vals = tl.load(bf16_cache_ptr + rope_offsets, mask=valid_row, other=0)
-        tl.store(
-            output_row_ptr + bf16_output_offset + rope_offsets,
-            bf16_vals,
-            mask=valid_row,
+
+    for local_t in tl.static_range(TILE_T_RESTORE):
+        token_idx = t_base + local_t
+        token_valid = token_idx < n_tokens
+
+        batch_idx = tl.sum((token_idx >= seq_ends).to(tl.int32), axis=0)
+        valid_batch = token_valid & (batch_idx >= 0) & (batch_idx < batch_size)
+        match_batch = batch_offsets == batch_idx
+        selected_seq_len = tl.sum(tl.where(match_batch, seq_lens, 0), axis=0)
+        seq_start = tl.sum(tl.where(match_batch, seq_starts, 0), axis=0)
+        token_in_request = token_idx - seq_start
+        safe_batch_idx = tl.where(valid_batch, batch_idx, 0).to(tl.int64)
+        if HAS_CU_DST_OFFSETS:
+            dst_base = tl.load(
+                cu_dst_offsets_ptr + safe_batch_idx, mask=valid_batch, other=0
+            ).to(tl.int64)
+            destination_row = dst_base + offset_i64 + token_in_request
+            valid_destination = (
+                valid_batch
+                & (selected_seq_len >= 0)
+                & (token_in_request >= 0)
+                & (token_in_request < selected_seq_len)
+                & (destination_row >= 0)
+                & (destination_row < out_rows_per_batch)
+            )
+            safe_destination_row = tl.where(valid_destination, destination_row, 0)
+            output_row_ptr = out_ptr + safe_destination_row * out_stride0_i64
+        else:
+            destination_row = offset_i64 + token_in_request
+            valid_destination = (
+                valid_batch
+                & (batch_idx < out_batch_size)
+                & (selected_seq_len >= 0)
+                & (token_in_request >= 0)
+                & (token_in_request < selected_seq_len)
+                & (destination_row >= 0)
+                & (destination_row < out_rows_per_batch)
+            )
+            safe_destination_row = tl.where(valid_destination, destination_row, 0)
+            output_row_ptr = (
+                out_ptr
+                + safe_batch_idx * out_stride0_i64
+                + safe_destination_row * out_stride1_i64
+            )
+
+        restored_idx = tl.load(
+            restore_indices_ptr + token_idx, mask=token_valid, other=-1
+        ).to(tl.int64)
+        valid_restore = (
+            token_valid & (restored_idx >= 0) & (restored_idx < gathered_rows)
         )
-    else:
-        for j in tl.static_range(bf16_dim // 16):
-            chunk_offsets = j * 16 + tl.arange(0, 16)
-            bf16_vals = tl.load(bf16_cache_ptr + chunk_offsets, mask=valid_row, other=0)
+        valid_row = valid_destination & valid_restore
+        safe_restored_idx = tl.where(valid_restore, restored_idx, 0)
+        token_ptr = gathered_ptr + safe_restored_idx * entry_bytes
+
+        fp8_mask = valid_row & (fp8_cols < fp8_dim)
+        x_uint8 = tl.load(token_ptr + fp8_cols, mask=fp8_mask, other=0)
+        x_float = x_uint8.to(tl.float8e4nv, bitcast=True).to(tl.float32)
+
+        encoded_scale = tl.load(
+            token_ptr + token_data_size + scale_cols,
+            mask=valid_row & (scale_cols < n_quant_blocks),
+            other=0,
+        )
+        scale = tl.exp2(encoded_scale.to(tl.float32) - 127.0)
+        x_groups = tl.reshape(x_float, (n_scale_groups, quant_block))
+        x_out = tl.reshape(x_groups * scale[:, None], (fp8_dim_pow2,)).to(tl.bfloat16)
+        tl.store(output_row_ptr + fp8_cols, x_out, mask=fp8_mask)
+
+        bf16_cache_ptr = (token_ptr + fp8_dim).to(tl.pointer_type(tl.bfloat16))
+        if bf16_dim == 64:
+            rope_offsets = tl.arange(0, 64)
+            bf16_vals = tl.load(bf16_cache_ptr + rope_offsets, mask=valid_row, other=0)
             tl.store(
-                output_row_ptr + bf16_output_offset + chunk_offsets,
+                output_row_ptr + bf16_output_offset + rope_offsets,
                 bf16_vals,
                 mask=valid_row,
             )
+        else:
+            for j in tl.static_range(bf16_dim // 16):
+                chunk_offsets = j * 16 + tl.arange(0, 16)
+                bf16_vals = tl.load(
+                    bf16_cache_ptr + chunk_offsets, mask=valid_row, other=0
+                )
+                tl.store(
+                    output_row_ptr + bf16_output_offset + chunk_offsets,
+                    bf16_vals,
+                    mask=valid_row,
+                )
 
 
 def dequantize_packed_k_cache_flat(out: torch.Tensor, packed: torch.Tensor) -> None:
@@ -1721,7 +1734,10 @@ def try_restore_dequantize_scatter_packed_k_cache_flat(
         return True
 
     batch_block = triton.next_power_of_2(batch_size)
-    _restore_dequantize_scatter_packed_k_cache_flat_kernel[(n_tokens,)](
+    tile_t_restore = 2
+    _restore_dequantize_scatter_packed_k_cache_flat_kernel[
+        (triton.cdiv(n_tokens, tile_t_restore),)
+    ](
         out,
         out.stride(0),
         out.stride(1),
@@ -1744,8 +1760,9 @@ def try_restore_dequantize_scatter_packed_k_cache_flat(
         n_quant_blocks=NOPE_TILES,
         n_scale_groups=N_SCALE_GROUPS,
         BATCH_BLOCK=batch_block,
+        TILE_T_RESTORE=tile_t_restore,
         HAS_CU_DST_OFFSETS=has_cu_dst_offsets,
-        num_warps=4,
+        num_warps=1,
     )
     return True
 
