@@ -162,6 +162,12 @@ class Q4SourceExpertTest(unittest.TestCase):
 
     def test_prequantized_tp2_marlin_slices_weights_and_scales_together(self):
         owners = [self._nvfp4_owner(rank, "nvfp4_marlin", "auto") for rank in (0, 1)]
+        for leaf in owners:
+            NewModelLoader._prepare_model_for_fastsafetensors(leaf, "cpu")
+            # Poison the actual destination, including FP8 scales (0x7f is NaN).
+            # Padding must be initialized by the load, not by the constructor.
+            for param in leaf.parameters():
+                param.view(torch.uint8).fill_(0x7F)
         # Positive E2M1 nibbles; weights and per-group scales both vary across
         # the TP boundary. Compare two local SwiGLUs to a full-checkpoint oracle.
         lut = torch.tensor([0., .5, 1., 1.5, 2., 3., 4., 6.])
@@ -188,8 +194,13 @@ class Q4SourceExpertTest(unittest.TestCase):
                     leaf.load_weights({key: data})
         outputs = []
         for leaf in owners:
-            leaf.validate_weights_loaded()
             self.assertEqual((leaf.local_n, leaf.n), (320, 384))
+            for fused in (leaf.w13, leaf.s13):
+                for half in fused.chunk(2, dim=1):
+                    self.assertFalse(half[:, 320:].view(torch.uint8).any().item())
+            for down, width in ((leaf.w2, 320 // 2), (leaf.s2, 320 // 16)):
+                self.assertFalse(down[:, :, width:].view(torch.uint8).any().item())
+            leaf.validate_weights_loaded()
             up, gate = decode(leaf.w13[0], leaf.s13[0]).chunk(2, dim=0)
             down = decode(leaf.w2[0], leaf.s2[0])
             outputs.append(down @ (torch.nn.functional.silu(gate @ x) * (up @ x)))

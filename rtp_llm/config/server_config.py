@@ -1,13 +1,30 @@
 """Frontend server configuration and port layout; no compute runtime required."""
 
+import logging
 import math
 import re
+from typing import Optional
 
 DEFAULT_START_PORT = 8088
+DEFAULT_STARTUP_HEALTH_CHECK_TIMEOUT = 3600
 COORDINATOR_INFO_PORT_NUM = 11
 MIN_WORKER_INFO_PORT_NUM = 9
 WORKER_INFO_PORT_NUM = MIN_WORKER_INFO_PORT_NUM
 DASH_SC_GRPC_SERVER_PORT_OFFSET = 8
+
+
+def normalize_startup_health_check_timeout(timeout: int) -> Optional[int]:
+    """Only -1 opts out of the startup deadline; other non-positive values use the default."""
+    if timeout == -1:
+        return None
+    if timeout <= 0:
+        logging.warning(
+            "invalid startup_health_check_timeout=%s; using %s",
+            timeout,
+            DEFAULT_STARTUP_HEALTH_CHECK_TIMEOUT,
+        )
+        return DEFAULT_STARTUP_HEALTH_CHECK_TIMEOUT
+    return timeout
 
 
 class ServerConfig:
@@ -25,9 +42,7 @@ class ServerConfig:
         self.ip: str = ""
         self.worker_info_port_num: int = MIN_WORKER_INFO_PORT_NUM
         self.shutdown_timeout: int = 600  # graceful drain budget (seconds)
-        self.startup_health_check_timeout: int = (
-            3600  # startup readiness bound (seconds)
-        )
+        self.startup_health_check_timeout: int = DEFAULT_STARTUP_HEALTH_CHECK_TIMEOUT
         self.monitor_interval: int = 1  # Monitor interval in seconds
         # -1 uses the resident mode default; 0 disables automatic restart.
         self.engine_restart_limit: int = -1

@@ -59,8 +59,6 @@ class Qwen4Nvfp4Experts(RtpModule):
             ("input_scales", (e, 3), torch.float32),
         ):
             data = torch.empty(shape, dtype=dtype)
-            if self.n != self.local_n and name in ("w13", "s13", "w2", "s2"):
-                data.view(torch.uint8).zero_()
             self.register_parameter(name, nn.Parameter(data, requires_grad=False))
         self._loaded = set()
         self._marlin = None
@@ -111,17 +109,23 @@ class Qwen4Nvfp4Experts(RtpModule):
                     read_spec = self.checkpoint_read_spec(name, tuple(value.shape))
                     value = value[read_spec.slices]
                 if p == 2:
-                    dest = (self.w2 if is_weight else self.s2)[
-                        i, :, : self.local_n // (2 if is_weight else 16)
-                    ]
+                    packed = (self.w2 if is_weight else self.s2)[i]
+                    axis, width = 1, self.local_n // (2 if is_weight else 16)
                 else:
-                    dest = (self.w13 if is_weight else self.s13)[
-                        i, p * self.n : p * self.n + self.local_n
+                    packed = (self.w13 if is_weight else self.s13)[
+                        i, p * self.n : (p + 1) * self.n
                     ]
+                    axis, width = 0, self.local_n
+                dest = packed.narrow(axis, 0, width)
                 if value.dtype != dest.dtype or value.shape != dest.shape:
                     raise ValueError(
                         f"Invalid packed tensor {name}: {value.shape} {value.dtype}; expected {dest.shape} {dest.dtype}"
                     )
+                # FST can replace constructor storage with empty storage. Clear
+                # only this projection's unused channels in the final destination.
+                padding = packed.size(axis) - width
+                if padding:
+                    packed.narrow(axis, width, padding).view(torch.uint8).zero_()
             dest.copy_(value)
             self._loaded.add(name)
 

@@ -28,7 +28,10 @@ def vision_router_layers(checkpoint_path):
     else:
         from safetensors import safe_open
 
-        from rtp_llm.models_py.weight_mapper import discover_ckpt_files
+        from rtp_llm.models_py.weight_mapper import (
+            _unwrap_pytorch_state_dict,
+            discover_ckpt_files,
+        )
 
         for filename in discover_ckpt_files(str(root)):
             if filename.endswith(".safetensors"):
@@ -36,7 +39,12 @@ def vision_router_layers(checkpoint_path):
                     names.update(source.keys())
             else:
                 metadata = torch.load(filename, map_location="meta", weights_only=True)
-                names.update(metadata.get("state_dict", metadata))
+                state = _unwrap_pytorch_state_dict(metadata)
+                names.update(
+                    name
+                    for name, value in state.items()
+                    if isinstance(name, str) and isinstance(value, torch.Tensor)
+                )
     result = {"layers": [], "mtp": []}
     for name in names:
         match = re.fullmatch(r"(layers|mtp)\.(\d+)\.ffn\.gate\.bias_vl", name)

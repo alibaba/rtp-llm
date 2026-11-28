@@ -170,4 +170,7 @@ pipeline.stop()
 MULTI_TASK_PROMPT is served out of L1. When configured, it automatically enables `REUSE_CACHE`
 and `ENABLE_DEVICE_CACHE`, preserving the existing behavior.
 When a task ID is specified, the system prompt of the task_id is used to concatenate the request, and the longest matching historical request is found in the KV cache to reuse the KV cache.
+For DynamicNTK, a system prompt beyond the original context length is kept as tokens only.
+Its task ID still prepends the full prompt. Even for a cached short system prompt, if the
+combined system and user input exceeds the original limit, the request recomputes the full prefix.
 When no task ID is specified, the user's prompt is used to find the longest matching historical request in the KV cache to reuse the KV cache.

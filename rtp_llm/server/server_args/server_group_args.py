@@ -1,3 +1,4 @@
+from rtp_llm.config.server_config import DEFAULT_STARTUP_HEALTH_CHECK_TIMEOUT
 from rtp_llm.server.server_args.util import str2bool
 
 
@@ -79,7 +80,7 @@ def init_server_group_args(parser, server_config, distribute_config):
         env_name="STARTUP_HEALTH_CHECK_TIMEOUT",
         bind_to=(server_config, "startup_health_check_timeout"),
         type=int,
-        default=3600,
+        default=DEFAULT_STARTUP_HEALTH_CHECK_TIMEOUT,
         help="Total bound for the startup health checks (restores the historical "
         "one-hour pipe wait; slow cold loads stay well under it). -1 opts out "
         "(unbounded wait); other non-positive values fall back to the default.",

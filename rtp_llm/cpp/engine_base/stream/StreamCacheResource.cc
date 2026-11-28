@@ -1218,11 +1218,11 @@ void StreamCacheResource::reportMallocRetry() const {
 
 bool StreamCacheResource::reuseCache() const {
     if (resource_context_.cache_manager) {
-        const auto limit = resource_context_.cache_manager->cacheConfig().length_independent_rope_limit;
         // A short prefill and a long prefill can have identical prefix tokens
         // but different rotated keys. Gate both cross-request lookup and
         // publication, including a short request that grew during decode.
-        if (limit > 0 && std::max(stream_->inputLength(), stream_->seqLength()) > limit) {
+        if (!resource_context_.cache_manager->cacheConfig().hasLengthIndependentRope(
+                std::max(stream_->inputLength(), stream_->seqLength()))) {
             return false;
         }
     }

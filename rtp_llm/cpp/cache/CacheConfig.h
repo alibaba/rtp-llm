@@ -46,6 +46,10 @@ public:
     // cannot be shared across requests using a token-only block identity.
     int length_independent_rope_limit = 0;
 
+    bool hasLengthIndependentRope(size_t seq_length) const {
+        return length_independent_rope_limit <= 0 || seq_length <= static_cast<size_t>(length_independent_rope_limit);
+    }
+
     int maxPrefixReuseTokens(int prompt_tokens) const {
         return std::max(0, prompt_tokens - std::max(1, cache_min_replay_tokens));
     }

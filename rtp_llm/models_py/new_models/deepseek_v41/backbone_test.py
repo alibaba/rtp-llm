@@ -516,6 +516,26 @@ class BackboneCheckpointTest(unittest.TestCase):
         )
         torch.testing.assert_close(experts, torch.tensor([[0, 1], [3, 2]]))
 
+    def test_unindexed_pytorch_bias_discovery_matches_tensor_reader(self):
+        from rtp_llm.models_py.new_models.deepseek_v41.owner import vision_router_layers
+
+        target, draft = "layers.1.ffn.gate.bias_vl", "mtp.2.ffn.gate.bias_vl"
+        state = {
+            target: torch.ones(4),
+            draft: torch.arange(4),
+            "layers.3.ffn.gate.bias_vl": "metadata only",
+        }
+        for wrapper in ("model", "state_dict", None):
+            with self.subTest(wrapper=wrapper), tempfile.TemporaryDirectory() as folder:
+                path = os.path.join(folder, "pytorch_model.bin")
+                payload = state if wrapper is None else {wrapper: state, "epoch": 3}
+                torch.save(payload, path)
+                tensors = dict(get_all_weights([path]))
+                self.assertEqual(set(tensors), {target, draft})
+                self.assertEqual(
+                    vision_router_layers(folder), {"layers": (1,), "mtp": (2,)}
+                )
+
     def test_checkpoint_metadata_selects_target_and_draft_vision_bias_separately(self):
         import json
 

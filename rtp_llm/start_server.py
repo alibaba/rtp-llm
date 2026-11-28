@@ -5,7 +5,7 @@ import os
 import sys
 import time
 import traceback
-from typing import Iterator, Optional
+from typing import Iterator
 
 import requests
 import torch
@@ -18,6 +18,7 @@ sys.path.append(os.path.join(str(CUR_PATH), ".."))
 
 from rtp_llm.config.log_config import setup_logging
 from rtp_llm.config.py_config_modules import PyEnvConfigs, resolve_engine_restart_limit
+from rtp_llm.config.server_config import normalize_startup_health_check_timeout
 from rtp_llm.config.server_config_setup import (
     load_gpu_nic_affinity,
     setup_and_configure_server,
@@ -787,20 +788,6 @@ def _engine_restart_enabled(py_env_configs: PyEnvConfigs) -> bool:
     )
 
 
-def _startup_health_check_timeout(py_env_configs: PyEnvConfigs) -> Optional[int]:
-    """Seconds a backend generation may take to become ready; None means no bound.
-
-    Only -1 is the unbounded opt-out; other non-positive values fall back to 3600.
-    """
-    timeout = py_env_configs.server_config.startup_health_check_timeout
-    if timeout == -1:
-        return None
-    if timeout <= 0:
-        logging.warning("invalid startup_health_check_timeout=%s; using 3600", timeout)
-        return 3600
-    return timeout
-
-
 def _backend_service_draining(service_draining, process_manager, restart_enabled):
     """The drain event to hand the next backend generation.
 
@@ -844,7 +831,9 @@ def _create_backend_restarter(
             int(master_port) if master_port else py_env_configs.server_config.start_port
         )
         port = base_port - ROW_COORDINATOR_PORT_OFFSET
-    startup_timeout = _startup_health_check_timeout(py_env_configs)
+    startup_timeout = normalize_startup_health_check_timeout(
+        py_env_configs.server_config.startup_health_check_timeout
+    )
     heartbeat_timeout = py_env_configs.server_config.engine_restart_heartbeat_timeout_s
     # nan or inf would never time out (no fail-closed); at or below the beat interval a
     # healthy row could look lost between two beats.
@@ -1013,7 +1002,9 @@ def start_server(py_env_configs: PyEnvConfigs):
             )
 
         # Start parallel health checks and wait; the bound is total (shared deadline across checks).
-        startup_timeout = _startup_health_check_timeout(py_env_configs)
+        startup_timeout = normalize_startup_health_check_timeout(
+            py_env_configs.server_config.startup_health_check_timeout
+        )
         if not process_manager.run_health_checks(timeout=startup_timeout):
             logging.error("[START_SERVER] Health checks failed")
             raise Exception("Health checks failed")

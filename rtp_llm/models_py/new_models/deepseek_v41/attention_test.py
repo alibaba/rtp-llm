@@ -98,6 +98,33 @@ def load(owner, values):
 
 
 class AttentionCheckpointTest(unittest.TestCase):
+    def test_serving_attention_preserves_flash_mla_process_policy(self):
+        from rtp_llm.models_py.modules.dsv41.fp8.attention import (
+            _configure_flash_mla_l2_persist,
+        )
+        from rtp_llm.models_py.new_models.deepseek_v41.backbone import (
+            runtime_backbone_class,
+        )
+
+        block = runtime_backbone_class().block_type
+        key = "FLASH_MLA_NO_L2_PERSIST"
+        self.addCleanup(_configure_flash_mla_l2_persist.cache_clear)
+        for initial, expected in ((None, "1"), ("0", None), ("1", "1")):
+            with self.subTest(initial=initial), patch.dict(os.environ):
+                _configure_flash_mla_l2_persist.cache_clear()
+                if initial is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = initial
+                cfg = config()
+                cfg.compress_ratios = [0]
+                # The legacy commit-only path writes KV and does not run MLA.
+                block.commit_attention_type(cfg, 0, {})
+                self.assertEqual(os.environ.get(key), initial)
+                for _ in range(2):
+                    block.attention_type(config(), 0, {})
+                    self.assertEqual(os.environ.get(key), expected)
+
     def test_consumer_selects_nearest_source_regardless_of_list_order(self):
         cfg = config()
         cfg.compress_ratios = [1] * 5

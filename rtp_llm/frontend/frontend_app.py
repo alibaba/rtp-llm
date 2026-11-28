@@ -28,6 +28,7 @@ from uvicorn import Config, Server
 from uvicorn.loops.auto import auto_loop_setup
 
 from rtp_llm.config.py_config_modules import PyEnvConfigs
+from rtp_llm.config.server_config import normalize_startup_health_check_timeout
 from rtp_llm.config.uvicorn_config import get_uvicorn_logging_config
 from rtp_llm.distribute.distributed_server import (
     get_dp_rpc_addresses,
@@ -444,10 +445,19 @@ class FrontendApp(object):
         )
 
     async def _wait_backend_health_ready_impl(self) -> None:
-        """Loop until backend gRPC health_check returns ok (used when PD 不分离)."""
-        timeout_s = 3600
-        deadline = time.monotonic() + timeout_s
-        while time.monotonic() < deadline:
+        """Wait for this worker's backend within the configured startup budget."""
+        timeout_s = normalize_startup_health_check_timeout(
+            self.server_config.startup_health_check_timeout
+        )
+        try:
+            await asyncio.wait_for(self._poll_backend_health(), timeout=timeout_s)
+        except asyncio.TimeoutError as exc:
+            raise RuntimeError(
+                f"Backend health_check did not become ready within {timeout_s}s"
+            ) from exc
+
+    async def _poll_backend_health(self) -> None:
+        while True:
             try:
                 if self.frontend_server.is_embedding:
                     # Each frontend has its own pooled channel. A successful
@@ -471,9 +481,6 @@ class FrontendApp(object):
                     e,
                 )
             await asyncio.sleep(1)
-        raise RuntimeError(
-            "Backend health_check did not become ready within %ds" % timeout_s
-        )
 
     def start(self):
         # spawn 后独立初始化；仅合法且启用的 JSON 配置会创建 Trace 运行时。

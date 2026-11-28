@@ -71,11 +71,18 @@ private:
 
 template<typename EngineType>
 std::shared_ptr<EngineType>
-createFocusedEngine(int64_t max_context_batch_size = 128, int64_t max_batch_tokens = 4096, bool multi_group = false) {
+createFocusedEngine(int64_t max_context_batch_size = 128,
+                    int64_t max_batch_tokens       = 4096,
+                    bool    multi_group            = false,
+                    int     dynamic_ntk_limit      = 0) {
     CustomConfig  config;
     ModelConfig   model_config;
     RuntimeConfig runtime_config;
     KVCacheConfig kv_cache_config;
+    if (dynamic_ntk_limit > 0) {
+        model_config.attn_config.rope_config.style   = RopeStyle::DynamicNTK;
+        model_config.attn_config.rope_config.max_pos = dynamic_ntk_limit;
+    }
     config.reuse_cache = true;
     auto params        = createEngineInitParams(config, model_config, runtime_config, kv_cache_config);
     params.runtime_config.fifo_scheduler_config.max_context_batch_size = max_context_batch_size;
@@ -135,6 +142,38 @@ TEST_F(SystemPromptConstructorTest, testMultiTaskPromptConstruct) {
     ASSERT_EQ(item2.prompt_tokens.size(), 4);
     ASSERT_FALSE(item2.group_block_ids.at("full").empty());
     ASSERT_EQ(item2.prompt_tokens, prompt_2);
+}
+
+TEST_F(SystemPromptConstructorTest, DynamicNtkCachesOnlyLengthIndependentSystemPrompts) {
+    auto engine = createFocusedEngine<NormalEngine>(128, 4096, false, /*dynamic_ntk_limit=*/4);
+    engine->kv_cache_config.multi_task_prompt_tokens = {
+        {"short", {1, 2, 3}}, {"at_limit", {4, 5, 6, 7}}, {"long", {11, 12, 13, 14, 15}}};
+    ASSERT_TRUE(engine->initSystemPrompt().ok());
+    auto prompts = engine->resourceContext().system_prompt;
+    ASSERT_NE(prompts, nullptr);
+    GenerateConfig config;
+    config.task_id = "at_limit";
+    EXPECT_FALSE(prompts->getPromptParams(config).group_block_ids.empty());
+    config.task_id = "long";
+    EXPECT_TRUE(prompts->getPromptParams(config).group_block_ids.empty());
+
+    auto check = [&](std::optional<std::string> task, std::vector<int> user, std::vector<int> expected, int reuse) {
+        auto input                      = makeSystemPromptInput();
+        input->input_ids                = torch::tensor(user, torch::kInt32);
+        input->generate_config->task_id = task;
+        auto stream                     = engine->createStream(input);
+        ASSERT_FALSE(stream->hasError());
+        EXPECT_EQ(stream->completeTokenIdsVec(), expected);
+        ASSERT_TRUE(stream->initKVBlock().ok());
+        ASSERT_TRUE(stream->streamCacheResource().waitForAllocatorLoad().ok());
+        EXPECT_EQ(stream->reuseLength(), reuse);
+    };
+    // Exactly at the limit a request can use a resident block; one token later it must recompute it.
+    check("short", {8}, {1, 2, 3, 8}, 2);
+    check("short", {8, 9}, {1, 2, 3, 8, 9}, 0);
+    check("long", {8}, {11, 12, 13, 14, 15, 8}, 0);
+    // A short unrelated request must not find a block rotated for the long system prompt.
+    check(std::nullopt, {11, 12, 8}, {11, 12, 8}, 0);
 }
 
 TEST_F(SystemPromptConstructorTest, testMultiGroupPromptPreservesEveryTaggedRow) {

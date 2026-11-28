@@ -303,6 +303,9 @@ def runtime_backbone_class(*, target_block_device=None):
     not substitute an ABI or a CPU attention implementation on import failure.
     """
     from rtp_llm.models_py.modules.dsv41.block import Block
+    from rtp_llm.models_py.modules.dsv41.fp8.attention import (
+        _configure_flash_mla_l2_persist,
+    )
     from rtp_llm.models_py.modules.dsv41.fp8.attention_v41 import AttentionV41FP8
     from rtp_llm.models_py.modules.dsv41.fp8.attention_v41_commit import (
         CommitOnlyAttentionV41FP8,
@@ -311,8 +314,12 @@ def runtime_backbone_class(*, target_block_device=None):
     from rtp_llm.models_py.modules.dsv41.transformer import V4Transformer
 
     class RuntimeAttention(AttentionV41FP8, OwnedV41Attention):
-        __init__ = OwnedV41Attention.__init__
         load_weights = OwnedV41Attention.load_weights
+
+        def __init__(self, args, layer_id, shared_attention):
+            # The owner bypasses AttentionFP8.__init__, but runs its MLA kernels.
+            _configure_flash_mla_l2_persist()
+            OwnedV41Attention.__init__(self, args, layer_id, shared_attention)
 
     class RuntimeCommitAttention(CommitOnlyAttentionV41FP8, OwnedV41CommitAttention):
         __init__ = OwnedV41CommitAttention.__init__
