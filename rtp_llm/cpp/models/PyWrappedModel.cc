@@ -17,6 +17,8 @@
 #include <unordered_set>
 #include "rtp_llm/cpp/pybind/PyUtils.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
+#include "rtp_llm/cpp/utils/TorchCudaOom.h"
+#include <c10/util/Exception.h>
 #include <cstdlib>
 #include <cstring>
 #include <iostream>
@@ -166,6 +168,21 @@ void PyWrappedModel::cleanupAfterConstructionFailure() noexcept {
     }
 }
 
+void PyWrappedModel::clearTransientForwardState() noexcept {
+    if (held_attn_pyobj_.ptr()) {
+        try {
+            py::gil_scoped_acquire gil;
+            held_attn_pyobj_ = py::object();
+        } catch (...) {
+            held_attn_pyobj_.release();
+        }
+    }
+    d2d_copies_.clear();
+    cp_mtp_last_hidden_states_ = torch::Tensor();
+    attention_inputs_          = torch_ext::PyAttentionInputs{};
+    attention_inputs_by_tag_.clear();
+}
+
 void PyWrappedModel::releaseBuffers() {
     if (held_attn_pyobj_.ptr()) {
         py::gil_scoped_acquire gil;
@@ -174,6 +191,11 @@ void PyWrappedModel::releaseBuffers() {
     // TensorHolder release point (PyWrappedModel): advances model-internal
     // host staging buffers from tensorHoldHostAndToCuda()/holdInputsHostBuffers().
     buffer_holder_.release();
+}
+
+void PyWrappedModel::clearBuffersAfterError() {
+    clearTransientForwardState();
+    buffer_holder_.clear();
 }
 
 torch::Tensor PyWrappedModel::getMtpTargetHiddenStates(int64_t num_tokens) {
@@ -1108,29 +1130,52 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
                     GenerationPrefillCudaGraphStatus::GRAPH_INPUT_SHAPE_MISMATCH :
                     graph_state.generation_prefill_status;
         }
-        if (can_run_graph) {
-            py::gil_scoped_acquire gil;
-            RTP_LLM_PROFILE_SCOPE("py_model.forward(cuda_graph)");
-            RTP_LLM_LOG_DEBUG(
-                "[PyWrappedModel] using CUDA graph forward, is_target_verify=%d, is_prefill=%d, graph_bs=%d",
-                py_model_inputs.attention_inputs.is_target_verify,
-                py_model_inputs.attention_inputs.is_prefill,
-                graph_state.current_real_graph_bs);
-            py_model_inputs.attention_inputs.is_s_padded = true;
-            py_model_outputs                             = graph_runner->forward(py_model_inputs, graph_state);
-            if (is_generation_prefill_runner) {
-                generation_prefill_cuda_graph_status = GenerationPrefillCudaGraphStatus::REPLAYED;
+        {
+            py::gil_scoped_acquire     gil;
+            std::optional<std::string> py_forward_error;
+            {
+                try {
+                    if (can_run_graph) {
+                        RTP_LLM_PROFILE_SCOPE("py_model.forward(cuda_graph)");
+                        RTP_LLM_LOG_DEBUG(
+                            "[PyWrappedModel] using CUDA graph forward, is_target_verify=%d, is_prefill=%d, graph_bs=%d",
+                            py_model_inputs.attention_inputs.is_target_verify,
+                            py_model_inputs.attention_inputs.is_prefill,
+                            graph_state.current_real_graph_bs);
+                        py_model_inputs.attention_inputs.is_s_padded = true;
+                        py_model_outputs = graph_runner->forward(py_model_inputs, graph_state);
+                        if (is_generation_prefill_runner) {
+                            generation_prefill_cuda_graph_status = GenerationPrefillCudaGraphStatus::REPLAYED;
+                        }
+                        RTP_LLM_LOG_DEBUG("[PyWrappedModel] CUDA graph forward completed");
+                    } else {
+                        RTP_LLM_PROFILE_SCOPE("py_model.forward(normal)");
+                        RTP_LLM_LOG_DEBUG("[PyWrappedModel] using normal forward, is_target_verify=%d, is_prefill=%d",
+                                          py_model_inputs.attention_inputs.is_target_verify,
+                                          py_model_inputs.attention_inputs.is_prefill);
+                        held_attn_pyobj_ = py_model_.attr("prepare_fmha_impl")(py_model_inputs, false);
+                        auto outputs     = py_forward_method_(py_model_inputs, held_attn_pyobj_);
+                        py_model_outputs = outputs.cast<PyModelOutputs>();
+                    }
+                } catch (const py::error_already_set& e) {
+                    py_forward_error = e.what();
+                    RTP_LLM_LOG_ERROR("Python error during forward call on Python instance: %s",
+                                      py_forward_error->c_str());
+                }
             }
-            RTP_LLM_LOG_DEBUG("[PyWrappedModel] CUDA graph forward completed");
-        } else {
-            py::gil_scoped_acquire gil;
-            RTP_LLM_PROFILE_SCOPE("py_model.forward(normal)");
-            RTP_LLM_LOG_DEBUG("[PyWrappedModel] using normal forward, is_target_verify=%d, is_prefill=%d",
-                              py_model_inputs.attention_inputs.is_target_verify,
-                              py_model_inputs.attention_inputs.is_prefill);
-            held_attn_pyobj_ = py_model_.attr("prepare_fmha_impl")(py_model_inputs, false);
-            auto outputs     = py_forward_method_(py_model_inputs, held_attn_pyobj_);
-            py_model_outputs = outputs.cast<PyModelOutputs>();
+            if (py_forward_error.has_value()) {
+                held_attn_pyobj_ = py::object();
+                if (isTorchCudaOomMessage(*py_forward_error)) {
+                    try {
+                        py::module_::import("gc").attr("collect")();
+                    } catch (...) {
+                    }
+                    C10_THROW_ERROR(
+                        OutOfMemoryError,
+                        "pybind11 error during forward call on Python instance: " + *py_forward_error);
+                }
+                throw std::runtime_error("pybind11 error during forward call on Python instance: " + *py_forward_error);
+            }
         }
 
         cache_store_write_cycle.finish();
@@ -1241,13 +1286,25 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
             attach_model_outputs(callForwardPostLayers(hidden_states, inputs, true)));
 
     } catch (const py::error_already_set& e) {
-        RTP_LLM_LOG_ERROR("Python error during forward call on Python instance: %s", e.what());
-        throw std::runtime_error(std::string("pybind11 error during forward call on Python instance: ") + e.what());
+        std::string err_msg;
+        {
+            py::gil_scoped_acquire gil;
+            err_msg = e.what();
+        }
+        RTP_LLM_LOG_ERROR("Python error during forward call on Python instance: %s", err_msg.c_str());
+        clearTransientForwardState();
+        throw std::runtime_error("pybind11 error during forward call on Python instance: " + err_msg);
+    } catch (const c10::OutOfMemoryError& e) {
+        RTP_LLM_LOG_ERROR("C++ OOM during forward call on Python instance: %s", e.what());
+        clearTransientForwardState();
+        throw;
     } catch (const std::exception& e) {
         RTP_LLM_LOG_ERROR("C++ error during forward call on Python instance: %s", e.what());
+        clearTransientForwardState();
         throw std::runtime_error(std::string("C++ error during forward call on Python instance: ") + e.what());
     } catch (...) {
         RTP_LLM_LOG_ERROR("An unknown error occurred during forward call on Python instance.");
+        clearTransientForwardState();
         throw std::runtime_error("An unknown error occurred during forward call on Python instance.");
     }
 }

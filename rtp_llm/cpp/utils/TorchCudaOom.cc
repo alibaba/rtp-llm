@@ -10,6 +10,9 @@
 
 #if USING_CUDA
 #include <c10/cuda/CUDACachingAllocator.h>
+#include <cuda_runtime.h>
+#elif USING_ROCM
+#include <hip/hip_runtime.h>
 #endif
 
 #include "rtp_llm/cpp/utils/Logger.h"
@@ -28,13 +31,19 @@ std::string lowerCase(const char* message) {
 }
 
 bool hasGpuOomMarker(const std::string& message) {
-    constexpr std::array<const char*, 6> markers = {
+    constexpr std::array<const char*, 12> markers = {
         "cuda out of memory",
         "cuda error: out of memory",
+        "cuda runtime error: out of memory",
+        "cuda_error_out_of_memory",
         "cudaerrormemoryallocation",
+        "cublas_status_alloc_failed",
         "hip out of memory",
         "hip error: out of memory",
+        "hip runtime error: out of memory",
         "hiperroroutofmemory",
+        "[rocm][error] out of memory",
+        "trackerallocator failed to allocate",
     };
     return std::any_of(markers.begin(), markers.end(), [&message](const char* marker) {
         return message.find(marker) != std::string::npos;
@@ -119,6 +128,14 @@ std::string dumpDiagnostics(int                   detail_device,
 
 }  // namespace
 
+bool isTorchCudaOomMessage(const std::string& message) noexcept {
+    try {
+        return hasGpuOomMarker(lowerCase(message.c_str()));
+    } catch (...) {
+        return false;
+    }
+}
+
 bool isTorchCudaOom(const std::exception& exception) noexcept {
     if (dynamic_cast<const c10::OutOfMemoryError*>(&exception) != nullptr) {
         return true;
@@ -136,6 +153,86 @@ bool torchGpuOomRecoveryRetrySupported() noexcept {
     return true;
 #else
     return false;
+#endif
+}
+
+bool recoverCudaAfterOom() noexcept {
+#if USING_CUDA
+    const cudaError_t peek_err = cudaPeekAtLastError();
+    if (peek_err == cudaErrorMemoryAllocation) {
+        (void)cudaGetLastError();
+    } else if (peek_err != cudaSuccess) {
+        RTP_LLM_LOG_ERROR("[Torch GPU OOM Recovery] non-OOM sticky CUDA error (%d: %s); cannot safely recover",
+                          static_cast<int>(peek_err),
+                          cudaGetErrorString(peek_err));
+        return false;
+    }
+
+    const cudaError_t sync_err = cudaDeviceSynchronize();
+    if (sync_err == cudaErrorMemoryAllocation) {
+        (void)cudaGetLastError();
+    } else if (sync_err != cudaSuccess) {
+        RTP_LLM_LOG_ERROR(
+            "[Torch GPU OOM Recovery] cudaDeviceSynchronize failed with non-OOM error (%d: %s); cannot safely recover",
+            static_cast<int>(sync_err),
+            cudaGetErrorString(sync_err));
+        return false;
+    }
+
+    try {
+        c10::cuda::CUDACachingAllocator::emptyCache();
+    } catch (const std::exception& error) {
+        RTP_LLM_LOG_ERROR("[Torch GPU OOM Recovery] CUDACachingAllocator::emptyCache failed: %s", error.what());
+        return false;
+    } catch (...) {
+        RTP_LLM_LOG_ERROR("[Torch GPU OOM Recovery] CUDACachingAllocator::emptyCache failed with unknown error");
+        return false;
+    }
+
+    const cudaError_t final_err = cudaPeekAtLastError();
+    if (final_err == cudaErrorMemoryAllocation) {
+        (void)cudaGetLastError();
+    } else if (final_err != cudaSuccess) {
+        RTP_LLM_LOG_ERROR("[Torch GPU OOM Recovery] unexpected CUDA error after cache cleanup (%d: %s)",
+                          static_cast<int>(final_err),
+                          cudaGetErrorString(final_err));
+        return false;
+    }
+    return true;
+#elif USING_ROCM
+    const hipError_t peek_err = hipPeekAtLastError();
+    if (peek_err == hipErrorOutOfMemory) {
+        (void)hipGetLastError();
+    } else if (peek_err != hipSuccess) {
+        RTP_LLM_LOG_ERROR("[Torch GPU OOM Recovery] non-OOM sticky HIP error (%d: %s); cannot safely recover",
+                          static_cast<int>(peek_err),
+                          hipGetErrorString(peek_err));
+        return false;
+    }
+
+    const hipError_t sync_err = hipDeviceSynchronize();
+    if (sync_err == hipErrorOutOfMemory) {
+        (void)hipGetLastError();
+    } else if (sync_err != hipSuccess) {
+        RTP_LLM_LOG_ERROR(
+            "[Torch GPU OOM Recovery] hipDeviceSynchronize failed with non-OOM error (%d: %s); cannot safely recover",
+            static_cast<int>(sync_err),
+            hipGetErrorString(sync_err));
+        return false;
+    }
+
+    const hipError_t final_err = hipPeekAtLastError();
+    if (final_err == hipErrorOutOfMemory) {
+        (void)hipGetLastError();
+    } else if (final_err != hipSuccess) {
+        RTP_LLM_LOG_ERROR("[Torch GPU OOM Recovery] unexpected HIP error after sync (%d: %s)",
+                          static_cast<int>(final_err),
+                          hipGetErrorString(final_err));
+        return false;
+    }
+    return true;
+#else
+    return true;
 #endif
 }
 

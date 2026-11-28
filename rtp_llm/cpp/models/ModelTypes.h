@@ -211,6 +211,7 @@ public:
     /** Builds rank-local PP warmup activations from full model inputs, applying CP padding when enabled. */
     virtual PPIntermediateTensors      makePPWarmUpInputTensors(const GptModelInputs& inputs, bool enable_cp);
     virtual void                       releaseBuffers() {}
+    virtual void                       clearBuffersAfterError() {}
     virtual void                       prepareAttentionInputs(const GptModelInputs& inputs) {}
     virtual std::optional<std::string> takeDeferredHiddenStateCaptureError() {
         return std::nullopt;

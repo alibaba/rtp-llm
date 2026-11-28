@@ -9,7 +9,9 @@ namespace rtp_llm {
 // Kept under the historical CUDA name for source compatibility; this recognizes
 // both CUDA and HIP allocator failures.
 bool isTorchCudaOom(const std::exception& exception) noexcept;
+bool isTorchCudaOomMessage(const std::string& message) noexcept;
 bool torchGpuOomRecoveryRetrySupported() noexcept;
+bool recoverCudaAfterOom() noexcept;
 
 std::string dumpTorchCudaOomDiagnostics(int detail_device, const std::string& dump_id) noexcept;
 void dumpFatalTorchCudaOomDiagnostics(int detail_device, const std::exception& exception) noexcept;

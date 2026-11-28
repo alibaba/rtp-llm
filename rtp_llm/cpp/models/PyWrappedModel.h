@@ -92,6 +92,7 @@ public:
     GptModelOutputs       forward(const GptModelInputs& inputs) override;
     PPIntermediateTensors makePPWarmUpInputTensors(const GptModelInputs& inputs, bool enable_cp) override;
     void                  releaseBuffers() override;
+    void                  clearBuffersAfterError() override;
     py::object&           getPyModel() {
         return py_model_;
     }
@@ -156,6 +157,7 @@ private:
     // both as hidden_states and all_hidden_states.
     GptModelOutputs forwardPostLayersLastHidden(torch::Tensor hidden, const GptModelInputs& inputs);
     void            holdInputsHostBuffers(const GptModelInputs& inputs);
+    void            clearTransientForwardState() noexcept;
     GraphBase*      selectGraphRunner(const torch_ext::PyAttentionInputs& attention_inputs) const;
     CudaGraphState& selectGraphState(const torch_ext::PyAttentionInputs& attention_inputs);
     void            cleanupAfterConstructionFailure() noexcept;

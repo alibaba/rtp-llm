@@ -2025,6 +2025,59 @@ private:
     std::shared_ptr<ProcessOverlapProbe> probe_;
 };
 
+class OomDispatchProcessor final: public NormalBatchStreamProcessor {
+public:
+    explicit OomDispatchProcessor(const ModelConfig& model_config):
+        NormalBatchStreamProcessor(model_config, PDSepConfig{}, ProfilingDebugLoggingConfig{}, CacheConfig{}, false) {}
+
+    absl::Status dispatch(const StreamGroups&, const MergedOutput&) const override {
+        throw std::runtime_error("CUDA out of memory in async output dispatch");
+    }
+};
+
+TEST_F(NormalBatchStreamProcessorTest, testAsyncWorkerOomUsesOriginalBatchAndRejectsMissingOwnership) {
+    ScopedEnvVar stream_async_env("RTP_LLM_STREAM_ASYNC", "1");
+    ScopedEnvVar drop_broad_sync_env("RTP_LLM_DROP_BROAD_SYNC", "1");
+    ScopedEnvVar device_input_env("RTP_LLM_DEVICE_INPUT", "0");
+
+    auto           params = makeExecutorParams(0);
+    NormalExecutor executor(params, nullptr);
+    executor.setBatchProcessor(std::make_unique<OomDispatchProcessor>(params.model_config_));
+    executor.setModel(std::make_unique<SnapshotRecordingModel>(std::make_shared<ProcessOverlapProbe>(),
+                                                               params.model_config_.vocab_size));
+
+    ResourceContext resource_context;
+    auto            make_stream = [&] {
+        auto query                             = make_shared<GenerateInput>();
+        query->input_ids                       = hostIntBuffer({1, 2, 3});
+        query->generate_config                 = make_shared<GenerateConfig>();
+        query->generate_config->max_new_tokens = 2;
+        auto stream                            = make_shared<NormalGenerateStream>(
+            query, params.model_config_, params.runtime_config, resource_context, nullptr);
+        stream->setIsContextStream(false);
+        stream->generate_status_->status = StreamState::RUNNING;
+        return stream;
+    };
+    auto previous_stream = make_stream();
+    auto next_stream     = make_stream();
+
+    ASSERT_TRUE(executor.dispatchOutputAsync(StreamGroups({previous_stream}), {}, {}, nullptr, nullptr, nullptr).ok());
+    ASSERT_TRUE(executor.process(ScheduleOutput{{next_stream}}).ok());
+
+    EXPECT_TRUE(previous_stream->hasError());
+    EXPECT_EQ(previous_stream->statusInfo().code(), ErrorCode::EXECUTION_EXCEPTION);
+    EXPECT_NE(previous_stream->stopReason().find("async output dispatch failed"), std::string::npos);
+    EXPECT_FALSE(previous_stream->hasPendingAsyncBookkeeping());
+    EXPECT_FALSE(next_stream->hasError());
+
+    auto another_next_stream = make_stream();
+    ASSERT_TRUE(
+        executor.dispatchOutputAsync(StreamGroups(std::list<GenerateStreamPtr>{}), {}, {}, nullptr, nullptr, nullptr)
+            .ok());
+    EXPECT_THROW(executor.process(ScheduleOutput{{another_next_stream}}), std::runtime_error);
+    EXPECT_FALSE(another_next_stream->hasError());
+}
+
 TEST_F(NormalBatchStreamProcessorTest, testProcessOverlapsMropeSnapshotButJoinsBeforeSampler) {
     // A real previous-worker task is held on NormalExecutor's AsyncRunner.
     // Snapshot decode may reach model forward before release; it still must

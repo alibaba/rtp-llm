@@ -485,6 +485,11 @@ absl::StatusOr<GenerateStreamPtr> NormalEngine::preRun(const std::shared_ptr<Gen
         }
     } else {
         THROW_IF_STATUS_ERROR(executor_->process(schedule_output));
+        // An isolated execution failure may only be recorded on the stream.
+        // Do not let the caller publish that stream's blocks as a resident prefix.
+        if (mode == preRunMode::build_system_prompt && stream->hasError()) {
+            return absl::InternalError("build system prompt failed: " + stream->stopReason());
+        }
     }
 #if USING_CUDA
     if (mode == preRunMode::build_system_prompt) {

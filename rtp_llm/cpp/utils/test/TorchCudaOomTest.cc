@@ -18,10 +18,18 @@ TEST(TorchCudaOomTest, RecognizesTypedAndBackendSpecificOomErrors) {
 
     EXPECT_TRUE(isTorchCudaOom(std::runtime_error("CUDA out of memory")));
     EXPECT_TRUE(isTorchCudaOom(std::runtime_error("CUDA error: out of memory")));
+    EXPECT_TRUE(isTorchCudaOom(std::runtime_error("[ERROR] CUDA runtime error: out of memory model.cc:123")));
+    EXPECT_TRUE(isTorchCudaOom(std::runtime_error("[ERROR] CUDA runtime error: CUDA_ERROR_OUT_OF_MEMORY")));
+    EXPECT_TRUE(isTorchCudaOom(std::runtime_error("[ERROR] CUDA runtime error: CUBLAS_STATUS_ALLOC_FAILED")));
     EXPECT_TRUE(isTorchCudaOom(std::runtime_error("cudaErrorMemoryAllocation")));
     EXPECT_TRUE(isTorchCudaOom(std::runtime_error("HIP out of memory")));
     EXPECT_TRUE(isTorchCudaOom(std::runtime_error("HIP error: out of memory")));
+    EXPECT_TRUE(isTorchCudaOom(std::runtime_error("HIP runtime error: out of memory")));
+    EXPECT_TRUE(isTorchCudaOom(std::runtime_error("[ROCm][ERROR] out of memory Assertion fail")));
     EXPECT_TRUE(isTorchCudaOom(std::runtime_error("hipErrorOutOfMemory")));
+    EXPECT_TRUE(isTorchCudaOom(std::runtime_error("TrackerAllocator failed to allocate 1073741824 bytes")));
+    EXPECT_TRUE(isTorchCudaOomMessage("pybind11 error: CUDA out of memory. Tried to allocate 2.00 GiB"));
+    EXPECT_FALSE(isTorchCudaOomMessage("CUDA error: an illegal memory access was encountered"));
 }
 
 TEST(TorchCudaOomTest, RejectsUnrelatedExceptionsContainingGenericOomWords) {
