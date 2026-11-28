@@ -1955,25 +1955,45 @@ def test_r8_gdn_prefill_fast_launch_and_ple_halo_parity() -> None:
 def test_r9_bf16_tgv_buckets_and_gdn_qkvz_ba_fusion() -> None:
     import os
     from rtp_llm.models_py.modules.qwen4_5.attention import (
+        _get_flashinfer_tgv_backend,
+        _select_bf16_tgv_tactic,
         _should_use_bf16_tgv,
         dense_linear_bf16_or_tgv,
     )
     from rtp_llm.models_py.modules.qwen4_5.fp8_linear import SM100FP8Linear
 
-    print("\n=== [R9 BF16 TGV] Strict-Win Buckets + GDN qkvz/ba Zero-Copy Fusion + Autograd/Reload ===")
+    print("\n=== [R9/R10 Direct BF16 TGV] Strict-Win Tactics + GDN qkvz/ba Zero-Copy Fusion + Autograd/Reload ===")
     device = torch.device("cuda")
     dtype = torch.bfloat16
     torch.manual_seed(4900)
     cap_major, _ = torch.cuda.get_device_capability(device)
 
-    # 1. Verify bucket predicate boundaries match L2-cold CG roofline wins
+    # 1. Verify R10 direct-tactic bucket predicate boundaries matching SM103 L2-cold CG wins
     assert _should_use_bf16_tgv(1, 5120, 5184) and _should_use_bf16_tgv(8, 5120, 5184)
-    assert not _should_use_bf16_tgv(16, 5120, 5184)
-    assert _should_use_bf16_tgv(16, 5120, 4096) and not _should_use_bf16_tgv(24, 5120, 4096)
+    assert _should_use_bf16_tgv(16, 5120, 5184) and _should_use_bf16_tgv(32, 5120, 5184)
+    assert _should_use_bf16_tgv(48, 5120, 5184) and not _should_use_bf16_tgv(64, 5120, 5184)
+    assert _should_use_bf16_tgv(16, 5120, 4096) and _should_use_bf16_tgv(24, 5120, 4096)
+    assert _should_use_bf16_tgv(32, 5120, 4096) and not _should_use_bf16_tgv(48, 5120, 4096)
     assert _should_use_bf16_tgv(16, 5120, 2560) and _should_use_bf16_tgv(24, 5120, 2560)
-    assert not _should_use_bf16_tgv(32, 5120, 2560)
-    assert _should_use_bf16_tgv(8, 2048, 5120) and not _should_use_bf16_tgv(16, 2048, 5120)
+    assert _should_use_bf16_tgv(32, 5120, 2560) and _should_use_bf16_tgv(48, 5120, 2560)
+    assert not _should_use_bf16_tgv(64, 5120, 2560)
+    assert _should_use_bf16_tgv(8, 2048, 5120) and _should_use_bf16_tgv(16, 2048, 5120)
+    assert _should_use_bf16_tgv(32, 2048, 5120) and not _should_use_bf16_tgv(48, 2048, 5120)
+    assert _should_use_bf16_tgv(16, 5120, 10368) and not _should_use_bf16_tgv(20, 5120, 10368)
+    assert _should_use_bf16_tgv(16, 512, 5120) and not _should_use_bf16_tgv(16, 512, 25600)
     assert not _should_use_bf16_tgv(8, 5120, 64) and not _should_use_bf16_tgv(8, 5120, 1152)
+    assert not _should_use_bf16_tgv(48, 5120, 5760) and not _should_use_bf16_tgv(32, 5120, 20480)
+    assert _select_bf16_tgv_tactic(8, 5120, 5184) == 3
+    assert _select_bf16_tgv_tactic(16, 5120, 5184) == 6
+    assert _select_bf16_tgv_tactic(32, 5120, 5184) == 8
+    assert _select_bf16_tgv_tactic(48, 5120, 5184) == 9
+    assert _select_bf16_tgv_tactic(16, 5120, 10368) == 10
+    assert _select_bf16_tgv_tactic(16, 5120, 4096) == 3
+    assert _select_bf16_tgv_tactic(32, 5120, 4096) == 6
+
+    if cap_major == 10:
+        tgv_fn, tactic_num = _get_flashinfer_tgv_backend(device)
+        assert callable(tgv_fn) and tactic_num >= 11, f"Expected direct SM10x tgv backend, got {tgv_fn}, {tactic_num}"
 
     prev_tgv = os.environ.get("QWEN4_5_BF16_TGV")
     prev_fuse = os.environ.get("QWEN4_5_GDN_FUSE_QKVZ_BA")
@@ -1982,11 +2002,20 @@ def test_r9_bf16_tgv_buckets_and_gdn_qkvz_ba_fusion() -> None:
         with torch.no_grad():
             for m_rows, k_dim, n_dim in (
                 (1, 5120, 5184),
+                (16, 5120, 5184),
+                (32, 5120, 5184),
+                (48, 5120, 5184),
                 (8, 5120, 5760),
+                (32, 5120, 5760),
                 (4, 5120, 5248),
                 (16, 5120, 4096),
+                (32, 5120, 4096),
                 (16, 5120, 2560),
-                (8, 2048, 5120),
+                (32, 5120, 2560),
+                (16, 2048, 5120),
+                (32, 2048, 5120),
+                (16, 5120, 10368),
+                (16, 512, 5120),
             ):
                 lin = torch.nn.Linear(k_dim, n_dim, bias=False, device=device, dtype=dtype).eval()
                 lin.weight.normal_(0.0, 0.02)
@@ -2052,8 +2081,8 @@ def test_r9_bf16_tgv_buckets_and_gdn_qkvz_ba_fusion() -> None:
             sm_qkvz.prepare_weights()
             gdn.in_proj_qkvz = sm_qkvz
 
-            # 4a) Forward B=8,T=1 and B=16,T=1 parity vs unfused baseline
-            for bsz_t in (8, 16):
+            # 4a) Forward B=8,T=1, B=16,T=1, and B=32,T=1 parity vs unfused baseline
+            for bsz_t in (8, 16, 32):
                 h_t = torch.randn((bsz_t, 1, 5120), device=device, dtype=dtype) * 0.1
                 st_r = gdn.create_state(bsz_t, device, dtype)
                 st_f = gdn.create_state(bsz_t, device, dtype)

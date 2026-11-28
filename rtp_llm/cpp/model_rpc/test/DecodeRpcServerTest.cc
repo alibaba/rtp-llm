@@ -1,10 +1,19 @@
 #include <gtest/gtest.h>
 
+#include <atomic>
 #include <chrono>
+#include <condition_variable>
+#include <future>
+#include <mutex>
 #include <optional>
 #include <stdexcept>
 #include <thread>
+#include <unordered_map>
 #include <utility>
+#include <vector>
+
+#include "autil/EnvUtil.h"
+#include "autil/Scope.h"
 
 #include "rtp_llm/cpp/cache/block_tree_cache/load/LoadAsyncContext.h"
 #include "rtp_llm/cpp/model_rpc/DecodeRpcServer.h"
@@ -2102,6 +2111,524 @@ TEST_F(DecodeRpcLoadRoutingTest, SingleStageReceiverUsesPrefillStagesWithoutRela
     request.add_tagged_group_block_ids()->set_tag("other-stage");
     EXPECT_ANY_THROW(server_.RemoteLoad(&context, &request, &response));
     EXPECT_TRUE(store_->calls.empty());
+}
+
+namespace {
+
+class AdmissionFakeEngine final: public EngineBase {
+public:
+    static EngineInitParams makeParams(RoleType role_type,
+                                       int64_t  concurrency_limit,
+                                       int64_t  max_generate_batch_size,
+                                       int64_t  max_inited_kv_cache_streams,
+                                       uint32_t seq_size_per_block) {
+        EngineInitParams params;
+        params.pd_sep_config.role_type                                         = role_type;
+        params.concurrency_config.concurrency_limit                            = static_cast<int>(concurrency_limit);
+        params.runtime_config.max_generate_batch_size                          = max_generate_batch_size;
+        params.runtime_config.fifo_scheduler_config.max_inited_kv_cache_streams = max_inited_kv_cache_streams;
+        params.model_config_.max_seq_len                                       = 64;
+        params.model_config_.attn_config.tokens_per_block                      = seq_size_per_block;
+        return params;
+    }
+
+    AdmissionFakeEngine(const CacheConfig&     cache_config,
+                        RoleType               role_type,
+                        int64_t                concurrency_limit,
+                        int64_t                max_generate_batch_size,
+                        int64_t                max_inited_kv_cache_streams,
+                        int64_t                reserve_block_ratio = 0):
+        EngineBase(makeParams(role_type,
+                              concurrency_limit,
+                              max_generate_batch_size,
+                              max_inited_kv_cache_streams,
+                              cache_config.seq_size_per_block)),
+        params_(makeParams(role_type,
+                           concurrency_limit,
+                           max_generate_batch_size,
+                           max_inited_kv_cache_streams,
+                           cache_config.seq_size_per_block)) {
+        KVCacheConfig kv_cfg;
+        kv_cfg.reserve_block_ratio = reserve_block_ratio;
+        cache = std::make_shared<KVCacheManager>(cache_config,
+                                                 false,
+                                                 nullptr,
+                                                 kv_cfg,
+                                                 params_.parallelism_config,
+                                                 params_.runtime_config,
+                                                 params_.sp_config,
+                                                 params_.pd_sep_config);
+        if (!cache->init()) {
+            throw std::runtime_error("admission test cache initialization failed");
+        }
+        resource_context_.cache_manager = cache;
+        resource_context_.role_type     = role_type;
+    }
+
+    GenerateStreamPtr makeStream(const std::shared_ptr<GenerateInput>& input) override {
+        return std::make_shared<NormalGenerateStream>(
+            input, params_.model_config_, params_.runtime_config, resource_context_, nullptr);
+    }
+    GenerateStreamPtr enqueue(const std::shared_ptr<GenerateInput>& input) override {
+        return makeStream(input);
+    }
+    void         enqueue(GenerateStreamPtr&) override {}
+    absl::Status stop() override {
+        return absl::OkStatus();
+    }
+    absl::StatusOr<GenerateStreamPtr> preRun(const std::shared_ptr<GenerateInput>&, preRunMode) override {
+        return absl::UnimplementedError("unused in admission test");
+    }
+    KVCacheInfo getCacheStatusInfo(int64_t, bool) override {
+        return {};
+    }
+
+    EngineInitParams                params_;
+    std::shared_ptr<KVCacheManager> cache;
+};
+
+class AdmissionRemoteGenerateService final: public RpcService::Service {
+public:
+    explicit AdmissionRemoteGenerateService(DecodeRpcServer& server): server_(server) {}
+
+    grpc::Status RemoteGenerate(grpc::ServerContext* context, ServerStream* stream) override {
+        return server_.RemoteGenerate(context, stream);
+    }
+
+private:
+    DecodeRpcServer& server_;
+};
+
+void fillDecodeAllocateRequest(DecodeGenerateContext& ctx,
+                               int64_t                request_id,
+                               int                    num_tokens,
+                               int                    max_new_tokens,
+                               int                    timeout_ms = 5000) {
+    ctx.request_id  = request_id;
+    ctx.request_key = "decode-admission-" + std::to_string(request_id);
+    ctx.time_info.updateRequestBegineTime();
+    ctx.allocate_request.set_stage(RemoteStage::ALLOCATE);
+    ctx.allocate_request.set_request_id(request_id);
+    ctx.allocate_request.set_client_id("prefill-test");
+    auto* input = ctx.allocate_request.mutable_input();
+    input->set_request_id(request_id);
+    for (int i = 0; i < num_tokens; ++i) {
+        input->add_token_ids(i + 1);
+    }
+    auto* gen_cfg = input->mutable_generate_config();
+    gen_cfg->set_max_new_tokens(max_new_tokens);
+    gen_cfg->set_num_beams(1);
+    gen_cfg->set_num_return_sequences(1);
+    gen_cfg->set_timeout_ms(timeout_ms);
+}
+
+void releaseTestStream(const GenerateStreamPtr& stream) {
+    if (!stream) {
+        return;
+    }
+    if (!stream->hasError()) {
+        stream->reportError(ErrorCode::CANCELLED, "admission test complete");
+    }
+    stream->moveToNext();
+}
+
+}  // namespace
+
+class DecodeRpcAdmissionTest: public DeviceTestBase {};
+
+TEST_F(DecodeRpcAdmissionTest, ResolveDecodeMaxInitedStreamsPrecedence) {
+    DecodeRpcServer server;
+    server.maga_init_params_.concurrency_config.concurrency_limit = 16;
+    server.maga_init_params_.runtime_config.max_generate_batch_size = 8;
+    server.maga_init_params_.runtime_config.fifo_scheduler_config.max_inited_kv_cache_streams = 0;
+
+    // Non-DECODE without explicit config/env imposes no decode admission cap.
+    server.maga_init_params_.pd_sep_config.role_type = RoleType::PDFUSION;
+    EXPECT_EQ(server.resolveDecodeMaxInitedStreams(), 0);
+
+    // DECODE falls back to max(concurrency_limit, max_generate_batch_size).
+    server.maga_init_params_.pd_sep_config.role_type = RoleType::DECODE;
+    EXPECT_EQ(server.resolveDecodeMaxInitedStreams(), 16);
+
+    server.maga_init_params_.runtime_config.max_generate_batch_size = 32;
+    EXPECT_EQ(server.resolveDecodeMaxInitedStreams(), 32);
+
+    // max_inited_kv_cache_streams overrides concurrency/batch fallback.
+    server.maga_init_params_.runtime_config.fifo_scheduler_config.max_inited_kv_cache_streams = 6;
+    EXPECT_EQ(server.resolveDecodeMaxInitedStreams(), 6);
+
+    // Explicit env overrides configured limits.
+    autil::EnvGuard env_cap("RTP_LLM_DECODE_MAX_INITED_STREAMS", "3");
+    EXPECT_EQ(server.resolveDecodeMaxInitedStreams(), 3);
+}
+
+class AdmissionAllocateHarness final: public RpcService::Service {
+public:
+    explicit AdmissionAllocateHarness(DecodeRpcServer& server): server_(server) {
+        grpc::ServerBuilder builder;
+        builder.AddListeningPort("127.0.0.1:0", grpc::InsecureServerCredentials(), &port_);
+        builder.RegisterService(this);
+        grpc_server_ = builder.BuildAndStart();
+        if (!grpc_server_ || port_ == 0) {
+            throw std::runtime_error("failed to start AdmissionAllocateHarness");
+        }
+        stub_ = RpcService::NewStub(
+            grpc::CreateChannel("127.0.0.1:" + std::to_string(port_), grpc::InsecureChannelCredentials()));
+    }
+
+    ~AdmissionAllocateHarness() override {
+        if (grpc_server_) {
+            grpc_server_->Shutdown();
+            grpc_server_->Wait();
+        }
+    }
+
+    grpc::Status RemoteGenerate(grpc::ServerContext* server_context, ServerStream* rpc_stream) override {
+        autil::ScopeGuard            admission_notify_guard([this] { server_.notifyAdmissionChange(); });
+        DecodeRpcContext             rpc_context{rpc_stream};
+        kmonitor::MetricsReporterPtr reporter;
+        DecodeGenerateContext        ctx(rpc_context, 0, server_context, reporter, server_.meta_);
+        const int                    uncaught_exceptions = std::uncaught_exceptions();
+        autil::ScopeGuard            rpc_completion_guard([&ctx, uncaught_exceptions] {
+            if (std::uncaught_exceptions() == uncaught_exceptions) {
+                ctx.markRpcHandlingCompleted();
+            }
+        });
+        if (!rpc_stream->Read(&ctx.allocate_request)) {
+            return grpc::Status(grpc::StatusCode::INTERNAL, "failed to read allocate request");
+        }
+        ctx.request_id  = ctx.allocate_request.request_id();
+        ctx.request_key = "decode-admission-" + std::to_string(ctx.request_id);
+        server_.allocateResource(ctx);
+        if (!ctx.error_status.ok()) {
+            return ctx.error_status;
+        }
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            streams_[ctx.request_id] = ctx.getStream();
+        }
+        cv_.notify_all();
+        GenerateRequestPB hold_msg;
+        while (rpc_stream->Read(&hold_msg)) {}
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            streams_.erase(ctx.request_id);
+        }
+        releaseTestStream(ctx.getStream());
+        ctx.stopStream();
+        return grpc::Status::OK;
+    }
+
+    struct OpenCall {
+        grpc::ClientContext                                                             client_ctx;
+        std::unique_ptr<grpc::ClientReaderWriter<GenerateRequestPB, GenerateOutputsPB>> stream;
+        GenerateOutputsPB                                                               alloc_resp;
+        bool                                                                            alloc_ok{false};
+        grpc::Status                                                                    status;
+
+        grpc::Status close() {
+            if (stream) {
+                stream->WritesDone();
+                status = stream->Finish();
+                stream.reset();
+            }
+            return status;
+        }
+
+        ~OpenCall() {
+            if (stream) {
+                client_ctx.TryCancel();
+                (void)stream->Finish();
+            }
+        }
+    };
+
+    std::unique_ptr<OpenCall> allocate(int64_t request_id, int num_tokens, int max_new_tokens, int timeout_ms = 5000) {
+        auto call    = std::make_unique<OpenCall>();
+        call->stream = stub_->RemoteGenerate(&call->client_ctx);
+        GenerateRequestPB req;
+        req.set_stage(RemoteStage::ALLOCATE);
+        req.set_request_id(request_id);
+        req.set_client_id("prefill-test");
+        auto* input = req.mutable_input();
+        input->set_request_id(request_id);
+        for (int i = 0; i < num_tokens; ++i) {
+            input->add_token_ids(i + 1);
+        }
+        auto* gen_cfg = input->mutable_generate_config();
+        gen_cfg->set_max_new_tokens(max_new_tokens);
+        gen_cfg->set_num_beams(1);
+        gen_cfg->set_num_return_sequences(1);
+        gen_cfg->set_timeout_ms(timeout_ms);
+        if (!call->stream->Write(req)) {
+            call->status = call->stream->Finish();
+            call->stream.reset();
+            return call;
+        }
+        if (call->stream->Read(&call->alloc_resp)) {
+            call->alloc_ok = call->alloc_resp.supports_prefill_completion();
+        } else {
+            call->status = call->stream->Finish();
+            call->stream.reset();
+        }
+        return call;
+    }
+
+    GenerateStreamPtr getStream(int64_t request_id) {
+        std::unique_lock<std::mutex> lock(mutex_);
+        cv_.wait(lock, [&] { return streams_.count(request_id) > 0; });
+        return streams_[request_id];
+    }
+
+private:
+    DecodeRpcServer&                               server_;
+    int                                            port_{0};
+    std::unique_ptr<grpc::Server>                  grpc_server_;
+    std::unique_ptr<RpcService::Stub>              stub_;
+    std::mutex                                     mutex_;
+    std::condition_variable                        cv_;
+    std::unordered_map<int64_t, GenerateStreamPtr> streams_;
+};
+
+TEST_F(DecodeRpcAdmissionTest, BurstConcurrentAllocationRespectsLimitAndWakesWaiters) {
+    autil::EnvGuard headroom_off("RTP_LLM_DECODE_GROWTH_HEADROOM_TOKENS", "0");
+    const auto      cache_config = test::makeSimpleMhaCacheConfig(1, 64, 4, DataType::TYPE_FP16);
+    auto            engine =
+        std::make_shared<AdmissionFakeEngine>(cache_config, RoleType::DECODE, 16, 16, /*max_inited=*/4, 0);
+    DecodeRpcServer server;
+    server.engine_           = engine;
+    server.meta_             = std::make_shared<RpcServerRuntimeMeta>();
+    server.maga_init_params_ = engine->params_;
+    AdmissionAllocateHarness harness(server);
+
+    constexpr int            kTotalRequests = 16;
+    std::atomic<int>         success_count{0};
+    std::atomic<int>         failed_count{0};
+    std::atomic<size_t>      max_observed_active{0};
+    std::mutex               err_mutex;
+    std::vector<std::string> unexpected_errors;
+    std::vector<std::thread> workers;
+    workers.reserve(kTotalRequests);
+
+    for (int i = 0; i < kTotalRequests; ++i) {
+        workers.emplace_back([&, i]() {
+            auto call = harness.allocate(100 + i, /*num_tokens=*/4, /*max_new_tokens=*/1, /*timeout_ms=*/5000);
+            if (!call->alloc_ok) {
+                failed_count.fetch_add(1);
+                std::lock_guard<std::mutex> lock(err_mutex);
+                unexpected_errors.push_back(call->status.error_message());
+                return;
+            }
+
+            const size_t active_now = server.activeInitedStreamCount();
+            size_t       prev       = max_observed_active.load();
+            while (active_now > prev && !max_observed_active.compare_exchange_weak(prev, active_now)) {}
+
+            EXPECT_LE(active_now, 4u);
+            std::this_thread::sleep_for(std::chrono::milliseconds(15));
+
+            EXPECT_TRUE(call->close().ok());
+            success_count.fetch_add(1);
+        });
+    }
+
+    for (auto& t : workers) {
+        t.join();
+    }
+
+    EXPECT_TRUE(unexpected_errors.empty()) << (unexpected_errors.empty() ? "" : unexpected_errors.front());
+    EXPECT_EQ(failed_count.load(), 0);
+    EXPECT_EQ(success_count.load(), kTotalRequests);
+    EXPECT_LE(max_observed_active.load(), 4u);
+    EXPECT_GE(max_observed_active.load(), 2u);
+    EXPECT_EQ(server.activeInitedStreamCount(), 0u);
+    EXPECT_EQ(engine->cache->freeBlocksNum(), 63u);
+}
+
+TEST_F(DecodeRpcAdmissionTest, GrowthHeadroomPreventsRunningStreamIncrKVBlockMallocFailed) {
+    // 16 total blocks -> 15 usable blocks, block_size=4.
+    // Admit 3 streams x 3 blocks (9 used, 6 free), each needing +8 tokens (+2 blocks) = 6 growth blocks.
+    // A 4th incoming stream (needs 3 blocks) must wait instead of stealing growth headroom,
+    // allowing all 3 active streams to finish incrKVBlock() with zero MALLOC_FAILED.
+    autil::EnvGuard headroom_env("RTP_LLM_DECODE_GROWTH_HEADROOM_TOKENS", "8");
+    const auto      cache_config = test::makeSimpleMhaCacheConfig(1, 16, 4, DataType::TYPE_FP16);
+    auto            engine =
+        std::make_shared<AdmissionFakeEngine>(cache_config, RoleType::DECODE, 16, 16, /*max_inited=*/8, 0);
+    DecodeRpcServer server;
+    server.engine_           = engine;
+    server.meta_             = std::make_shared<RpcServerRuntimeMeta>();
+    server.maga_init_params_ = engine->params_;
+    AdmissionAllocateHarness harness(server);
+
+    std::vector<std::unique_ptr<AdmissionAllocateHarness::OpenCall>> active(3);
+    std::vector<GenerateStreamPtr>                                   active_streams(3);
+    for (int i = 0; i < 3; ++i) {
+        active[i] = harness.allocate(200 + i, /*num_tokens=*/12, /*max_new_tokens=*/8, /*timeout_ms=*/5000);
+        ASSERT_TRUE(active[i]->alloc_ok) << active[i]->status.error_message();
+        active_streams[i] = harness.getStream(200 + i);
+        ASSERT_EQ(active_streams[i]->curBlocksNum(), 3);
+    }
+    ASSERT_EQ(engine->cache->freeBlocksNum(), 6u);
+
+    std::atomic<bool>                                fourth_done{false};
+    std::unique_ptr<AdmissionAllocateHarness::OpenCall> call4;
+    std::thread                                         waiter([&]() {
+        call4 = harness.allocate(299, /*num_tokens=*/12, /*max_new_tokens=*/8, /*timeout_ms=*/5000);
+        fourth_done.store(true);
+    });
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(40));
+    EXPECT_FALSE(fourth_done.load()) << "4th stream breached active decode growth headroom";
+    EXPECT_EQ(engine->cache->freeBlocksNum(), 6u);
+
+    // Grow each active stream by +8 tokens (+2 blocks) -> consumes remaining 6 blocks cleanly.
+    for (int i = 0; i < 3; ++i) {
+        active_streams[i]->setIsContextStream(false);
+        active_streams[i]->setSeqLength(20);
+        ASSERT_TRUE(active_streams[i]->incrKVBlock().ok()) << "active stream " << i << " failed incrKVBlock";
+        EXPECT_EQ(active_streams[i]->curBlocksNum(), 5);
+    }
+    EXPECT_EQ(engine->cache->freeBlocksNum(), 0u);
+
+    // Release active streams so 4th stream wakes up and completes cleanly.
+    for (int i = 0; i < 3; ++i) {
+        active_streams[i].reset();
+        EXPECT_TRUE(active[i]->close().ok());
+    }
+
+    waiter.join();
+    EXPECT_TRUE(fourth_done.load());
+    ASSERT_NE(call4, nullptr);
+    EXPECT_TRUE(call4->alloc_ok) << call4->status.error_message();
+    auto stream4 = harness.getStream(299);
+    ASSERT_NE(stream4, nullptr);
+    EXPECT_EQ(stream4->curBlocksNum(), 3);
+    stream4.reset();
+    EXPECT_TRUE(call4->close().ok());
+    EXPECT_EQ(server.activeInitedStreamCount(), 0u);
+    EXPECT_EQ(engine->cache->freeBlocksNum(), 15u);
+}
+
+TEST_F(DecodeRpcAdmissionTest, SingleOversizedRequestFailsWithMallocFailedWithoutWaiting) {
+    const auto cache_config = test::makeSimpleMhaCacheConfig(1, 8, 4, DataType::TYPE_FP16);
+    auto engine = std::make_shared<AdmissionFakeEngine>(cache_config, RoleType::DECODE, 16, 16, /*max_inited=*/4, 0);
+    DecodeRpcServer server;
+    server.engine_           = engine;
+    server.maga_init_params_ = engine->params_;
+
+    DecodeRpcContext             rpc_ctx{nullptr};
+    kmonitor::MetricsReporterPtr reporter;
+    auto                         meta = std::make_shared<RpcServerRuntimeMeta>();
+    DecodeGenerateContext        ctx(rpc_ctx, 0, nullptr, reporter, meta);
+    fillDecodeAllocateRequest(ctx, 300, /*num_tokens=*/40, /*max_new_tokens=*/1, /*timeout_ms=*/5000);
+
+    const auto start = std::chrono::steady_clock::now();
+    server.allocateResource(ctx);
+    const auto elapsed_ms =
+        std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start).count();
+
+    EXPECT_LT(elapsed_ms, 500);
+    EXPECT_EQ(ctx.error_info.code(), ErrorCode::MALLOC_FAILED);
+    EXPECT_EQ(ctx.error_status.error_code(), grpc::StatusCode::RESOURCE_EXHAUSTED);
+    EXPECT_EQ(server.activeInitedStreamCount(), 0u);
+    ctx.markRpcHandlingCompleted();
+}
+
+TEST_F(DecodeRpcAdmissionTest, RemoteGenerateCancellationReleasesAdmissionAndWakesWaiter) {
+    autil::EnvGuard headroom_off("RTP_LLM_DECODE_GROWTH_HEADROOM_TOKENS", "0");
+    const auto      cache_config = test::makeSimpleMhaCacheConfig(1, 16, 4, DataType::TYPE_FP16);
+    auto            engine =
+        std::make_shared<AdmissionFakeEngine>(cache_config, RoleType::DECODE, 16, 16, /*max_inited=*/1, 0);
+    DecodeRpcServer server;
+    server.engine_           = engine;
+    server.meta_             = std::make_shared<RpcServerRuntimeMeta>();
+    server.maga_init_params_ = engine->params_;
+
+    AdmissionRemoteGenerateService service(server);
+    grpc::ServerBuilder            builder;
+    int                            port = 0;
+    builder.AddListeningPort("127.0.0.1:0", grpc::InsecureServerCredentials(), &port);
+    builder.RegisterService(&service);
+    auto grpc_server = builder.BuildAndStart();
+    ASSERT_NE(grpc_server, nullptr);
+    ASSERT_NE(port, 0);
+
+    auto stub = RpcService::NewStub(
+        grpc::CreateChannel("127.0.0.1:" + std::to_string(port), grpc::InsecureChannelCredentials()));
+
+    grpc::ClientContext client1;
+    auto                call1 = stub->RemoteGenerate(&client1);
+    GenerateRequestPB   alloc_req1;
+    alloc_req1.set_stage(RemoteStage::ALLOCATE);
+    alloc_req1.set_request_id(401);
+    alloc_req1.set_client_id("prefill-test");
+    auto* input1 = alloc_req1.mutable_input();
+    input1->set_request_id(401);
+    input1->add_token_ids(1);
+    input1->add_token_ids(2);
+    input1->mutable_generate_config()->set_max_new_tokens(1);
+    input1->mutable_generate_config()->set_timeout_ms(5000);
+    ASSERT_TRUE(call1->Write(alloc_req1));
+
+    GenerateOutputsPB alloc_resp1;
+    ASSERT_TRUE(call1->Read(&alloc_resp1));
+    EXPECT_TRUE(alloc_resp1.supports_prefill_completion());
+    EXPECT_EQ(server.activeInitedStreamCount(), 1u);
+
+    // Timeout case while limit=1 is held: must fail with GENERATE_TIMEOUT, not MALLOC_FAILED.
+    {
+        DecodeRpcContext             rpc_timeout{nullptr};
+        kmonitor::MetricsReporterPtr reporter;
+        DecodeGenerateContext        timeout_ctx(rpc_timeout, 0, nullptr, reporter, server.meta_);
+        fillDecodeAllocateRequest(timeout_ctx, 402, /*num_tokens=*/2, /*max_new_tokens=*/1, /*timeout_ms=*/60);
+        server.allocateResource(timeout_ctx);
+        EXPECT_EQ(timeout_ctx.error_info.code(), ErrorCode::GENERATE_TIMEOUT);
+        EXPECT_EQ(timeout_ctx.error_status.error_code(), grpc::StatusCode::DEADLINE_EXCEEDED);
+        EXPECT_EQ(server.activeInitedStreamCount(), 1u);
+        timeout_ctx.markRpcHandlingCompleted();
+    }
+
+    // Blocked waiter must wake promptly once call1 cancels and RemoteGenerate unwinds.
+    std::atomic<bool>   waiter_done{false};
+    grpc::ClientContext client2;
+    auto                call2 = stub->RemoteGenerate(&client2);
+    GenerateRequestPB   alloc_req2;
+    alloc_req2.set_stage(RemoteStage::ALLOCATE);
+    alloc_req2.set_request_id(403);
+    alloc_req2.set_client_id("prefill-test");
+    auto* input2 = alloc_req2.mutable_input();
+    input2->set_request_id(403);
+    input2->add_token_ids(1);
+    input2->add_token_ids(2);
+    input2->mutable_generate_config()->set_max_new_tokens(1);
+    input2->mutable_generate_config()->set_timeout_ms(5000);
+    ASSERT_TRUE(call2->Write(alloc_req2));
+
+    GenerateOutputsPB alloc_resp2;
+    bool              read2_ok = false;
+    std::thread       waiter([&]() {
+        read2_ok = call2->Read(&alloc_resp2);
+        waiter_done.store(true);
+    });
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(30));
+    EXPECT_FALSE(waiter_done.load());
+
+    client1.TryCancel();
+    (void)call1->Finish();
+
+    waiter.join();
+    EXPECT_TRUE(waiter_done.load());
+    EXPECT_TRUE(read2_ok);
+    EXPECT_TRUE(alloc_resp2.supports_prefill_completion());
+
+    call2->WritesDone();
+    (void)call2->Finish();
+    EXPECT_EQ(server.activeInitedStreamCount(), 0u);
+    EXPECT_EQ(engine->cache->freeBlocksNum(), 15u);
+
+    grpc_server->Shutdown();
+    grpc_server->Wait();
 }
 
 }  // namespace rtp_llm

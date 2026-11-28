@@ -21,6 +21,11 @@ import torch.nn.functional as F
 import triton
 import triton.language as tl
 
+from rtp_llm.models_py.modules.qwen4_5.activation import (
+    can_sm10x_bf16_tgv,
+    get_sm10x_bf16_tgv_backend,
+    run_sm10x_bf16_tgv_gemm,
+)
 from rtp_llm.models_py.modules.qwen4_5.contracts import (
     FullAttnKVCache,
     Qwen4_5ArchConfig,
@@ -31,9 +36,7 @@ from rtp_llm.models_py.modules.qwen4_exp.qsa.indexer import Qwen4ExpQSAIndexer, 
 from rtp_llm.models_py.modules.qwen4_5.short_conv import _triton_int_spec, triton_fast_launch
 
 _ATTN_TRITON_CACHE: dict = {}
-_FI_MM_BF16: Any = None
-_FI_MM_UNAVAILABLE = object()
-_SM100_CAP_CACHE: dict[int, bool] = {}
+_TGV_WARMED_DEVS: set[int] = set()
 
 
 def _is_bf16_tgv_enabled() -> bool:
@@ -41,42 +44,94 @@ def _is_bf16_tgv_enabled() -> bool:
     return raw not in ("0", "false", "no", "off")
 
 
-def _get_flashinfer_mm_bf16(device: torch.device) -> Any:
-    """Return cached ``flashinfer.mm_bf16`` on SM100+ CUDA devices, else ``None``."""
-    global _FI_MM_BF16
-    if device.type != "cuda":
-        return None
+def _get_flashinfer_tgv_backend(device: torch.device) -> Tuple[Any, int]:
+    """Return cached SM10x ``(tgv_gemm_fn, tactic_num)`` via shared ``activation.py`` backend."""
+    if not _is_bf16_tgv_enabled() or device.type != "cuda":
+        return None, 0
     dev_idx = int(device.index) if device.index is not None else int(torch.cuda.current_device())
-    is_sm100 = _SM100_CAP_CACHE.get(dev_idx)
-    if is_sm100 is None:
-        try:
-            major, _ = torch.cuda.get_device_capability(dev_idx)
-            is_sm100 = int(major) >= 10
-        except Exception:
-            is_sm100 = False
-        _SM100_CAP_CACHE[dev_idx] = is_sm100
-    if not is_sm100:
+    if dev_idx not in _TGV_WARMED_DEVS and torch.cuda.is_current_stream_capturing():
+        return None, 0
+    with torch.cuda.device(device):
+        _, tgv_fn, tactic_num = get_sm10x_bf16_tgv_backend(device)
+    if tgv_fn is not None and tactic_num > 0:
+        _TGV_WARMED_DEVS.add(dev_idx)
+        return tgv_fn, int(tactic_num)
+    return None, 0
+
+
+def _select_bf16_tgv_tactic(
+    m_rows: int, k_dim: int, n_dim: int, tactic_num: int = 11
+) -> Optional[int]:
+    """Select strict-win FlashInfer SM10x ``tgv_gemm`` tactic on L2-cold CG (SM103)."""
+    if (
+        tactic_num <= 0
+        or m_rows <= 0
+        or m_rows > 48
+        or k_dim < 512
+        or n_dim < 1280
+        or n_dim > 12288
+        or (k_dim % 16) != 0
+        or (n_dim % 8) != 0
+        or (n_dim * k_dim) >= (1 << 30)
+    ):
         return None
-    if _FI_MM_BF16 is _FI_MM_UNAVAILABLE:
+
+    tactic: Optional[int] = None
+    if k_dim < 2048:
+        if n_dim < 2048 or n_dim > 6144 or m_rows > 32:
+            return None
+        if n_dim <= 3072:
+            if m_rows <= 8:
+                tactic = 0
+            elif m_rows <= 24:
+                tactic = 5
+        elif m_rows <= 8:
+            tactic = 2
+        elif m_rows <= 16:
+            tactic = 5
+        else:
+            tactic = 8
+    elif n_dim < 2048:
+        if m_rows >= 9:
+            tactic = 3
+    elif n_dim <= 6144:
+        if m_rows <= 8:
+            tactic = 2 if k_dim < 4096 else 3
+        elif m_rows <= 16:
+            tactic = 3 if (k_dim >= 5120 and n_dim <= 4096) else 6
+        elif m_rows <= 32:
+            if n_dim <= 3072 and m_rows <= 24:
+                tactic = 3
+            elif n_dim <= 4096:
+                tactic = 6
+            else:
+                tactic = 8
+        elif 4096 <= k_dim <= 6144:
+            if n_dim <= 3072:
+                tactic = 6
+            elif 4096 < n_dim <= 5376:
+                tactic = 9
+    elif n_dim <= 8192:
+        if m_rows <= 8:
+            tactic = 2
+        elif m_rows <= 16:
+            tactic = 6
+    else:
+        if m_rows <= 16:
+            tactic = 10
+
+    if tactic is None or tactic < 0 or tactic >= tactic_num:
         return None
-    if _FI_MM_BF16 is None:
-        try:
-            import flashinfer
-
-            mm_fn = getattr(flashinfer, "mm_bf16", None)
-            _FI_MM_BF16 = mm_fn if callable(mm_fn) else _FI_MM_UNAVAILABLE
-        except Exception:
-            _FI_MM_BF16 = _FI_MM_UNAVAILABLE
-    return None if _FI_MM_BF16 is _FI_MM_UNAVAILABLE else _FI_MM_BF16
+    return tactic
 
 
-def _should_use_bf16_tgv(m_rows: int, k_dim: int, n_dim: int) -> bool:
-    """Select strict-win ``(M, K, N)`` buckets proven faster in L2-cold CG on SM103."""
+def _should_use_legacy_mm_bf16_tgv(m_rows: int, k_dim: int, n_dim: int) -> bool:
+    """Conservative fallback buckets if only ``flashinfer.mm_bf16(..., backend='tgv')`` exists."""
     if (
         m_rows <= 0
         or k_dim < 2048
         or n_dim < 2048
-        or n_dim > 26000
+        or n_dim > 5760
         or (k_dim % 16) != 0
         or (n_dim % 8) != 0
         or (n_dim * k_dim) >= (1 << 30)
@@ -87,6 +142,11 @@ def _should_use_bf16_tgv(m_rows: int, k_dim: int, n_dim: int) -> bool:
     if n_dim <= 4096:
         return m_rows <= 16
     return m_rows <= 8
+
+
+def _should_use_bf16_tgv(m_rows: int, k_dim: int, n_dim: int) -> bool:
+    """Return True iff ``(M, K, N)`` selects a strict-win SM10x ``tgv_gemm`` tactic."""
+    return _select_bf16_tgv_tactic(m_rows, k_dim, n_dim) is not None
 
 
 def _is_bf16_weight_ready(w: Any, x: torch.Tensor) -> bool:
@@ -126,22 +186,33 @@ def _extract_bf16_linear_weight(mod: Any, x: torch.Tensor) -> Optional[torch.Ten
 
 
 def _try_bf16_tgv(x: torch.Tensor, w: torch.Tensor) -> Optional[torch.Tensor]:
-    if not _is_bf16_tgv_enabled():
+    if not _is_bf16_tgv_enabled() or not x.is_cuda:
         return None
     k_dim = int(x.shape[-1])
     m_rows = int(x.numel() // k_dim)
     n_dim = int(w.shape[0])
-    if not _should_use_bf16_tgv(m_rows, k_dim, n_dim):
+    if _select_bf16_tgv_tactic(m_rows, k_dim, n_dim) is None:
         return None
-    mm_fn = _get_flashinfer_mm_bf16(x.device)
-    if mm_fn is None:
+    dev_idx = int(x.device.index) if x.device.index is not None else int(torch.cuda.current_device())
+    if dev_idx not in _TGV_WARMED_DEVS and torch.cuda.is_current_stream_capturing():
         return None
-    x_2d = x.reshape(m_rows, k_dim)
-    if not x_2d.is_contiguous():
-        x_2d = x_2d.contiguous()
     with torch.cuda.device(x.device):
-        out_2d = mm_fn(x_2d, w.t(), pdl=True, backend="tgv")
-    return out_2d.reshape(*x.shape[:-1], n_dim)
+        mm_fn, tgv_fn, tactic_num = get_sm10x_bf16_tgv_backend(x.device)
+    if tgv_fn is not None:
+        _TGV_WARMED_DEVS.add(dev_idx)
+        tactic = _select_bf16_tgv_tactic(m_rows, k_dim, n_dim, tactic_num=tactic_num)
+        if tactic is None:
+            return None
+        spec = can_sm10x_bf16_tgv(x, w, tactic=tactic)
+        if spec is not None:
+            return run_sm10x_bf16_tgv_gemm(x, w, spec, pdl=True)
+        return None
+    if mm_fn is not None and _should_use_legacy_mm_bf16_tgv(m_rows, k_dim, n_dim):
+        _TGV_WARMED_DEVS.add(dev_idx)
+        spec = can_sm10x_bf16_tgv(x, w, tactic=None)
+        if spec is not None:
+            return run_sm10x_bf16_tgv_gemm(x, w, spec, pdl=True)
+    return None
 
 
 def dense_weight_bf16_or_tgv(x: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:

@@ -3531,6 +3531,209 @@ def test_r9_tgv_tactics_and_contig_overlap(device: torch.device) -> None:
     print("  PASS R9 Direct TGV Tactic Dispatch (M=1..64) & Contiguous EP Overlap")
 
 
+def _r10_dg_lock_worker(cache_dir: str, lock_dir: str, wid: int, q: Any) -> None:
+    import time
+    from rtp_llm.models_py.modules.qwen4_5 import mxfp4_ops
+
+    os.environ["DG_JIT_CACHE_DIR"] = cache_dir
+    os.environ["QWEN4_5_DG_LOCK_DIR"] = lock_dir
+    with mxfp4_ops._dg_jit_serialize("r10_probe", 32, 5120, 2560):
+        t_in = time.monotonic()
+        time.sleep(0.08)
+        t_out = time.monotonic()
+    q.put((wid, t_in, t_out))
+
+
+def test_r10_dg_jit_dedup_and_shared_tgv(device: torch.device) -> None:
+    """Verify M10-1 DeepGEMM cross-rank flock/warmup dedup and M10-2 shared TGV helpers."""
+    import multiprocessing as mp
+    import shutil
+    import tempfile
+    from rtp_llm.models_py.modules.qwen4_5.activation import (
+        bf16_linear_tgv_or_torch,
+        can_sm10x_bf16_tgv,
+        get_sm10x_bf16_tgv_backend,
+        run_sm10x_bf16_tgv_gemm,
+        select_sm10x_bf16_tgv_tactic,
+    )
+    from rtp_llm.models_py.modules.qwen4_5 import moe as moe_mod
+    from rtp_llm.models_py.modules.qwen4_5 import mxfp4_ops
+
+    print("\n=== [R10] DeepGEMM JIT Dedup & Shared SM10x TGV Helpers ===")
+
+    # 1. Shared TGV helpers live in activation.py (zero circular dependency) and are re-exported by moe.py.
+    assert moe_mod.get_sm10x_bf16_tgv_backend is get_sm10x_bf16_tgv_backend
+    assert moe_mod._bf16_linear_tgv_or_torch is bf16_linear_tgv_or_torch
+    dt = torch.bfloat16
+    for M, K, N in ((1, 5120, 5184), (16, 5120, 5184), (16, 5120, 2560)):
+        x = torch.randn(M, K, dtype=dt, device=device)
+        w = torch.randn(N, K, dtype=dt, device=device) * 0.02
+        bias = torch.randn(N, dtype=dt, device=device) * 0.01
+        ref_nb = F.linear(x, w)
+        ref_b = F.linear(x, w, bias)
+        with torch.no_grad():
+            y_nb = bf16_linear_tgv_or_torch(x, w)
+            y_b = bf16_linear_tgv_or_torch(x, w, bias=bias)
+            _, tgv_fn, tac_num = get_sm10x_bf16_tgv_backend(device)
+            if tgv_fn is not None and tac_num > 6:
+                y_exp = run_sm10x_bf16_tgv_gemm(x, w, tactic=6, bias=bias, pdl=True)
+                cos_exp = F.cosine_similarity(ref_b.float().flatten(), y_exp.float().flatten(), dim=0).item()
+                assert cos_exp >= 0.9999, f"explicit TGV cos={cos_exp}"
+                g = torch.cuda.CUDAGraph()
+                with torch.cuda.graph(g):
+                    y_cg = bf16_linear_tgv_or_torch(x, w, bias=bias, tactic=6)
+                g.replay()
+                torch.cuda.synchronize(device)
+                cos_cg = F.cosine_similarity(ref_b.float().flatten(), y_cg.float().flatten(), dim=0).item()
+                assert cos_cg >= 0.9999, f"TGV bias CG cos={cos_cg}"
+        cos_nb = F.cosine_similarity(ref_nb.float().flatten(), y_nb.float().flatten(), dim=0).item()
+        cos_b = F.cosine_similarity(ref_b.float().flatten(), y_b.float().flatten(), dim=0).item()
+        assert cos_nb >= 0.9999, f"shared TGV no-bias cos={cos_nb}"
+        assert cos_b >= 0.9999, f"shared TGV bias cos={cos_b}"
+
+    # Autograd fallback safety on shared TGV helper
+    with torch.inference_mode(False), torch.enable_grad():
+        xg = torch.randn(4, 5120, dtype=dt, device=device, requires_grad=True)
+        wg = torch.randn(2560, 5120, dtype=dt, device=device) * 0.02
+        assert can_sm10x_bf16_tgv(xg, wg) is None
+        yg = bf16_linear_tgv_or_torch(xg, wg)
+        yg.sum().backward()
+        assert xg.grad is not None
+    assert select_sm10x_bf16_tgv_tactic(8, 5120, 5184, 11) == 2
+
+    # 2. Cross-process _dg_jit_serialize mutual exclusion & O(1) fast-path skip (outside DG_JIT_CACHE_DIR).
+    tmp_root = tempfile.mkdtemp(prefix="r10_dg_lock_test_")
+    try:
+        dg_cache = os.path.join(tmp_root, "dg_cache")
+        lock_dir = os.path.join(tmp_root, "locks")
+        os.makedirs(dg_cache, exist_ok=True)
+        prev_cache = os.environ.get("DG_JIT_CACHE_DIR")
+        prev_lock = os.environ.get("QWEN4_5_DG_LOCK_DIR")
+        os.environ["DG_JIT_CACHE_DIR"] = dg_cache
+        os.environ["QWEN4_5_DG_LOCK_DIR"] = lock_dir
+
+        ctx = mp.get_context("spawn")
+        q = ctx.Queue()
+
+        procs = [ctx.Process(target=_r10_dg_lock_worker, args=(dg_cache, lock_dir, i, q)) for i in range(2)]
+        try:
+            for p in procs:
+                p.start()
+            for p in procs:
+                p.join(timeout=60)
+                assert p.exitcode == 0, f"lock worker failed exitcode={p.exitcode}"
+        finally:
+            for p in procs:
+                if p.is_alive():
+                    p.terminate()
+                    p.join(timeout=5)
+        intervals = sorted([q.get(timeout=5)[1:] for _ in range(2)])
+        assert intervals[0][1] <= intervals[1][0] + 1e-3, f"flock did not serialize: {intervals}"
+        assert os.listdir(dg_cache) == [], f"lockfile leaked into DG_JIT_CACHE_DIR: {os.listdir(dg_cache)}"
+
+        # Parent process: cold once then O(1) warm skip (must not create extra locks or block)
+        saved_keys = set(mxfp4_ops._WARMED_DG_GROUPED_KEYS)
+        try:
+            with mxfp4_ops._dg_jit_serialize("r10_fast", 32, 5120, 2560):
+                pass
+            files_before = sorted(os.listdir(lock_dir))
+            assert len(files_before) == 2
+            with mxfp4_ops._dg_jit_serialize("r10_fast", 32, 5120, 2560):
+                pass
+            assert sorted(os.listdir(lock_dir)) == files_before
+        finally:
+            mxfp4_ops._WARMED_DG_GROUPED_KEYS.clear()
+            mxfp4_ops._WARMED_DG_GROUPED_KEYS.update(saved_keys)
+    finally:
+        if prev_cache is None:
+            os.environ.pop("DG_JIT_CACHE_DIR", None)
+        else:
+            os.environ["DG_JIT_CACHE_DIR"] = prev_cache
+        if prev_lock is None:
+            os.environ.pop("QWEN4_5_DG_LOCK_DIR", None)
+        else:
+            os.environ["QWEN4_5_DG_LOCK_DIR"] = prev_lock
+        shutil.rmtree(tmp_root, ignore_errors=True)
+
+    # 3. warmup_deepgemm_mxfp4_moe_kernels guards + EP4 bf16 topk_weights early prep correctness
+    dev_idx = int(device.index or 0)
+    if mxfp4_ops.has_deepgemm_fp8_fp4(dev_idx):
+        E_s, L_s, I_s = 16, 256, 256
+        wg_u8 = torch.randint(0, 256, (E_s, I_s, L_s // 2), dtype=torch.uint8, device=device)
+        sg_u8 = torch.full((E_s, I_s, L_s // 32), 127, dtype=torch.uint8, device=device)
+        wu_u8 = torch.randint(0, 256, (E_s, I_s, L_s // 2), dtype=torch.uint8, device=device)
+        su_u8 = torch.full((E_s, I_s, L_s // 32), 127, dtype=torch.uint8, device=device)
+        w2_u8 = torch.randint(0, 256, (E_s, L_s, I_s // 2), dtype=torch.uint8, device=device)
+        s2_u8 = torch.full((E_s, L_s, I_s // 32), 127, dtype=torch.uint8, device=device)
+        small_w = mxfp4_ops.prepare_mxfp4_moe_weights(
+            w_gate_u8=wg_u8, w_gate_scale=sg_u8,
+            w_up_u8=wu_u8, w_up_scale=su_u8,
+            w2_u8=w2_u8, w2_scale=s2_u8,
+        )
+        # Auto warmup skips tiny shapes (L<1024), strict bf16, and backend='triton'
+        assert mxfp4_ops.warmup_deepgemm_mxfp4_moe_kernels(small_w, backend="auto", compute_mode="fp8") == 0
+        assert mxfp4_ops.warmup_deepgemm_mxfp4_moe_kernels(small_w, backend="triton", compute_mode="fp8", force=True) == 0
+        assert mxfp4_ops.warmup_deepgemm_mxfp4_moe_kernels(small_w, backend="auto", compute_mode="bf16_strict", force=True) == 0
+        warmed = mxfp4_ops.warmup_deepgemm_mxfp4_moe_kernels(small_w, backend="auto", compute_mode="fp8", force=True)
+        assert warmed == 2, f"expected masked+contig warmed, got {warmed}"
+        assert mxfp4_ops.warmup_deepgemm_mxfp4_moe_kernels(small_w, backend="auto", compute_mode="fp8", force=True) == 0
+
+        # Check EP=4 contiguous with non-fp32 topk_weights parity
+        x_ep = torch.randn(32, L_s, dtype=dt, device=device)
+        ti_ep = torch.arange(32 * 4, device=device, dtype=torch.int32).view(32, 4) % (E_s * 4)
+        tw_bf16 = torch.full((32, 4), 0.25, dtype=dt, device=device)
+        y_ep = mxfp4_ops.mxfp4_moe_deepgemm_contiguous(x_ep, ti_ep, tw_bf16, small_w, ep_start=0, ep_size=4)
+        y_ref = mxfp4_ops.mxfp4_moe_forward_ref(x_ep, ti_ep, tw_bf16.float(), small_w, ep_start=0, ep_size=4, fp8_activations=True)
+        cos_ep = F.cosine_similarity(y_ep.float().flatten(), y_ref.float().flatten(), dim=0).item()
+        assert cos_ep >= 0.99, f"EP4 bf16 weights contig cos={cos_ep}"
+
+    # 4. SM100FP8Linear M10-1: cross-rank flock, scoped set_block_size_multiple_of((128,128)), and warmup dedup
+    from rtp_llm.models_py.modules.qwen4_5 import fp8_linear as fp8_mod
+
+    if fp8_mod.has_deepgemm_fp8(dev_idx):
+        import deep_gemm
+
+        fp8_small = fp8_mod.SM100FP8Linear(256, 256, mode="deepgemm_fp8", keep_bf16=True, device=device)
+        with torch.no_grad():
+            fp8_small.weight.normal_(0, 0.02)
+        fp8_small.prepare_weights()
+        # Small shape (< 2048) skips auto warmup to keep unit tests fast
+        assert fp8_small._warmup_deepgemm_fp8_if_needed(device, 256, 256) == 0
+
+        x_fp8 = torch.randn(256, 256, dtype=dt, device=device)
+        with torch.no_grad():
+            os.environ["QWEN4_5_DG_BLOCK_MULTIPLE_128"] = "1"
+            y_m128 = fp8_small(x_fp8)
+            os.environ["QWEN4_5_DG_BLOCK_MULTIPLE_128"] = "0"
+            y_def = fp8_small(x_fp8)
+            os.environ["QWEN4_5_DG_BLOCK_MULTIPLE_128"] = "1"
+            # Verify set_block_size_multiple_of restored cleanly to default (1, 1)
+            deep_gemm.set_block_size_multiple_of((1, 1))
+            y_bf16_ref = F.linear(x_fp8, fp8_small.weight)
+        cos_dg_vs_bf16 = F.cosine_similarity(y_bf16_ref.float().flatten(), y_m128.float().flatten(), dim=0).item()
+        cos_dg_vs_def = F.cosine_similarity(y_def.float().flatten(), y_m128.float().flatten(), dim=0).item()
+        assert cos_dg_vs_bf16 >= 0.999, f"fp8 mult128 cos vs bf16={cos_dg_vs_bf16}"
+        assert cos_dg_vs_def >= 0.9999, f"fp8 mult128 cos vs default={cos_dg_vs_def}"
+
+        # Also verify warmup dedup caches per unique (N, K) on real-sized shape without duplicate second pass
+        saved_fp8_keys = set(fp8_mod._WARMED_DG_FP8_SHAPES)
+        try:
+            fp8_large_1 = fp8_mod.SM100FP8Linear(2048, 5120, mode="auto", keep_bf16=True, device=device)
+            with torch.no_grad():
+                fp8_large_1.weight.normal_(0, 0.02)
+            fp8_large_1.prepare_weights()
+            fp8_large_2 = fp8_mod.SM100FP8Linear(2048, 5120, mode="auto", keep_bf16=True, device=device)
+            with torch.no_grad():
+                fp8_large_2.weight.normal_(0, 0.02)
+            fp8_large_2.prepare_weights()
+            assert fp8_large_2._warmup_deepgemm_fp8_if_needed(device, 5120, 2048) == 0
+        finally:
+            fp8_mod._WARMED_DG_FP8_SHAPES.clear()
+            fp8_mod._WARMED_DG_FP8_SHAPES.update(saved_fp8_keys)
+
+    print("  PASS test_r10_dg_jit_dedup_and_shared_tgv")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Qwen 4.5-Flash LatentMoE & SM100 MXFP4 test suite")
     parser.add_argument("--distributed", action="store_true", help="Run multi-GPU FastAllReduce/TP/EP tests")
@@ -3597,6 +3800,7 @@ def main() -> int:
         test_r7_tpsp_and_fused_kernels(device)
         test_r8_splitk_router_bf16_tgv_and_dp_tpsp(device)
         test_r9_tgv_tactics_and_contig_overlap(device)
+        test_r10_dg_jit_dedup_and_shared_tgv(device)
 
     if args.distributed:
         test_distributed_fast_comm_tp_ep(world_size=args.world_size)

@@ -27,9 +27,13 @@ Selectable & regime-dispatched backends on SM100 / SM103:
 
 from __future__ import annotations
 
+import contextlib
 from dataclasses import dataclass, field
+import fcntl
 import functools
+import hashlib
 import os
+import tempfile
 import threading
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
@@ -3070,6 +3074,11 @@ def mxfp4_moe_deepgemm_contiguous(
     num_packs = num_groups // 4
     M_total = M * top_k
     dst_slots = torch.empty((M, top_k), dtype=torch.int32, device=dev)
+    w_f = (
+        topk_weights
+        if (topk_weights.dtype == torch.float32 and topk_weights.is_contiguous())
+        else topk_weights.float().contiguous()
+    )
 
     if use_cap_nosync:
         all_tokens = (
@@ -3140,14 +3149,15 @@ def mxfp4_moe_deepgemm_contiguous(
     )
 
     gate_up = torch.empty((all_tokens, 2 * I), dtype=torch.bfloat16, device=dev)
-    deep_gemm.m_grouped_fp8_fp4_gemm_nt_contiguous(
-        (a_fp8, a_scale),
-        (w13_i8, w13_s),
-        gate_up,
-        m_indices,
-        recipe_a=(1, 32),
-        recipe_b=(1, 32),
-    )
+    with _dg_jit_serialize("contig", int(w13_i8.shape[0]), int(w13_i8.shape[1]), int(a_fp8.shape[-1])):
+        deep_gemm.m_grouped_fp8_fp4_gemm_nt_contiguous(
+            (a_fp8, a_scale),
+            (w13_i8, w13_s),
+            gate_up,
+            m_indices,
+            recipe_a=(1, 32),
+            recipe_b=(1, 32),
+        )
     del a_fp8, a_scale
 
     h_fp8, h_scale = situ_glu_fp8_quant_packed(
@@ -3161,23 +3171,19 @@ def mxfp4_moe_deepgemm_contiguous(
     del gate_up
 
     down_out = torch.empty((all_tokens, L), dtype=torch.bfloat16, device=dev)
-    deep_gemm.m_grouped_fp8_fp4_gemm_nt_contiguous(
-        (h_fp8, h_scale),
-        (w2_i8, w2_s),
-        down_out,
-        m_indices,
-        recipe_a=(1, 32),
-        recipe_b=(1, 32),
-    )
+    with _dg_jit_serialize("contig", int(w2_i8.shape[0]), int(w2_i8.shape[1]), int(h_fp8.shape[-1])):
+        deep_gemm.m_grouped_fp8_fp4_gemm_nt_contiguous(
+            (h_fp8, h_scale),
+            (w2_i8, w2_s),
+            down_out,
+            m_indices,
+            recipe_a=(1, 32),
+            recipe_b=(1, 32),
+        )
     del h_fp8, h_scale
 
     out = torch.empty((M, L), dtype=res_dtype, device=dev)
     BLOCK_K = 512 if L >= 512 else triton.next_power_of_2(max(L, 64))
-    w_f = (
-        topk_weights
-        if (topk_weights.dtype == torch.float32 and topk_weights.is_contiguous())
-        else topk_weights.float().contiguous()
-    )
     _gather_slot_weighted_reduce_kernel[(M, triton.cdiv(L, BLOCK_K))](
         down_out,
         dst_slots,
@@ -3712,15 +3718,16 @@ def mxfp4_moe_deepgemm_masked(
         )
         del x_q, x_sc_raw
 
-    deep_gemm.m_grouped_fp8_fp4_gemm_nt_masked(
-        (a_fp8, a_scale),
-        (w13_i8, w13_s),
-        gate_up,
-        masked_m,
-        expected_m,
-        recipe_a=(1, 32),
-        recipe_b=(1, 32),
-    )
+    with _dg_jit_serialize("masked", int(w13_i8.shape[0]), int(w13_i8.shape[1]), int(a_fp8.shape[-1])):
+        deep_gemm.m_grouped_fp8_fp4_gemm_nt_masked(
+            (a_fp8, a_scale),
+            (w13_i8, w13_s),
+            gate_up,
+            masked_m,
+            expected_m,
+            recipe_a=(1, 32),
+            recipe_b=(1, 32),
+        )
 
     situ_glu_fp8_quant_masked_packed(
         gate_up,
@@ -3732,15 +3739,16 @@ def mxfp4_moe_deepgemm_masked(
         out_sc=h_scale,
     )
 
-    deep_gemm.m_grouped_fp8_fp4_gemm_nt_masked(
-        (h_fp8, h_scale),
-        (w2_i8, w2_s),
-        down_out,
-        masked_m,
-        expected_m,
-        recipe_a=(1, 32),
-        recipe_b=(1, 32),
-    )
+    with _dg_jit_serialize("masked", int(w2_i8.shape[0]), int(w2_i8.shape[1]), int(h_fp8.shape[-1])):
+        deep_gemm.m_grouped_fp8_fp4_gemm_nt_masked(
+            (h_fp8, h_scale),
+            (w2_i8, w2_s),
+            down_out,
+            masked_m,
+            expected_m,
+            recipe_a=(1, 32),
+            recipe_b=(1, 32),
+        )
 
     out = torch.empty((M, L), dtype=res_dtype, device=dev)
     BLOCK_K = 512 if L >= 512 else triton.next_power_of_2(max(L, 64))
@@ -4597,6 +4605,173 @@ def bench_sm100_shootout(
     return results
 
 
+_WARMED_DG_GROUPED_KEYS: set[Tuple[Any, ...]] = set()
+_WARMED_DG_LOCK = threading.Lock()
+
+
+def _dg_get_num_sms() -> int:
+    try:
+        import deep_gemm
+
+        fn = getattr(deep_gemm, "get_num_sms", None)
+        if fn is not None:
+            return int(fn())
+    except Exception:
+        pass
+    return 0
+
+
+def _dg_jit_cache_key(op_tag: str, *dims: Any) -> Tuple[Any, ...]:
+    return (
+        os.environ.get("DG_JIT_CACHE_DIR", ""),
+        op_tag,
+        _dg_get_num_sms(),
+        *(int(d) if isinstance(d, bool) else d for d in dims),
+    )
+
+
+@contextlib.contextmanager
+def _dg_jit_serialize(
+    op_tag: str,
+    *dims: Any,
+    lock_dims: Optional[Tuple[Any, ...]] = None,
+):
+    """Serialize cold DeepGEMM JIT compilation across ranks sharing DG_JIT_CACHE_DIR.
+
+    Lockfiles are placed outside ``DG_JIT_CACHE_DIR`` so ``JitCacheManager`` and
+    ``deepjit_snapshot_files`` never observe non-entry artifacts. Once a kernel key
+    succeeds in this process, subsequent calls return in ``O(1)`` with zero syscalls.
+    """
+    key = _dg_jit_cache_key(op_tag, *dims)
+    if key in _WARMED_DG_GROUPED_KEYS:
+        yield
+        return
+
+    l_dims = dims if lock_dims is None else lock_dims
+    lock_dir = os.environ.get("QWEN4_5_DG_LOCK_DIR") or os.path.join(
+        tempfile.gettempdir(), f"rtp_dg_jit_locks_{os.geteuid()}"
+    )
+    lock_sig = "|".join(str(x) for x in (key[0], key[1], key[2], *l_dims))
+    digest = hashlib.sha256(lock_sig.encode()).hexdigest()[:24]
+    lock_path = os.path.join(lock_dir, f"dg_{digest}.lock")
+
+    lf = None
+    locked = False
+    try:
+        os.makedirs(lock_dir, exist_ok=True)
+        lf = open(lock_path, "a+")
+        fcntl.flock(lf.fileno(), fcntl.LOCK_EX)
+        locked = True
+    except OSError:
+        if lf is not None:
+            try:
+                lf.close()
+            except OSError:
+                pass
+            lf = None
+        locked = False
+
+    try:
+        yield
+    except Exception:
+        raise
+    else:
+        with _WARMED_DG_LOCK:
+            if len(_WARMED_DG_GROUPED_KEYS) < 16384:
+                _WARMED_DG_GROUPED_KEYS.add(key)
+    finally:
+        if locked and lf is not None:
+            try:
+                fcntl.flock(lf.fileno(), fcntl.LOCK_UN)
+            except OSError:
+                pass
+        if lf is not None:
+            try:
+                lf.close()
+            except OSError:
+                pass
+
+
+def warmup_deepgemm_mxfp4_moe_kernels(
+    weights: MXFP4MoEWeights,
+    *,
+    ep_size: int = 1,
+    ep_rank: int = 0,
+    backend: str = "auto",
+    compute_mode: str = "fp8",
+    device: Optional[torch.device] = None,
+    force: bool = False,
+) -> int:
+    """Warm up DeepGEMM MXFP4 grouped kernels once per unique shape at load time.
+
+    Each unique ``(DG_JIT_CACHE_DIR, mode, num_sms, E_local, N, K)`` compiles once
+    across ranks via ``_dg_jit_serialize`` and short-circuits all future layers/steps.
+    Returns the number of DeepGEMM modes warmed during this call.
+    """
+    dev = weights.w13_u8.device if device is None else torch.device(device)
+    if dev.type != "cuda" or not supports_triton_mxfp4(dev) or weights.weights_transposed:
+        return 0
+    E_local = int(weights.num_experts)
+    L = int(weights.latent_dim)
+    I = int(weights.intermediate_size)
+    dev_idx = int(dev.index or 0)
+    if (L % 128) != 0 or (I % 128) != 0 or not has_deepgemm_fp8_fp4(dev_idx):
+        return 0
+
+    req = backend if backend != "auto" else os.environ.get("QWEN4_5_MXFP4_BACKEND", "auto")
+    cm_l = str(compute_mode).lower()
+    if (
+        req in ("ref", "triton", "triton_splitk", "cutlass", "flashinfer", "flashinfer_noswap")
+        or cm_l in ("bf16_strict", "strict_bf16")
+        or os.environ.get("QWEN4_5_MXFP4_STRICT_BF16", "0") == "1"
+    ):
+        return 0
+
+    if not force:
+        if os.environ.get("QWEN4_5_WARMUP_DEEPGEMM", "1") == "0":
+            return 0
+        if L < 1024 or I < 1024 or E_local < 16:
+            return 0
+
+    if req == "deepgemm_masked":
+        modes = ("masked",)
+    elif req in ("deepgemm_contiguous", "deepgemm_contig"):
+        modes = ("contig",)
+    elif req in ("auto", "deepgemm"):
+        modes = ("masked", "contig")
+    else:
+        return 0
+
+    needed = []
+    for mode in modes:
+        k13 = _dg_jit_cache_key(mode, E_local, 2 * I, L)
+        k2 = _dg_jit_cache_key(mode, E_local, L, I)
+        if k13 not in _WARMED_DG_GROUPED_KEYS or k2 not in _WARMED_DG_GROUPED_KEYS:
+            needed.append(mode)
+    if not needed:
+        return 0
+
+    ep_sz = max(int(ep_size), 1)
+    ep_start = max(int(ep_rank), 0) * E_local
+    warmed = 0
+    with _cuda_device_ctx(dev), torch.no_grad():
+        weights.get_deepgemm_pair()
+        x_w = torch.zeros((1, L), dtype=torch.bfloat16, device=dev)
+        ids_w = torch.full((1, 1), ep_start, dtype=torch.int32, device=dev)
+        tw_w = torch.ones((1, 1), dtype=torch.float32, device=dev)
+        for mode in needed:
+            if mode == "masked":
+                mxfp4_moe_deepgemm_masked(
+                    x_w, ids_w, tw_w, weights, ep_start=ep_start, ep_size=ep_sz
+                )
+            else:
+                mxfp4_moe_deepgemm_contiguous(
+                    x_w, ids_w, tw_w, weights, ep_start=ep_start, ep_size=ep_sz
+                )
+            warmed += 1
+    return warmed
+
+
 __all__ = [
     "CompactMoETileSchedule",
     "MXFP4MoEWeights",
@@ -4625,4 +4800,5 @@ __all__ = [
     "quantize_mxfp4",
     "quantize_mxfp8_e4m3",
     "supports_triton_mxfp4",
+    "warmup_deepgemm_mxfp4_moe_kernels",
 ]

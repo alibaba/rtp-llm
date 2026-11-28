@@ -41,7 +41,14 @@ import triton
 import triton.language as tl
 from triton.language.extra import libdevice
 
-from rtp_llm.models_py.modules.qwen4_5.activation import SituAndMul
+from rtp_llm.models_py.modules.qwen4_5.activation import (
+    SituAndMul,
+    bf16_linear_tgv_or_torch,
+    can_sm10x_bf16_tgv,
+    get_sm10x_bf16_tgv_backend,
+    run_sm10x_bf16_tgv_gemm,
+    select_sm10x_bf16_tgv_tactic,
+)
 from rtp_llm.models_py.modules.qwen4_5.contracts import Qwen4_5ArchConfig
 from rtp_llm.models_py.modules.qwen4_5.fast_comm import (
     FastAllReduce,
@@ -183,6 +190,7 @@ from rtp_llm.models_py.modules.qwen4_5.mxfp4_ops import (
     prepare_mxfp4_moe_weights,
     resolve_moe_backend_for_shape,
     supports_triton_mxfp4,
+    warmup_deepgemm_mxfp4_moe_kernels,
 )
 
 
@@ -591,134 +599,12 @@ def _qwen45_router_splitk_reduce_topk_kernel(
     tl.store(weights_ptr + row * TOP_K + slots, chosen_w, mask=slots < TOP_K)
 
 
-_FLASHINFER_MM_BF16 = None
-_FLASHINFER_TGV_FN = None
-_FLASHINFER_TGV_TACTIC_NUM = 0
-_FLASHINFER_TGV_CHECKED = False
-
-
-def _get_flashinfer_tgv_backend(device: torch.device) -> Tuple[Any, Any, int]:
-    """Return ``(mm_fn, tgv_fn, tactic_num)`` when SM100+ TGV BF16 path is enabled."""
-    global _FLASHINFER_MM_BF16, _FLASHINFER_TGV_FN, _FLASHINFER_TGV_TACTIC_NUM, _FLASHINFER_TGV_CHECKED
-    if os.environ.get("QWEN4_5_BF16_TGV", "1") == "0":
-        return None, None, 0
-    if device.type != "cuda":
-        return None, None, 0
-    try:
-        cap_major, _ = torch.cuda.get_device_capability(device)
-        if cap_major < 10:
-            return None, None, 0
-    except Exception:
-        return None, None, 0
-    if not _FLASHINFER_TGV_CHECKED:
-        _FLASHINFER_TGV_CHECKED = True
-        try:
-            import flashinfer
-
-            _FLASHINFER_MM_BF16 = getattr(flashinfer, "mm_bf16", None)
-        except Exception:
-            _FLASHINFER_MM_BF16 = None
-        if cap_major == 10:
-            try:
-                from flashinfer.gemm import gemm_base as _gb
-
-                use_100f = bool(_gb.is_sm100f_supported(device))
-                mod = _gb.gen_tgv_gemm_sm10x_module(torch.bfloat16, use_100f).build_and_load()
-                _FLASHINFER_TGV_FN = mod.tgv_gemm
-                _FLASHINFER_TGV_TACTIC_NUM = int(mod.tgv_gemm_tactic_num())
-            except Exception:
-                _FLASHINFER_TGV_FN = None
-                _FLASHINFER_TGV_TACTIC_NUM = 0
-    return _FLASHINFER_MM_BF16, _FLASHINFER_TGV_FN, _FLASHINFER_TGV_TACTIC_NUM
-
-
-def _select_bf16_tgv_tactic(M: int, K: int, N: int, tactic_num: int) -> Optional[int]:
-    """Select empirically optimal SM100+ TGV tactic (splitKreduce=0) or ``None`` if F.linear wins."""
-    if M <= 0 or K < 320 or N < 1024 or (K % 16) != 0 or (N % 8) != 0:
-        return None
-    if N * K >= (1 << 30):
-        return None
-    if N > 8192:
-        if M > 4:
-            return None
-        tactic = 3 if K >= 10240 else (2 if K >= 1280 else 1)
-    elif M <= 8:
-        tactic = 3 if K >= 10240 else (2 if K >= 1280 else 1)
-    elif M <= 16:
-        tactic = 6 if K >= 1280 else 5
-    elif M <= 32:
-        if N <= 2560 and M > 24:
-            tactic = 5
-        elif 1280 <= K < 2560:
-            tactic = 7
-        else:
-            tactic = 8
-    elif M <= 64 and N <= 2560:
-        tactic = 8
-    else:
-        return None
-    return tactic if tactic < tactic_num else None
-
-
-def _can_bf16_tgv(
-    x: torch.Tensor, w: torch.Tensor
-) -> Optional[Tuple[Any, Any, Optional[int], int, int, int]]:
-    """Return ``(mm_fn, tgv_fn, tactic, M, K, N)`` for zero-splitKreduce SM100+ TGV fast path."""
-    mm_fn, tgv_fn, tactic_num = _get_flashinfer_tgv_backend(x.device)
-    if (
-        (tgv_fn is not None or mm_fn is not None)
-        and x.is_cuda
-        and w.is_cuda
-        and x.dtype == torch.bfloat16
-        and w.dtype == torch.bfloat16
-        and w.is_contiguous()
-        and not (torch.is_grad_enabled() and (x.requires_grad or w.requires_grad))
-    ):
-        K = int(w.shape[1])
-        N = int(w.shape[0])
-        M = int(x.numel() // K) if K > 0 and x.shape[-1] == K else 0
-        if M <= 0:
-            return None
-        if tgv_fn is not None:
-            tactic = _select_bf16_tgv_tactic(M, K, N, tactic_num)
-            if tactic is not None:
-                return mm_fn, tgv_fn, tactic, M, K, N
-        elif (
-            mm_fn is not None
-            and 1 <= M <= 8
-            and K >= 1280
-            and N >= 1024
-            and (K % 16) == 0
-            and (N % 8) == 0
-        ):
-            return mm_fn, None, None, M, K, N
-    return None
-
-
-def _run_bf16_tgv(
-    x: torch.Tensor,
-    w: torch.Tensor,
-    spec: Tuple[Any, Any, Optional[int], int, int, int],
-) -> torch.Tensor:
-    mm_fn, tgv_fn, tactic, M, K, N = spec
-    x_2d = x.reshape(M, K)
-    if not x_2d.is_contiguous():
-        x_2d = x_2d.contiguous()
-    with _cuda_device_ctx(x.device):
-        if tgv_fn is not None and tactic is not None:
-            out_2d = torch.empty((M, N), dtype=torch.bfloat16, device=x.device)
-            tgv_fn(w, x_2d.t(), None, tactic, out_2d, True)
-        else:
-            out_2d = mm_fn(x_2d, w.t(), pdl=True, backend="tgv")
-    return out_2d.reshape(*x.shape[:-1], N) if x.ndim != 2 else out_2d
-
-
-def _bf16_linear_tgv_or_torch(x: torch.Tensor, w: torch.Tensor) -> torch.Tensor:
-    """Run zero-splitKreduce FlashInfer TGV GEMM on SM100+ for optimal (M, K, N) BF16 shapes."""
-    spec = _can_bf16_tgv(x, w)
-    if spec is not None:
-        return _run_bf16_tgv(x, w, spec)
-    return F.linear(x, w)
+# Re-export circular-dependency-free SM100+ TGV BF16 helpers from activation.py.
+_get_flashinfer_tgv_backend = get_sm10x_bf16_tgv_backend
+_select_bf16_tgv_tactic = select_sm10x_bf16_tgv_tactic
+_can_bf16_tgv = can_sm10x_bf16_tgv
+_run_bf16_tgv = run_sm10x_bf16_tgv_gemm
+_bf16_linear_tgv_or_torch = bf16_linear_tgv_or_torch
 
 
 def _dense_linear_or_tgv(
@@ -1491,6 +1377,15 @@ class Qwen4_5LatentMoE(nn.Module):
             weights = self._mxfp4_weights()
             if prepare_deepgemm and not self.weights_transposed:
                 weights.get_deepgemm_pair()
+            if self.use_triton_mxfp4 and not self.weights_transposed:
+                warmup_deepgemm_mxfp4_moe_kernels(
+                    weights,
+                    ep_size=self.ep_size,
+                    ep_rank=self.ep_rank,
+                    backend=self.backend,
+                    compute_mode=self.compute_mode,
+                    device=self.w13_u8.device,
+                )
             if prepare_flashinfer and not self.weights_transposed:
                 weights.get_flashinfer_pair()
         if dense_linear_mode is not None:

@@ -3676,6 +3676,216 @@ class Qwen4_5QSATest(unittest.TestCase):
             else:
                 os.environ["QWEN4_5_GDN_FUSE_QKVZ_BA"] = prev_fuse
 
+    def test_r10_direct_tgv_b16_b32_decode_verify_and_tactics(self) -> None:
+        if not torch.cuda.is_available():
+            self.skipTest("R10 direct TGV test requires CUDA")
+        from rtp_llm.models_py.modules.qwen4_5.attention import (
+            _get_flashinfer_tgv_backend,
+            _select_bf16_tgv_tactic,
+        )
+        from rtp_llm.models_py.model_desc.qwen4_5_runtime import QWEN4_5_CACHE_TAGS
+
+        dev = _device()
+        dt = torch.bfloat16
+        cap_major, _ = torch.cuda.get_device_capability(dev)
+        if cap_major == 10:
+            tgv_fn, tactic_num = _get_flashinfer_tgv_backend(dev)
+            self.assertTrue(callable(tgv_fn))
+            self.assertGreaterEqual(tactic_num, 11)
+        self.assertEqual(_select_bf16_tgv_tactic(16, 5120, 5184), 6)
+        self.assertEqual(_select_bf16_tgv_tactic(32, 5120, 5184), 8)
+        self.assertEqual(_select_bf16_tgv_tactic(32, 2048, 5120), 8)
+        self.assertIsNone(_select_bf16_tgv_tactic(32, 5120, 10368))
+
+        arch = Qwen4_5ArchConfig(
+            vocab_size=256,
+            hidden_size=5120,
+            num_hidden_layers=8,
+            intermediate_size=1024,
+            first_k_dense_replace=1,
+            max_position_embeddings=512,
+            full_attention_interval=4,
+            num_attention_heads=8,
+            num_key_value_heads=1,
+            head_dim=256,
+            attn_output_gate=True,
+            partial_rotary_factor=0.25,
+            linear_num_key_heads=8,
+            linear_key_head_dim=64,
+            linear_num_value_heads=32,
+            linear_value_head_dim=64,
+            hc_count=4,
+            hc_lowrank=128,
+            num_experts=16,
+            num_experts_per_tok=4,
+            routed_expert_hidden_size=256,
+            moe_intermediate_size=256,
+            shared_expert_intermediate_size=128,
+            ple_layer_ids=(2,),
+            ple_embed_dim=512,
+            ple_conv_kernel_size=4,
+            ngram_size=3,
+            heads_per_ngram=4,
+            ngram_vocab_size_base=256,
+            make_ngram_vocab_size_divisible_by=64,
+            split_ngram_parts=4,
+            ple_quant_scheme="bf16",
+            share_map="4->8,5->6,5->7",
+            enable_yoco_decode=True,
+            quant_method="mxfp4",
+            indexer_head_dim=128,
+            indexer_n_heads=8,
+            indexer_kv_heads=1,
+            indexer_compress_ratio=4,
+            indexer_budget=64,
+        )
+        pools = {t: 256 for t in set(QWEN4_5_CACHE_TAGS) | {"linear"}}
+        prev_tgv = os.environ.get("QWEN4_5_BF16_TGV")
+        prev_fuse = os.environ.get("QWEN4_5_GDN_FUSE_QKVZ_BA")
+        try:
+            with torch.no_grad():
+                lm = Qwen4_5ForCausalLM(
+                    arch,
+                    use_triton_mxfp4=True,
+                    compute_mode="fp8",
+                    dense_linear_mode="auto",
+                    dtype=dt,
+                    device=dev,
+                )
+                lm.init_synthetic_weights(seed=9911, ple_mode="gpu_full", ple_fp8=False)
+                _stabilize_router_margins(lm)
+                lm.prepare_weights(dense_linear_mode="auto")
+                plan = build_qwen4_5_kv_cache_plan(arch)
+                kv = LocalKVCache(plan, tokens_per_block=64, num_blocks_per_tag=pools, device=dev, dtype=dt)
+                rt = Qwen4_5RTPModel.from_causal_lm(lm, kv_cache=kv)
+
+                gen = torch.Generator(device="cpu").manual_seed(9912)
+                tbl32 = build_block_tables_for_requests(kv, [80] * 32)
+                p32 = torch.randint(4, 240, (32 * 64,), generator=gen, dtype=torch.int64).to(dev)
+                ai_p32 = make_tagged_attention_inputs(
+                    tbl32,
+                    is_prefill=True,
+                    input_lengths=[64] * 32,
+                    sequence_lengths=[64] * 32,
+                    prefix_lengths=[0] * 32,
+                    device=dev,
+                )
+                mi_p32 = LocalPyModelInputs(input_ids=p32, attention_inputs=ai_p32)
+                rt.forward(mi_p32, fmha_impl=rt.prepare_fmha_impl(mi_p32, is_cuda_graph=False))
+
+                snap = {
+                    (lid, tag): lc.kv_cache_base.clone()
+                    for lid, tm in enumerate(kv.layer_caches)
+                    for tag, lc in tm.items()
+                }
+
+                def _restore_kv() -> None:
+                    for (lid, tag), buf in snap.items():
+                        kv.layer_caches[lid][tag].kv_cache_base.copy_(buf)
+
+                for bsz in (16, 32):
+                    toks = torch.randint(4, 240, (bsz,), generator=gen, dtype=torch.int64).to(dev)
+                    ai_d = make_tagged_attention_inputs(
+                        {k: v[:bsz] for k, v in tbl32.items()},
+                        is_prefill=False,
+                        input_lengths=[1] * bsz,
+                        sequence_lengths=[64] * bsz,
+                        prefix_lengths=[0] * bsz,
+                        device=dev,
+                    )
+                    for g_ai in ai_d.values():
+                        g_ai.sequence_lengths_plus_1_device = g_ai._sequence_lengths_dev + 1
+                    mi_d = LocalPyModelInputs(input_ids=toks, attention_inputs=ai_d)
+                    fh_d = rt.prepare_fmha_impl(mi_d, is_cuda_graph=True)
+
+                    _restore_kv()
+                    os.environ["QWEN4_5_BF16_TGV"] = "0"
+                    os.environ["QWEN4_5_GDN_FUSE_QKVZ_BA"] = "0"
+                    out_base = rt.forward(mi_d, fmha_impl=fh_d).hidden_states
+                    with torch.profiler.profile(activities=[torch.profiler.ProfilerActivity.CUDA]) as prof_b:
+                        _restore_kv()
+                        _ = rt.forward(mi_d, fmha_impl=fh_d)
+                        torch.cuda.synchronize(dev)
+                    sk_base = sum(
+                        1
+                        for e in prof_b.events()
+                        if e.device_type == torch.autograd.DeviceType.CUDA and "splitK" in e.name
+                    )
+
+                    _restore_kv()
+                    os.environ["QWEN4_5_BF16_TGV"] = "1"
+                    os.environ["QWEN4_5_GDN_FUSE_QKVZ_BA"] = "1"
+                    out_opt = rt.forward(mi_d, fmha_impl=fh_d).hidden_states
+                    with torch.profiler.profile(activities=[torch.profiler.ProfilerActivity.CUDA]) as prof_o:
+                        _restore_kv()
+                        _ = rt.forward(mi_d, fmha_impl=fh_d)
+                        torch.cuda.synchronize(dev)
+                    sk_opt = sum(
+                        1
+                        for e in prof_o.events()
+                        if e.device_type == torch.autograd.DeviceType.CUDA and "splitK" in e.name
+                    )
+                    c80_opt = sum(
+                        1
+                        for e in prof_o.events()
+                        if e.device_type == torch.autograd.DeviceType.CUDA and "cutlass_80" in e.name
+                    )
+                    tgv_opt = sum(
+                        1
+                        for e in prof_o.events()
+                        if e.device_type == torch.autograd.DeviceType.CUDA and "tgv" in e.name.lower()
+                    )
+
+                    self.assertGreaterEqual(_cosine(out_opt, out_base), 0.999)
+                    self.assertEqual(c80_opt, 0)
+                    if cap_major == 10:
+                        self.assertGreater(tgv_opt, 0)
+                        self.assertLess(sk_opt, sk_base)
+
+                # Verify B=4 V=4 (M=16) direct TGV parity + zero-sync B=32 Decode & Verify
+                v_toks = torch.randint(4, 240, (4 * 4,), generator=gen, dtype=torch.int64).to(dev)
+                ai_v = make_tagged_attention_inputs(
+                    {k: v[:4] for k, v in tbl32.items()},
+                    is_prefill=True,
+                    input_lengths=[4] * 4,
+                    sequence_lengths=[],
+                    prefix_lengths=[64] * 4,
+                    device=dev,
+                )
+                for g_ai in ai_v.values():
+                    g_ai.is_target_verify = True
+                mi_v = LocalPyModelInputs(input_ids=v_toks, attention_inputs=ai_v)
+                fh_v = rt.prepare_fmha_impl(mi_v, is_cuda_graph=True)
+
+                _restore_kv()
+                os.environ["QWEN4_5_BF16_TGV"] = "0"
+                os.environ["QWEN4_5_GDN_FUSE_QKVZ_BA"] = "0"
+                v_base = rt.forward(mi_v, fmha_impl=fh_v).hidden_states
+                _restore_kv()
+                os.environ["QWEN4_5_BF16_TGV"] = "1"
+                os.environ["QWEN4_5_GDN_FUSE_QKVZ_BA"] = "1"
+                v_opt = rt.forward(mi_v, fmha_impl=fh_v).hidden_states
+                self.assertGreaterEqual(_cosine(v_opt, v_base), 0.999)
+
+                prev_mode = torch.cuda.get_sync_debug_mode()
+                try:
+                    torch.cuda.set_sync_debug_mode("error")
+                    _restore_kv()
+                    rt.forward(mi_d, fmha_impl=fh_d)
+                    _restore_kv()
+                    rt.forward(mi_v, fmha_impl=fh_v)
+                finally:
+                    torch.cuda.set_sync_debug_mode(prev_mode)
+        finally:
+            if prev_tgv is None:
+                os.environ.pop("QWEN4_5_BF16_TGV", None)
+            else:
+                os.environ["QWEN4_5_BF16_TGV"] = prev_tgv
+            if prev_fuse is None:
+                os.environ.pop("QWEN4_5_GDN_FUSE_QKVZ_BA", None)
+            else:
+                os.environ["QWEN4_5_GDN_FUSE_QKVZ_BA"] = prev_fuse
+
     def test_r9_auto_prefill_cg_thread_local_and_enable_cuda_graph_gate(self) -> None:
         if not torch.cuda.is_available():
             self.skipTest("CUDA is required for R9 Auto-Prefill-CG thread_local & gate test")

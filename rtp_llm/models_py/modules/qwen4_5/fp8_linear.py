@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import functools
 import os
+import threading
 from typing import Any, Dict, Optional, Tuple
 
 import torch
@@ -37,6 +38,8 @@ from rtp_llm.models_py.modules.qwen4_5.activation import (
     quant_fp8_1x128_deepgemm_triton,
 )
 from rtp_llm.models_py.modules.qwen4_5.mxfp4_ops import (
+    _dg_get_num_sms,
+    _dg_jit_serialize,
     has_deepgemm_fp8_fp4,
     prepare_fp4_weight_scale_for_deepgemm,
     quantize_mxfp4,
@@ -47,6 +50,43 @@ _QUANT_EPS = 1.0e-12
 _TRTLLM_PERM_CACHE: Dict[torch.Size, torch.Tensor] = {}
 _MXFP8_PROBE_CACHE: Dict[int, bool] = {}
 _TRTLLM_LL_PROBE_CACHE: Dict[int, bool] = {}
+_WARMED_DG_FP8_SHAPES: set[Tuple[Any, ...]] = set()
+_WARMED_DG_FP8_LOCK = threading.Lock()
+
+
+def _run_dg_fp8_gemm_nt(
+    x_q: torch.Tensor,
+    x_sc: torch.Tensor,
+    w_q: torch.Tensor,
+    w_sc: torch.Tensor,
+    out: torch.Tensor,
+    *,
+    M: int,
+    N: int,
+    K: int,
+) -> None:
+    """Execute ``deep_gemm.fp8_gemm_nt`` with scoped 128-multiple blocking and cross-rank lock."""
+    import deep_gemm  # type: ignore
+
+    use_mult128 = int(
+        os.environ.get("QWEN4_5_DG_BLOCK_MULTIPLE_128", "1") != "0"
+        and hasattr(deep_gemm, "set_block_size_multiple_of")
+    )
+    with _dg_jit_serialize(
+        "fp8_nt", use_mult128, N, K, M, lock_dims=(use_mult128, N, K)
+    ):
+        if use_mult128:
+            deep_gemm.set_block_size_multiple_of((128, 128))
+            try:
+                deep_gemm.fp8_gemm_nt(
+                    (x_q, x_sc), (w_q, w_sc), out, recipe=(1, 1, 128)
+                )
+            finally:
+                deep_gemm.set_block_size_multiple_of((1, 1))
+        else:
+            deep_gemm.fp8_gemm_nt(
+                (x_q, x_sc), (w_q, w_sc), out, recipe=(1, 1, 128)
+            )
 
 
 def has_flashinfer_mxfp8(device_index: int = 0) -> bool:
@@ -496,6 +536,81 @@ class SM100FP8Linear(nn.Module):
         with _cuda_device_ctx(dev):
             self._prepare_weights_cuda(w_d, N, K, dev_idx)
         self._refresh_fast_dispatch()
+        self._warmup_deepgemm_fp8_if_needed(dev, N, K)
+
+    def _warmup_deepgemm_fp8_if_needed(
+        self, dev: torch.device, N: int, K: int
+    ) -> int:
+        """Warm canonical Prefill ``fp8_gemm_nt`` wave M buckets once per unique ``(N, K)``."""
+        if (
+            self.w_dg_fp8 is None
+            or self.w_dg_sc is None
+            or dev.type != "cuda"
+            or os.environ.get("QWEN4_5_WARMUP_DEEPGEMM", "1") == "0"
+            or self._is_wide
+            or min(N, K) < 2048
+            or max(N, K) > 16384
+        ):
+            return 0
+        env_mode = os.environ.get("QWEN4_5_DENSE_LINEAR_MODE", "").strip().lower()
+        eff_mode = env_mode or self.mode
+        if eff_mode not in ("auto", "fp8", "deepgemm_fp8"):
+            return 0
+
+        base_m = self._auto_dg_min_m if eff_mode in ("auto", "fp8") else 512
+        if base_m > 16384:
+            return 0
+        buckets = tuple(
+            sorted(
+                {
+                    m
+                    for m in (
+                        base_m,
+                        max(base_m, 2200),
+                        max(base_m, 2400),
+                        max(base_m, 2560),
+                        max(base_m, 5500),
+                        max(base_m, 6144),
+                    )
+                    if m <= 16384
+                }
+            )
+        )
+        if not buckets:
+            return 0
+
+        mult128 = int(os.environ.get("QWEN4_5_DG_BLOCK_MULTIPLE_128", "1") != "0")
+        shape_key = (
+            os.environ.get("DG_JIT_CACHE_DIR", ""),
+            _dg_get_num_sms(),
+            mult128,
+            base_m,
+            N,
+            K,
+        )
+        if shape_key in _WARMED_DG_FP8_SHAPES:
+            return 0
+
+        with _cuda_device_ctx(dev), torch.no_grad():
+            for m in buckets:
+                x_q, x_sc = quant_fp8_1x128_deepgemm_triton(
+                    torch.zeros((m, K), dtype=self.dtype, device=dev)
+                )
+                out = torch.empty((m, N), dtype=self.dtype, device=dev)
+                _run_dg_fp8_gemm_nt(
+                    x_q,
+                    x_sc,
+                    self.w_dg_fp8,
+                    self.w_dg_sc,
+                    out,
+                    M=m,
+                    N=N,
+                    K=K,
+                )
+                del x_q, x_sc, out
+        with _WARMED_DG_FP8_LOCK:
+            _WARMED_DG_FP8_SHAPES.add(shape_key)
+        return len(buckets)
 
     @torch.no_grad()
     def _prepare_weights_cuda(
@@ -693,14 +808,19 @@ class SM100FP8Linear(nn.Module):
         """Execute ``deep_gemm.fp8_gemm_nt`` reusing pre-quantized 1x128 UE8M0 FP8 input."""
         if self.w_dg_fp8 is None or self.w_dg_sc is None:
             raise RuntimeError("w_dg_fp8 is not prepared on SM100FP8Linear")
-        import deep_gemm  # type: ignore
 
-        out = torch.empty(
-            (int(x_q.shape[0]), self.out_features), dtype=self.dtype, device=x_q.device
-        )
+        M = int(x_q.shape[0])
+        out = torch.empty((M, self.out_features), dtype=self.dtype, device=x_q.device)
         with _cuda_device_ctx(x_q.device):
-            deep_gemm.fp8_gemm_nt(
-                (x_q, x_sc), (self.w_dg_fp8, self.w_dg_sc), out, recipe=(1, 1, 128)
+            _run_dg_fp8_gemm_nt(
+                x_q,
+                x_sc,
+                self.w_dg_fp8,
+                self.w_dg_sc,
+                out,
+                M=M,
+                N=self.out_features,
+                K=self.in_features,
             )
         if self.bias is not None:
             out = out + self.bias
@@ -797,25 +917,37 @@ class SM100FP8Linear(nn.Module):
                 backend="cutlass",
             )
         elif chosen == "deepgemm_fp8" and self.w_dg_fp8 is not None and self.w_dg_sc is not None:
-            import deep_gemm  # type: ignore
-
             ax, asc = quant_fp8_1x128_deepgemm_triton(x_2d)
             out = torch.empty((M, self.out_features), dtype=self.dtype, device=x_2d.device)
-            deep_gemm.fp8_gemm_nt(
-                (ax, asc), (self.w_dg_fp8, self.w_dg_sc), out, recipe=(1, 1, 128)
+            _run_dg_fp8_gemm_nt(
+                ax,
+                asc,
+                self.w_dg_fp8,
+                self.w_dg_sc,
+                out,
+                M=M,
+                N=self.out_features,
+                K=self.in_features,
             )
         elif chosen == "w4a8" and self.w_fp4_i8 is not None and self.w_fp4_sc is not None:
             import deep_gemm  # type: ignore
 
             ax, asc = per_token_group_quant_fp8_ue8m0(x_2d, scale_format="deepgemm")
             out = torch.empty((M, self.out_features), dtype=self.dtype, device=x_2d.device)
-            deep_gemm.fp8_fp4_gemm_nt(
-                (ax, asc),
-                (self.w_fp4_i8, self.w_fp4_sc),
-                out,
-                recipe_a=(1, 32),
-                recipe_b=(1, 32),
-            )
+            with _dg_jit_serialize(
+                "fp8_fp4_nt",
+                self.out_features,
+                self.in_features,
+                M,
+                lock_dims=(self.out_features, self.in_features),
+            ):
+                deep_gemm.fp8_fp4_gemm_nt(
+                    (ax, asc),
+                    (self.w_fp4_i8, self.w_fp4_sc),
+                    out,
+                    recipe_a=(1, 32),
+                    recipe_b=(1, 32),
+                )
         elif self.w_fp8_row is not None and self.w_sc_row is not None:
             ax, asc = quantize_fp8_rowwise_triton(x_2d)
             out = torch._scaled_mm(

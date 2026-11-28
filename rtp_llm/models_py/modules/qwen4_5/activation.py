@@ -17,7 +17,8 @@ FP8 E4M3 quantization kernels:
 from __future__ import annotations
 
 import contextlib
-from typing import Optional, Tuple
+import os
+from typing import Any, Optional, Tuple
 
 import torch
 import torch.nn as nn
@@ -52,6 +53,199 @@ def _get_sm_count(device_index: int) -> int:
         cached = int(torch.cuda.get_device_properties(device_index).multi_processor_count)
         _SM_COUNT_CACHE[device_index] = cached
     return cached
+
+
+_FLASHINFER_MM_BF16 = None
+_FLASHINFER_TGV_FN = None
+_FLASHINFER_TGV_TACTIC_NUM = 0
+_FLASHINFER_TGV_CHECKED = False
+
+
+def get_sm10x_bf16_tgv_backend(device: torch.device) -> Tuple[Any, Any, int]:
+    """Return ``(mm_fn, tgv_fn, tactic_num)`` when SM100+ TGV BF16 path is enabled."""
+    global _FLASHINFER_MM_BF16, _FLASHINFER_TGV_FN, _FLASHINFER_TGV_TACTIC_NUM, _FLASHINFER_TGV_CHECKED
+    if os.environ.get("QWEN4_5_BF16_TGV", "1") == "0":
+        return None, None, 0
+    if device.type != "cuda":
+        return None, None, 0
+    try:
+        cap_major, _ = torch.cuda.get_device_capability(device)
+        if cap_major < 10:
+            return None, None, 0
+    except Exception:
+        return None, None, 0
+    if not _FLASHINFER_TGV_CHECKED:
+        _FLASHINFER_TGV_CHECKED = True
+        try:
+            import flashinfer
+
+            _FLASHINFER_MM_BF16 = getattr(flashinfer, "mm_bf16", None)
+        except Exception:
+            _FLASHINFER_MM_BF16 = None
+        if cap_major == 10:
+            try:
+                from flashinfer.gemm import gemm_base as _gb
+
+                use_100f = bool(_gb.is_sm100f_supported(device))
+                mod = _gb.gen_tgv_gemm_sm10x_module(torch.bfloat16, use_100f).build_and_load()
+                _FLASHINFER_TGV_FN = mod.tgv_gemm
+                _FLASHINFER_TGV_TACTIC_NUM = int(mod.tgv_gemm_tactic_num())
+            except Exception:
+                _FLASHINFER_TGV_FN = None
+                _FLASHINFER_TGV_TACTIC_NUM = 0
+    return _FLASHINFER_MM_BF16, _FLASHINFER_TGV_FN, _FLASHINFER_TGV_TACTIC_NUM
+
+
+def select_sm10x_bf16_tgv_tactic(
+    M: int, K: int, N: int, tactic_num: int = 11
+) -> Optional[int]:
+    """Select empirically optimal SM100+ TGV tactic (splitKreduce=0) or ``None`` if F.linear wins."""
+    if M <= 0 or K < 320 or N < 1024 or (K % 16) != 0 or (N % 8) != 0:
+        return None
+    if N * K >= (1 << 30):
+        return None
+    if N > 8192:
+        if M > 4:
+            return None
+        tactic = 3 if K >= 10240 else (2 if K >= 1280 else 1)
+    elif M <= 8:
+        tactic = 3 if K >= 10240 else (2 if K >= 1280 else 1)
+    elif M <= 16:
+        tactic = 6 if K >= 1280 else 5
+    elif M <= 32:
+        if N <= 2560 and M > 24:
+            tactic = 5
+        elif 1280 <= K < 2560:
+            tactic = 7
+        else:
+            tactic = 8
+    elif M <= 64 and N <= 2560:
+        tactic = 8
+    else:
+        return None
+    return tactic if tactic < tactic_num else None
+
+
+def can_sm10x_bf16_tgv(
+    x: torch.Tensor,
+    w: torch.Tensor,
+    *,
+    tactic: Optional[int] = None,
+    bias: Optional[torch.Tensor] = None,
+) -> Optional[Tuple[Any, Any, Optional[int], int, int, int]]:
+    """Return ``(mm_fn, tgv_fn, tactic, M, K, N)`` for zero-splitKreduce SM100+ TGV fast path."""
+    mm_fn, tgv_fn, tactic_num = get_sm10x_bf16_tgv_backend(x.device)
+    if (
+        (tgv_fn is not None or mm_fn is not None)
+        and x.is_cuda
+        and w.is_cuda
+        and x.dtype == torch.bfloat16
+        and w.dtype == torch.bfloat16
+        and w.is_contiguous()
+        and not (
+            torch.is_grad_enabled()
+            and (x.requires_grad or w.requires_grad or (bias is not None and bias.requires_grad))
+        )
+    ):
+        K = int(w.shape[1])
+        N = int(w.shape[0])
+        M = int(x.numel() // K) if K > 0 and x.shape[-1] == K else 0
+        if M <= 0:
+            return None
+        if bias is not None and (
+            not bias.is_cuda
+            or bias.device != x.device
+            or bias.dtype != torch.bfloat16
+            or bias.ndim != 1
+            or int(bias.shape[0]) != N
+            or not bias.is_contiguous()
+        ):
+            return None
+        if tgv_fn is not None:
+            if tactic is not None:
+                if (
+                    0 <= int(tactic) < tactic_num
+                    and (K % 16) == 0
+                    and (N % 8) == 0
+                    and (N * K) < (1 << 30)
+                ):
+                    return mm_fn, tgv_fn, int(tactic), M, K, N
+                return None
+            sel = select_sm10x_bf16_tgv_tactic(M, K, N, tactic_num)
+            if sel is not None:
+                return mm_fn, tgv_fn, sel, M, K, N
+        elif (
+            mm_fn is not None
+            and tactic is None
+            and 1 <= M <= 8
+            and K >= 1280
+            and N >= 1024
+            and (K % 16) == 0
+            and (N % 8) == 0
+        ):
+            return mm_fn, None, None, M, K, N
+    return None
+
+
+def run_sm10x_bf16_tgv_gemm(
+    x: torch.Tensor,
+    w: torch.Tensor,
+    spec: Optional[Tuple[Any, Any, Optional[int], int, int, int]] = None,
+    *,
+    tactic: Optional[int] = None,
+    bias: Optional[torch.Tensor] = None,
+    pdl: bool = True,
+    out: Optional[torch.Tensor] = None,
+) -> torch.Tensor:
+    """Execute explicit SM100+ TGV BF16 GEMM (or ``mm_bf16`` fallback) for ``spec``."""
+    if spec is None:
+        spec = can_sm10x_bf16_tgv(x, w, tactic=tactic, bias=bias)
+        if spec is None:
+            raise RuntimeError("SM100+ BF16 TGV path unavailable or invalid tensor/tactic spec.")
+    mm_fn, tgv_fn, sel_tactic, M, K, N = spec
+    x_2d = x.reshape(M, K)
+    if not x_2d.is_contiguous():
+        x_2d = x_2d.contiguous()
+    with _cuda_device_ctx(x.device):
+        if tgv_fn is not None and sel_tactic is not None:
+            out_2d = (
+                out.reshape(M, N)
+                if (
+                    out is not None
+                    and out.is_cuda
+                    and out.device == x.device
+                    and out.dtype == torch.bfloat16
+                    and out.is_contiguous()
+                    and out.numel() == M * N
+                )
+                else torch.empty((M, N), dtype=torch.bfloat16, device=x.device)
+            )
+            tgv_fn(w, x_2d.t(), bias, sel_tactic, out_2d, pdl)
+        else:
+            out_2d = (
+                mm_fn(x_2d, w.t(), bias=bias, pdl=pdl, backend="tgv")
+                if bias is not None
+                else mm_fn(x_2d, w.t(), pdl=pdl, backend="tgv")
+            )
+            if out is not None:
+                out.reshape(M, N).copy_(out_2d)
+                out_2d = out.reshape(M, N)
+    return out_2d.reshape(*x.shape[:-1], N) if x.ndim != 2 else out_2d
+
+
+def bf16_linear_tgv_or_torch(
+    x: torch.Tensor,
+    w: torch.Tensor,
+    *,
+    bias: Optional[torch.Tensor] = None,
+    tactic: Optional[int] = None,
+    pdl: bool = True,
+) -> torch.Tensor:
+    """Execute ``x @ w.t() (+ bias)`` via SM100+ TGV when beneficial, else ``F.linear``."""
+    spec = can_sm10x_bf16_tgv(x, w, tactic=tactic, bias=bias)
+    if spec is not None:
+        return run_sm10x_bf16_tgv_gemm(x, w, spec, bias=bias, pdl=pdl)
+    return torch.nn.functional.linear(x, w, bias)
 
 
 def situ_and_mul_ref(
@@ -1724,9 +1918,14 @@ def quant_fp8_1x128_deepgemm_triton(
 
 __all__ = [
     "SituAndMul",
+    "bf16_linear_tgv_or_torch",
+    "can_sm10x_bf16_tgv",
+    "get_sm10x_bf16_tgv_backend",
     "per_token_group_quant_fp8_ue8m0",
     "per_token_group_quant_fp8_ue8m0_ref",
     "quant_fp8_1x128_deepgemm_triton",
+    "run_sm10x_bf16_tgv_gemm",
+    "select_sm10x_bf16_tgv_tactic",
     "situ_and_mul_ref",
     "situ_and_mul_triton",
     "situ_glu_fp8_quant_masked_packed",

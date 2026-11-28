@@ -1,10 +1,13 @@
 #include <algorithm>
+#include <cerrno>
 #include <chrono>
 #include <cstdlib>
 #include <cstring>
 #include <exception>
+#include <limits>
 #include <mutex>
 #include <memory>
+#include <optional>
 #include <stdexcept>
 #include <thread>
 #include <unistd.h>
@@ -119,7 +122,112 @@ void appendStagePeerGroups(BroadcastLoadRequestPB& request, const std::vector<St
     }
 }
 
+std::optional<int64_t> parseNonNegativeInt64Env(const char* name) {
+    const char* raw = std::getenv(name);
+    if (raw == nullptr || *raw == '\0') {
+        return std::nullopt;
+    }
+    errno          = 0;
+    char* end_ptr  = nullptr;
+    auto  parsed   = std::strtoll(raw, &end_ptr, 10);
+    if (errno != 0 || end_ptr == raw || *end_ptr != '\0' || parsed < 0) {
+        return std::nullopt;
+    }
+    return static_cast<int64_t>(parsed);
+}
+
+int64_t resolveDecodeGrowthHeadroomTokens(size_t default_block_size) {
+    if (const auto env_tokens = parseNonNegativeInt64Env("RTP_LLM_DECODE_GROWTH_HEADROOM_TOKENS");
+        env_tokens.has_value()) {
+        return *env_tokens;
+    }
+    const size_t safe_block_size = std::max<size_t>(1, default_block_size);
+    return static_cast<int64_t>(std::min<size_t>(512, safe_block_size * 4));
+}
+
 }  // namespace
+
+DecodeRpcServer::AdmittedStreamEntry DecodeRpcServer::captureAdmittedStreamBudget(
+    const std::shared_ptr<GenerateStream>& stream) {
+    AdmittedStreamEntry entry;
+    entry.stream         = stream;
+    entry.max_batch_size = std::max<int64_t>(1, stream->maxBatchSize());
+    entry.max_remaining_tokens =
+        std::max<int64_t>(0, static_cast<int64_t>(stream->maxTokenNum()) - static_cast<int64_t>(stream->seqLength()));
+    const auto complete_tokens = stream->completeTokenIdsPtr();
+    entry.reserve_step =
+        complete_tokens ? std::max<int64_t>(0, static_cast<int64_t>(complete_tokens->getReserveStep())) : 0;
+    return entry;
+}
+
+void DecodeRpcServer::pruneAdmittedStreamsLocked(AdmissionWaitState& state) {
+    auto& entries = state.admitted_streams;
+    entries.erase(std::remove_if(entries.begin(),
+                                 entries.end(),
+                                 [](const AdmittedStreamEntry& entry) {
+                                     const auto stream = entry.stream.lock();
+                                     return !stream || stream->isFinished();
+                                 }),
+                  entries.end());
+}
+
+DecodeRpcServer::DecodeHeadroomBudget DecodeRpcServer::computeDecodeHeadroomBudget(
+    const CacheConfig&                      cache_config,
+    const std::vector<AdmittedStreamEntry>& active_streams,
+    int64_t                                 window_tokens) {
+    DecodeHeadroomBudget budget;
+    const auto&          groups = cache_config.topology().groups();
+    for (const auto& group : groups) {
+        if (group.policy.reservable && group.policy.explicit_block_num == 0) {
+            budget.total_reservable_blocks += group.block_num;
+        }
+        if (group.policy.group_type == CacheGroupType::FULL) {
+            const size_t seq_per_block = std::max<size_t>(1, group.seqSizePerBlock());
+            if (!budget.has_full_group) {
+                budget.has_full_group          = true;
+                budget.full_seq_size_per_block = seq_per_block;
+                budget.min_full_total_blocks   = group.block_num;
+            } else {
+                budget.full_seq_size_per_block = std::min(budget.full_seq_size_per_block, seq_per_block);
+                budget.min_full_total_blocks   = std::min<size_t>(budget.min_full_total_blocks, group.block_num);
+            }
+        }
+    }
+    if (window_tokens <= 0) {
+        return budget;
+    }
+    for (const auto& entry : active_streams) {
+        const int64_t active_window = std::min<int64_t>(entry.max_remaining_tokens, window_tokens);
+        if (active_window <= 0) {
+            continue;
+        }
+        size_t per_stream_max_full = 0;
+        for (const auto& group : groups) {
+            const int64_t block_size = std::max<int64_t>(1, static_cast<int64_t>(group.seqSizePerBlock()));
+            int64_t       blocks     = 0;
+            if (group.policy.group_type == CacheGroupType::LINEAR) {
+                blocks = 1 + std::min<int64_t>(entry.reserve_step, 1 + active_window / block_size);
+            } else {
+                const int64_t tokens = active_window + entry.reserve_step;
+                blocks               = (tokens + block_size - 1) / block_size;
+                if (group.policy.group_type == CacheGroupType::FULL) {
+                    blocks = std::max<int64_t>(blocks, 1);
+                }
+                if (group.policy.sliding_window_size > 0) {
+                    const int64_t swa_cap = (group.policy.sliding_window_size + block_size - 1) / block_size + 2;
+                    blocks                = std::min<int64_t>(blocks, swa_cap);
+                }
+            }
+            const size_t stream_group_blocks = static_cast<size_t>(entry.max_batch_size * blocks);
+            budget.total_growth_blocks += stream_group_blocks;
+            if (group.policy.group_type == CacheGroupType::FULL) {
+                per_stream_max_full = std::max(per_stream_max_full, stream_group_blocks);
+            }
+        }
+        budget.full_growth_blocks += per_stream_max_full;
+    }
+    return budget;
+}
 
 grpc::Status DecodeRpcServer::generateRequestReadFailureStatus(bool cancelled) {
     if (cancelled) {
@@ -169,6 +277,40 @@ grpc::Status DecodeRpcServer::init(const EngineInitParams&                      
         return ret;
     }
     return grpc::Status::OK;
+}
+
+int64_t DecodeRpcServer::resolveDecodeMaxInitedStreams() const {
+    if (const auto env_cap = parseNonNegativeInt64Env("RTP_LLM_DECODE_MAX_INITED_STREAMS");
+        env_cap.has_value() && *env_cap > 0) {
+        return *env_cap;
+    }
+    const int64_t configured_cap =
+        maga_init_params_.runtime_config.fifo_scheduler_config.max_inited_kv_cache_streams;
+    if (configured_cap > 0) {
+        return configured_cap;
+    }
+    const bool is_decode_role = maga_init_params_.pd_sep_config.role_type == RoleType::DECODE
+                                || (engine_ != nullptr && engine_->resourceContext().role_type == RoleType::DECODE);
+    if (is_decode_role && maga_init_params_.concurrency_config.concurrency_limit > 0) {
+        return std::max<int64_t>(maga_init_params_.concurrency_config.concurrency_limit,
+                                 maga_init_params_.runtime_config.max_generate_batch_size);
+    }
+    return 0;
+}
+
+size_t DecodeRpcServer::activeInitedStreamCount() const {
+    std::lock_guard<std::mutex> lock(admission_state_->mutex);
+    pruneAdmittedStreamsLocked(*admission_state_);
+    return admission_state_->admitted_streams.size() + admission_state_->inflight_pre_init;
+}
+
+void DecodeRpcServer::notifyAdmissionChange() const {
+    {
+        std::lock_guard<std::mutex> lock(admission_state_->mutex);
+        pruneAdmittedStreamsLocked(*admission_state_);
+        ++admission_state_->release_generation;
+    }
+    admission_state_->cv.notify_all();
 }
 
 std::string
@@ -412,6 +554,31 @@ void DecodeRpcServer::allocateResource(DecodeGenerateContext& decode_context) {
     const auto& pd_config            = maga_init_params_.pd_sep_config;
     const auto  allocation_begin_us  = currentTimeUs();
     const auto  cancellation_poll_ms = std::max<int64_t>(pd_config.decode_retry_interval_ms, 50);
+    const int64_t max_inited_cap     = resolveDecodeMaxInitedStreams();
+    const auto&   cache_config       = cache_manager->cacheConfig();
+    const int64_t growth_window_tokens =
+        resolveDecodeGrowthHeadroomTokens(cache_config.seq_size_per_block);
+    const bool is_decode_role = pd_config.role_type == RoleType::DECODE
+                                || engine_->resourceContext().role_type == RoleType::DECODE;
+    const bool uses_cache_lookup =
+        !(cache_config.disable_decode_first_malloc_device_reuse && is_decode_role)
+        && generate_stream->streamCacheResource().enableCacheLookup();
+    const auto   new_budget             = captureAdmittedStreamBudget(generate_stream);
+    const size_t raw_new_blocks =
+        static_cast<size_t>(std::max(generate_stream->estimateInitialNeedBlocks(), 0));
+    const size_t effective_new_blocks = uses_cache_lookup ? std::min<size_t>(raw_new_blocks, 1) : raw_new_blocks;
+    const auto   static_layout = computeDecodeHeadroomBudget(cache_config, {}, growth_window_tokens);
+    const size_t raw_new_full_blocks =
+        static_layout.has_full_group ?
+            static_cast<size_t>(
+                ((static_cast<int64_t>(generate_stream->seqLength()) + new_budget.reserve_step
+                  + static_cast<int64_t>(static_layout.full_seq_size_per_block) - 1)
+                 / static_cast<int64_t>(static_layout.full_seq_size_per_block))
+                * new_budget.max_batch_size) :
+            0;
+    const size_t effective_new_full_blocks =
+        uses_cache_lookup ? std::min<size_t>(raw_new_full_blocks, 1) : raw_new_full_blocks;
+    const bool cp_sharded = cache_manager->cpSlotMapper() && cache_manager->cpSlotMapper()->isSharded();
 
     auto finish_allocation_error = [&](grpc::StatusCode grpc_code, ErrorCode error_code, const std::string& message) {
         const std::string error_msg = "request: [" + decode_context.request_key + "] " + message;
@@ -440,54 +607,131 @@ void DecodeRpcServer::allocateResource(DecodeGenerateContext& decode_context) {
             return;
         }
 
-        const auto observed_generation = cache_manager->allocationGeneration();
-        auto       allocation_status   = generate_stream->streamCacheResource().initKVBlock();
-        ++allocation_attempts;
-        decode_context.retry_times        = allocation_attempts;
-        decode_context.retry_cost_time_ms = (currentTimeUs() - allocation_begin_us) / 1000;
+        uint64_t     observed_generation    = 0;
+        uint64_t     observed_admission_gen = 0;
+        bool         blocked_by_admission   = false;
+        bool         holds_inflight_slot    = false;
+        bool         inflight_committed     = false;
+        absl::Status allocation_status;
 
-        if (allocation_status.ok()) {
-            auto& cache_resource = generate_stream->streamCacheResource();
-            if (cache_resource.asyncLoadCache()) {
-                generate_stream->recordLoadingCacheStartTime();
-                while (true) {
-                    const auto load_cost_ms = (currentTimeUs() - decode_context.request_begin_time_us) / 1000;
-                    if (decode_context.isRequestCancelled()) {
-                        finish_allocation_error(
-                            grpc::StatusCode::CANCELLED, ErrorCode::CANCELLED, "decode cache load cancelled by client");
-                        return;
-                    }
-                    if (decode_context.request_timeout_ms > 0 && load_cost_ms >= decode_context.request_timeout_ms) {
-                        finish_allocation_error(grpc::StatusCode::DEADLINE_EXCEEDED,
-                                                ErrorCode::GENERATE_TIMEOUT,
-                                                "decode cache load exceeded request timeout");
-                        return;
-                    }
-                    const auto load_status = cache_resource.pollAllocatorLoad();
-                    if (load_status.has_value()) {
-                        allocation_status = *load_status;
-                        break;
-                    }
-                    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        {
+            std::lock_guard<std::mutex> lock(admission_state_->mutex);
+            pruneAdmittedStreamsLocked(*admission_state_);
+            observed_generation    = cache_manager->allocationGeneration();
+            observed_admission_gen = admission_state_->release_generation;
+
+            const size_t active_count = admission_state_->admitted_streams.size() + admission_state_->inflight_pre_init;
+            if (max_inited_cap > 0 && active_count >= static_cast<size_t>(max_inited_cap)) {
+                blocked_by_admission = true;
+            } else if (!admission_state_->admitted_streams.empty() || admission_state_->inflight_pre_init > 0) {
+                const auto headroom = computeDecodeHeadroomBudget(
+                    cache_config, admission_state_->admitted_streams, growth_window_tokens);
+                const size_t reserve_blocks   = cache_manager->reserveBlocksNum();
+                const size_t available_blocks = cache_manager->availableBlocksNum();
+                const size_t required_total =
+                    reserve_blocks + headroom.total_growth_blocks + admission_state_->pending_init_blocks
+                    + effective_new_blocks;
+                bool has_headroom = available_blocks >= required_total;
+
+                if (has_headroom && headroom.has_full_group && headroom.min_full_total_blocks > 0 && !cp_sharded) {
+                    const size_t full_available =
+                        cache_manager->availableTokensNum() / headroom.full_seq_size_per_block;
+                    const size_t full_reserve =
+                        headroom.total_reservable_blocks == 0 ?
+                            0 :
+                            (reserve_blocks * headroom.min_full_total_blocks / headroom.total_reservable_blocks);
+                    const size_t required_full =
+                        full_reserve + headroom.full_growth_blocks + admission_state_->pending_full_init_blocks
+                        + effective_new_full_blocks;
+                    has_headroom = full_available >= required_full;
                 }
-                generate_stream->recordLoadingCacheDoneTime();
+                if (!has_headroom) {
+                    blocked_by_admission = true;
+                }
             }
-            if (allocation_status.ok()) {
-                // Only committed, materialized cache resources may enter the P/D handoff.
-                generate_stream->reportEvent(StreamEvents::LoadInitiated);
-                break;
+
+            if (!blocked_by_admission) {
+                admission_state_->inflight_pre_init += 1;
+                admission_state_->pending_init_blocks += effective_new_blocks;
+                admission_state_->pending_full_init_blocks += effective_new_full_blocks;
+                holds_inflight_slot = true;
             }
         }
 
-        if (!absl::IsUnavailable(allocation_status)) {
-            const bool deadline_exceeded = absl::IsDeadlineExceeded(allocation_status);
-            const auto grpc_code         = deadline_exceeded ? grpc::StatusCode::DEADLINE_EXCEEDED :
-                                           absl::IsResourceExhausted(allocation_status) ? grpc::StatusCode::RESOURCE_EXHAUSTED :
-                                                                                          grpc::StatusCode::INTERNAL;
-            finish_allocation_error(grpc_code,
-                                    deadline_exceeded ? ErrorCode::LOAD_CACHE_TIMEOUT : ErrorCode::MALLOC_FAILED,
-                                    allocation_status.ToString());
-            return;
+        if (!blocked_by_admission) {
+            autil::ScopeGuard inflight_rollback_guard([&] {
+                if (holds_inflight_slot && !inflight_committed) {
+                    {
+                        std::lock_guard<std::mutex> lock(admission_state_->mutex);
+                        admission_state_->inflight_pre_init -= 1;
+                        admission_state_->pending_init_blocks -= effective_new_blocks;
+                        admission_state_->pending_full_init_blocks -= effective_new_full_blocks;
+                        ++admission_state_->release_generation;
+                    }
+                    admission_state_->cv.notify_all();
+                }
+            });
+
+            allocation_status = generate_stream->streamCacheResource().initKVBlock();
+            ++allocation_attempts;
+            decode_context.retry_times        = allocation_attempts;
+            decode_context.retry_cost_time_ms = (currentTimeUs() - allocation_begin_us) / 1000;
+
+            if (allocation_status.ok()) {
+                auto& cache_resource = generate_stream->streamCacheResource();
+                if (cache_resource.asyncLoadCache()) {
+                    generate_stream->recordLoadingCacheStartTime();
+                    while (true) {
+                        const auto load_cost_ms = (currentTimeUs() - decode_context.request_begin_time_us) / 1000;
+                        if (decode_context.isRequestCancelled()) {
+                            finish_allocation_error(grpc::StatusCode::CANCELLED,
+                                                    ErrorCode::CANCELLED,
+                                                    "decode cache load cancelled by client");
+                            return;
+                        }
+                        if (decode_context.request_timeout_ms > 0 && load_cost_ms >= decode_context.request_timeout_ms) {
+                            finish_allocation_error(grpc::StatusCode::DEADLINE_EXCEEDED,
+                                                    ErrorCode::GENERATE_TIMEOUT,
+                                                    "decode cache load exceeded request timeout");
+                            return;
+                        }
+                        const auto load_status = cache_resource.pollAllocatorLoad();
+                        if (load_status.has_value()) {
+                            allocation_status = *load_status;
+                            break;
+                        }
+                        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                    }
+                    generate_stream->recordLoadingCacheDoneTime();
+                }
+                if (allocation_status.ok()) {
+                    {
+                        std::lock_guard<std::mutex> lock(admission_state_->mutex);
+                        admission_state_->inflight_pre_init -= 1;
+                        admission_state_->pending_init_blocks -= effective_new_blocks;
+                        admission_state_->pending_full_init_blocks -= effective_new_full_blocks;
+                        admission_state_->admitted_streams.push_back(new_budget);
+                        inflight_committed = true;
+                    }
+                    // Only committed, materialized cache resources may enter the P/D handoff.
+                    generate_stream->reportEvent(StreamEvents::LoadInitiated);
+                    break;
+                }
+            }
+
+            if (!absl::IsUnavailable(allocation_status)) {
+                const bool deadline_exceeded = absl::IsDeadlineExceeded(allocation_status);
+                const auto grpc_code         = deadline_exceeded ? grpc::StatusCode::DEADLINE_EXCEEDED :
+                                               absl::IsResourceExhausted(allocation_status) ?
+                                                                   grpc::StatusCode::RESOURCE_EXHAUSTED :
+                                                                   grpc::StatusCode::INTERNAL;
+                finish_allocation_error(grpc_code,
+                                        deadline_exceeded ? ErrorCode::LOAD_CACHE_TIMEOUT : ErrorCode::MALLOC_FAILED,
+                                        allocation_status.ToString());
+                return;
+            }
+        } else {
+            decode_context.retry_cost_time_ms = (currentTimeUs() - allocation_begin_us) / 1000;
         }
 
         const auto wait_begin_cost_ms = (currentTimeUs() - decode_context.request_begin_time_us) / 1000;
@@ -500,6 +744,40 @@ void DecodeRpcServer::allocateResource(DecodeGenerateContext& decode_context) {
             wait_ms = std::min(wait_ms, decode_context.request_timeout_ms - wait_begin_cost_ms);
         }
         wait_ms = std::max<int64_t>(wait_ms, 1);
+
+        if (blocked_by_admission) {
+            int64_t waited_ms = 0;
+            while (waited_ms < wait_ms) {
+                const auto now_request_cost_ms    = (currentTimeUs() - decode_context.request_begin_time_us) / 1000;
+                decode_context.retry_cost_time_ms = (currentTimeUs() - allocation_begin_us) / 1000;
+                if (decode_context.isRequestCancelled()
+                    || (decode_context.request_timeout_ms > 0
+                        && now_request_cost_ms >= decode_context.request_timeout_ms)
+                    || cache_manager->allocationGeneration() != observed_generation) {
+                    break;
+                }
+                const int64_t remaining_budget_ms = decode_context.request_timeout_ms > 0 ?
+                                                        std::max<int64_t>(
+                                                            1, decode_context.request_timeout_ms - now_request_cost_ms) :
+                                                        wait_ms;
+                const int64_t slice_ms = std::min<int64_t>({wait_ms - waited_ms, remaining_budget_ms, int64_t{5}});
+                {
+                    std::unique_lock<std::mutex> lock(admission_state_->mutex);
+                    if (admission_state_->cv.wait_for(lock, std::chrono::milliseconds(slice_ms), [&] {
+                            return admission_state_->release_generation != observed_admission_gen;
+                        })) {
+                        break;
+                    }
+                    const size_t before_prune = admission_state_->admitted_streams.size();
+                    pruneAdmittedStreamsLocked(*admission_state_);
+                    if (admission_state_->admitted_streams.size() < before_prune) {
+                        break;
+                    }
+                }
+                waited_ms += slice_ms;
+            }
+            continue;
+        }
 
         // Temporary KV pressure is admission backpressure, not a failed RPC stage.  The legacy
         // DECODE_RETRY_{TIMES,TIMEOUT_MS} limits bound re-execution after stage errors; applying
@@ -1861,6 +2139,7 @@ grpc::Status DecodeRpcServer::RemoteGenerate(grpc::ServerContext* server_context
     RTP_LLM_PROFILE_FUNCTION();
     c10::InferenceMode inference_guard(true);
     AtomicGuard        request_guard(onflight_requests_);
+    autil::ScopeGuard  admission_notify_guard([this] { notifyAdmissionChange(); });
     DecodeRpcContext   rpc_context{grpc_stream};
     // TODO(xinfei.sxf) request id is 0 here
     auto decode_context              = DecodeGenerateContext(rpc_context, 0, server_context, metrics_reporter_, meta_);

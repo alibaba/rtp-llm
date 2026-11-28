@@ -7,7 +7,10 @@
 #include "rtp_llm/cpp/cache/KVCacheResource.h"
 #include "rtp_llm/cpp/cache/CacheGroupType.h"
 
+#include <condition_variable>
+#include <mutex>
 #include <utility>
+#include <vector>
 
 namespace rtp_llm {
 
@@ -24,6 +27,9 @@ public:
     grpc::Status RemoteLoad(grpc::ServerContext*          server_context,
                             const BroadcastLoadRequestPB* request,
                             BroadcastLoadResponsePB*      response);
+
+    int64_t resolveDecodeMaxInitedStreams() const;
+    size_t  activeInitedStreamCount() const;
 
     class LoadKVCacheContext {
     public:
@@ -168,9 +174,43 @@ private:
                                        const std::string&              error_message,
                                        const std::vector<std::string>& buffer_debug_infos);
 
+    struct AdmittedStreamEntry {
+        std::weak_ptr<GenerateStream> stream;
+        int64_t                       max_batch_size{1};
+        int64_t                       max_remaining_tokens{0};
+        int64_t                       reserve_step{0};
+    };
+
+    struct AdmissionWaitState {
+        std::mutex                       mutex;
+        std::condition_variable          cv;
+        std::vector<AdmittedStreamEntry> admitted_streams;
+        size_t                           inflight_pre_init{0};
+        size_t                           pending_init_blocks{0};
+        size_t                           pending_full_init_blocks{0};
+        uint64_t                         release_generation{0};
+    };
+
+    struct DecodeHeadroomBudget {
+        size_t total_growth_blocks     = 0;
+        size_t full_growth_blocks      = 0;
+        bool   has_full_group          = false;
+        size_t full_seq_size_per_block = 0;
+        size_t min_full_total_blocks   = 0;
+        size_t total_reservable_blocks = 0;
+    };
+
 private:
+    static AdmittedStreamEntry  captureAdmittedStreamBudget(const std::shared_ptr<GenerateStream>& stream);
+    static void                 pruneAdmittedStreamsLocked(AdmissionWaitState& state);
+    static DecodeHeadroomBudget computeDecodeHeadroomBudget(const CacheConfig&                      cache_config,
+                                                            const std::vector<AdmittedStreamEntry>& active_streams,
+                                                            int64_t                                 window_tokens);
+    void                        notifyAdmissionChange() const;
+
     autil::ThreadPoolBasePtr thread_pool_;
     std::atomic<size_t>      onflight_load_cache_requests_{0};
+    std::shared_ptr<AdmissionWaitState> admission_state_{std::make_shared<AdmissionWaitState>()};
     size_t                   model_id;
 };
 

@@ -147,9 +147,9 @@ SamplerInputs NormalSamplerInputGatherer::allocateSamplerInputs(const StreamGrou
     sampler_inputs.frequency_penalty    = torch::empty({bs}, pinned_f32);
     sampler_inputs.no_repeat_ngram_size = torch::empty({bs}, pinned_i32);
     sampler_inputs.do_sample            = torch::empty({bs}, pinned_bool);
-    sampler_inputs.finished_mask        = torch::empty({bs}, torch::kBool);
+    sampler_inputs.finished_mask        = torch::empty({bs}, pinned_bool);
     if (stream_groups.needReturnCumLogProbs()) {
-        sampler_inputs.cum_log_probs = torch::empty({(int64_t)total_batch_size_in}, torch::kFloat32);
+        sampler_inputs.cum_log_probs = torch::empty({(int64_t)total_batch_size_in}, pinned_f32);
     }
     // Pin token_ids so Sampler::forward can non_blocking=true the H2D copy.
     // Without pinning, the .to(kCUDA) becomes a blocking pageable memcpy that
