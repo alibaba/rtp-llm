@@ -113,8 +113,14 @@ private:
     // while holding the cache mutex, with only synchronous drops mutating the tree.
     // A new pass must recheck released references and matchability.
     struct EvictionBatchContext {
-        std::unordered_set<TreeNode*>       rejected_candidates;
-        std::unordered_map<TreeNode*, bool> endpoint_matchable;
+        std::unordered_set<TreeNode*>                    rejected_candidates;
+        std::unordered_map<TreeNode*, bool>              endpoint_matchable;
+        std::optional<EvictionHeap::RejectedPrefixScope> rejected_prefix;
+    };
+
+    struct PreparedVictims {
+        std::vector<TransferDescriptor>    descriptors;
+        std::vector<EvictionTimingMetrics> timings;
     };
 
     struct BatchEvictResult {
@@ -146,15 +152,24 @@ private:
 
     EvictionHeap*                     heapFor(size_t group_set_id, Tier tier) const;
     bool                              isEvictable(TreeNode* node, size_t group_set_id, Tier source_tier) const;
-    std::optional<TransferDescriptor> chooseVictim(size_t                group_set_id,
-                                                   Tier                  tier,
-                                                   bool                  force_drop             = false,
-                                                   EvictionBatchContext* eviction_batch_context = nullptr,
-                                                   EvictionVictimTrigger trigger = EvictionVictimTrigger::WATERMARK,
-                                                   DropScope             scope   = DropScope::CASCADE);
-    bool                              canReclaimDeviceDrop(const TransferDescriptor& desc,
-                                                           EvictionBatchContext*     eviction_batch_context,
-                                                           DropScope                 scope) const;
+    std::optional<TransferDescriptor>
+    chooseDropVictim(size_t                group_set_id,
+                     Tier                  tier,
+                     EvictionBatchContext* eviction_batch_context = nullptr,
+                     EvictionVictimTrigger trigger                = EvictionVictimTrigger::FORCE_DROP,
+                     DropScope             scope                  = DropScope::CASCADE);
+    // Caller holds the cache mutex. Select and reserve a batch for eviction to a
+    // lower tier in one ordered pass. Return descriptors and timings in the same order.
+    // Target allocation, submission and rollback happen after this call returns.
+    PreparedVictims
+    chooseAndReserveVictims(size_t group_set_id, Tier source_tier, Tier target_tier, size_t max_victim_count);
+    // Check transfer eviction protections before deciding whether a heap entry is stale.
+    std::optional<EvictionVictimSkipReason>
+    transferEvictionRejectionReason(TreeNode* node, size_t group_set_id, Tier tier, const GroupSet& group_set) const;
+    bool canReclaimDeviceDrop(TreeNode*             node,
+                              size_t                group_set_id,
+                              EvictionBatchContext* eviction_batch_context,
+                              DropScope             scope) const;
     void logZeroDeviceReclaimLocked(size_t group_set_id,
                                     size_t member_group_id,
                                     size_t required_blocks,
@@ -167,7 +182,8 @@ private:
                     bool                  notify_settled,
                     EvictionVictimTrigger trigger                = EvictionVictimTrigger::FORCE_DROP,
                     EvictionBatchContext* eviction_batch_context = nullptr,
-                    DropScope             scope                  = DropScope::CASCADE);
+                    DropScope             scope                  = DropScope::CASCADE,
+                    bool                  may_drop_again         = true);
     // Builds the drop closure without reserving or detaching its resources.
     EvictionDropTask planDropTask(TransferDescriptor                         eviction_desc,
                                   std::vector<std::pair<TreeNode*, size_t>>& detached_resources,

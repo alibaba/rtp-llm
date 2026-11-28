@@ -8,6 +8,7 @@
 #include <exception>
 #include <limits>
 #include <map>
+#include <optional>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -248,14 +249,17 @@ size_t BlockTreeEvictor::reclaimDeviceBlocksLocked(size_t group_set_id, size_t m
                 break;
             }
             // Retry with a narrower plan and reconsider candidates rejected by the cascade pass.
-            scope                  = DropScope::PRIMARY_ONLY;
-            eviction_batch_context = {};
+            scope = DropScope::PRIMARY_ONLY;
+            eviction_batch_context.rejected_prefix.reset();
+            eviction_batch_context.rejected_candidates.clear();
+            eviction_batch_context.endpoint_matchable.clear();
             continue;
         }
         eviction_triggered        = true;
         const size_t current_free = device_pool->freeBlocksNum();
         reclaimed                 = current_free > initial_free ? current_free - initial_free : 0;
     }
+    eviction_batch_context.rejected_prefix.reset();
     if (eviction_triggered) {
         metrics_reporter_->reportEvictionTriggered(Tier::DEVICE, group_set->groupType(), /*force_drop=*/true);
     }
@@ -347,11 +351,20 @@ bool BlockTreeEvictor::dropLocked(size_t                group_set_id,
                                   bool                  notify_settled,
                                   EvictionVictimTrigger trigger,
                                   EvictionBatchContext* eviction_batch_context,
-                                  DropScope             scope) {
-    std::optional<TransferDescriptor> eviction_desc =
-        chooseVictim(group_set_id, source_tier, /*force_drop=*/true, eviction_batch_context, trigger, scope);
+                                  DropScope             scope,
+                                  bool                  may_drop_again) {
+    auto eviction_desc = chooseDropVictim(group_set_id, source_tier, eviction_batch_context, trigger, scope);
     if (!eviction_desc.has_value()) {
         return false;
+    }
+    if (may_drop_again && eviction_batch_context != nullptr && !eviction_batch_context->rejected_prefix.has_value()
+        && !eviction_batch_context->rejected_candidates.empty()) {
+        // Install the copied boundary while the heap still matches the
+        // completed scan. This drop can already promote or prune candidates.
+        heapFor(group_set_id, source_tier)
+            ->rememberRejectedPrefixBefore(eviction_desc->node,
+                                           eviction_batch_context->rejected_candidates,
+                                           eviction_batch_context->rejected_prefix);
     }
     runDropTask(std::move(*eviction_desc),
                 notify_settled,
@@ -387,7 +400,13 @@ bool BlockTreeEvictor::batchDropLocked(size_t  group_set_id,
         for (IBlockPool* pool : source_pools) {
             used_before.push_back(pool->usedBlocksNum());
         }
-        if (!dropLocked(group_set_id, source_tier, false, EvictionVictimTrigger::WATERMARK, &eviction_batch_context)) {
+        if (!dropLocked(group_set_id,
+                        source_tier,
+                        /*notify_settled=*/false,
+                        EvictionVictimTrigger::WATERMARK,
+                        &eviction_batch_context,
+                        DropScope::CASCADE,
+                        /*may_drop_again=*/remaining_count > 1)) {
             break;
         }
         processed                  = true;
@@ -401,6 +420,7 @@ bool BlockTreeEvictor::batchDropLocked(size_t  group_set_id,
         const size_t progress = std::min(std::max<size_t>(1, physically_released), remaining_count);
         remaining_count -= progress;
     }
+    eviction_batch_context.rejected_prefix.reset();
     if (processed) {
         settled_(false);
     }
@@ -432,6 +452,105 @@ bool BlockTreeEvictor::submitEvictionTask(std::vector<TransferDescriptor>    des
         return false;
     }
     return true;
+}
+
+BlockTreeEvictor::PreparedVictims BlockTreeEvictor::chooseAndReserveVictims(size_t group_set_id,
+                                                                            Tier   source_tier,
+                                                                            Tier   target_tier,
+                                                                            size_t max_victim_count) {
+    PreparedVictims prepared;
+    if (max_victim_count == 0) {
+        return prepared;
+    }
+    RTP_LLM_CHECK_WITH_INFO(target_tier != Tier::NONE,
+                            "batch victim preparation requires a target tier for eviction: source=%s",
+                            tierName(source_tier));
+    EvictionHeap*   heap      = heapFor(group_set_id, source_tier);
+    const GroupSet& group_set = *tree_->groupSets()[group_set_id];
+    auto*           counters =
+        metrics_reporter_->enabled() ?
+                      &eviction_victim_metrics_.at(EvictionVictimTrigger::WATERMARK, source_tier, group_set.groupType(), false) :
+                      nullptr;
+    auto       selection_begin  = std::chrono::steady_clock::time_point{};
+    bool       selection_active = false;
+    const auto begin_selection  = [&] {
+        if (counters != nullptr) {
+            counters->candidates_sum += heap->size();
+            selection_begin  = std::chrono::steady_clock::now();
+            selection_active = true;
+        }
+    };
+    const auto record_selection = [&](bool selected) {
+        if (selection_active) {
+            selection_active   = false;
+            counters->observed = true;
+            ++counters->calls;
+            counters->selected += selected;
+            counters->latency_sum_ns +=
+                std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - selection_begin)
+                    .count();
+        }
+    };
+    block_tree_cache_detail::ScopeRollback record([&] { record_selection(false); });
+    begin_selection();
+    // Eviction preparation only removes the current source from this heap. Copy
+    // and advance before qualification can discard it or suspendCandidate erases it.
+    for (auto candidate = heap->begin(); candidate != heap->end();) {
+        const EvictionEntry entry = *candidate++;
+        TreeNode*           node  = entry.node;
+        if (counters != nullptr) {
+            ++counters->scanned_candidates;
+        }
+        if (const auto reason = transferEvictionRejectionReason(node, group_set_id, source_tier, group_set)) {
+            if (counters != nullptr) {
+                ++counters->skipped[static_cast<size_t>(*reason)];
+            }
+            continue;
+        }
+        if (!isEvictable(node, group_set_id, source_tier)) {
+            if (counters != nullptr) {
+                ++counters->skipped[static_cast<size_t>(EvictionVictimSkipReason::INVALID_CANDIDATE)];
+            }
+            const GroupSetResource& resource = node->group_set_resources[group_set_id];
+            RTP_LLM_LOG_ERROR("invalid eviction candidate: node=%p key=%ld group_set_id=%zu source_tier=%s "
+                              "top_tier=%s transfer_state=%d",
+                              static_cast<void*>(node),
+                              node->cache_key,
+                              group_set_id,
+                              tierName(source_tier),
+                              tierName(resource.getTopTier()),
+                              static_cast<int>(resource.transfer_state));
+            heap->erase(node);
+            continue;
+        }
+        GroupSetResource&  resource = node->group_set_resources[group_set_id];
+        TransferDescriptor desc(node,
+                                group_set_id,
+                                /*path_index=*/0,
+                                source_tier,
+                                target_tier,
+                                resource.getBlocks(source_tier),
+                                /*initial_owner=*/true);
+        record_selection(true);
+        if (prepared.descriptors.empty()) {
+            prepared.descriptors.reserve(max_victim_count);
+            prepared.timings.reserve(max_victim_count);
+        }
+        prepared.timings.emplace_back(resource.candidate_meta);
+        suspendCandidate(node, group_set_id, source_tier);
+        resource.eviction_access_seq = resource.candidate_meta.last_access_seq;
+        resource.transfer_state      = GroupSetTransferState::EVICTING;
+        tree_->refreshPublishedState(node);
+        prepared.descriptors.push_back(std::move(desc));
+        if (prepared.descriptors.size() == max_victim_count) {
+            return prepared;
+        }
+        begin_selection();
+    }
+    // An exhausted scan corresponds to the old loop's final unsuccessful
+    // logical choose, including when the last selected entry emptied the heap.
+    record_selection(false);
+    return prepared;
 }
 
 BlockTreeEvictor::BatchEvictResult
@@ -469,32 +588,9 @@ BlockTreeEvictor::batchEvictLocked(size_t group_set_id, Tier source_tier, size_t
         return result;
     }
 
-    std::vector<TransferDescriptor>    descriptors;
-    std::vector<EvictionTimingMetrics> timings;
-    EvictionBatchContext               eviction_batch_context;
-    for (size_t victim_count = 0; victim_count < max_victim_count; ++victim_count) {
-        auto eviction_desc = chooseVictim(group_set_id,
-                                          source_tier,
-                                          /*force_drop=*/false,
-                                          &eviction_batch_context,
-                                          EvictionVictimTrigger::WATERMARK);
-        if (!eviction_desc.has_value()) {
-            break;
-        }
-        if (descriptors.empty()) {
-            descriptors.reserve(max_victim_count);
-            timings.reserve(max_victim_count);
-        }
-        auto& desc     = *eviction_desc;
-        auto& resource = desc.node->group_set_resources[desc.group_set_id];
-        timings.emplace_back(resource.candidate_meta);
-        // Reserve the source before selecting the next victim.
-        suspendCandidate(desc.node, desc.group_set_id, desc.source_tier);
-        resource.eviction_access_seq = resource.candidate_meta.last_access_seq;
-        resource.transfer_state      = GroupSetTransferState::EVICTING;
-        tree_->refreshPublishedState(desc.node);
-        descriptors.push_back(std::move(desc));
-    }
+    auto  prepared    = chooseAndReserveVictims(group_set_id, source_tier, target_tier, max_victim_count);
+    auto& descriptors = prepared.descriptors;
+    auto& timings     = prepared.timings;
     if (descriptors.empty()) {
         return {/*direct_progress=*/false,
                 /*async_submitted=*/false,
@@ -624,22 +720,55 @@ void BlockTreeEvictor::scheduleEvictionSettlement(std::shared_ptr<const Eviction
     }
 }
 
-std::optional<TransferDescriptor> BlockTreeEvictor::chooseVictim(size_t                group_set_id,
-                                                                 Tier                  tier,
-                                                                 bool                  force_drop,
-                                                                 EvictionBatchContext* eviction_batch_context,
-                                                                 EvictionVictimTrigger trigger,
-                                                                 DropScope             scope) {
+std::optional<EvictionVictimSkipReason> BlockTreeEvictor::transferEvictionRejectionReason(
+    TreeNode* node, size_t group_set_id, Tier tier, const GroupSet& group_set) const {
+    const GroupSetResource& resource = node->group_set_resources[group_set_id];
+    if (tier == Tier::DEVICE) {
+        for (size_t i = 0; i < resource.device_blocks.size(); ++i) {
+            if (!isNullBlockIdx(resource.device_blocks[i])) {
+                if (group_set.devicePools()[i]->hasRequestRef(resource.device_blocks[i])) {
+                    return EvictionVictimSkipReason::REQUEST_REF;
+                }
+                if (group_set.devicePools()[i]->isFrozen(resource.device_blocks[i])) {
+                    return EvictionVictimSkipReason::FROZEN;
+                }
+            }
+        }
+    } else if ((tier == Tier::HOST && !isNullBlockIdx(resource.host_block)
+                && group_set.hostPool()->isFrozen(resource.host_block))
+               || (tier == Tier::DISK && !isNullBlockIdx(resource.disk_block)
+                   && group_set.diskPool()->isFrozen(resource.disk_block))) {
+        return EvictionVictimSkipReason::FROZEN;
+    }
+    if (tier == Tier::DEVICE && group_set.groupType() == CacheGroupType::FULL) {
+        const bool children_idle =
+            std::none_of(node->children.begin(), node->children.end(), [group_set_id](const auto& child_entry) {
+                const GroupSetTransferState state =
+                    child_entry.second->group_set_resources[group_set_id].transfer_state;
+                return state == GroupSetTransferState::LOAD_PENDING || state == GroupSetTransferState::LOADING;
+            });
+        if (!children_idle) {
+            return EvictionVictimSkipReason::CHILD_LOADING;
+        }
+    }
+    return std::nullopt;
+}
+
+std::optional<TransferDescriptor> BlockTreeEvictor::chooseDropVictim(size_t                group_set_id,
+                                                                     Tier                  tier,
+                                                                     EvictionBatchContext* eviction_batch_context,
+                                                                     EvictionVictimTrigger trigger,
+                                                                     DropScope             scope) {
     EvictionHeap* heap = heapFor(group_set_id, tier);
     if (heap == nullptr) {
         return std::nullopt;
     }
 
     // Instrumentation adds no allocation, atomics, extra locks, or reporting in the selection loop.
-    auto* counters =
-        metrics_reporter_->enabled() ?
-            &eviction_victim_metrics_.at(trigger, tier, tree_->groupSets()[group_set_id]->groupType(), force_drop) :
-            nullptr;
+    auto* counters = metrics_reporter_->enabled() ?
+                         &eviction_victim_metrics_.at(
+                             trigger, tier, tree_->groupSets()[group_set_id]->groupType(), /*force_drop=*/true) :
+                         nullptr;
     if (counters != nullptr) {
         counters->candidates_sum += heap->size();
     }
@@ -669,51 +798,12 @@ std::optional<TransferDescriptor> BlockTreeEvictor::chooseVictim(size_t         
             return false;
         }
     } context{counters, eviction_batch_context};
-    const auto can_evict_uncached = [this, group_set_id, tier, force_drop, scope, &context](TreeNode* node) {
-        if (force_drop && tier == Tier::DEVICE && isEvictable(node, group_set_id, tier)) {
-            const TransferDescriptor desc(node,
-                                          group_set_id,
-                                          /*path_index=*/0,
-                                          tier,
-                                          Tier::NONE,
-                                          node->group_set_resources[group_set_id].getBlocks(tier),
-                                          /*initial_owner=*/true);
-            if (!canReclaimDeviceDrop(desc, context.eviction_batch_context, scope)) {
-                return context.skip(EvictionVictimSkipReason::NOT_RECLAIMABLE);
-            }
+    const auto can_evict_uncached = [this, group_set_id, tier, scope, &context](TreeNode* node) {
+        if (tier == Tier::DEVICE && isEvictable(node, group_set_id, tier)
+            && !canReclaimDeviceDrop(node, group_set_id, context.eviction_batch_context, scope)) {
+            return context.skip(EvictionVictimSkipReason::NOT_RECLAIMABLE);
         }
-        if (!force_drop) {
-            const GroupSetPtr&      group_set = tree_->groupSets()[group_set_id];
-            const GroupSetResource& resource  = node->group_set_resources[group_set_id];
-            if (tier == Tier::DEVICE) {
-                for (size_t i = 0; i < resource.device_blocks.size(); ++i) {
-                    if (!isNullBlockIdx(resource.device_blocks[i])) {
-                        if (group_set->devicePools()[i]->hasRequestRef(resource.device_blocks[i])) {
-                            return context.skip(EvictionVictimSkipReason::REQUEST_REF);
-                        }
-                        if (group_set->devicePools()[i]->isFrozen(resource.device_blocks[i])) {
-                            return context.skip(EvictionVictimSkipReason::FROZEN);
-                        }
-                    }
-                }
-            } else if ((tier == Tier::HOST && !isNullBlockIdx(resource.host_block)
-                        && group_set->hostPool()->isFrozen(resource.host_block))
-                       || (tier == Tier::DISK && !isNullBlockIdx(resource.disk_block)
-                           && group_set->diskPool()->isFrozen(resource.disk_block))) {
-                return context.skip(EvictionVictimSkipReason::FROZEN);
-            }
-        }
-        if (force_drop || tier != Tier::DEVICE
-            || tree_->groupSets()[group_set_id]->groupType() != CacheGroupType::FULL) {
-            return true;
-        }
-        const bool children_idle =
-            std::none_of(node->children.begin(), node->children.end(), [group_set_id](const auto& child_entry) {
-                const GroupSetTransferState state =
-                    child_entry.second->group_set_resources[group_set_id].transfer_state;
-                return state == GroupSetTransferState::LOAD_PENDING || state == GroupSetTransferState::LOADING;
-            });
-        return children_idle || context.skip(EvictionVictimSkipReason::CHILD_LOADING);
+        return true;
     };
     // Keep the std::function passed to best() at its original two-pointer capture size.
     const auto can_evict = [&context, &can_evict_uncached](TreeNode* node) {
@@ -732,7 +822,12 @@ std::optional<TransferDescriptor> BlockTreeEvictor::chooseVictim(size_t         
         return true;
     };
     std::optional<EvictionEntry> entry;
-    while ((entry = heap->best(can_evict)).has_value()) {
+    while (true) {
+        entry = heap->bestForDrop(
+            can_evict, eviction_batch_context->rejected_candidates, eviction_batch_context->rejected_prefix);
+        if (!entry.has_value()) {
+            break;
+        }
         if (isEvictable(entry->node, group_set_id, tier)) {
             break;
         }
@@ -752,20 +847,12 @@ std::optional<TransferDescriptor> BlockTreeEvictor::chooseVictim(size_t         
         return std::nullopt;
     }
 
-    GroupSetResource& resource    = entry->node->group_set_resources[group_set_id];
-    Tier              target_tier = Tier::NONE;
-    if (!force_drop) {
-        if (tier == Tier::DEVICE && is_tier_enabled_(Tier::HOST)) {
-            target_tier = Tier::HOST;
-        } else if (tier == Tier::HOST && is_tier_enabled_(Tier::DISK)) {
-            target_tier = Tier::DISK;
-        }
-    }
-    TransferDescriptor victim(entry->node,
+    const GroupSetResource& resource = entry->node->group_set_resources[group_set_id];
+    TransferDescriptor      victim(entry->node,
                               group_set_id,
                               /*path_index=*/0,
                               tier,
-                              target_tier,
+                              Tier::NONE,
                               resource.getBlocks(tier),
                               /*initial_owner=*/true);
     selected = true;
@@ -1284,32 +1371,35 @@ void BlockTreeEvictor::eraseNodeFromAllHeaps(TreeNode* node) {
     }
 }
 
-bool BlockTreeEvictor::canReclaimDeviceDrop(const TransferDescriptor& desc,
-                                            EvictionBatchContext*     eviction_batch_context,
-                                            DropScope                 scope) const {
-    const auto can_reclaim = [this](const TransferDescriptor& candidate) {
-        if (candidate.source_tier != Tier::DEVICE) {
-            return true;
-        }
-        const auto& pools = tree_->groupSets()[candidate.group_set_id]->devicePools();
-        for (size_t i = 0; i < candidate.source_blocks.size(); ++i) {
-            if (!isNullBlockIdx(candidate.source_blocks[i])
-                && !pools[i]->canReclaimCacheBlock(candidate.source_blocks[i])) {
+bool BlockTreeEvictor::canReclaimDeviceDrop(TreeNode*             node,
+                                            size_t                group_set_id,
+                                            EvictionBatchContext* eviction_batch_context,
+                                            DropScope             scope) const {
+    const auto can_reclaim = [this](size_t candidate_group_set_id, const BlockIdList& blocks) {
+        const auto& pools = tree_->groupSets()[candidate_group_set_id]->devicePools();
+        for (size_t i = 0; i < blocks.size(); ++i) {
+            if (!isNullBlockIdx(blocks[i]) && !pools[i]->canReclaimCacheBlock(blocks[i])) {
                 return false;
             }
         }
         return true;
     };
-    if (!can_reclaim(desc)) {
+    // Selection holds the cache mutex, so the primary block list can be read
+    // directly before allocating a descriptor for a drop plan.
+    const auto& blocks = node->group_set_resources[group_set_id].device_blocks;
+    if (!can_reclaim(group_set_id, blocks)) {
         return false;
     }
-    if (tree_->groupSets()[desc.group_set_id]->groupType() == CacheGroupType::FULL) {
+    if (tree_->groupSets()[group_set_id]->groupType() == CacheGroupType::FULL) {
         // FULL usually shares request ownership with its related resources. Rarely,
         // an upward cascade can reach a request-held ancestor whose SWA was dropped.
         // Check only the primary resource to avoid planning the closure twice; any
         // held related block stays physically alive through its request reference.
         return scope == DropScope::CASCADE;
     }
+    const TransferDescriptor desc(
+        node, group_set_id, /*path_index=*/0, Tier::DEVICE, Tier::NONE, blocks, /*initial_owner=*/true);
+
     std::vector<std::pair<TreeNode*, size_t>> detached_resources;
     const EvictionDropTask task = planDropTask(desc, detached_resources, eviction_batch_context, DropScope::CASCADE);
     if (scope == DropScope::PRIMARY_ONLY) {
@@ -1330,8 +1420,11 @@ bool BlockTreeEvictor::canReclaimDeviceDrop(const TransferDescriptor& desc,
     }
     // FULL pruning and cascades must not discard cache entries backed by held
     // device blocks either. Planning does not reserve or detach any resource.
-    return std::all_of(task.cascade_descs.begin(), task.cascade_descs.end(), can_reclaim)
-           && std::all_of(task.dependent_prune_descs.begin(), task.dependent_prune_descs.end(), can_reclaim)
+    const auto can_reclaim_related = [&can_reclaim](const TransferDescriptor& candidate) {
+        return candidate.source_tier != Tier::DEVICE || can_reclaim(candidate.group_set_id, candidate.source_blocks);
+    };
+    return std::all_of(task.cascade_descs.begin(), task.cascade_descs.end(), can_reclaim_related)
+           && std::all_of(task.dependent_prune_descs.begin(), task.dependent_prune_descs.end(), can_reclaim_related)
            && std::none_of(detached_resources.begin(), detached_resources.end(), [](const auto& entry) {
                   return entry.first->group_set_resources[entry.second].hasTier(Tier::DEVICE);
               });
