@@ -9,6 +9,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import torch
+
 from rtp_llm.access_logger import access_logger
 from rtp_llm.access_logger.access_logger import AccessLogger, MMAccessLogger
 from rtp_llm.config.model_config import ModelConfig
@@ -16,11 +18,91 @@ from rtp_llm.config.py_config_modules import PyEnvConfigs
 from rtp_llm.frontend.frontend_server import FrontendServer
 from rtp_llm.multimodal.mm_process_engine import MMProcessEngine
 from rtp_llm.multimodal.mm_scheduler import MMSchedulerRequestTooLargeError
+from rtp_llm.ops import MMPreprocessConfig, MultimodalInput
 from rtp_llm.server.backend_manager import BackendManager
 from rtp_llm.server.server_args.misc_group_args import init_misc_group_args
 from rtp_llm.server.server_args.server_args import EnvArgumentParser
 from rtp_llm.server.server_args.vit_group_args import init_vit_group_args
 from rtp_llm.structure.request_constants import request_id_field_name
+
+
+class MMLogFormattingTest(unittest.TestCase):
+    def test_native_batch_strings_match_scalar_and_keep_custom_inputs(self):
+        for config, expected in (
+            (MMPreprocessConfig(), "-1_-1_-1_-1_-1_-1_-1__-1_-1"),
+            (
+                MMPreprocessConfig(-1, -1, -1, -1, -1, -1, -1, [], 30000),
+                "-1_-1_-1_-1_-1_-1_-1__-1_30000",
+            ),
+            (
+                MMPreprocessConfig(17, -1, -1, -1, -1, -1, -1, [0.125, -0.0], 30000),
+                "17_-1_-1_-1_-1_-1_-1_0.125000:-0.000000_-1_30000",
+            ),
+        ):
+            with self.subTest(config=expected):
+                self.assertEqual(config.to_string(), expected)
+                inputs = [
+                    MultimodalInput(url, 0, torch.empty(0, device="cpu"), config)
+                    for url in ("", "image://" + "x" * 300, "image://测试")
+                ]
+                custom = SimpleNamespace(to_string=lambda: "custom-input")
+                inputs.append(custom)
+                self.assertEqual(
+                    MultimodalInput.get_log_strings(inputs),
+                    [item.to_string() for item in inputs],
+                )
+
+    def test_mm_logs_keep_every_record_and_current_input_values(self):
+        logger = MMAccessLogger.__new__(MMAccessLogger)
+        logger.query_logger = MagicMock()
+        logger.logger = MagicMock()
+        config = MMPreprocessConfig(-1, -1, -1, -1, -1, -1, -1, [], 30000)
+        inputs = [
+            MultimodalInput("", 0, torch.empty(0, device="cpu"), config)
+            for _ in range(32)
+        ]
+        queries = [item.to_string() for item in inputs]
+        now = 1700000000.125
+        log_time = (
+            access_logger.time.strftime(
+                "%Y-%m-%d %H:%M:%S", access_logger.time.localtime(now)
+            )
+            + ".125"
+        )
+
+        def expected(query, exception=None, response=None):
+            return access_logger.dump_json(
+                dict(
+                    id=42,
+                    query=query,
+                    log_time=log_time,
+                    exception=exception,
+                    response=response,
+                )
+            )
+
+        with patch.object(access_logger.time, "time", return_value=now):
+            logger.log_query_access(inputs, 42)
+            self.assertEqual(
+                logger.query_logger.info.call_args.args[0], expected(queries)
+            )
+            inputs[0].url = "image://changed"
+            inputs[0].mm_preprocess_config.mm_timeout_ms = 123
+            current = [item.to_string() for item in inputs]
+            logger.log_success_access(inputs, "result", 42)
+            error = RuntimeError("failure")
+            logger.log_exception_access(inputs, error, 42)
+
+        self.assertEqual(logger.query_logger.info.call_count, 1)
+        self.assertEqual(logger.logger.info.call_count, 2)
+        self.assertEqual(
+            logger.logger.info.call_args_list[0].args[0],
+            expected(current, response="result"),
+        )
+        self.assertEqual(
+            logger.logger.info.call_args_list[1].args[0],
+            expected(current, exception=error),
+        )
 
 
 class AccessLoggerTest(unittest.TestCase):

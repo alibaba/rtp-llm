@@ -51,7 +51,7 @@ class BertEmbeddingInputs:
     ) -> None: ...
     def __repr__(self) -> str: ...
     @property
-    def combo_position_ids(self) -> torch.Tensor:
+    def combo_position_ids(self) -> torch.Tensor | None:
         """
         Combined position IDs tensor
         """
@@ -59,7 +59,7 @@ class BertEmbeddingInputs:
     @combo_position_ids.setter
     def combo_position_ids(self, arg0: torch.Tensor) -> None: ...
     @property
-    def combo_tokens_type_ids(self) -> torch.Tensor:
+    def combo_tokens_type_ids(self) -> torch.Tensor | None:
         """
         Combined token type IDs tensor
         """
@@ -75,7 +75,7 @@ class BertEmbeddingInputs:
     @input_embedding_scalar.setter
     def input_embedding_scalar(self, arg0: float) -> None: ...
     @property
-    def position_encoding(self) -> torch.Tensor:
+    def position_encoding(self) -> torch.Tensor | None:
         """
         Position encoding tensor
         """
@@ -83,7 +83,7 @@ class BertEmbeddingInputs:
     @position_encoding.setter
     def position_encoding(self, arg0: torch.Tensor) -> None: ...
     @property
-    def token_type_embedding(self) -> torch.Tensor:
+    def token_type_embedding(self) -> torch.Tensor | None:
         """
         Token type embedding tensor
         """
@@ -303,7 +303,7 @@ class PyEmbeddingInputs:
     def __init__(self) -> None: ...
     def __repr__(self) -> str: ...
     @property
-    def combo_tokens_type_ids(self) -> torch.Tensor:
+    def combo_tokens_type_ids(self) -> torch.Tensor | None:
         """
         Combined token type IDs tensor
         """
@@ -311,7 +311,7 @@ class PyEmbeddingInputs:
     @combo_tokens_type_ids.setter
     def combo_tokens_type_ids(self, arg0: torch.Tensor) -> None: ...
     @property
-    def text_tokens_mask(self) -> torch.Tensor:
+    def text_tokens_mask(self) -> torch.Tensor | None:
         """
         Text tokens mask tensor
         """
@@ -337,6 +337,8 @@ class PyModelInputs:
     need_all_hidden_states: bool
     need_all_logits: bool
     engram_token_windows: torch.Tensor
+    input_ids_host: torch.Tensor | None
+    text_tokens_mask_host: torch.Tensor | None
     @typing.overload
     def __init__(self) -> None: ...
     @typing.overload
@@ -479,7 +481,7 @@ class PyMultimodalInputs:
     @mm_extra_input.setter
     def mm_extra_input(self, arg0: list[torch.Tensor]) -> None: ...
     @property
-    def mm_features_locs(self) -> torch.Tensor:
+    def mm_features_locs(self) -> torch.Tensor | None:
         """
         Multimodal features locations tensor
         """

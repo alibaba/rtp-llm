@@ -12,7 +12,13 @@ import torch
 __all__ = [
     "SelectTopkOp",
     "embedding",
+    "fused_multimodal_copy_",
+    "try_fused_multimodal_copy_",
     "fused_add_layernorm",
+    "fused_add_layernorm_quant_fp8",
+    "fused_bias_add",
+    "fused_bias_gelu",
+    "fused_bias_gelu_quant_fp8",
     "fused_qk_rmsnorm",
     "FlashInferMlaAttnParams",
     "layernorm",
@@ -60,6 +66,44 @@ def fused_add_layernorm(
     """
     Fused Add LayerNorm kernel
     """
+
+def fused_add_layernorm_quant_fp8(
+    input: torch.Tensor,
+    residual: torch.Tensor,
+    bias: torch.Tensor,
+    weight: torch.Tensor,
+    beta: torch.Tensor,
+    output: torch.Tensor,
+    scales: torch.Tensor,
+    eps: float,
+) -> None:
+    """Fused Add LayerNorm and per-block FP8 UE8M0 quantization."""
+
+def fused_bias_add(input: torch.Tensor, bias: torch.Tensor) -> None:
+    """In-place per-column bias add kernel."""
+
+def fused_bias_gelu(input: torch.Tensor, bias: torch.Tensor) -> None:
+    """In-place fused bias add and exact GELU kernel."""
+
+def fused_multimodal_copy_(
+    dst: torch.Tensor,
+    srcs: list[torch.Tensor],
+    row_offsets: list[int],
+) -> None:
+    """Copy multiple contiguous feature tensors into a token embedding tensor."""
+
+def try_fused_multimodal_copy_(
+    dst: torch.Tensor, srcs: list[torch.Tensor], row_offsets: list[int]
+) -> bool:
+    """Copy a disjoint GPU batch, returning false without writing if unsupported."""
+
+def fused_bias_gelu_quant_fp8(
+    input: torch.Tensor,
+    bias: torch.Tensor,
+    output: torch.Tensor,
+    scales: torch.Tensor,
+) -> None:
+    """Fused bias, exact GELU, and per-block FP8 UE8M0 quantization."""
 
 def fused_qk_rmsnorm(
     IO: torch.Tensor,

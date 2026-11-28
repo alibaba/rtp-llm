@@ -6,6 +6,8 @@
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
 #include <c10/core/InferenceMode.h>
 #include <exception>
+#include <algorithm>
+#include <c10/core/impl/VirtualGuardImpl.h>
 #include <utility>
 
 using namespace std;
@@ -59,6 +61,7 @@ absl::Status EmbeddingEngine::stop() {
     RETURN_IF_STATUS_ERROR(scheduler_->stop());
     if (loop_thread_.joinable()) {
         loop_thread_.join();
+        executor_->drainTensorOutput();
     }
     return absl::OkStatus();
 }
@@ -82,9 +85,19 @@ std::shared_ptr<EmbeddingOutput> EmbeddingEngine::decode(th::Tensor             
                                                          int64_t                          request_id,
                                                          std::optional<MultimodalFeature> multimodal_features,
                                                          std::optional<th::Tensor>        input_embeddings,
-                                                         EmbeddingProfileConfig           profile_config) {
+                                                         EmbeddingProfileConfig           profile_config,
+                                                         bool                             inputs_on_current_stream) {
     auto input = std::make_shared<EmbeddingInput>(
         token_ids, token_type_ids, input_lengths, request_id, multimodal_features, input_embeddings);
+#if USING_CUDA || USING_ROCM
+    if (inputs_on_current_stream && executor_->canOverlapTensorOutput()) {
+        input->allow_stream_overlap = true;
+        if ((multimodal_features && !multimodal_features->features.empty())
+            || (input_embeddings && input_embeddings->is_cuda())) {
+            input->producer_ready = runtimeCreateEvent();
+        }
+    }
+#endif
     return decode(input, std::move(profile_config));
 }
 
@@ -106,12 +119,25 @@ absl::Status EmbeddingEngine::enqueue(EmbeddingStreamPtr streams) {
 }
 
 absl::Status EmbeddingEngine::step() {
-    cudaSyncAndCheck();
     RTP_LLM_LOG_DEBUG(__PRETTY_FUNCTION__);
     CHECK_AND_RETURN_REF(streams, scheduler_->scheduleNew());
     if (streams.empty()) {
         RTP_LLM_LOG_INFO("no query run and sleep");
         return absl::OkStatus();
+    }
+    const bool overlap = std::all_of(streams.begin(), streams.end(), [](const auto& stream) {
+        return stream->embeddingInput()->allow_stream_overlap;
+    });
+    if (overlap) {
+        for (const auto& stream : streams) {
+            const auto& event = stream->embeddingInput()->producer_ready;
+            if (event) {
+                c10::impl::VirtualGuardImpl guard(event->device_type());
+                event->block(guard.getStream(guard.getDevice()));
+            }
+        }
+    } else {
+        cudaSyncAndCheck();
     }
     if (!step_profiler_.enabled()) {
         for (const auto& stream : streams) {
@@ -127,8 +153,12 @@ absl::Status EmbeddingEngine::step() {
     {
         [[maybe_unused]] auto profile_step = step_profiler_.stepScope();
         try {
-            auto status = executor_->process(streams);
+            auto status = executor_->process(streams, overlap);
             if (!status.ok()) {
+                // A failed batch can still have queued reads of RPC-owned inputs.
+                if (overlap) {
+                    cudaSyncAndCheck();
+                }
                 for (auto& stream : streams) {
                     stream->setError(status.ToString());
                     RTP_LLM_LOG_WARNING("error_stream_info: length: %d, exception: %s",
@@ -137,6 +167,9 @@ absl::Status EmbeddingEngine::step() {
                 }
             }
         } catch (const exception& e) {
+            if (overlap) {
+                cudaSyncAndCheck();
+            }
             std::string error_msg = e.what();
             RTP_LLM_LOG_WARNING("run engine failed, stream size: %d, error: %s", streams.size(), error_msg.c_str());
             for (auto& stream : streams) {
@@ -148,7 +181,11 @@ absl::Status EmbeddingEngine::step() {
                 abort();
             }
         }
-        cudaSyncAndCheck();
+        if (overlap) {
+            cudaCheckLastError();
+        } else {
+            cudaSyncAndCheck();
+        }
     }
     return absl::OkStatus();
 }

@@ -90,12 +90,16 @@ def create_per_token_group_quant_fp8_output_scale(
         x_s_mn, x_s_k = x_q_mn, x_q_k // group_size
         aligned_mn = ceil_align(x_s_mn, 4)
         aligned_k = ceil_align(x_s_k, 4)
-        # TODO(FIXME): Fix cuda kernel and recover here to empty.
-        return torch.empty(
-            (*x_batch, aligned_k // 4, aligned_mn),
+        packed_k = aligned_k // 4
+        storage = torch.empty(
+            (*x_batch, packed_k, aligned_mn),
             device=device,
             dtype=torch.int,
-        ).transpose(-1, -2)[..., :x_s_mn, :]
+        )
+        if not x_batch:
+            # Return the logical rows while retaining the trailing TMA padding.
+            return storage.as_strided((x_s_mn, packed_k), (1, storage.stride(0)))
+        return storage.transpose(-1, -2)[..., :x_s_mn, :]
     elif column_major_scales:
         if scale_tma_aligned:
             # TODO extract "align" function

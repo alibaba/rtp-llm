@@ -935,6 +935,7 @@ class LinearAttentionConfig:
     def to_string(self) -> str:
         ...
 class MMModelConfig:
+    hash_embedding_features: bool
     include_sep_tokens: bool
     is_multimodal: bool
     mm_position_ids_style: int
@@ -1201,6 +1202,12 @@ class MoeConfig:
     def to_string(self) -> str:
         ...
 class MultimodalInput:
+    @staticmethod
+    def get_log_strings(inputs: list[MultimodalInput]) -> list[str]:
+        ...
+    @staticmethod
+    def get_precomputed_features(inputs: list[MultimodalInput], default_timeout_ms: int, default_type: int, tensor_type: int) -> typing.Optional[tuple[list[torch.Tensor], int, bool]]:
+        ...
     mm_preprocess_config: ...
     mm_type: int
     tensor: torch.Tensor

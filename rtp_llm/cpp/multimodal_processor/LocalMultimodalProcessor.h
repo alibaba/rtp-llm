@@ -17,53 +17,22 @@ private:
         if (mm_inputs.size() == 0) {
             return MultimodalOutput();
         } else if (!mm_process_engine_.is_none()) {
-            std::vector<std::string>   urls;
-            std::vector<int32_t>       types;
-            std::vector<torch::Tensor> tensors;
-            for (auto& mm_input : mm_inputs) {
-                urls.push_back(mm_input.url);
-                tensors.push_back(mm_input.tensor);
-                types.push_back(mm_input.mm_type);
-            }
             try {
                 py::gil_scoped_acquire acquire;
-
-                std::vector<py::list> mm_preprocess_configs;
-                for (auto& mm_input : mm_inputs) {
-                    py::list mm_preprocess_config;
-                    mm_preprocess_config.append(mm_input.mm_preprocess_config.width);
-                    mm_preprocess_config.append(mm_input.mm_preprocess_config.height);
-                    mm_preprocess_config.append(mm_input.mm_preprocess_config.min_pixels);
-                    mm_preprocess_config.append(mm_input.mm_preprocess_config.max_pixels);
-                    mm_preprocess_config.append(mm_input.mm_preprocess_config.fps);
-                    mm_preprocess_config.append(mm_input.mm_preprocess_config.min_frames);
-                    mm_preprocess_config.append(mm_input.mm_preprocess_config.max_frames);
-                    py::list crop_positions;
-                    for (const float& crop_position : mm_input.mm_preprocess_config.crop_positions) {
-                        crop_positions.append(crop_position);
-                    }
-                    mm_preprocess_config.append(crop_positions);
-                    mm_preprocess_config.append(mm_input.mm_preprocess_config.mm_timeout_ms);
-                    mm_preprocess_config.append(mm_input.mm_preprocess_config.max_long_side_pixel);
-                    mm_preprocess_configs.push_back(mm_preprocess_config);
-                }
-
-                auto res = mm_process_engine_.attr("mm_embedding_cpp")(
-                    urls,
-                    types,
-                    tensors,
-                    mm_preprocess_configs,
+                auto                   res = mm_process_engine_.attr("mm_embedding_inputs_cpp")(
+                    py::cast(mm_inputs, py::return_value_policy::copy),
                     request_id,
                     dashScopeMetadata(server_context, "x-dashscope-uid"),
                     dashScopeMetadata(server_context, "x-dashscope-service"));
-                auto mm_embedding_vec = convertPyObjectToVec(res.attr("embeddings"));
-
-                MultimodalOutput           mm_embedding_res;
-                std::vector<torch::Tensor> mm_features;
-                for (auto& emb : mm_embedding_vec) {
-                    mm_features.emplace_back(convertPyObjectToTensor(emb));
+                MultimodalOutput mm_embedding_res;
+                auto             stacked = py::getattr(res, "stacked_embeddings", py::none());
+                if (!stacked.is_none()) {
+                    mm_embedding_res.mm_features = convertPyObjectToTensor(stacked).unbind(0);
+                } else {
+                    for (const auto& value : convertPyObjectToVec(res.attr("embeddings"))) {
+                        mm_embedding_res.mm_features.emplace_back(convertPyObjectToTensor(value));
+                    }
                 }
-                mm_embedding_res.mm_features = mm_features;
                 if (py::hasattr(res, "feature_hashes") && !res.attr("feature_hashes").is_none()) {
                     std::vector<torch::Tensor> hashes;
                     for (auto& value : convertPyObjectToVec(res.attr("feature_hashes"))) {

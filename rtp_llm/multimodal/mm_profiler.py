@@ -2,11 +2,20 @@ import json
 import logging
 import os
 import threading
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from typing import Any, Dict, List, Optional
 
 import torch
 import torch.profiler
+
+
+def record_function(name: str):
+    # The dispatcher-backed Python scope is relatively expensive even when
+    # Kineto is idle. Query the current thread so an armed worker still emits
+    # the ordinary named profiler ranges.
+    if torch.autograd._profiler_enabled():
+        return torch.profiler.record_function(name)
+    return nullcontext()
 
 
 class MMProfiler:

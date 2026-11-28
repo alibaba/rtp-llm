@@ -20,6 +20,7 @@
 
 #if USING_CUDA
 #include "rtp_llm/models_py/bindings/cuda/cuda_host_utils.h"
+#include <cuda_fp8.h>
 #endif
 
 #if USING_ROCM
@@ -38,6 +39,157 @@ compute_layernorm(Tf val, float s_mean, float s_variance, const T* gamma, const 
     }
     return ret;
 }
+
+#if USING_CUDA
+// Vision-BERT/DeepGEMM fast path.  This deliberately mirrors the existing
+// USE_DIFF_OF_SQUARES AddBiasResidualLayerNorm reduction and BF16 rounding,
+// then quantizes the rounded register values into DeepGEMM's
+// per-128 UE8M0 TMA layout.  Keeping both outputs preserves the residual path
+// while avoiding a second global-memory read and a separate quant kernel.
+template<typename T>
+__global__ void generalAddBiasResidualLayerNormQuantFp8(T*             output,
+                                                        T*             normed_output,
+                                                        const T*       input,
+                                                        const T*       bias,
+                                                        const T*       residual,
+                                                        const T*       gamma,
+                                                        const T*       beta,
+                                                        float          eps,
+                                                        int            hidden_dim,
+                                                        __nv_fp8_e4m3* output_quant,
+                                                        uint32_t*      scales,
+                                                        int            scale_stride) {
+    using float_packed_t     = typename packed_as<float, num_elems<T>::value>::type;
+    const int      row       = blockIdx.x;
+    const int      lane      = threadIdx.x % 32;
+    const int      group     = threadIdx.x / 32;
+    const int      pair_col  = group * 64 + lane;
+    const int      pair_base = row * (hidden_dim / 2) + pair_col;
+    float_packed_t value[2];
+    float          moments[4];
+#pragma unroll
+    for (int part = 0; part < 2; ++part) {
+        const int offset = part * 32;
+        T         v      = input[pair_base + offset];
+        if (bias != nullptr) {
+            v = add(v, ldg(&bias[pair_col + offset]));
+        }
+        v                          = add(v, ldg(&residual[pair_base + offset]));
+        output[pair_base + offset] = v;
+        value[part]                = cuda_cast<float_packed_t>(v);
+        moments[2 * part]          = cuda_sum<float>(value[part]);
+        moments[2 * part + 1]      = cuda_sum<float>(value[part] * value[part]);
+    }
+
+    // Each half of the scaling group retains its original 32-pair XOR sum.
+    warpReduceSumV2<float, 4>(moments);
+    __shared__ float2 partial[16];
+    if (lane == 0) {
+        partial[2 * group]     = make_float2(moments[0], moments[1]);
+        partial[2 * group + 1] = make_float2(moments[2], moments[3]);
+    }
+    __syncthreads();
+    const float2 p        = lane < (hidden_dim / 64) ? partial[lane] : make_float2(0.f, 0.f);
+    float        whole[2] = {p.x, p.y};
+    warpReduceSumV2<float, 2>(whole);
+    const float mean    = __shfl_sync(0xffffffffu, whole[0], 0) / hidden_dim;
+    const float squares = __shfl_sync(0xffffffffu, whole[1], 0) / hidden_dim;
+    const float inv_std = rsqrtf(squares - mean * mean + eps);
+
+    float_packed_t rounded[2];
+    float          amax = 1e-4f;
+#pragma unroll
+    for (int part = 0; part < 2; ++part) {
+        const int offset     = part * 32;
+        const T   normalized = cuda_cast<T>(
+            compute_layernorm<float_packed_t, T, true>(value[part], mean, inv_std, gamma, beta, pair_col + offset));
+        normed_output[pair_base + offset] = normalized;
+        rounded[part]                     = cuda_cast<float_packed_t>(normalized);
+        amax                              = fmaxf(amax, fmaxf(fabsf(rounded[part].x), fabsf(rounded[part].y)));
+    }
+#pragma unroll
+    for (int delta = 16; delta > 0; delta >>= 1) {
+        amax = fmaxf(amax, __shfl_xor_sync(0xffffffffu, amax, delta));
+    }
+    const float    raw_scale = fmaxf(amax / 448.0f, 1e-10f);
+    const uint32_t bits      = __float_as_uint(raw_scale);
+    const uint32_t exponent  = (bits >> 23) + ((bits & 0x7fffffU) != 0);
+    const float    scale     = __uint_as_float(exponent << 23);
+    if (lane == 0) {
+        reinterpret_cast<uint8_t*>(scales)[(group / 4) * scale_stride * 4 + row * 4 + group % 4] =
+            static_cast<uint8_t>(exponent);
+    }
+#pragma unroll
+    for (int part = 0; part < 2; ++part) {
+        const float2 q = make_float2(fminf(fmaxf(rounded[part].x / scale, -448.0f), 448.0f),
+                                     fminf(fmaxf(rounded[part].y / scale, -448.0f), 448.0f));
+        reinterpret_cast<__nv_fp8x2_e4m3*>(output_quant)[pair_base + 32 * part] = __nv_fp8x2_e4m3(q);
+    }
+}
+
+template<typename T>
+void invokeGeneralAddBiasResidualLayerNormQuantFp8(T*           out,
+                                                   T*           norm_output,
+                                                   const T*     input,
+                                                   const T*     bias,
+                                                   const T*     residual,
+                                                   const T*     gamma,
+                                                   const T*     beta,
+                                                   float        eps,
+                                                   int          tokens,
+                                                   int          hidden_dim,
+                                                   void*        out_quant,
+                                                   uint32_t*    scales,
+                                                   int          scale_stride,
+                                                   cudaStream_t stream) {
+    using packed_t = typename packed_as<T, 2>::type;
+    dim3 block(hidden_dim / 4);
+    dim3 grid(tokens);
+    generalAddBiasResidualLayerNormQuantFp8<<<grid, block, 0, stream>>>(reinterpret_cast<packed_t*>(out),
+                                                                        reinterpret_cast<packed_t*>(norm_output),
+                                                                        reinterpret_cast<const packed_t*>(input),
+                                                                        reinterpret_cast<const packed_t*>(bias),
+                                                                        reinterpret_cast<const packed_t*>(residual),
+                                                                        reinterpret_cast<const packed_t*>(gamma),
+                                                                        reinterpret_cast<const packed_t*>(beta),
+                                                                        eps,
+                                                                        hidden_dim,
+                                                                        static_cast<__nv_fp8_e4m3*>(out_quant),
+                                                                        scales,
+                                                                        scale_stride);
+}
+
+template void invokeGeneralAddBiasResidualLayerNormQuantFp8<half>(half*,
+                                                                  half*,
+                                                                  const half*,
+                                                                  const half*,
+                                                                  const half*,
+                                                                  const half*,
+                                                                  const half*,
+                                                                  float,
+                                                                  int,
+                                                                  int,
+                                                                  void*,
+                                                                  uint32_t*,
+                                                                  int,
+                                                                  cudaStream_t);
+#ifdef ENABLE_BF16
+template void invokeGeneralAddBiasResidualLayerNormQuantFp8<__nv_bfloat16>(__nv_bfloat16*,
+                                                                           __nv_bfloat16*,
+                                                                           const __nv_bfloat16*,
+                                                                           const __nv_bfloat16*,
+                                                                           const __nv_bfloat16*,
+                                                                           const __nv_bfloat16*,
+                                                                           const __nv_bfloat16*,
+                                                                           float,
+                                                                           int,
+                                                                           int,
+                                                                           void*,
+                                                                           uint32_t*,
+                                                                           int,
+                                                                           cudaStream_t);
+#endif
+#endif
 
 /* Computes the layernorm https://pytorch.org/docs/stable/generated/torch.nn.LayerNorm.html
  * normed_output <- ( (input - E[input]) / Sqrt(Var[input] + eps) ) * gamma + beta
@@ -682,6 +834,16 @@ void invokeGeneralLayerNorm(T*           out,
                               );
 
     if (use_vec_type) {
+#if USING_CUDA
+        // A packed thread handles two scalar columns. For the unquantized
+        // path, remove only whole warps whose inputs and outputs were empty.
+        // Active lanes keep the same packed index and both reduction stages
+        // keep the same nonzero operands and zero padding.
+        if (scale == nullptr && dynamic_scale == nullptr && out_quant == nullptr) {
+            const int packed_dim = hidden_dim / vec_size;
+            block.x              = 32 * ((min(packed_dim, 1024) + 31) / 32);
+        }
+#endif
         using Tp = typename packed_as<T, vec_size>::type;
         dispatch_layernorm_output(reinterpret_cast<Tp*>(out),
                                   reinterpret_cast<Tp*>(normed_output),
@@ -759,6 +921,16 @@ void invokeGeneralAddBiasResidualLayerNorm(T*           out,
                               );
 
     if (use_vec_type) {
+#if USING_CUDA
+        // A packed thread handles two scalar columns. For the unquantized
+        // path, remove only whole warps whose inputs and outputs were empty.
+        // Active lanes keep the same packed index and both reduction stages
+        // keep the same nonzero operands and zero padding.
+        if (scale == nullptr && dynamic_scale == nullptr && out_quant == nullptr) {
+            const int packed_dim = hidden_dim / vec_size;
+            block.x              = 32 * ((min(packed_dim, 1024) + 31) / 32);
+        }
+#endif
         using Tp = typename packed_as<T, vec_size>::type;
         dispatch_layernorm_output(reinterpret_cast<Tp*>(out),
                                   reinterpret_cast<Tp*>(norm_output),

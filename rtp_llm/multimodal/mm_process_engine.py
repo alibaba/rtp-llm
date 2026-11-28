@@ -7,11 +7,11 @@ import os
 import signal
 import threading
 import time
+from functools import cached_property
 from types import SimpleNamespace
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 import torch
-import torch.profiler
 
 from rtp_llm.access_logger.access_logger import MMAccessLogger
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
@@ -28,8 +28,10 @@ from rtp_llm.multimodal.mm_embedding_cache import (
     MMEmbeddingCacheEntry,
     MMHashKeyCache,
     _current_cuda_streams,
+    _map_tensors,
+    _record_cuda_events,
 )
-from rtp_llm.multimodal.mm_profiler import MMProfiler
+from rtp_llm.multimodal.mm_profiler import MMProfiler, record_function
 from rtp_llm.multimodal.mm_scheduler import (
     MMScheduler,
     MMSchedulerError,
@@ -88,15 +90,17 @@ def _run_preprocess_task(
     )
 
 
-def _embedding_token_length(embeddings: List[Any]) -> int:
+def _embedding_token_length(embeddings: List[Any] | torch.Tensor) -> int:
     """Return the total visual-token length represented by embedding tensors."""
+    if isinstance(embeddings, torch.Tensor) and embeddings.ndim == 3:
+        return embeddings.size(0) * embeddings.size(1)
     total = 0
     for embedding in embeddings:
         if isinstance(embedding, torch.Tensor):
             # Embeddings are normally [tokens, hidden]. A 1-D tensor is a
             # single token vector, so its hidden dimension must not be counted
             # as the token length.
-            total += int(embedding.shape[0]) if embedding.ndim >= 2 else 1
+            total += embedding.size(0) if embedding.ndim >= 2 else 1
             continue
         try:
             total += len(embedding)
@@ -236,10 +240,8 @@ def _report_preprocess_queue_size(queue_size: int) -> None:
 
 def _count_images(mm_inputs: List[MultimodalInput]) -> int:
     """Count image-like inputs without treating videos or audio as images."""
-    return sum(
-        mm_input.mm_type in (MMUrlType.DEFAULT, MMUrlType.IMAGE)
-        for mm_input in mm_inputs
-    )
+    image_types = (MMUrlType.DEFAULT, MMUrlType.IMAGE)
+    return sum(item.mm_type in image_types for item in mm_inputs)
 
 
 def _report_image_count(mm_inputs: List[MultimodalInput]) -> None:
@@ -552,19 +554,41 @@ class MMEmbeddingRes:
 
     def __init__(
         self,
-        embeddings: List[torch.Tensor],
+        embeddings: List[torch.Tensor] | torch.Tensor,
         position_ids: Optional[List[torch.Tensor]] = None,
         extra_input: Optional[List[torch.Tensor]] = None,
         feature_hashes: Optional[List[torch.Tensor]] = None,
     ):
-        self.embeddings = embeddings
+        if isinstance(embeddings, torch.Tensor):
+            self._stacked = embeddings
+        else:
+            self.embeddings = embeddings
         self.position_ids = position_ids if position_ids is not None else []
         # Model-specific extra input, one opaque flat 1-D tensor per image (e.g. deepstack).
         self.extra_input = extra_input if extra_input is not None else []
         self.feature_hashes = feature_hashes
 
+    @property
+    def stacked_embeddings(self) -> Optional[torch.Tensor]:
+        # The public list can be mutated after it has been requested.
+        return None if "embeddings" in self.__dict__ else self._stacked
+
+    @cached_property
+    def embeddings(self) -> List[torch.Tensor]:
+        views = list(self._stacked.unbind())
+        self.__dict__["embeddings"] = views
+        del self._stacked
+        return views
+
     def __str__(self) -> str:
-        return f"MMEmbeddingRes(length={len(self.embeddings)}, embeddings_shape={[e.shape for e in self.embeddings]}, position_ids_shape={[p.shape for p in self.position_ids] if self.position_ids is not None else []}, extra_input_shape={[d.shape for d in self.extra_input] if self.extra_input is not None else []})"
+        packed = self.stacked_embeddings
+        if packed is None:
+            count = len(self.embeddings)
+            shapes = str([e.shape for e in self.embeddings])
+        else:
+            count = packed.size(0)
+            shapes = "[" + ", ".join([str(packed.shape[1:])] * count) + "]"
+        return f"MMEmbeddingRes(length={count}, embeddings_shape={shapes}, position_ids_shape={[p.shape for p in self.position_ids] if self.position_ids is not None else []}, extra_input_shape={[d.shape for d in self.extra_input] if self.extra_input is not None else []})"
 
 
 class _AsyncComputeTask:
@@ -588,6 +612,7 @@ class MMWorkItem:
         hash_key_cache: Optional[MMHashKeyCache] = None,
         defer_feature_hashes: bool = False,
         deadline: Optional[float] = None,
+        allow_precomputed: bool = False,
     ):
         self.deadline = deadline
         if not mm_inputs:
@@ -601,17 +626,28 @@ class MMWorkItem:
             if mm_timeout_ms is not None and mm_timeout_ms > 0
             else VitConfig.DEFAULT_MM_TIMEOUT_MS
         )
-        self.mm_timeout_ms = max(
-            (
-                input.mm_preprocess_config.mm_timeout_ms
-                if input.mm_preprocess_config.mm_timeout_ms > 0
-                else default_timeout_ms
+        prepared = (
+            MultimodalInput.get_precomputed_features(
+                mm_inputs, default_timeout_ms, MMUrlType.DEFAULT, MMUrlType.TENSOR
             )
-            for input in self.mm_inputs
+            if allow_precomputed
+            else None
         )
+        self.preprocess_events = ()
+        self.preprocess_result: Optional[Any] = None
+        if prepared is None:
+            self.mm_timeout_ms = max(
+                timeout if timeout > 0 else default_timeout_ms
+                for timeout in (
+                    item.mm_preprocess_config.mm_timeout_ms for item in mm_inputs
+                )
+            )
+        else:
+            self.preprocess_result, self.mm_timeout_ms, has_cuda = prepared
+            if has_cuda:
+                self.preprocess_events = _record_cuda_events(self.preprocess_result)
         self.mm_type = self.mm_inputs[0].mm_type
 
-        self.preprocess_result: Optional[Any] = None
         self.embedding_result: Optional[Any] = None
         self.feature_hashes: Optional[List[torch.Tensor]] = None
         self.work_estimate: Optional[MMWorkEstimate] = None
@@ -767,6 +803,12 @@ class MMProcessEngine:
         )
 
         self.mm_part = mm_part
+        self.hash_embedding_features = (
+            model_config.mm_model_config.hash_embedding_features
+        )
+        self.supports_precomputed_embedding = bool(
+            getattr(mm_part, "supports_inline_embedding", False)
+        )
 
         self._remote_embedding_cache = None
         if vit_config.mm_remote_cache_enable:
@@ -1187,6 +1229,7 @@ class MMProcessEngine:
         request_id: int = 0,
         user_id: str = "",
         service_name: str = "",
+        need_feature_hashes: bool = True,
     ) -> MMEmbeddingRes:
         """Run one synchronous request and account for every failure boundary."""
         try:
@@ -1195,6 +1238,7 @@ class MMProcessEngine:
                 request_id=request_id,
                 user_id=user_id,
                 service_name=service_name,
+                need_feature_hashes=need_feature_hashes,
             )
         except Exception as error:
             self.report_vit_error(error)
@@ -1206,6 +1250,7 @@ class MMProcessEngine:
         request_id: int = 0,
         user_id: str = "",
         service_name: str = "",
+        need_feature_hashes: bool = True,
     ) -> MMEmbeddingRes:
         """Synchronous embedding path with greennet (used by the in-process /
         cpp / rpc entrypoints). Preprocess + inspect run, ViT runs concurrently
@@ -1222,9 +1267,13 @@ class MMProcessEngine:
             )
             work_items: List[MMWorkItem] = []
             try:
+                skip_hashes = not need_feature_hashes and all(
+                    not item.url for item in rewritten
+                )
                 result, work_items = self._mm_embedding_impl(
                     rewritten,
                     defer_cache_complete=True,
+                    defer_feature_hashes=skip_hashes,
                     request_id=request_id,
                     report_vit_error=False,
                 )
@@ -1254,6 +1303,21 @@ class MMProcessEngine:
                         and work_item.embedding_result is not None
                     ):
                         work_item.complete_cache(work_item.embedding_result, force=True)
+                if skip_hashes:
+                    for item in work_items:
+                        for producer in item.embedding_producer_streams or ():
+                            consumer = torch.cuda.current_stream(producer.device)
+                            if consumer != producer:
+                                with cuda_graph_gate.operation():
+                                    consumer.wait_stream(producer)
+                                    _map_tensors(
+                                        item.embedding_result,
+                                        lambda tensor: (
+                                            tensor.record_stream(consumer)
+                                            if tensor.device == consumer.device
+                                            else None
+                                        ),
+                                    )
                 return result
             except Exception as error:
                 self.report_vit_error(error)
@@ -1498,12 +1562,28 @@ class MMProcessEngine:
         except Exception as error:
             self.report_vit_error(error)
             raise
+        return self.mm_embedding_inputs_cpp(
+            mm_inputs, request_id, user_id, service_name
+        )
+
+    def mm_embedding_inputs_cpp(
+        self,
+        mm_inputs: List[MultimodalInput],
+        request_id: int = 0,
+        user_id: str = "",
+        service_name: str = "",
+    ) -> MMEmbeddingRes:
         res = self._embed_with_greennet_sync(
-            mm_inputs, request_id=request_id, user_id=user_id, service_name=service_name
+            mm_inputs,
+            request_id=request_id,
+            user_id=user_id,
+            service_name=service_name,
+            need_feature_hashes=self.hash_embedding_features,
         )
         try:
-            with cuda_graph_gate.operation():
-                res.position_ids = [pos.cpu() for pos in res.position_ids]
+            if res.position_ids:
+                with cuda_graph_gate.operation():
+                    res.position_ids = [pos.cpu() for pos in res.position_ids]
         except Exception as error:
             self.report_vit_error(error)
             raise
@@ -1542,7 +1622,7 @@ class MMProcessEngine:
             self.mm_part.validate_inputs(mm_inputs)
             if report_image_count:
                 _report_image_count(mm_inputs)
-            with torch.profiler.record_function("mm_embedding_impl"):
+            with record_function("mm_embedding_impl"):
                 if not self.is_proxy_mode:
                     kmonitor.report(
                         AccMetrics.VIT_QPS_METRIC, 1, {"source": "mm_embedding"}
@@ -1553,7 +1633,7 @@ class MMProcessEngine:
                 if not self.vit_config.disable_access_log:
                     self._access_logger.log_query_access(mm_inputs, request_id)
 
-                with torch.profiler.record_function("preprocess"):
+                with record_function("preprocess"):
                     work_items = self._create_work_items(
                         mm_inputs,
                         cache_claim=cache_claim,
@@ -1563,9 +1643,11 @@ class MMProcessEngine:
                     )
                     self._wait_for_preprocessing(work_items)
 
-                with torch.profiler.record_function("compute_embeddings"):
+                with record_function("compute_embeddings"):
                     emb_res, pos_res, extra_input_res = self._compute_embeddings(
-                        work_items, deadline=deadline
+                        work_items,
+                        deadline=deadline,
+                        preserve_stacked=defer_feature_hashes,
                     )
                     if report_embedding_length:
                         kmonitor.report(
@@ -1573,7 +1655,7 @@ class MMProcessEngine:
                             _embedding_token_length(emb_res),
                         )
 
-                with torch.profiler.record_function("postprocess"):
+                with record_function("postprocess"):
                     hashes = (
                         None
                         if defer_feature_hashes
@@ -1648,6 +1730,7 @@ class MMProcessEngine:
                     defer_cache_complete=defer_cache_complete,
                     defer_feature_hashes=defer_feature_hashes,
                     deadline=deadline,
+                    allow_precomputed=self.supports_precomputed_embedding,
                 )
                 work_items.append(work_item)
                 remote_cache = self._remote_embedding_cache
@@ -1661,7 +1744,8 @@ class MMProcessEngine:
                         timeout_ms=max(1, int(work_item.remaining_timeout_s() * 1000)),
                     )
                 work_item.remaining_timeout_s()
-                self.preprocess_executor.submit(work_item)
+                if work_item.preprocess_result is None:
+                    self.preprocess_executor.submit(work_item)
 
         except Exception as error:
             # The caller has not received this list yet and cannot roll it back.
@@ -1692,7 +1776,8 @@ class MMProcessEngine:
                     timeout=timeout_s
                 )
             work_item.remaining_timeout_s()
-            self.preprocess_executor.get_result(work_item)
+            if work_item.future is not None or work_item.preprocess_result is None:
+                self.preprocess_executor.get_result(work_item)
             work_item.remaining_timeout_s()
             if work_item.embedding_result is None:
                 estimate = self.mm_part.estimate_work(
@@ -1706,8 +1791,11 @@ class MMProcessEngine:
                 work_item.work_estimate = estimate
 
     def _compute_embeddings(
-        self, work_items: List[MMWorkItem], deadline: Optional[float] = None
-    ) -> Tuple[List[Any], List[Any], List[Any]]:
+        self,
+        work_items: List[MMWorkItem],
+        deadline: Optional[float] = None,
+        preserve_stacked: bool = False,
+    ) -> Tuple[List[Any] | torch.Tensor, List[Any], List[Any]]:
         """Compute embeddings for all work items."""
         pending_items = [
             wi
@@ -1717,6 +1805,23 @@ class MMProcessEngine:
 
         if pending_items:
             self._scheduler.submit_and_wait(pending_items, deadline=deadline)
+
+        if (
+            preserve_stacked
+            and len(work_items) == 1
+            and work_items[0].cache_entry is None
+        ):
+            # The scheduler already validated the output and captured its streams.
+            # The native receiver can unbind it without creating a Python object per image.
+            result = work_items[0].embedding_result
+            if (
+                result is not None
+                and len(result) == 2
+                and result[1] is None
+                and isinstance(result[0], torch.Tensor)
+                and result[0].ndim == 3
+            ):
+                return result[0], [], []
 
         emb_res, pos_res, tensor_res = [], [], []
         local_producers = {

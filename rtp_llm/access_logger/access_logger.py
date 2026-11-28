@@ -240,7 +240,12 @@ class MMAccessLogger(AccessLogger):
             dump_json(
                 {
                     "id": request_id,
-                    "query": [mm_input.to_string() for mm_input in request],
+                    "query": (
+                        MultimodalInput.get_log_strings(request)
+                        if type(request) is list
+                        and hasattr(MultimodalInput, "get_log_strings")
+                        else [mm_input.to_string() for mm_input in request]
+                    ),
                     "log_time": log_time,
                     "exception": exception,
                     "response": response,

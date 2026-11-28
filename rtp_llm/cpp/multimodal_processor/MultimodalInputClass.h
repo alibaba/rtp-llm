@@ -52,6 +52,12 @@ struct MMPreprocessConfig {
                + std::to_string(max_frames) + "_" + crop_positions_str + "_" + std::to_string(max_long_side_pixel);
     }
     std::string to_string() const {
+        // Already-preprocessed tensor requests commonly share this geometry.
+        // Preserve the wire/log text while avoiding eight integer conversions.
+        if (width == -1 && height == -1 && min_pixels == -1 && max_pixels == -1 && fps == -1 && min_frames == -1
+            && max_frames == -1 && crop_positions.empty() && max_long_side_pixel == -1) {
+            return "-1_-1_-1_-1_-1_-1_-1__-1_" + std::to_string(mm_timeout_ms);
+        }
         return cache_key_string() + "_" + std::to_string(mm_timeout_ms);
     }
 };

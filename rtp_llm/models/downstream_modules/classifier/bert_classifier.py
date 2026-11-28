@@ -7,7 +7,7 @@ from rtp_llm.frontend.tokenizer_factory.tokenizers import BaseTokenizer
 from rtp_llm.model_loader.weight_module import CustomAtomicWeight
 from rtp_llm.models.downstream_modules.custom_module import CustomHandler, CustomModule
 from rtp_llm.utils.model_weight import CkptWeightInfo
-from rtp_llm.utils.tensor_utils import get_first_token_from_combo_tokens
+from rtp_llm.utils.tensor_utils import first_token_indices
 from rtp_llm.utils.util import to_torch_dtype
 
 from .classifier import ClassifierRenderer
@@ -23,6 +23,8 @@ class BertClassifierModule(CustomModule):
 
 
 class BertClassifierHandler(CustomHandler):
+
+    pooled_row_indices = staticmethod(first_token_indices)
 
     def __init__(self, config: ModelConfig):
         super().__init__(config)
@@ -70,15 +72,12 @@ class BertClassifierHandler(CustomHandler):
         input_ids: torch.Tensor,
         hidden_states: torch.Tensor,
         input_lengths: torch.Tensor,
-    ) -> List[torch.Tensor]:
-        first_tokens = get_first_token_from_combo_tokens(hidden_states, input_lengths)
-        # first_tokens = self.pooler(first_tokens)
-        # return self.linear(first_tokens)
-        if self.device.type == "cpu":
-            first_tokens = self.pooler(first_tokens)
-            first_tokens = self.linear(first_tokens)
-            first_tokens = first_tokens.to(torch.float16)
-            return first_tokens
-        else:
-            first_tokens = self.pooler(first_tokens)
-            return self.linear(first_tokens)
+    ) -> torch.Tensor:
+        return self.score_pooled_rows(
+            hidden_states[self.pooled_row_indices(input_lengths)]
+        )
+
+    @torch.inference_mode()
+    def score_pooled_rows(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        scores = self.linear(self.pooler(hidden_states))
+        return scores.to(torch.float16) if self.device.type == "cpu" else scores
