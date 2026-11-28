@@ -140,7 +140,8 @@ def init_parallel_group_args(
         bind_to=(prefill_cp_config, "kv_cache_sharded"),
         type=str2bool,
         default=False,
-        help="开启后 prefill 节点的 paged KV pool 按 logical block round-robin 切到各 CP rank，每卡只存 1/cp_size。需 PD 分离 + reuse cache。",
+        help="按 logical block round-robin 分片 Prefill CP 的 paged KV pool。"
+        "使用 PageRR KV 布局的推理模型在 TP > 1 时也需要开启，包括 Decode 和 PDFUSION。",
     )
     prefill_cp_size_bind_to = (
         (prefill_cp_config, "prefill_cp_size")

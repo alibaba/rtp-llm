@@ -59,7 +59,9 @@ class EmbeddingEndpoint(object):
     ):
         self.renderer = create_custom_module(model_config, tokenizer).renderer
         # 创建到服务器的连接
-        self.address = f"localhost:{server_config.embedding_rpc_server_port}"
+        self._backend_port = server_config.embedding_rpc_server_port
+        self._backend_has_listened = False
+        self.address = f"localhost:{self._backend_port}"
         logging.info(f"embedding endpoint connect to rpc addresses: {self.address}")
         self.options = []
         client_config = grpc_config.get_client_config()
@@ -75,10 +77,22 @@ class EmbeddingEndpoint(object):
             options=self.options, cleanup_interval=60
         )
 
+    async def _get_channel(self) -> grpc.aio.Channel:
+        if not self._backend_has_listened:
+            # Early health probes must not put this worker's pooled gRPC channel
+            # into connection backoff before the local backend starts listening.
+            _, writer = await asyncio.wait_for(
+                asyncio.open_connection("127.0.0.1", self._backend_port), timeout=1
+            )
+            writer.close()
+            await writer.wait_closed()
+            self._backend_has_listened = True
+        return await self._channel_pool.get(self.address)
+
     async def health_check(self) -> bool:
         """Liveness probe for the embedding backend over gRPC."""
         try:
-            channel = await self._channel_pool.get(self.address)
+            channel = await self._get_channel()
             stub = pb2_grpc.EmbeddingRpcServiceStub(channel)
             await stub.health(pb2.EmbeddingHealthRequestPB(request_id=0), timeout=3)
             return True
@@ -99,7 +113,7 @@ class EmbeddingEndpoint(object):
                     req.get("enable_all_rank", req.get("all_tp", False))
                 ),
             )
-            channel = await self._channel_pool.get(self.address)
+            channel = await self._get_channel()
             stub = pb2_grpc.EmbeddingRpcServiceStub(channel)
             await stub.StartProfile(request, timeout=3)
             return {"status": "ok"}
@@ -177,7 +191,7 @@ class EmbeddingEndpoint(object):
         profile_config: Optional[Dict[str, Any]] = None,
     ):
         profile_config = profile_config or {}
-        channel = await self._channel_pool.get(self.address)
+        channel = await self._get_channel()
         stub = pb2_grpc.EmbeddingRpcServiceStub(channel)
         multimodal_features = []
 

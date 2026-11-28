@@ -39,6 +39,7 @@ struct AttentionConfigs {
     bool  is_causal         = true;
 
     // mla config
+    // Model-level MLA algorithm/weight selection; KVCacheSpec declares each group's storage layout.
     bool   use_mla = false;
     size_t q_lora_rank;
     size_t kv_lora_rank;
@@ -49,6 +50,7 @@ struct AttentionConfigs {
     // softmax config
     float           softmax_extra_scale = 1.0f;
     KvCacheDataType kv_cache_dtype      = KvCacheDataType::BASE;
+    bool            mla_fp8_compute     = false;
     bool            need_rope_kv_cache  = true;
 
     // sparse attention config

@@ -2,6 +2,7 @@
 
 import ast
 import ctypes
+import hashlib
 import importlib.util
 import json
 import os
@@ -54,6 +55,44 @@ def _metadata(m=33):
 
 
 class WoAQuantCPUContractTest(unittest.TestCase):
+    @staticmethod
+    def _vendor_include():
+        # Locate the actual provider without importing its CUDA initialization.
+        spec = importlib.util.find_spec("deep_gemm")
+        assert spec is not None and spec.origin is not None
+        return Path(spec.origin).resolve().parent / "include"
+
+    def test_pinned_provider_headers_match_audited_abi(self):
+        include = self._vendor_include()
+        self.assertEqual(len(op._VENDOR_HASHES), 7)
+        for name, expected in op._VENDOR_HASHES.items():
+            with self.subTest(header=name):
+                path = include / "deep_gemm" / name
+                self.assertEqual(
+                    hashlib.sha256(path.read_bytes()).hexdigest(), expected
+                )
+        self.assertTrue(op._vendor_supported(include))
+
+    def test_changed_or_missing_vendor_headers_are_rejected(self):
+        provider = self._vendor_include() / "deep_gemm"
+        with tempfile.TemporaryDirectory() as directory:
+            include = Path(directory)
+            for name in op._VENDOR_HASHES:
+                path = include / "deep_gemm" / name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes((provider / name).read_bytes())
+            self.assertTrue(op._vendor_supported(include))
+            for name in op._VENDOR_HASHES:
+                path = include / "deep_gemm" / name
+                original = path.read_bytes()
+                with self.subTest(header=name, change="modified"):
+                    path.write_bytes(original + b"\n")
+                    self.assertFalse(op._vendor_supported(include))
+                with self.subTest(header=name, change="missing"):
+                    path.unlink()
+                    self.assertFalse(op._vendor_supported(include))
+                path.write_bytes(original)
+
     def test_linear_valid_quantized_calls_keep_output_and_gemm_geometry(self):
         linear_cls = self._linear_class()
         linear = linear_cls.__new__(linear_cls)

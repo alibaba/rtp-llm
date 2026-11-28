@@ -337,7 +337,7 @@ CacheConfig createConfigFromDescs(const ModelConfig&       model_config,
             || (cp.kv_cache_sharded && (cp.is_enabled() || cp.is_prefill_enabled())
                 && parallelism_config.role_type != RoleType::DECODE));
     RTP_LLM_CHECK_WITH_INFO(!config.local_kv_cache_sharded || cp.kv_cache_sharded,
-                            "local PageRR allocation requires kv_cache_sharded transport metadata");
+                            "local PageRR allocation requires --prefill_cp_kv_cache_sharded=1");
 
     config.seq_size_per_block = seq_size;
     config.use_mla            = model_config.attn_config.use_mla;
@@ -472,8 +472,8 @@ CacheConfig CacheConfigCreator::createConfig(const ModelConfig&                 
                                              const KVCacheConfig&                             kv_cache_config,
                                              const std::optional<SpeculativeExecutionConfig>& sp_config,
                                              const ModelConfig*                               draft_model_config,
-                                             bool                                             is_mtp,
-                                             bool                                             is_eagle) {
+                                             bool /*is_mtp*/,
+                                             bool /*is_eagle*/) {
     RTP_LLM_CHECK_WITH_INFO(draft_model_config == nullptr || sp_config.has_value(),
                             "draft cache configuration requires speculative execution configuration");
     RTP_LLM_CHECK_WITH_INFO(
@@ -488,9 +488,8 @@ CacheConfig CacheConfigCreator::createConfig(const ModelConfig&                 
         const StageLayerRange draft_range{0, static_cast<uint32_t>(draft_model_config->num_layers)};
         auto                  draft =
             createBasicConfig(*draft_model_config, parallelism_config, kv_cache_config, gen_num_per_cycle, draft_range);
-        // DSpARK/DFlash are single multi-layer block-draft models; gamma is
-        // the proposal width, not a count of independent one-layer modules.
-        int num_mtp_modules = is_mtp && !is_eagle && !isBlockDraftType(sp_config->type) ? gen_num_per_cycle : 1;
+        // Proposal depth does not change the single draft module reused by the executor.
+        const int num_mtp_modules = 1;
         RTP_LLM_CHECK_WITH_INFO(num_mtp_modules > 0, "draft cache configuration requires at least one module");
         config.mtp_sub_configs.reserve(static_cast<size_t>(num_mtp_modules));
         for (int module = 0; module < num_mtp_modules; ++module) {

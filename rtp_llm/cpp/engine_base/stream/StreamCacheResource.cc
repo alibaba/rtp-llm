@@ -229,12 +229,7 @@ void applyP2PSideChannel(const P2PSideChannelPayload& payload, GenerateStream* s
             memcpy(output->tokens.data_ptr<int>(),
                    payload.propose_tokens.data(),
                    payload.propose_tokens.size() * sizeof(int));
-            // Wire snapshots are CPU-owned; speculative execution consumes device tensors.
-            output->all_probs     = probs.to(torch::kCUDA);
-            output->hidden_states = hidden.to(torch::kCUDA);
-            output->tensors_holder.emplace_back(std::move(probs));
-            output->tensors_holder.emplace_back(std::move(hidden));
-            stream->setSPOutputBuffer(output);
+            stream->setP2PProposalBuffer(std::move(output), std::move(probs), std::move(hidden));
         }
     }
 
@@ -295,6 +290,30 @@ void StreamCacheResource::init(int batch_size) {
 }
 
 bool StreamCacheResource::copyChunkKernelBlocks(int batch, const std::string& tag, int32_t* dst) const {
+    if (stream_->isFakeStream() && stream_->warmup_chunk_window_) {
+        const auto& group = resource_context_.cache_manager->cacheConfig().group(tag);
+        if (group.policy.group_type != CacheGroupType::LINEAR) {
+            return false;
+        }
+        const auto span   = group.seqSizePerBlock();
+        const int  prefix = stream_->prefixLength();
+        const int  end    = prefix + stream_->contextLength();
+        const auto count  = batch_kv_cache_resource_->kernelBlocks(batch, tag).size();
+        RTP_LLM_CHECK_WITH_INFO(end > prefix && static_cast<size_t>(end - 1) / span < count,
+                                "warmup LINEAR state table does not cover the chunk");
+        // Two slots per request: readers of the prefix cannot race checkpoint
+        // writers. Intermediate checkpoints are unnecessary during warmup.
+        const int initial = 1 + 2 * batch + stream_->warmup_chunk_index_ % 2;
+        const int output  = 1 + 2 * batch + (stream_->warmup_chunk_index_ + 1) % 2;
+        RTP_LLM_CHECK_WITH_INFO(static_cast<size_t>(std::max(initial, output)) < group.block_num,
+                                "warmup LINEAR pool needs two state slots per request");
+        std::fill_n(dst, count, NULL_BLOCK_IDX);
+        if (prefix > 0) {
+            dst[static_cast<size_t>(prefix - 1) / span] = initial;
+        }
+        dst[static_cast<size_t>(end - 1) / span] = output;
+        return true;
+    }
     if (!stream_->useChunkWindow() || stream_->isFakeStream()) {
         return false;
     }

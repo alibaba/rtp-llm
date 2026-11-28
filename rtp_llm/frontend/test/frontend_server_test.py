@@ -11,7 +11,7 @@ from fastapi.responses import ORJSONResponse
 from pydantic import BaseModel
 
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
-from rtp_llm.config.generate_config import GenerateConfig, RoleAddr
+from rtp_llm.config.generate_config import GenerateConfig, ReturnAllProbsMode, RoleAddr
 from rtp_llm.config.py_config_modules import PyEnvConfigs
 from rtp_llm.cpp.model_rpc.model_rpc_client import (
     ModelRpcClient,
@@ -257,14 +257,19 @@ class FrontendServerTest(TestCase):
         worker.batch_infer = AsyncMock(return_value=FakePipelinResponse(res="batch"))
         self.frontend_server._frontend_worker = worker
         controller = self.frontend_server._global_controller
-        with patch("rtp_llm.utils.concurrency_controller.time.time_ns", return_value=1_800_000_000_000_000_000):
+        with patch(
+            "rtp_llm.utils.concurrency_controller.time.time_ns",
+            return_value=1_800_000_000_000_000_000,
+        ):
             for count in (4097, 2):
                 asyncio.run(
                     self.frontend_server.batch_infer(
                         {"prompt_batch": ["hello"] * count}, FakeRawRequest()
                     )
                 )
-            single_id = self.frontend_server._request_id_for_slot(controller.increment())
+            single_id = self.frontend_server._request_id_for_slot(
+                controller.increment()
+            )
             controller.decrement()
         ids = [
             request_id
@@ -636,6 +641,72 @@ class FrontendServerTest(TestCase):
                         self.frontend_server._global_controller.current_concurrency.value,
                         0,
                     )
+
+    def test_openai_batch_preserves_item_order_with_legacy_and_compact_logprobs(self):
+        from rtp_llm.openai.api_datatype import BatchChatCompletionRequest
+        from rtp_llm.openai.openai_endpoint import OpenaiEndpoint
+
+        endpoint = OpenaiEndpoint.__new__(OpenaiEndpoint)
+
+        def prepare(request_id, request):
+            dense = request.logprobs_mode == "default"
+            config = GenerateConfig(
+                return_logprobs=bool(request.logprobs) and not dense,
+                return_all_probs=(
+                    ReturnAllProbsMode.DEFAULT if dense else ReturnAllProbsMode.NONE
+                ),
+            )
+            return (
+                SimpleNamespace(request_id=request_id, generate_config=config),
+                config,
+            )
+
+        endpoint._prepare_chat_input = MagicMock(side_effect=prepare)
+        batch_enqueue = AsyncMock(return_value=["compact", "unscored"])
+        enqueue = AsyncMock(
+            side_effect=FtRuntimeException(
+                ExceptionType.UNSUPPORTED_OPERATION,
+                "legacy probability mode unavailable",
+            )
+        )
+        endpoint.backend_rpc_server_visitor = SimpleNamespace(
+            batch_enqueue=batch_enqueue, enqueue=enqueue
+        )
+        endpoint._render_single_output = AsyncMock(
+            side_effect=lambda output, *_: FakePipelinResponse(res=output)
+        )
+        self.frontend_server._openai_endpoint = endpoint
+        request = BatchChatCompletionRequest(
+            requests=[
+                ChatCompletionRequest(messages=[], logprobs=True),
+                ChatCompletionRequest(
+                    messages=[], logprobs=True, logprobs_mode="default"
+                ),
+                ChatCompletionRequest(messages=[]),
+            ]
+        )
+
+        result = asyncio.run(
+            self.frontend_server.batch_chat_completion(request, FakeRawRequest())
+        )
+        self.assertEqual(result.status_code, 200)
+        responses = json.loads(result.body)["responses"]
+        self.assertEqual(responses[0], {"res": "compact"})
+        self.assertEqual(
+            responses[1]["error"]["error_code"], ExceptionType.UNSUPPORTED_OPERATION
+        )
+        self.assertEqual(responses[2], {"res": "unscored"})
+        batch_enqueue.assert_awaited_once()
+        enqueue.assert_awaited_once()
+        scored, unscored = batch_enqueue.await_args.args[0]
+        self.assertTrue(scored.generate_config.return_logprobs)
+        self.assertFalse(scored.generate_config.is_streaming)
+        self.assertFalse(unscored.generate_config.return_logprobs)
+        self.assertTrue(enqueue.await_args.args[0].generate_config.is_streaming)
+        self.assertEqual(
+            [call.args[1] for call in endpoint._prepare_chat_input.call_args_list],
+            request.requests,
+        )
 
     def test_native_batch_rpc_errors_preserve_item_results_and_metrics(self):
         import struct
@@ -1778,11 +1849,13 @@ class FrontendServerTest(TestCase):
             num_return_sequences=1,
             can_use_pd_separation=True,
         )
-        self.assertIs(_selected_pd_separation(RoleType.PREFILL, pd_config, False), False)
-        self.assertIs(_selected_pd_separation(RoleType.PDFUSION, pd_config, False), False)
         self.assertIs(
-            _selected_pd_separation(RoleType.DECODE, pd_config, False), True
+            _selected_pd_separation(RoleType.PREFILL, pd_config, False), False
         )
+        self.assertIs(
+            _selected_pd_separation(RoleType.PDFUSION, pd_config, False), False
+        )
+        self.assertIs(_selected_pd_separation(RoleType.DECODE, pd_config, False), True)
         self.assertIsNone(_selected_pd_separation(None, pd_config, False))
 
         fallback_updates = (

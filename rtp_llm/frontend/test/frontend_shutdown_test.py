@@ -110,6 +110,7 @@ class FrontendShutdownManagerTest(unittest.TestCase):
     def test_start_profile_uses_embedding_rpc(self):
         endpoint = EmbeddingEndpoint.__new__(EmbeddingEndpoint)
         endpoint.address = "localhost:8087"
+        endpoint._backend_has_listened = True
         endpoint._channel_pool = SimpleNamespace(get=AsyncMock())
         start = AsyncMock()
         with patch(

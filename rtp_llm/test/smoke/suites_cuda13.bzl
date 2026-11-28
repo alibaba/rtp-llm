@@ -142,6 +142,7 @@ def cuda13_suites():
     native.test_suite(
         name = "smoke_cuda13_x86",
         tests = [
+            "//rtp_llm/test/smoke/kimi_k3:kimi_k31_single",
             # CRC write/read regression with real HOST reuse in two prefix
             # regimes; DEVICE/DISK/remote reuse are disabled so each second
             # query must reload HOST blocks. The fixture carries the

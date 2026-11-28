@@ -1,6 +1,11 @@
 #if defined(USING_CUDA)
 #include <ATen/cuda/CUDAGeneratorImpl.h>
 #endif
+#if USING_CUDA
+#include <ATen/cuda/CUDAEvent.h>
+#include <c10/cuda/CUDAGuard.h>
+#include <future>
+#endif
 
 #include "gtest/gtest.h"
 #include "gmock/gmock.h"
@@ -1727,6 +1732,26 @@ TEST_F(StreamCacheResourceTest, ReviewRegressionPrefillPublishesBeforeReplayPrun
             EXPECT_EQ(next->reuseLength(), length / 2 * 2);
         }
     }
+}
+
+TEST_F(StreamCacheResourceTest, ReviewRegressionWarmupLinearUsesSeparateStateSlots) {
+    auto config = test::makeSimpleHybridMhaCacheConfig(4, 8, 2, DataType::TYPE_FP16, 2);
+    prepareResourceWithCacheConfig(config, {1, 2, 3, 4, 5, 6, 7, 8}, false, RoleType::PREFILL);
+    auto& resource = stream_->streamCacheResource();
+    stream_->setIsFakeStream(true);
+    stream_->enableWarmupChunkWindow();
+    stream_->setChunkSize(4);
+    resource.fakeInitKVBlock(4);
+    std::vector<int32_t> first(4), second(4), other_row(4);
+    ASSERT_TRUE(resource.copyChunkKernelBlocks(0, "linear", first.data()));
+    ASSERT_TRUE(resource.copyChunkKernelBlocks(1, "linear", other_row.data()));
+    EXPECT_EQ(first, (std::vector<int32_t>{-1, 2, -1, -1}));
+    EXPECT_EQ(other_row, (std::vector<int32_t>{-1, 4, -1, -1}));
+    stream_->advanceChunk();
+    ASSERT_TRUE(resource.copyChunkKernelBlocks(0, "linear", second.data()));
+    EXPECT_EQ(second, (std::vector<int32_t>{-1, 2, -1, 1}));
+    EXPECT_NE(second[1], second[3]);
+    EXPECT_FALSE(resource.copyChunkKernelBlocks(0, "full1", first.data()));
 }
 
 TEST_F(StreamCacheResourceTest, testLateChunkEnableKeepsFullPromptLinearMapping) {
@@ -3608,7 +3633,7 @@ TEST_F(StreamCacheResourceTest, testP2PHandoffRejectsIncompleteProposalAndMalfor
     }
 }
 
-#if defined(USING_CUDA)
+#if USING_CUDA
 TEST_F(StreamCacheResourceTest, testP2PHandoffRestoresNonemptyMtpProposal) {
     prepareResource(/*reuse_cache=*/true, RoleType::DECODE);
     stream_->generateConfig()->pd_separation = true;
@@ -3616,24 +3641,62 @@ TEST_F(StreamCacheResourceTest, testP2PHandoffRestoresNonemptyMtpProposal) {
     data.has_first_token = true;
     data.first_token_id  = 7;
     data.propose_tokens  = {7, 8};
-    data.propose_probs   = torch::ones({1, 4}, torch::kFloat32);
-    data.propose_hidden  = torch::ones({1, 4}, torch::kFloat16);
+    data.propose_probs   = torch::arange(163840, torch::kFloat32).reshape({1, 163840});
+    data.propose_hidden  = torch::arange(7168, torch::kFloat32).to(torch::kBFloat16).reshape({1, 7168});
     P2PConnectorStartLoadResponsePB response;
     ASSERT_TRUE(PrefillResultStore::fillStartLoadResponsePayload(data, response).ok());
-    completeP2PSideChannel(std::move(response));
+
+    const auto         upload_stream   = c10::cuda::getStreamFromPool();
+    const auto         consumer_stream = c10::cuda::getStreamFromPool();
+    std::promise<void> release;
+    auto               gate          = release.get_future().share();
+    auto               release_guard = std::shared_ptr<void>(nullptr, [&release, upload_stream](void*) {
+        release.set_value();
+        upload_stream.synchronize();
+    });
+    // Warm both streams' CUDA allocations and pinned size classes before blocking the upload stream.
+    for (const auto stream : {upload_stream, consumer_stream}) {
+        c10::cuda::CUDAStreamGuard guard(stream);
+        const auto                 probs  = data.propose_probs.pin_memory().to(torch::kCUDA, /*non_blocking=*/true);
+        const auto                 hidden = data.propose_hidden.pin_memory().to(torch::kCUDA, /*non_blocking=*/true);
+        ASSERT_TRUE(probs.defined() && hidden.defined());
+        stream.synchronize();
+    }
+    {
+        c10::cuda::CUDAStreamGuard guard(upload_stream);
+        ASSERT_EQ(
+            cudaLaunchHostFunc(
+                upload_stream.stream(),
+                [](void* input) { static_cast<std::shared_future<void>*>(input)->wait_for(std::chrono::seconds(10)); },
+                &gate),
+            cudaSuccess);
+        at::cuda::CUDAEvent pending;
+        pending.record(upload_stream);
+        completeP2PSideChannel(std::move(response));
+        EXPECT_FALSE(pending.query());
+    }
     ASSERT_FALSE(stream_->hasError());
     EXPECT_EQ(stream_->getProposeToken(), (std::vector<int>{7, 8}));
     EXPECT_TRUE(stream_->contain_propose_token_);
-    ASSERT_NE(stream_->getSPOutputBuffer(), nullptr);
+    c10::cuda::CUDAStreamGuard guard(consumer_stream);
     const auto output = stream_->getSPOutputBuffer();
+    ASSERT_NE(output, nullptr);
     EXPECT_EQ(output->tokens.numel(), 2);
     EXPECT_EQ(output->tokens[0][1].item<int32_t>(), 8);
-    EXPECT_TRUE(output->all_probs.is_cuda());
-    EXPECT_TRUE(output->hidden_states.is_cuda());
-    EXPECT_TRUE(torch::equal(output->all_probs.cpu(), data.propose_probs));
-    EXPECT_TRUE(torch::equal(output->hidden_states.cpu(), data.propose_hidden));
+    ASSERT_TRUE(output->all_probs.is_cuda());
+    ASSERT_TRUE(output->hidden_states.is_cuda());
+    const auto consumed_probs  = output->all_probs.clone();
+    const auto consumed_hidden = output->hidden_states.clone();
+    auto       consumed        = std::async(std::launch::async, [consumer_stream] { consumer_stream.synchronize(); });
+    EXPECT_EQ(consumed.wait_for(std::chrono::milliseconds(100)), std::future_status::timeout);
+    release_guard.reset();
+    consumed.get();
+    EXPECT_TRUE(torch::equal(consumed_probs.cpu(), data.propose_probs));
+    EXPECT_TRUE(torch::equal(consumed_hidden.cpu(), data.propose_hidden));
 }
+#endif
 
+#if defined(USING_CUDA)
 TEST_F(StreamCacheResourceTest, testP2PRngHandoffContinuesPrefillRandomSequence) {
     for (bool advance : {false, true}) {
         prepareResource(/*reuse_cache=*/true, RoleType::DECODE);

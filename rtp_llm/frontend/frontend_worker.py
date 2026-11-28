@@ -85,6 +85,7 @@ class FrontendWorker:
 
         # Create engine_config from config (ports from server_config/distribute_config)
         engine_config = EngineConfig.create(py_env_configs, nccl_comm_config=None)
+        model_config.configure_parallelism(engine_config.parallelism_config)
 
         addresses = get_dp_rpc_addresses(py_env_configs)
 
@@ -107,7 +108,6 @@ class FrontendWorker:
             server_config=py_env_configs.server_config,
             master_config=py_env_configs.master_config,
             parallelism_config=engine_config.parallelism_config,
-            prefill_cp_config=py_env_configs.prefill_cp_config,
         )
         self.backend_rpc_server_visitor = self.pipeline.backend_rpc_server_visitor
         self.generate_env_config = py_env_configs.generate_env_config

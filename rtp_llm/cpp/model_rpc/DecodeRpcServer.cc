@@ -550,6 +550,11 @@ grpc::Status DecodeRpcServer::BatchGenerateCall(grpc::ServerContext*        cont
             if (item.enqueued_by_master())
                 guard.submitted_prefill.insert(item.request_id());
 
+            if (config->return_logprobs()) {
+                fail_item(item.request_id(), {ErrorCode::INVALID_PARAMS, "PD batch does not support compact logprobs"});
+                continue;
+            }
+
             const bool multimodal =
                 item.multimodal_inputs_size() != 0 || item.has_v41_inputs() || item.has_multimodal_token_layout();
             if (multimodal) {
@@ -725,6 +730,11 @@ grpc::Status DecodeRpcServer::preparePDRequest(const GenerateInputPB&          r
                                                GenerateInputPB&                prefill_request,
                                                std::optional<PrefillPeerInfo>& peer_info,
                                                grpc::ServerContext*            server_context) {
+    const auto& config = request.generate_config();
+    if (config.return_logprobs() && !config.is_streaming()) {
+        return serializeErrorMsg(std::to_string(request.request_id()),
+                                 {ErrorCode::INVALID_PARAMS, "PD compact logprobs require streaming output"});
+    }
     input                      = QueryConverter::transQuery(&request);
     input->request_deadline_ms = deadline_ms;
     const auto support         = checkPDSupport(request);

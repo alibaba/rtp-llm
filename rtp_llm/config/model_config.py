@@ -5,6 +5,8 @@ import os
 from typing import Any, Dict, Optional
 
 import torch
+
+from rtp_llm.config.model_args import ModelArgs
 from rtp_llm.config.py_config_modules import VitConfig
 from rtp_llm.config.quant_config import (
     CompressedW4A8Int4PerChannelQuantConfig,
@@ -19,7 +21,7 @@ from rtp_llm.config.quant_config import (
 from rtp_llm.multimodal.multimodal_mixin_register import get_multimodal_mixin_cls
 from rtp_llm.ops import DataType, HiddenStateCaptureDtype, KvCacheDataType
 from rtp_llm.ops import ModelConfig as CppModelConfig
-from rtp_llm.ops import TaskType, VitSeparation
+from rtp_llm.ops import ParallelismConfig, TaskType, VitSeparation
 from rtp_llm.utils.base_model_datatypes import VitParameters
 from rtp_llm.utils.util import get_config_from_path, to_torch_dtype
 from rtp_llm.utils.weight_type import WEIGHT_TYPE
@@ -155,6 +157,8 @@ def _resolve_explicit_w8a8_method(quantization: Optional[str]) -> Optional[str]:
 
 
 class ModelConfig(CppModelConfig):
+    default_moe_strategy: str = "auto"
+
     # Model-specific weight estimators add to these fields when needed. Class
     # defaults keep the generic estimator statically visible and zero-cost for
     # every existing model.
@@ -218,6 +222,7 @@ class ModelConfig(CppModelConfig):
         "use_page_rr_kv_cache",
         "num_layers",
         "max_seq_len",
+        "mtp_draft_prefill_uses_request_lanes",
         "vocab_size",
         "hidden_size",
         "hidden_state_capture_layer_ids",
@@ -847,6 +852,9 @@ class ModelConfig(CppModelConfig):
         self.vit_separation: VitSeparation = VitSeparation.VIT_SEPARATION_LOCAL
         self.quant_config = None
 
+    def configure_parallelism(self, parallelism: ParallelismConfig) -> None:
+        """Adjust finalized engine parallelism when required by this model."""
+
     def apply_override_args(self, json_model_override_args: str) -> None:
         """Apply model override arguments to ModelConfig.
 
@@ -1234,14 +1242,26 @@ def apply_layer_num_override(model_config: ModelConfig, num_layers: int) -> None
     model_config.num_layers = num_layers
 
 
-def _apply_model_override_args(model_config: ModelConfig, model_args: Any) -> None:
-    if model_args.json_model_override_args:
-        model_config.apply_override_args(model_args.json_model_override_args)
+def _apply_model_override_args(
+    model_config: ModelConfig, model_args: ModelArgs
+) -> None:
+    overrides = json.loads(model_args.json_model_override_args or "{}")
+    for field, value in (
+        (
+            "prefill_kv_workspace_budget_bytes",
+            model_args.prefill_kv_workspace_budget_bytes,
+        ),
+        ("shared_expert_weight_shard", model_args.shared_expert_weight_shard),
+    ):
+        if value is not None:
+            overrides[field] = value
+    if model_args.json_model_override_args or overrides:
+        model_config.apply_override_args(json.dumps(overrides))
 
 
 def build_model_config(
     model_config: ModelConfig,  # ModelConfig instance to build
-    model_args: Any,  # ModelArgs from py_env_configs
+    model_args: ModelArgs,
     kv_cache_config,
     profiling_debug_logging_config: Any,  # ProfilingDebugLoggingConfig
     embedding_config: Optional[

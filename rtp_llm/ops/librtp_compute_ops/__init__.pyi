@@ -261,10 +261,17 @@ class PyAttentionInputs:
     is_cuda_graph: bool
     is_prefill: bool
     is_s_padded: bool
+    is_warmup: bool
     is_target_verify: bool
     is_draft_extend: bool
     mtp_indexer_seed_rows: torch.Tensor
+    is_mtp_draft_update: bool
+    logical_request_count: int
+    physical_request_count: int
+    logical_token_count: int
+    physical_token_count: int
     linear_replay: LinearReplayInputs | None
+    valid_token_mask: torch.Tensor
     padding_offset: torch.Tensor
     prefill_cuda_graph_copy_params: PyPrefillCudaGaphCopyParams | None
     prefix_lengths: torch.Tensor

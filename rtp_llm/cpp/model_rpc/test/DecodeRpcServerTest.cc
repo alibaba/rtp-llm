@@ -717,7 +717,7 @@ TEST(DecodeRpcServerTest, UnimplementedBatchFallbackKeepsIndependentCancelLive) 
     auto stub = RpcService::NewStub(
         grpc::CreateChannel("127.0.0.1:" + std::to_string(decode_port), grpc::InsecureChannelCredentials()));
     BatchGenerateInputPB batch;
-    for (int64_t id : {301, 302}) {
+    for (int64_t id : {301, 302, 303}) {
         auto* item = batch.add_inputs();
         item->set_request_id(id);
         item->add_token_ids(1);
@@ -727,6 +727,7 @@ TEST(DecodeRpcServerTest, UnimplementedBatchFallbackKeepsIndependentCancelLive) 
         config->set_num_beams(1);
         config->set_num_return_sequences(1);
         config->set_can_use_pd_separation(true);
+        config->set_return_logprobs(id == 303);
         auto* address = config->add_role_addrs();
         address->set_role(RoleAddrPB::PREFILL);
         address->set_ip("127.0.0.1");
@@ -770,10 +771,13 @@ TEST(DecodeRpcServerTest, UnimplementedBatchFallbackKeepsIndependentCancelLive) 
                                         .cum_log_probs  = torch::tensor({-0.5f})});
     ASSERT_EQ(call.wait_for(std::chrono::seconds(3)), std::future_status::ready);
     EXPECT_TRUE(call.get().ok());
-    ASSERT_EQ(response.results_size(), 2);
+    ASSERT_EQ(response.results_size(), 3);
     EXPECT_EQ(response.results(0).error_info().error_code(), ErrorCodePB::PRIORITY_PREEMPTED);
     EXPECT_FALSE(response.results(1).has_error_info());
     EXPECT_TRUE(response.results(1).has_final_output());
+    ASSERT_TRUE(response.results(2).has_error_info());
+    EXPECT_EQ(response.results(2).error_info().error_code(), ErrorCodePB::INVALID_PARAMS);
+    EXPECT_EQ(response.results(2).error_info().error_message(), "PD batch does not support compact logprobs");
     streams[0]->finishWithoutGenerate();
     EXPECT_TRUE(waitForCancel(
         [&] { return handle->terminal.load() && !decode->cancel_registry_->needsDownstreamCancel(handle); }));

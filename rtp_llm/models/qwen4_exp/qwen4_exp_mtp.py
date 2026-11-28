@@ -258,6 +258,7 @@ class Qwen4ExpMTP(Qwen4Exp):
         config.num_layers = 1
         config.moe_layer_index = [0]
         config.is_mtp = True
+        config.mtp_draft_prefill_uses_request_lanes = True
         cls._configure_precision_recipe(config)
         config.hybrid_attention_config.enable_hybrid_attention = True
         config.hybrid_attention_config.hybrid_attention_types = [

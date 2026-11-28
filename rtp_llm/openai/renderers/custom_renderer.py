@@ -495,10 +495,17 @@ class CustomChatRenderer:
     def render_chat(self, request: ChatCompletionRequest) -> RenderedInputs:
         raise NotImplementedError
 
+    @classmethod
+    def get_chat_completion_tool_names(cls, request: ChatCompletionRequest) -> set[str]:
+        return {tool.function.name for tool in request.tools or []}
+
+    def validate_chat_completion_prefix(self, request: ChatCompletionRequest) -> None:
+        pass
+
     def apply_chat_completion_constraints(
         self, request: ChatCompletionRequest, generate_config: GenerateConfig
     ) -> None:
-        tool_choice = getattr(request, "tool_choice", None)
+        tool_choice = request.tool_choice
         if tool_choice is None or tool_choice in ("auto", "none"):
             return
         raise FtRuntimeException(
@@ -506,6 +513,16 @@ class CustomChatRenderer:
             f"tool_choice={tool_choice!r} is not supported by "
             f"{self.__class__.__name__}",
         )
+
+    def try_finalize_chat_completion_response_format(
+        self,
+        request: ChatCompletionRequest,
+        generate_config: GenerateConfig,
+        enable_thinking: Optional[bool],
+        input_ids: Optional[List[int]],
+    ) -> bool:
+        """Apply renderer constraints and finalize the format when taking ownership."""
+        return False
 
     async def generate_choice(
         self,

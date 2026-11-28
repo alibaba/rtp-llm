@@ -15,9 +15,5 @@ py_test(
     ],
     exec_properties = {"gpu": "H20_CU13"},
     tags = ["H20_CU13"],
-    target_compatible_with = select({
-        "@//:using_cuda13_x86": [],
-        "//conditions:default": ["@platforms//:incompatible"],
-    }),
     visibility = ["//visibility:public"],
 )

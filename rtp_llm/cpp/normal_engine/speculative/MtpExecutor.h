@@ -1,8 +1,10 @@
 #pragma once
 
+#include <functional>
 #include <list>
 #include <map>
 #include <memory>
+#include <optional>
 #include <vector>
 #include "kmonitor/client/MetricsReporter.h"
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
@@ -48,6 +50,7 @@ public:
                          bool                                           warm_up            = false);
 
     absl::Status process(const ScheduleOutput& schedule_output, int64_t schedule_time_us = 0) override;
+    absl::Status finish() override;
     bool         updateEplbConfig(const EPLBConfig& config) override;
 
     void setModelForwardCallbacks(std::function<void()> before, std::function<void()> after) {
@@ -99,7 +102,6 @@ public:
                                                              bool linear_attention,
                                                              bool cache_snapshot_ready = false);
     static int               selectMtpPreviousSeqLenUpperBound(bool pending, int previous_next_bound, int host_seq_len);
-
     static bool              hasLinearCacheSnapshotCapacity(const std::list<GenerateStreamPtr>& streams,
                                                             const CacheConfig&                  cache_config,
                                                             const std::vector<CacheGroupType>&  group_types,
@@ -155,11 +157,8 @@ protected:
     // decodeStep helpers — extracted to keep decodeStep readable. Each helper
     // owns a single phase (prepare, forward, broadcast, dispatch) and
     // preserves the original PROFILE_SCOPE labels.
-    void waitPreviousBookkeepingBeforeStreamPreparation(const std::list<GenerateStreamPtr>& streams);
-    void launchTargetVerifyPrepareAsync(const GptModelInputs& model_input, size_t batch_size);
-    // post_rejection=true forks with the final post-commit input, which is
-    // safe under speculative target hooks; the default pre-rejection fork
-    // keeps its historical useAsyncPrepare() gate.
+    void            waitPreviousBookkeepingBeforeStreamPreparation(const std::list<GenerateStreamPtr>& streams);
+    void            launchTargetVerifyPrepareAsync(const GptModelInputs& model_input, size_t batch_size);
     void            launchDraftPrefillPrepareAsync(const GptModelInputs& model_input, bool post_rejection = false);
     GptModelOutputs runTargetVerifyForward(GptModelInputs& model_input, const StreamGroups& stream_groups);
     void            debugCheckLinearBlockMapAtKernelRead(const GptModelInputs& model_input,
@@ -286,10 +285,12 @@ protected:
                                                   int64_t              batch_size,
                                                   int64_t              verify_width);
 
-    void releaseAllModelBuffers();
+    void releaseAllModelBuffers(bool defer_reclaim = false);
 
 private:
     static torch::Tensor snapshotMutableHostInputToCuda(const torch::Tensor& tensor, TensorHolder& holder);
+    static torch::Tensor gatherAsyncPreviousSequenceLengths(const std::list<GenerateStreamPtr>& streams,
+                                                            TensorHolder&                       holder);
 
     static bool canEarlyReturnTargetOnlyPrefill(int64_t dp_size);
     static bool shouldSkipEmptyDecode(bool streams_empty);
@@ -343,6 +344,8 @@ private:
     // Keeps async copy source tensors alive across release points.
     TensorHolder buffer_holder_;
 
+    std::optional<torch::Event> decode_follower_forward_done_;
+
     bool     warm_up_;
     RoleType role_type_;
     // True when any KV-cache group is CacheGroupType::LINEAR (RWKV / Mamba /
@@ -373,6 +376,7 @@ private:
     // Declare the worker after its target so destruction joins the worker first.
     std::unique_ptr<SpecLogitsVerifyRunner> spec_logits_verify_runner_;
     AsyncRunner                             spec_logits_verify_async_runner_;
+    AsyncRunner                             spec_sampler_prepare_runner_;
 
     // Bookkeeping worker for stream-async decode dispatch. It owns a CUDA
     // stream + thread and runs D2H/specUpdate/KV release off the main thread.

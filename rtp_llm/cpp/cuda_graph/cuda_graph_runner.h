@@ -20,6 +20,7 @@
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_utils.h"
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_base.h"
+#include "rtp_llm/cpp/utils/math_utils.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
 
 namespace py = pybind11;
@@ -63,6 +64,7 @@ public:
         enable_cuda_graph_debug_mode_(graph_params.enable_cuda_graph_debug_mode),
         num_tokens_per_bs_(graph_params.num_tokens_per_bs),
         linear_replay_group_count_(graph_params.linear_replay_group_count),
+        sequence_parallel_size_(graph_params.sequence_parallel_size),
         max_seq_len_(graph_params.max_seq_len),
         request_max_seq_len_(graph_params.request_max_seq_len > 0 ? graph_params.request_max_seq_len :
                                                                     graph_params.max_seq_len),
@@ -102,9 +104,17 @@ public:
                                       || role_ == CudaGraphRole::MTP_DRAFT_PREFILL
                                       || role_ == CudaGraphRole::GENERATION_PREFILL;
         is_target_verify_ = role_ == CudaGraphRole::TARGET_VERIFY;
+        // Opt-in models prepare attention metadata from device inputs in forward.
+        // Ordinary Prefill runners also consume host lengths themselves.
+        attention_metadata_in_forward_ =
+            !isEmbeddingStylePrefillCudaGraph() && !isGenerationPrefillCudaGraph()
+            && py::getattr(py_instance_, "cuda_graph_prepares_attention_metadata_in_forward", py::bool_(false))
+                   .cast<bool>();
         draft_prefill_uses_request_lanes_ =
-            isMtpDraftPrefillCudaGraph() && py::hasattr(py_instance_, "cuda_graph_draft_prefill_uses_request_lanes")
-            && py_instance_.attr("cuda_graph_draft_prefill_uses_request_lanes")().cast<bool>();
+            isMtpDraftPrefillCudaGraph() && graph_params.mtp_draft_prefill_uses_request_lanes;
+        if (sequence_parallel_size_ > 1 && role_ != CudaGraphRole::GENERATION_PREFILL) {
+            max_bs_ = padSequenceParallelRequests(max_bs_, num_tokens_per_bs_, sequence_parallel_size_);
+        }
         if (role_ == CudaGraphRole::GENERATION_PREFILL) {
             RTP_LLM_CHECK_WITH_INFO(
                 request_max_seq_len_ > 0 && request_max_seq_len_ <= max_seq_len_,
@@ -258,6 +268,7 @@ private:
     bool                    enable_cuda_graph_{false};
     bool                    is_prefill_cuda_graph_mode_{false};
     bool                    is_target_verify_{false};
+    bool                    attention_metadata_in_forward_{false};
     bool                    draft_prefill_uses_request_lanes_{false};
     CudaGraphRole           role_{CudaGraphRole::AUTO};
     cuda_graph::GraphStream capture_stream_;
@@ -265,6 +276,7 @@ private:
     size_t                  max_bs_{1};
     int                     num_tokens_per_bs_{1};
     int                     linear_replay_group_count_{0};
+    int                     sequence_parallel_size_{1};
     int                     max_num_token_{1};
     int64_t                 max_kernel_block_table_width_{0};
     int                     max_seq_len_{0};

@@ -2,13 +2,13 @@ import asyncio
 import itertools
 import json
 import logging
+from contextlib import aclosing
 from functools import partial
 from typing import Any, AsyncGenerator, Callable, Dict, List, Optional
 
 from fastapi import Request
 
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
-from rtp_llm.server.misc import format_exception
 from rtp_llm.config.generate_config import (
     GenerateConfig,
     ReturnAllProbsMode,
@@ -41,6 +41,7 @@ from rtp_llm.openai.api_datatype import (
     RoleEnum,
     ToolCall,
     UsageInfo,
+    get_tool_choice_function_name,
 )
 from rtp_llm.openai.renderer_factory import ChatRendererFactory
 from rtp_llm.openai.renderers.basic_renderer import BasicRenderer
@@ -52,6 +53,7 @@ from rtp_llm.openai.renderers.custom_renderer import (
 )
 from rtp_llm.ops import SpecialTokens
 from rtp_llm.server.backend_rpc_server_visitor import BackendRPCServerVisitor
+from rtp_llm.server.misc import format_exception
 from rtp_llm.server.request_headers import extract_request_headers
 from rtp_llm.utils.base_model_datatypes import FrontendMetricFrame
 from rtp_llm.utils.complete_response_async_generator import (
@@ -243,14 +245,28 @@ class OpenaiEndpoint(object):
                     stop_word_ids.append(list(token_ids))
         return stop_word_ids
 
+    @staticmethod
+    def _validate_renderer_tool_choice(
+        request: ChatCompletionRequest,
+        renderer: CustomChatRenderer,
+    ) -> None:
+        tool_name = get_tool_choice_function_name(request.tool_choice)
+        if request.tool_choice == "required" or tool_name is not None:
+            names = renderer.get_chat_completion_tool_names(request)
+            if not names or (tool_name is not None and tool_name not in names):
+                raise FtRuntimeException(
+                    ExceptionType.INVALID_PARAMS,
+                    "tool_choice requires a tool supported by the selected renderer",
+                )
+
     def _extract_generation_config(
         self,
         request: ChatCompletionRequest,
         input_ids: Optional[List[int]] = None,
         renderer: Optional[CustomChatRenderer] = None,
     ) -> GenerateConfig:
-        # TODO(wangyin): implement this
         renderer = renderer or self.chat_renderer
+        self._validate_renderer_tool_choice(request, renderer)
         config = (
             request.extra_configs.model_copy(deep=True)
             if request.extra_configs is not None
@@ -369,18 +385,22 @@ class OpenaiEndpoint(object):
             config.max_new_tokens = backend_max_new_tokens
         elif request.max_tokens != None:
             config.max_new_tokens = request.max_tokens
-        config.add_thinking_params(
-            self.tokenizer,
-            self.generate_env_config,
-            enable_thinking=(
-                None
-                if config.thinking_mode == ThinkingMode.ADAPTIVE
-                else config.thinking_mode == ThinkingMode.ENABLED
-            ),
-            reasoning_format=self._reasoning_format_for_prompt(
-                config, renderer, input_ids
-            ),
+        enable_thinking = (
+            None
+            if config.thinking_mode == ThinkingMode.ADAPTIVE
+            else config.thinking_mode == ThinkingMode.ENABLED
         )
+        if not renderer.try_finalize_chat_completion_response_format(
+            request, config, enable_thinking, input_ids
+        ):
+            config.add_thinking_params(
+                self.tokenizer,
+                self.generate_env_config,
+                enable_thinking=enable_thinking,
+                reasoning_format=self._reasoning_format_for_prompt(
+                    config, renderer, input_ids
+                ),
+            )
         if request.debug_info:
             config.return_output_ids = True
         return config
@@ -479,7 +499,10 @@ class OpenaiEndpoint(object):
         aux_info = None
         extra_outputs = None
         async for response in choice_generator:
-            if len(response.choices) != len(all_choices):
+            if not response.choices and response.usage is not None:
+                # The final usage-only stream frame does not replace choices.
+                pass
+            elif len(response.choices) != len(all_choices):
                 if all_choices == []:
                     all_choices = [
                         ChatCompletionResponseChoice(
@@ -661,6 +684,8 @@ class OpenaiEndpoint(object):
         renderer = (
             self.template_renderer if chat_request.user_template else self.chat_renderer
         )
+        self._validate_renderer_tool_choice(chat_request, renderer)
+        self.chat_renderer.validate_chat_completion_prefix(chat_request)
         prepopulate_str = ""
         if len(chat_request.messages) > 0 and chat_request.messages[-1].partial:
             prepopulate_str = str(chat_request.messages[-1].content)
@@ -852,16 +877,19 @@ class OpenaiEndpoint(object):
         return gen_input, generate_config
 
     async def _render_single_output(self, outputs, chat_request, generate_config):
-        """Render a single GenerateOutputs into a ChatCompletionResponse.
-        Only non-streaming mode is supported for batch inference."""
+        async def single_output():
+            yield outputs
+
+        return await self._render_batch_output(
+            single_output(), chat_request, generate_config
+        )
+
+    async def _render_batch_output(
+        self, output_generator, chat_request, generate_config
+    ):
         renderer = (
             self.template_renderer if chat_request.user_template else self.chat_renderer
         )
-
-        async def _single_output_gen(out):
-            yield out
-
-        output_generator = _single_output_gen(outputs)
 
         prompt_logits_data = None
         if generate_config.return_prompt_logits:
@@ -870,9 +898,12 @@ class OpenaiEndpoint(object):
                 prompt_logits_data,
             ) = await renderer._extract_prompt_logits(output_generator)
 
-        merged_gen = await renderer._merge_non_streaming_outputs(output_generator)
+        if not generate_config.is_streaming:
+            output_generator = await renderer._merge_non_streaming_outputs(
+                output_generator
+            )
         choice_generator = renderer.render_response_stream(
-            merged_gen, chat_request, generate_config
+            output_generator, chat_request, generate_config
         )
         resp = await self._collect_complete_response(
             choice_generator, None, self.tokenizer
@@ -891,7 +922,11 @@ class OpenaiEndpoint(object):
         request_ids: Optional[List[int]] = None,
     ) -> list:
         inputs = []
-        all_configs = []
+        prepared_items = []
+        incremental_items = []
+        responses: list[ChatCompletionResponse | dict[str, Any] | None] = [None] * len(
+            batch_request.requests
+        )
         for i, chat_request in enumerate(batch_request.requests):
             if chat_request.stream:
                 raise ValueError(
@@ -899,9 +934,15 @@ class OpenaiEndpoint(object):
                 )
             chat_request.stream = False
             gen_input, generate_config = self._prepare_chat_input(
-                request_ids[i] if request_ids is not None else base_request_id + i, chat_request
+                request_ids[i] if request_ids is not None else base_request_id + i,
+                chat_request,
             )
-            generate_config.is_streaming = False
+            # Legacy probability tensors describe only the current step.
+            incremental = (
+                chat_request.logprobs
+                and generate_config.return_all_probs != ReturnAllProbsMode.NONE
+            )
+            generate_config.is_streaming = bool(incremental)
             if frontend_metric_observer is not None:
                 # Keep aux-free terminal batches on the native zero-copy path.
                 gen_input.generate_config = generate_config.model_copy(
@@ -927,21 +968,46 @@ class OpenaiEndpoint(object):
 
                 gen_input.frontend_metric_observer = raw_metric_observer
             gen_input.frontend_metric_tags = dict(frontend_metric_tags or {})
-            inputs.append(gen_input)
-            all_configs.append(generate_config)
-
-        batch_outputs = await self.backend_rpc_server_visitor.batch_enqueue(inputs)
-
-        responses = []
-        for i, outputs in enumerate(batch_outputs):
-            if isinstance(outputs, FtRuntimeException):
-                responses.append({"error": format_exception(outputs)})
+            if incremental:
+                incremental_items.append((i, gen_input, generate_config))
                 continue
-            complete_response = await self._render_single_output(
-                outputs, batch_request.requests[i], all_configs[i]
-            )
-            responses.append(complete_response)
+            inputs.append(gen_input)
+            prepared_items.append((i, generate_config))
 
+        async def render_native_batch():
+            batch_outputs = await self.backend_rpc_server_visitor.batch_enqueue(inputs)
+            for (i, generate_config), outputs in zip(
+                prepared_items, batch_outputs, strict=True
+            ):
+                if isinstance(outputs, FtRuntimeException):
+                    responses[i] = {"error": format_exception(outputs)}
+                    continue
+                responses[i] = await self._render_single_output(
+                    outputs, batch_request.requests[i], generate_config
+                )
+
+        async def render_incremental(i, gen_input, generate_config):
+            try:
+                output_generator = await self.backend_rpc_server_visitor.enqueue(
+                    gen_input
+                )
+                async with aclosing(output_generator):
+                    responses[i] = await self._render_batch_output(
+                        output_generator, batch_request.requests[i], generate_config
+                    )
+            except FtRuntimeException as error:
+                responses[i] = {"error": format_exception(error)}
+
+        if incremental_items:
+            work = [render_incremental(*item) for item in incremental_items]
+            if inputs:
+                work.append(render_native_batch())
+            results = await asyncio.gather(*work, return_exceptions=True)
+            for result in results:
+                if isinstance(result, BaseException):
+                    raise result
+        elif inputs:
+            await render_native_batch()
         return responses
 
     def chat_render(self, chat_request: ChatCompletionRequest) -> DebugInfo:

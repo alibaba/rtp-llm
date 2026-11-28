@@ -129,6 +129,12 @@ public:
 
     // hold tensors from grpc
     std::vector<torch::Tensor> tensors_holder;
+
+private:
+    friend class GenerateStream;
+    struct P2PProposalUpload;
+    std::shared_ptr<P2PProposalUpload> p2p_proposal_upload_;
+    std::atomic<bool>                  p2p_proposal_pending_{false};
 };
 using SpeculativeExecutorStreamOutputPtr = std::shared_ptr<SpeculativeExecutorStreamOutput>;
 
@@ -714,9 +720,9 @@ public:
         sp_output_buffer_ = sp_output_buffer;
     }
 
-    SpeculativeExecutorStreamOutputPtr getSPOutputBuffer() {
-        return sp_output_buffer_;
-    }
+    void setP2PProposalBuffer(SpeculativeExecutorStreamOutputPtr output, torch::Tensor probs, torch::Tensor hidden);
+
+    SpeculativeExecutorStreamOutputPtr getSPOutputBuffer();
 
     // Count worker claims on this stream's KV resource.
     // releaseResource waits for zero so worker-side update/specUpdate cannot
@@ -1130,6 +1136,7 @@ protected:
     int  max_chunk_size_      = 0;
     bool chunk_advanced_      = false;
     bool warmup_chunk_window_ = false;
+    int  warmup_chunk_index_  = 0;
     // prefill reuse info (PD-sep); read/write only under output_mutex_
     bool    prefill_independent_block_pools_ = false;
     int64_t prefill_total_reuse_len_         = 0;

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import struct
 from collections.abc import Iterable, Iterator, Sequence
 from dataclasses import dataclass, field
@@ -238,6 +239,18 @@ def _parse_optional_scalar_int(request, tensor_name: str) -> int | None:
     if not ids:
         return None
     return int(ids[0])
+
+
+def _parse_optional_scalar_bool(request, tensor_name: str) -> bool | None:
+    inp, raw = _find_input_raw(request, tensor_name)
+    if inp is None or not raw:
+        return None
+    if inp.datatype == "BOOL":
+        return raw[0] != 0
+    value = _parse_optional_scalar_int(request, tensor_name)
+    if value is None:
+        value = _parse_optional_scalar_float(request, tensor_name)
+    return value != 0 if value is not None else None
 
 
 def _parse_optional_scalar_float(request, tensor_name: str) -> float | None:
@@ -753,6 +766,16 @@ class SamplingParams:
     response_format: str | None = None
     json_format: bool = False
     structural_tag: str | None = None
+    logprobs: bool = False
+    top_logprobs: int = 0
+
+    def __post_init__(self) -> None:
+        if self.logprobs and (
+            type(self.top_logprobs) is not int or not 0 <= self.top_logprobs <= 20
+        ):
+            raise DashScParameterError(
+                "top_logprobs must be an integer between 0 and 20"
+            )
 
     @property
     def n(self) -> int:
@@ -820,6 +843,8 @@ class SamplingParams:
             stop_words_list=self.stop_words_list_py(),
             max_thinking_tokens=max_thinking_tokens,
             return_input_ids=return_input_ids,
+            return_logprobs=self.logprobs,
+            top_logprobs=self.top_logprobs if self.logprobs else 0,
             is_streaming=True,
             response_format=response_format,
             structural_tag=structural_tag,
@@ -913,7 +938,7 @@ def parse_sampling_params(
     ``top_p``, ``top_k``, ``stop_words_list``, ``temperature``,
     ``min_new_tokens`` (or DashScope alias ``min_length``), ``seed``,
     ``repetition_penalty``, ``frequency_penalty``, ``presence_penalty``,
-    ``max_new_think_tokens`` / ``max_think_length``.
+    ``max_new_think_tokens`` / ``max_think_length``, ``logprobs``, ``top_logprobs``.
 
     Legacy: if there is no ``top_k`` input, ``request.parameters["top_k"].int64_param``
     is used instead.
@@ -980,6 +1005,22 @@ def parse_sampling_params(
     if vf is not None:
         presence_penalty = vf
 
+    logprobs = _parse_optional_scalar_bool(request, "logprobs")
+    if logprobs is None:
+        logprobs = _parse_optional_parameter_bool(request, "logprobs")
+    if logprobs is None:
+        logprobs = _parse_optional_bool(
+            _lookup_ds_request_control(ds_attrs, "logprobs")
+        )
+
+    top_logprobs = _parse_optional_scalar_int(request, "top_logprobs")
+    if top_logprobs is None:
+        top_logprobs = _parse_optional_parameter_int(request, "top_logprobs")
+    if top_logprobs is None:
+        top_logprobs = _parse_optional_int_value(
+            _lookup_ds_request_control(ds_attrs, "top_logprobs")
+        )
+
     for tensor_name in ("max_think_length", "max_new_think_tokens"):
         v = _parse_optional_scalar_int(request, tensor_name)
         if v is not None:
@@ -1012,6 +1053,8 @@ def parse_sampling_params(
         response_format=response_format,
         json_format=json_format,
         structural_tag=structural_tag,
+        logprobs=bool(logprobs),
+        top_logprobs=top_logprobs or 0,
     )
 
 
@@ -1361,6 +1404,78 @@ def _token_ids_list_from_generate_output(out_py: GenerateOutput) -> list[int]:
     return ids
 
 
+def _append_logprobs_parameter(
+    infer: predict_v2_pb2.ModelInferResponse,
+    out_py: GenerateOutput,
+    generated_ids: list[int],
+    top_logprobs: int,
+) -> None:
+    rows: list[dict[str, float | None]] = []
+    if generated_ids:
+        source_ids = _token_ids_list_from_generate_output(out_py)
+        # A thinking phase may stop inside a backend frame. Its emitted IDs
+        # must be a prefix of the original IDs, which compact placement refers to.
+        offset, count = out_py.logprobs_offset, out_py.logprobs_count
+        if offset is None and count is None:
+            # Older compact responses had a score for every generated token.
+            offset, count = 0, len(source_ids)
+        if (
+            offset is None
+            or count is None
+            or offset < 0
+            or count < 0
+            or offset + count != len(source_ids)
+            or source_ids[: len(generated_ids)] != generated_ids
+        ):
+            raise RuntimeError("compact logprobs cannot be aligned with generated_ids")
+
+        rows.extend({str(token_id): None} for token_id in generated_ids[:offset])
+        emitted_scored_count = len(generated_ids) - len(rows)
+        if emitted_scored_count:
+            token_logprobs = out_py.token_logprobs
+            if token_logprobs is None or token_logprobs.shape != (count,):
+                raise RuntimeError(
+                    "token_logprobs is missing or cannot be aligned with generated_ids"
+                )
+            candidate_rows: list[dict[str, float | None]] = [
+                {} for _ in range(emitted_scored_count)
+            ]
+            if top_logprobs:
+                candidate_ids = out_py.top_logprob_token_ids
+                candidate_scores = out_py.top_logprobs
+                if (
+                    candidate_ids is None
+                    or candidate_scores is None
+                    or candidate_ids.dim() != 2
+                    or candidate_ids.shape != candidate_scores.shape
+                    or candidate_ids.shape[0] != count
+                    or candidate_ids.shape[1] > top_logprobs
+                ):
+                    raise RuntimeError(
+                        "top logprobs are missing or cannot be aligned with generated_ids"
+                    )
+                for row, ids, scores in zip(
+                    candidate_rows,
+                    candidate_ids[:emitted_scored_count].tolist(),
+                    candidate_scores[:emitted_scored_count].tolist(),
+                ):
+                    row.update(
+                        (str(token_id), score)
+                        for token_id, score in zip(ids, scores)
+                        if score != -math.inf
+                    )
+            for row, token_id, score in zip(
+                candidate_rows,
+                generated_ids[offset:],
+                token_logprobs[:emitted_scored_count].tolist(),
+            ):
+                row[str(token_id)] = score
+            rows.extend(candidate_rows)
+    infer.parameters["logprobs"].string_param = json.dumps(
+        rows, allow_nan=False, separators=(",", ":")
+    )
+
+
 def _first_int(value: int | list[int] | tuple[int, ...] | None) -> int | None:
     if value is None:
         return None
@@ -1434,9 +1549,22 @@ def prepend_to_generated_ids_tensor(
         cur_len = shape[-1] if shape else 0
         if cur_len <= 0:
             return False
+        prefixed_logprobs = None
+        if "logprobs" in infer.parameters:
+            rows = json.loads(infer.parameters["logprobs"].string_param)
+            if not isinstance(rows, list) or len(rows) != cur_len:
+                raise ValueError("logprobs rows must match generated_ids before echo")
+            # Prompt echo has no generated probability. Preserve token alignment.
+            prefixed_logprobs = json.dumps(
+                [{str(token_id): None} for token_id in token_ids] + rows,
+                allow_nan=False,
+                separators=(",", ":"),
+            )
         prefix_raw = struct.pack("<%di" % len(token_ids), *token_ids)
         infer.raw_output_contents[i] = prefix_raw + bytes(infer.raw_output_contents[i])
         out.shape[:] = [1, cur_len + len(token_ids)]
+        if prefixed_logprobs is not None:
+            infer.parameters["logprobs"].string_param = prefixed_logprobs
         return True
     return False
 
@@ -1577,6 +1705,7 @@ def build_stream_response_from_generate_outputs(
     stream_finished: bool | None = None,
     token_ids: list[int] | None = None,
     log_input_output: bool = True,
+    emit_logprobs: bool = True,
 ) -> predict_v2_pb2.ModelStreamInferResponse:
     """Build ``ModelStreamInferResponse`` from one ``GenerateOutputs`` chunk.
 
@@ -1616,6 +1745,14 @@ def build_stream_response_from_generate_outputs(
         out_py,
         prompt_token_fallback=len(request_input_ids or []),
     )
+    if (
+        emit_logprobs
+        and generate_config is not None
+        and generate_config.return_logprobs
+    ):
+        _append_logprobs_parameter(
+            infer, out_py, generated_ids, generate_config.top_logprobs
+        )
     infer.parameters["incremental_output"].int64_param = 1 if is_streaming else 0
     _append_dashllm_limit_parameters(
         infer,
@@ -1726,6 +1863,7 @@ class StreamResponseBuilder:
         finish_reason_override: int | None = None,
         stream_finished: bool | None = None,
         token_ids: list[int] | None = None,
+        emit_logprobs: bool = True,
     ) -> predict_v2_pb2.ModelStreamInferResponse:
         if not go.generate_outputs:
             raise ValueError("StreamResponseBuilder.build expects non-empty outputs")
@@ -1755,6 +1893,10 @@ class StreamResponseBuilder:
             else self._prompt_token_fallback
         )
         cached_tokens = int(aux_info.reuse_len) if aux_info is not None else 0
+        config = self._generate_config
+        include_logprobs = (
+            emit_logprobs and config is not None and config.return_logprobs
+        )
 
         if self._template is None:
             response = predict_v2_pb2.ModelStreamInferResponse()
@@ -1799,6 +1941,11 @@ class StreamResponseBuilder:
             self._template_prompt_tokens = prompt_tokens
             self._template_cached_tokens = cached_tokens
             self._template_think_token_num = generate_think_token_num
+            # Scores belong to this frame and must stay out of the template.
+            if include_logprobs:
+                _append_logprobs_parameter(
+                    infer, out_py, generated_ids, config.top_logprobs
+                )
             logging.debug(
                 "[DashScGrpc] [%s] generated_ids: %s",
                 self._request_log_tag,
@@ -1816,6 +1963,10 @@ class StreamResponseBuilder:
         response = predict_v2_pb2.ModelStreamInferResponse()
         response.CopyFrom(self._template)
         infer = response.infer_response
+        if include_logprobs:
+            _append_logprobs_parameter(
+                infer, out_py, generated_ids, config.top_logprobs
+            )
 
         generated_raw = (
             struct.pack("<%di" % len(generated_ids), *generated_ids)
