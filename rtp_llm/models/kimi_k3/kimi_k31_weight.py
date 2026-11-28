@@ -100,7 +100,6 @@ class KimiK31Weight(KimiK3Weight):
         "self_attn.indexer.k_norm.bias",
         "self_attn.indexer.weights_proj.weight",
     )
-    _MLA_SUFFIXES = KimiK3Weight._MLA_SUFFIXES + _INDEXER_SUFFIXES
 
     def _mla_weights(self):
         attention = super()._mla_weights()

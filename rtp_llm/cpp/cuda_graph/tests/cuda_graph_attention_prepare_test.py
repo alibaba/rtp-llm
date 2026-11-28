@@ -51,6 +51,9 @@ class MetadataImpl:
 
 
 class MetadataModel:
+    def cuda_graph_draft_prefill_uses_request_lanes(self):
+        return True
+
     def __init__(self, read_host=(False, False), *, prepare_in_forward=False):
         self.read_host = read_host
         if prepare_in_forward:
@@ -100,7 +103,7 @@ class MetadataModel:
 def make_runner(model, role):
     runner = CudaGraphRunner()
     if role == "update":
-        runner.init_mtp_draft_prefill(model, 2, HIDDEN_SIZE, 4, 1, request_lanes=True)
+        runner.init_mtp_draft_prefill(model, 2, HIDDEN_SIZE, 4, 1)
     else:
         runner.init_decode(
             model,

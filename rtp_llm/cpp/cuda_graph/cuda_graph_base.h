@@ -75,8 +75,6 @@ struct GraphParams {
     // the model output hidden_size because auxiliary feature rows may be wider.
     std::size_t input_hidden_size      = 0;
     float       input_embedding_scalar = 1.0f;
-    // Draft Prefill input layout selected alongside the executor batch layout.
-    bool mtp_draft_prefill_uses_request_lanes = false;
     // Model-owned embedding weights must be installed before initCapture();
     // setting them after capture leaves the graph bound to undefined tensors.
     torch::Tensor position_encoding;

@@ -260,7 +260,6 @@ struct MtpExecutorTestConfig {
     int64_t         dspark_mask_token_id      = -1;
     RoleType        role_type                 = RoleType::PDFUSION;
     bool            enable_batch_record       = false;
-    bool            draft_prefill_uses_request_lanes = false;
     double          record_decode_sample_rate = 1.0;
 };
 
@@ -957,7 +956,7 @@ private:
 
 class MtpExecutorTest: public DeviceTestBase {
 public:
-    void runMultiBatchDecode(bool use_mtp_hidden_buffer, bool request_lanes = false);
+    void runMultiBatchDecode(bool use_mtp_hidden_buffer);
     void runDSparkSpecLogitsWorkerScenario(bool previous_commit_pending, bool previous_commit_throws = false);
 
     GenerateStreamPtr createContextStream(const ModelConfig&     model_config,
@@ -1128,17 +1127,6 @@ public:
 
         // Create MtpExecutor
         auto executor = std::make_unique<TestableMtpExecutor>(params, propose_params, cache_manager);
-
-        // C++ fake models have no Python hook; fixed-Q fixtures declare their layout here.
-        if (test_config.draft_prefill_uses_request_lanes) {
-            executor->setBatchProcessor(std::make_unique<MtpBatchStreamProcessor>(params.model_config_,
-                                                                                  params.pd_sep_config,
-                                                                                  params.profiling_debug_logging_config,
-                                                                                  cache_config,
-                                                                                  params.sp_config,
-                                                                                  false,
-                                                                                  true));
-        }
 
         // Create fake models
         GptModelInitParams target_model_params(
@@ -1347,7 +1335,7 @@ public:
     void runSingleBatchDecodeScenario(bool                         with_prefill_only,
                                       const MtpExecutorTestConfig* config_override   = nullptr,
                                       int64_t*                     out_kv_len_before = nullptr);
-    void runMultiBatchDecodeScenario(int seed_mode, bool use_mtp_hidden_buffer = false, bool request_lanes = false);
+    void runMultiBatchDecodeScenario(int seed_mode, bool use_mtp_hidden_buffer = false);
 
     GptModelOutputs createRandomGptModelOutputs(size_t token_num, size_t vocab_size, size_t hidden_size) {
         auto output              = GptModelOutputs{};
@@ -3471,7 +3459,6 @@ void MtpExecutorTest::runSingleBatchDecodeScenario(bool                         
     size_t vocab_size   = 4;
 
     MtpExecutorTestConfig test_config;
-    test_config.draft_prefill_uses_request_lanes = true;
     test_config.gen_num_per_cycle   = propose_step;
     test_config.vocab_size_override = 4;
     if (config_override) {
@@ -3479,6 +3466,8 @@ void MtpExecutorTest::runSingleBatchDecodeScenario(bool                         
         test_config.record_decode_sample_rate = config_override->record_decode_sample_rate;
     }
     auto components = createMtpExecutorComponents(test_config);
+    const int64_t draft_rows =
+        (components.executor->useStreamAsync() || components.executor->useAsyncDeviceState()) ? 5 : 3;
 
     size_t batch_size = 1;
 
@@ -3544,11 +3533,13 @@ void MtpExecutorTest::runSingleBatchDecodeScenario(bool                         
     auto next_draft_input    = GptModelInputs{};
     auto next_draft_output   = GptModelOutputs{};
     next_draft_output.logits = torch::tensor({1.9f, 1.10f, 1.11f, 1.12f}).reshape({(int64_t)batch_size, 4});
-    next_draft_output.all_hidden_states =
-        torch::tensor({0.1f, 0.1f, 0.2f, 0.22f, 0.3f, 0.33f, 0.0f, 0.0f, 0.0f, 0.0f}).reshape({5, 2}).to(torch::kCUDA);
+    next_draft_output.all_hidden_states = torch::tensor({0.1f, 0.1f, 0.2f, 0.22f, 0.3f, 0.33f, 0.0f, 0.0f, 0.0f, 0.0f})
+                                              .reshape({5, 2})
+                                              .narrow(0, 0, draft_rows)
+                                              .to(torch::kCUDA);
 
-    next_draft_input.combo_tokens      = torch::tensor({3, 2, 0, 0, 0}, torch::kInt32);
-    next_draft_input.input_lengths     = torch::tensor({5}, torch::kInt32);
+    next_draft_input.combo_tokens      = torch::tensor({3, 2, 0, 0, 0}, torch::kInt32).narrow(0, 0, draft_rows);
+    next_draft_input.input_lengths     = torch::tensor({draft_rows}, torch::kInt32);
     next_draft_input.prefix_lengths    = torch::tensor({2}, torch::kInt32);
     next_draft_input.lm_output_indexes = torch::tensor({2}, torch::kInt32);
 
@@ -3579,7 +3570,7 @@ void MtpExecutorTest::runSingleBatchDecodeScenario(bool                         
     // attribute still refers to rows from graph capture.
     components.fake_target_model->setMtpTargetHiddenStates(torch::full_like(target_output.all_hidden_states, -1));
 
-    next_draft_input.last_hidden_states = target_output.all_hidden_states;
+    next_draft_input.last_hidden_states = target_output.all_hidden_states.narrow(0, 0, draft_rows);
 
     components.fake_draft_model->setInputs({draft_input_1, draft_input_2, draft_input_3});
     components.fake_draft_model->setOutputs({draft_output_1, draft_output_2, draft_output_3});
@@ -3721,10 +3712,11 @@ TEST_F(MtpExecutorTest, testDecodeSpecLogitsCapReplacesInvalidDraftWithTargetTok
     size_t vocab_size   = 4;
 
     MtpExecutorTestConfig test_config;
-    test_config.draft_prefill_uses_request_lanes = true;
     test_config.gen_num_per_cycle   = propose_step;
     test_config.vocab_size_override = vocab_size;
     auto components                 = createMtpExecutorComponents(test_config);
+    const int64_t draft_rows =
+        (components.executor->useStreamAsync() || components.executor->useAsyncDeviceState()) ? 3 : 1;
 
     auto                 stream_new_tokens        = torch::tensor({{2}}, torch::kInt32);
     auto                 stream_hidden_states     = torch::tensor({{0.03f, 0.04f}});
@@ -3760,14 +3752,14 @@ TEST_F(MtpExecutorTest, testDecodeSpecLogitsCapReplacesInvalidDraftWithTargetTok
 
     auto next_draft_input               = GptModelInputs{};
     auto next_draft_output              = GptModelOutputs{};
-    next_draft_input.combo_tokens       = torch::tensor({1, 0, 0}, torch::kInt32);
-    next_draft_input.input_lengths      = torch::tensor({3}, torch::kInt32);
+    next_draft_input.combo_tokens       = torch::tensor({1, 0, 0}, torch::kInt32).narrow(0, 0, draft_rows);
+    next_draft_input.input_lengths      = torch::tensor({draft_rows}, torch::kInt32);
     next_draft_input.prefix_lengths     = torch::tensor({2}, torch::kInt32);
     next_draft_input.lm_output_indexes  = torch::tensor({0}, torch::kInt32);
-    next_draft_input.last_hidden_states = target_output.all_hidden_states;
+    next_draft_input.last_hidden_states = target_output.all_hidden_states.narrow(0, 0, draft_rows);
     next_draft_output.logits            = torch::tensor({0.2f, 0.1f, 0.8f, 0.0f}).reshape({1, 4});
     next_draft_output.all_hidden_states =
-        torch::tensor({0.21f, 0.22f, 0.0f, 0.0f, 0.0f, 0.0f}).reshape({3, 2}).to(torch::kCUDA);
+        torch::tensor({0.21f, 0.22f, 0.0f, 0.0f, 0.0f, 0.0f}).reshape({3, 2}).narrow(0, 0, draft_rows).to(torch::kCUDA);
 
     components.fake_draft_model->setInputs({draft_input_1, next_draft_input});
     // Transactional targets disable the speculative early async prepare. The
@@ -4116,50 +4108,6 @@ TEST_F(MtpExecutorTest, ReviewTransactionalPreviousBookkeepingFailureReachesCons
     runDSparkSpecLogitsWorkerScenario(true, true);
 }
 
-TEST_F(MtpExecutorTest, DraftPrefillLayoutUsesTheDraftModelConfig) {
-    // No Python Torch import is needed: this exercises construction and the
-    // capability contract, not forward. Keep the real PyWrappedModel wrapper.
-    py::scoped_interpreter interpreter;
-    auto module = py::module_::import("types").attr("ModuleType")("mtp_draft_layout_test").cast<py::module_>();
-    py::class_<torch_ext::PyModelInitResources>(module, "PyModelInitResources");
-    py::exec(R"(
-class DraftModel:
-    def __init__(self):
-        self.initializations = 0
-    def initialize(self, resources):
-        self.initializations += 1
-        return True
-    def forward(self, inputs):
-        raise AssertionError("construction must not run a forward")
-    def close(self):
-        pass
-)",
-             module.attr("__dict__"));
-    auto          draft = module.attr("DraftModel")();
-    CustomConfig  config;
-    ModelConfig   model_config;
-    RuntimeConfig runtime_config;
-    KVCacheConfig kv_cache_config;
-    auto          params               = createEngineInitParams(config, model_config, runtime_config, kv_cache_config);
-    params.sp_config.type              = SP_TYPE_MTP;
-    params.sp_config.gen_num_per_cycle = 3;
-    params.hw_kernel_config.enable_cuda_graph = false;
-    params.py_model                           = py::none();
-    params.py_sp_model                        = draft;
-    auto modules                              = std::make_unique<std::vector<std::unique_ptr<EngineInitParams>>>();
-    auto draft_params                         = std::make_unique<EngineInitParams>(params);
-    draft_params->model_config_.mtp_draft_prefill_uses_request_lanes = true;
-    modules->push_back(std::move(draft_params));
-    auto propose = std::make_unique<ProposeModelEngineInitParams>(SP_TYPE_MTP, 3, std::move(modules));
-    ASSERT_TRUE(propose->getEngineInitParams().py_model.is_none());
-    TestableMtpExecutor executor(params, propose, nullptr, 1, true);
-    ASSERT_NE(dynamic_cast<PyWrappedModel*>(executor.draft_model_.get()), nullptr);
-    EXPECT_EQ(draft.attr("initializations").cast<int>(), 1);
-    EXPECT_TRUE(executor.batch_stream_processor_->request_lanes_)
-        << "the batch layout must use the same model configuration as the draft wrapper";
-    EXPECT_EQ(executor.batch_stream_processor_->draftInputLayout(), mtp::DraftInputLayout::FIXED_WIDTH);
-}
-
 TEST_F(MtpExecutorTest, testDSparkDraftUsesFlashInferSamplingAndReturnsExactQ) {
     constexpr int32_t gamma      = 3;
     constexpr int32_t vocab_size = 4;
@@ -4448,10 +4396,11 @@ TEST_F(MtpExecutorTest, testDecodeOneStepSpecLogitsCapReplacesInvalidDraftWithTa
     size_t vocab_size   = 4;
 
     MtpExecutorTestConfig test_config;
-    test_config.draft_prefill_uses_request_lanes = true;
     test_config.gen_num_per_cycle   = propose_step;
     test_config.vocab_size_override = vocab_size;
     auto components                 = createMtpExecutorComponents(test_config);
+    const int64_t draft_rows =
+        (components.executor->useStreamAsync() || components.executor->useAsyncDeviceState()) ? 2 : 1;
 
     auto                 stream_new_tokens        = torch::tensor({{2}}, torch::kInt32);
     auto                 stream_hidden_states     = torch::tensor({{0.03f, 0.04f}});
@@ -4476,13 +4425,14 @@ TEST_F(MtpExecutorTest, testDecodeOneStepSpecLogitsCapReplacesInvalidDraftWithTa
 
     auto next_draft_input               = GptModelInputs{};
     auto next_draft_output              = GptModelOutputs{};
-    next_draft_input.combo_tokens       = torch::tensor({1, 2}, torch::kInt32);
-    next_draft_input.input_lengths      = torch::tensor({2}, torch::kInt32);
+    next_draft_input.combo_tokens       = torch::tensor({1, 2}, torch::kInt32).narrow(0, 0, draft_rows);
+    next_draft_input.input_lengths      = torch::tensor({draft_rows}, torch::kInt32);
     next_draft_input.prefix_lengths     = torch::tensor({2}, torch::kInt32);
     next_draft_input.lm_output_indexes  = torch::tensor({0}, torch::kInt32);
-    next_draft_input.last_hidden_states = target_output.all_hidden_states;
+    next_draft_input.last_hidden_states = target_output.all_hidden_states.narrow(0, 0, draft_rows);
     next_draft_output.logits            = torch::tensor({0.2f, 0.1f, 0.8f, 0.0f}).reshape({1, 4});
-    next_draft_output.all_hidden_states = torch::tensor({0.21f, 0.22f, 0.0f, 0.0f}).reshape({2, 2}).to(torch::kCUDA);
+    next_draft_output.all_hidden_states =
+        torch::tensor({0.21f, 0.22f, 0.0f, 0.0f}).reshape({2, 2}).narrow(0, 0, draft_rows).to(torch::kCUDA);
 
     components.fake_target_model->setInputs({target_input});
     components.fake_target_model->setOutputs({target_output});
@@ -4559,19 +4509,11 @@ TEST_F(MtpExecutorTest, testMultiBatchDecodeCompactsMtpHiddenBuffer) {
     runMultiBatchDecode(true);
 }
 
-TEST_F(MtpExecutorTest, testMultiBatchDecodeFixedRequestLanes) {
-    runMultiBatchDecode(false, true);
+void MtpExecutorTest::runMultiBatchDecode(bool use_mtp_hidden_buffer) {
+    runMultiBatchDecodeScenario(-1, use_mtp_hidden_buffer);
 }
 
-TEST_F(MtpExecutorTest, testMultiBatchDecodeFixedRequestLanesMtpHiddenBuffer) {
-    runMultiBatchDecode(true, true);
-}
-
-void MtpExecutorTest::runMultiBatchDecode(bool use_mtp_hidden_buffer, bool request_lanes) {
-    runMultiBatchDecodeScenario(-1, use_mtp_hidden_buffer, request_lanes);
-}
-
-void MtpExecutorTest::runMultiBatchDecodeScenario(int seed_mode, bool use_mtp_hidden_buffer, bool request_lanes) {
+void MtpExecutorTest::runMultiBatchDecodeScenario(int seed_mode, bool use_mtp_hidden_buffer) {
     // test multi batch decode not accept & accept all
     // input s1:[0, 1, 2, 3] + [2] s2:[3, 2, 1] + [3]
     // darft s1:[2]+[1,2,3] s2:[3]+[0,2,2]
@@ -4583,11 +4525,11 @@ void MtpExecutorTest::runMultiBatchDecodeScenario(int seed_mode, bool use_mtp_hi
     size_t batch_size   = 2;
 
     MtpExecutorTestConfig test_config;
-    test_config.draft_prefill_uses_request_lanes = request_lanes;
     test_config.vocab_size          = vocab_size;
     test_config.gen_num_per_cycle   = propose_step;
     test_config.vocab_size_override = vocab_size;
     auto components                 = createMtpExecutorComponents(test_config);
+    const bool fixed_width = components.executor->useStreamAsync() || components.executor->useAsyncDeviceState();
 
     // Create context stream
     auto stream1_new_tokens        = torch::tensor({{3}}, torch::kInt32);
@@ -4653,7 +4595,7 @@ void MtpExecutorTest::runMultiBatchDecodeScenario(int seed_mode, bool use_mtp_hi
     next_draft_input.prefix_lengths    = torch::tensor({3, 2}, torch::kInt32);
     next_draft_input.lm_output_indexes = torch::tensor({0, 9}, torch::kInt32);
     const auto accepted_rows           = torch::tensor({0, 5, 6, 7, 8, 9}, torch::kLong);
-    if (!request_lanes) {
+    if (!fixed_width) {
         next_draft_input.combo_tokens       = next_draft_input.combo_tokens.index_select(0, accepted_rows);
         next_draft_input.input_lengths     = torch::tensor({1, 5}, torch::kInt32);
         next_draft_input.lm_output_indexes = torch::tensor({0, 5}, torch::kInt32);
@@ -4686,7 +4628,7 @@ void MtpExecutorTest::runMultiBatchDecodeScenario(int seed_mode, bool use_mtp_hi
         components.fake_target_model->setMtpTargetHiddenStates(mtp_hidden_buffer);
         target_hidden = mtp_hidden_buffer.narrow(0, 0, 10);
     }
-    next_draft_input.last_hidden_states = request_lanes ? target_hidden : target_hidden.index_select(0, accepted_rows);
+    next_draft_input.last_hidden_states = fixed_width ? target_hidden : target_hidden.index_select(0, accepted_rows);
 
     auto*      draft_model    = components.fake_draft_model.get();
     FakeModel* seed_model     = nullptr;

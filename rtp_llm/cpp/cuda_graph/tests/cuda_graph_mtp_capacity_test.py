@@ -31,6 +31,9 @@ class PackedDraftCapacityModel:
 
 
 class DraftCapacityModel(PackedDraftCapacityModel):
+    def cuda_graph_draft_prefill_uses_request_lanes(self):
+        return True
+
     def __init__(self, num_tokens_per_request=4, hc_mult=4):
         super().__init__(hc_mult)
         self.num_tokens_per_request = num_tokens_per_request
@@ -59,7 +62,7 @@ class MtpGraphCapacityTest(unittest.TestCase):
         torch.cuda.set_device(0)
         model = DraftCapacityModel(lanes, hc_mult)
         runner = CudaGraphRunner()
-        runner.init_mtp_draft_prefill(model, 8, 4, lanes, hc_mult, request_lanes=True)
+        runner.init_mtp_draft_prefill(model, 8, 4, lanes, hc_mult)
         self.assertEqual(
             model.shapes, {(lanes * batch, batch) for batch in range(1, 9)}
         )
@@ -170,7 +173,7 @@ class MtpGraphCapacityTest(unittest.TestCase):
             with self.subTest(lanes=lanes):
                 with self.assertRaisesRegex(RuntimeError, "int32 token/padding"):
                     CudaGraphRunner().init_mtp_draft_prefill(
-                        DraftCapacityModel(), 8, 4, lanes, 4, request_lanes=True
+                        DraftCapacityModel(), 8, 4, lanes, 4
                     )
 
 

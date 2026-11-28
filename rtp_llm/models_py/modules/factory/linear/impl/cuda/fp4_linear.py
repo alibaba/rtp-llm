@@ -221,6 +221,7 @@ class CudaFp4GEMMLinear(LinearBase):
                 raise ValueError("Prepared NVFP4 GEMM requires a caller-owned output")
             return gemm(activation, out)
         from flashinfer.gemm import gemm_base
+        from flashinfer.utils import _get_stream_cache_buf
 
         from rtp_llm.models_py.kernels.cuda.fp4_kernel.flashinfer_dual_scale import (
             select_runner,
@@ -228,10 +229,8 @@ class CudaFp4GEMMLinear(LinearBase):
 
         if out is None:
             out = values.new_empty(shape, dtype=torch.bfloat16)
-        workspace = gemm_base._get_cache_buf(
-            f"rtp_nvfp4_workspace_{torch.cuda.current_stream(values.device).cuda_stream}",
-            gemm_base.DEFAULT_WORKSPACE_SIZE,
-            values.device,
+        workspace = _get_stream_cache_buf(
+            "rtp_nvfp4_workspace", gemm_base.DEFAULT_WORKSPACE_SIZE, values.device
         )
         inputs = [
             values,

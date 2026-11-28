@@ -11,6 +11,9 @@ from rtp_llm.utils.model_weight import W
 
 
 class KimiK3MtpModel(KimiK3Model):
+    def cuda_graph_draft_prefill_uses_request_lanes(self) -> bool:
+        return True
+
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.register_buffer("_mtp_prefill_last_hidden_buffer", None, persistent=False)

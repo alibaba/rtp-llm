@@ -215,6 +215,9 @@ class Qwen4ExpMTPInputProjection(nn.Module):
 class Qwen4ExpMTPModel(Qwen4ExpModel):
     """One-layer draft model with target-hidden input fusion and QSA."""
 
+    def cuda_graph_draft_prefill_uses_request_lanes(self) -> bool:
+        return True
+
     def prepare_fmha_impl(self, inputs, is_cuda_graph=False):
         if not is_cuda_graph:
             normalize_mtp_prefill_positions(

@@ -702,6 +702,9 @@ def _build_target_verify_inputs(
 class MtpRequestMetadataModel:
     requires_sequence_parallel_padding = False
 
+    def cuda_graph_draft_prefill_uses_request_lanes(self):
+        return True
+
     def __init__(self, query_width):
         self.query_width = query_width
         self.capture_shapes = set()
@@ -752,6 +755,9 @@ class MtpRequestMetadataModel:
 
 class RectangularMtpDraftModel:
     requires_sequence_parallel_padding = True
+
+    def cuda_graph_draft_prefill_uses_request_lanes(self):
+        return True
 
     def __init__(self, query_width):
         self.query_width = query_width
@@ -945,7 +951,7 @@ class TestCudaGraphTaggedCache(unittest.TestCase):
         max_requests, query, sp = 16, 3, 4
         model = MtpRequestMetadataModel(query)
         runner = CudaGraphRunner()
-        runner.init_mtp_draft_prefill_sp(model, max_requests, query, sp, 1, True)
+        runner.init_mtp_draft_prefill_sp(model, max_requests, query, sp, 1)
         # Reuse buckets with both legacy padded sources and raw inputs.
         for logical_requests, physical_requests, padded in (
             (2, 4, True),
@@ -1092,7 +1098,7 @@ class TestCudaGraphTaggedCache(unittest.TestCase):
                 model = RectangularMtpDraftModel(query)
                 runner = CudaGraphRunner()
                 runner.init_mtp_draft_prefill_sp(
-                    model, max_requests, query, sp, hc_mult, True
+                    model, max_requests, query, sp, hc_mult
                 )
                 self.assertTrue(
                     captures <= model.capture_shapes,
@@ -1157,7 +1163,7 @@ class TestCudaGraphTaggedCache(unittest.TestCase):
         query, physical, logical = 3, 4, 1
         runner = CudaGraphRunner()
         runner.init_mtp_draft_prefill_sp(
-            RectangularMtpDraftModel(query), 16, query, 4, 1, True
+            RectangularMtpDraftModel(query), 16, query, 4, 1
         )
         inputs = _build_target_verify_inputs(
             GROUP_TAGS, {"full": 2, "aux": 1}, physical, query, 1

@@ -1081,7 +1081,6 @@ class ModelConfig:
     kv_cache_spec_descs: list[list[KVCacheSpecDesc]]
     use_page_rr_kv_cache: bool
     cache_min_replay_tokens: int
-    mtp_draft_prefill_uses_request_lanes: bool
     cache_key_hash_seed: int
     expert_num: int
     extra_data_path: str

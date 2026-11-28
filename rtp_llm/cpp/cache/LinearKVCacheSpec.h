@@ -140,13 +140,6 @@ struct LinearKVCacheSpec: public KVCacheSpec {
         return conv_elems * getTypeSize(conv_state_dtype);
     }
 
-    DataType ssmStateDType() const {
-        return ssm_state_dtype;
-    }
-    DataType convStateDType() const {
-        return conv_state_dtype;
-    }
-
     rtp_llm::DataType memoryLayoutDType() const override {
         return memory_layout_dtype_;
     }

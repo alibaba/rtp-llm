@@ -111,7 +111,8 @@ public:
             && py::getattr(py_instance_, "cuda_graph_prepares_attention_metadata_in_forward", py::bool_(false))
                    .cast<bool>();
         draft_prefill_uses_request_lanes_ =
-            isMtpDraftPrefillCudaGraph() && graph_params.mtp_draft_prefill_uses_request_lanes;
+            isMtpDraftPrefillCudaGraph() && py::hasattr(py_instance_, "cuda_graph_draft_prefill_uses_request_lanes")
+            && py_instance_.attr("cuda_graph_draft_prefill_uses_request_lanes")().cast<bool>();
         if (sequence_parallel_size_ > 1 && role_ != CudaGraphRole::GENERATION_PREFILL) {
             max_bs_ = padSequenceParallelRequests(max_bs_, num_tokens_per_bs_, sequence_parallel_size_);
         }

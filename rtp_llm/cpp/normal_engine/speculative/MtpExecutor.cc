@@ -887,15 +887,12 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
         && std::any_of(cache_config.topology().groups().begin(),
                        cache_config.topology().groups().end(),
                        [](const GroupBase& group) { return group.policy.group_type == CacheGroupType::LINEAR; });
-    const bool request_lanes =
-        draft_config.mtp_draft_prefill_uses_request_lanes && params.py_sp_model && !params.py_sp_model.is_none();
     batch_stream_processor_.reset(new MtpBatchStreamProcessor(params.model_config_,
                                                               params.pd_sep_config,
                                                               params.profiling_debug_logging_config,
                                                               cache_config,
                                                               params.sp_config,
-                                                              warm_up_,
-                                                              request_lanes));
+                                                              warm_up_));
 
     LogitsProcessorFactory::init(params.model_config_,
                                  params.grammar_config,
@@ -930,7 +927,6 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
                                              warm_up_,
                                              mtp_params->model_config_.hidden_state_capture_layer_ids);
         model_params.hidden_state_capture_dtype = mtp_params->model_config_.hidden_state_capture_dtype;
-        model_params.mtp_draft_prefill_uses_request_lanes = request_lanes;
 #if USING_CUDA || USING_ROCM
         if (params.hw_kernel_config.enable_cuda_graph && model_params.kv_cache_layer_layout.has_value()) {
             const auto& topology = model_params.kv_cache_layer_layout->topology();
@@ -2472,8 +2468,6 @@ void MtpExecutor::launchDraftPrefillPrepareAsync(const GptModelInputs& model_inp
     } else if (!useAsyncPrepare()) {
         return;
     }
-    // Every draft update retains the verify B x Q geometry, so attention
-    // metadata can be prepared before rejection sampling in every mode.
     const auto& mtp_cache_cfg = cache_manager_->getMTPModuleCacheConfig(0);
     // AsyncRunner value-captures model_input on its own stream/thread, so later
     // main-stream mutations cannot affect draft prefill prepare.

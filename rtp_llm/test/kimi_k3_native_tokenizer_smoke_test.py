@@ -14,9 +14,7 @@ from transformers import AutoTokenizer
 from rtp_llm.config.generate_config import GenerateConfig, ThinkingMode
 from rtp_llm.config.grammar_tokenizer_info import build_grammar_tokenizer_info_json
 from rtp_llm.models.kimi_k3.kimi_k3_grammar import KimiK3Grammar
-from rtp_llm.models.kimi_k3.kimi_k3_request_contract import (
-    kimi_k3_pending_prompt_token_count,
-)
+from rtp_llm.models.kimi_k3.kimi_k3_request_contract import kimi_k3_prompt_channel
 from rtp_llm.openai.api_datatype import ChatCompletionRequest
 from rtp_llm.openai.renderers.kimi_k3_renderer import KimiK3Renderer
 
@@ -58,20 +56,16 @@ class KimiK3NativeTokenizerSmokeTest(unittest.TestCase):
         prefix = [17, 18, 19]
 
         self.assertEqual(
-            kimi_k3_pending_prompt_token_count(self.tokenizer, prefix + think_suffix),
-            len(think_suffix),
+            kimi_k3_prompt_channel(self.tokenizer, prefix + think_suffix),
+            ("think", len(think_suffix)),
         )
         self.assertEqual(
-            kimi_k3_pending_prompt_token_count(
-                self.tokenizer, prefix + response_suffix
-            ),
-            len(response_suffix),
+            kimi_k3_prompt_channel(self.tokenizer, prefix + response_suffix),
+            ("response", len(response_suffix)),
         )
         self.assertEqual(
-            kimi_k3_pending_prompt_token_count(
-                self.tokenizer, prefix + think_suffix + [20]
-            ),
-            0,
+            kimi_k3_prompt_channel(self.tokenizer, prefix + think_suffix + [20]),
+            (None, 0),
         )
 
     def test_native_xgrammar_masks_eos_until_full_xtml_boundary_and_final(self) -> None:

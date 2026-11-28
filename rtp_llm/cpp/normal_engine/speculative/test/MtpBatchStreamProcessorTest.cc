@@ -1294,8 +1294,6 @@ TEST_F(MtpBatchStreamProcessorTest, DraftPreparationPreservesProposalOnlyRowsAnd
 }
 
 TEST_F(MtpBatchStreamProcessorTest, DraftCacheWritesRemainContiguousAcrossPreparationPaths) {
-    // Synchronous updates retain the verify rectangle; accepted length alone
-    // advances the next logical cache position.
     autil::EnvGuard             stream_async("RTP_LLM_STREAM_ASYNC", "0");
     autil::EnvGuard             device_state("RTP_LLM_MTP_ASYNC_DEVICE_STATE", "0");
     ModelConfig                 model_config;
@@ -1310,13 +1308,7 @@ TEST_F(MtpBatchStreamProcessorTest, DraftCacheWritesRemainContiguousAcrossPrepar
     model_config.attn_config.rope_config.index_factor  = 3;
     sp_config.gen_num_per_cycle                        = 4;
     auto                    cache_config               = test::makeSimpleMhaCacheConfig(1, 4, 2048, rtp_llm::TYPE_FP16);
-    MtpBatchStreamProcessor processor(model_config,
-                                      pd_sep_config,
-                                      logging_config,
-                                      cache_config,
-                                      sp_config,
-                                      false,
-                                      /*draft_prefill_uses_request_lanes=*/true);
+    MtpBatchStreamProcessor processor(model_config, pd_sep_config, logging_config, cache_config, sp_config, false);
 
     for (int prompt_len : {465, 2048, 2051}) {
         SCOPED_TRACE(prompt_len);
@@ -1397,7 +1389,7 @@ TEST_F(MtpBatchStreamProcessorTest, DraftCacheWritesRemainContiguousAcrossPrepar
             verified.all_hidden_states = torch::zeros({5, 2});
             torch::Tensor selected_hidden;
             processor.updateDecodePostDraftModelInput(post, verified, rejection, 1, selected_hidden, holder);
-            ASSERT_EQ((vector<int>{5}), toVec<int>(post.input_lengths));
+            ASSERT_EQ((vector<int>{accepted}), toVec<int>(post.input_lengths));
             ASSERT_EQ((vector<int>{first_unwritten_slot}), toVec<int>(post.prefix_lengths));
             EXPECT_EQ((vector<int>{accepted - 1}), toVec<int>(post.lm_output_indexes));
             const int      next_slot = toVec<int>(post.prefix_lengths)[0] + accepted;
@@ -1985,13 +1977,8 @@ TEST_F(MtpBatchStreamProcessorTest, testUpdateDecodePostDraftModelInput) {
 
     auto stream_groups = StreamGroups({stream1, stream2});
 
-    auto processor = MtpBatchStreamProcessor(model_config,
-                                             pd_sep_config,
-                                             profiling_debug_logging_config,
-                                             cache_config,
-                                             sp_config,
-                                             false,
-                                             /*draft_prefill_uses_request_lanes=*/true);
+    auto processor = MtpBatchStreamProcessor(
+        model_config, pd_sep_config, profiling_debug_logging_config, cache_config, sp_config, false);
     TensorHolder holder;
     auto         model_input_status = processor.gatherModelInput(stream_groups, holder);
     EXPECT_TRUE(model_input_status.ok());
@@ -2017,11 +2004,11 @@ TEST_F(MtpBatchStreamProcessorTest, testUpdateDecodePostDraftModelInput) {
         model_input, model_output, spec_decode_output, stream_groups.size(), hidden_states_d_t, holder);
 
     auto        combo_tokens        = model_input.combo_tokens.cpu();
-    vector<int> expect_combo_tokens = {2, 3, 1, 2, 0, 0};
+    vector<int> expect_combo_tokens = {2, 3, 1, 2};
     EXPECT_EQ(expect_combo_tokens, toVec<int>(combo_tokens));
 
     auto        input_lengths        = model_input.input_lengths;
-    vector<int> expect_input_lengths = {3, 3};
+    vector<int> expect_input_lengths = {3, 1};
     EXPECT_EQ(expect_input_lengths, toVec<int>(input_lengths));
 
     auto        lm_output_indexes        = model_input.lm_output_indexes.cpu();
@@ -2029,7 +2016,7 @@ TEST_F(MtpBatchStreamProcessorTest, testUpdateDecodePostDraftModelInput) {
     EXPECT_EQ(expect_lm_output_indexes, toVec<int>(lm_output_indexes));
 
     auto          last_hidden_states        = model_input.last_hidden_states;
-    vector<float> expect_last_hidden_states = {0.1f, 0.2f, 0.3f, 0.4f, 0.5f, 0.6f, 1.1f, 1.2f, 1.3f, 1.4f, 1.5f, 1.6f};
+    vector<float> expect_last_hidden_states = {0.1f, 0.2f, 0.3f, 0.4f, 0.5f, 0.6f, 1.1f, 1.2f};
     EXPECT_EQ(expect_last_hidden_states, toVec<float>(last_hidden_states));
     EXPECT_FALSE(model_input.is_target_verify);
     // The executor sets the draft-update phase immediately before forward.

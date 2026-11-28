@@ -592,7 +592,6 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
         RTP_LLM_CHECK_WITH_INFO(graph_params.kernel_block_table_width > 0,
                                 "CUDA graph requires Executor to provide a positive kernel block table width");
 
-        graph_params.mtp_draft_prefill_uses_request_lanes = params.mtp_draft_prefill_uses_request_lanes;
         graph_params.sequence_parallel_size =
             sequence_parallel_padding_enabled_ ? params.parallelism_config.tp_size : 1;
         auto graph_runner =

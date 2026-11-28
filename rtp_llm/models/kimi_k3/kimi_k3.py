@@ -85,7 +85,6 @@ class KimiK3ModelConfig(ModelConfig):
         if type(model_args.shared_expert_weight_shard) is not bool:
             raise ValueError("shared_expert_weight_shard must be a boolean")
         self.shared_expert_weight_shard = model_args.shared_expert_weight_shard
-        super().apply_model_args(model_args)
 
     def _projection_quant_config(self, quantization):
         if quantization not in ("", "FP8_PER_BLOCK"):
@@ -783,7 +782,6 @@ class KimiK3Mtp(KimiK3):
         config.tokenizer_path = ckpt_path
         config.model_type = cls.MODEL_TYPE
         config.is_mtp = True
-        config.mtp_draft_prefill_uses_request_lanes = True
         cls._parse_basic_config(config_json, text, config)
         cls._parse_attention_config(text, config)
         cls._parse_moe_config(text, config)

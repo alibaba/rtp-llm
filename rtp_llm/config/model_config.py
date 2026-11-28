@@ -223,7 +223,6 @@ class ModelConfig(CppModelConfig):
         "use_page_rr_kv_cache",
         "num_layers",
         "max_seq_len",
-        "mtp_draft_prefill_uses_request_lanes",
         "vocab_size",
         "hidden_size",
         "hidden_state_capture_layer_ids",
@@ -854,8 +853,7 @@ class ModelConfig(CppModelConfig):
         self.quant_config = None
 
     def apply_model_args(self, model_args: ModelArgs) -> None:
-        if model_args.json_model_override_args:
-            self.apply_override_args(model_args.json_model_override_args)
+        """Apply model-specific arguments before JSON overrides."""
 
     def apply_override_args(self, json_model_override_args: str) -> None:
         """Apply model override arguments to ModelConfig.
@@ -1244,6 +1242,11 @@ def apply_layer_num_override(model_config: ModelConfig, num_layers: int) -> None
     model_config.num_layers = num_layers
 
 
+def _apply_model_override_args(model_config: ModelConfig, model_args: Any) -> None:
+    if model_args.json_model_override_args:
+        model_config.apply_override_args(model_args.json_model_override_args)
+
+
 def build_model_config(
     model_config: ModelConfig,  # ModelConfig instance to build
     model_args: Any,  # ModelArgs from py_env_configs
@@ -1340,3 +1343,4 @@ def build_model_config(
     model_config.enable_output_vocab_pruning = model_args.enable_output_vocab_pruning
 
     model_config.apply_model_args(model_args)
+    _apply_model_override_args(model_config, model_args)

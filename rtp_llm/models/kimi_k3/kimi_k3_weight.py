@@ -12,7 +12,7 @@ represented explicitly below.
 from __future__ import annotations
 
 import functools
-from typing import Iterator, List, Optional
+from typing import List, Optional
 
 import torch
 
@@ -260,141 +260,9 @@ class KimiK3Weight(ModelDeployWeightInfo):
     MODEL_PREFIX = "language_model.model."
     LAYER_PREFIX = MODEL_PREFIX + "layers.{i}."
 
-    _COMMON_LAYER_SUFFIXES = (
-        "input_layernorm.weight",
-        "post_attention_layernorm.weight",
-        "self_attention_res_norm.weight",
-        "self_attention_res_proj.weight",
-        "mlp_res_norm.weight",
-        "mlp_res_proj.weight",
-    )
-    _KDA_SUFFIXES = (
-        "self_attn.q_proj.weight",
-        "self_attn.k_proj.weight",
-        "self_attn.v_proj.weight",
-        "self_attn.q_conv1d.weight",
-        "self_attn.k_conv1d.weight",
-        "self_attn.v_conv1d.weight",
-        "self_attn.A_log",
-        "self_attn.dt_bias",
-        "self_attn.f_a_proj.weight",
-        "self_attn.f_b_proj.weight",
-        "self_attn.b_proj.weight",
-        "self_attn.g_proj.weight",
-        "self_attn.o_norm.weight",
-        "self_attn.o_proj.weight",
-    )
-    _MLA_SUFFIXES = (
-        "self_attn.q_a_proj.weight",
-        "self_attn.q_a_layernorm.weight",
-        "self_attn.q_b_proj.weight",
-        "self_attn.kv_a_proj_with_mqa.weight",
-        "self_attn.kv_a_layernorm.weight",
-        "self_attn.kv_b_proj.weight",
-        "self_attn.g_proj.weight",
-        "self_attn.o_proj.weight",
-    )
-    _DENSE_SUFFIXES = (
-        "mlp.gate_proj.weight",
-        "mlp.up_proj.weight",
-        "mlp.down_proj.weight",
-    )
-    _MOE_SUFFIXES = (
-        "block_sparse_moe.gate.weight",
-        "block_sparse_moe.gate.e_score_correction_bias",
-        "block_sparse_moe.routed_expert_down_proj.weight",
-        "block_sparse_moe.routed_expert_up_proj.weight",
-        "block_sparse_moe.routed_expert_norm.weight",
-        "block_sparse_moe.shared_experts.gate_proj.weight",
-        "block_sparse_moe.shared_experts.up_proj.weight",
-        "block_sparse_moe.shared_experts.down_proj.weight",
-    )
-
     @classmethod
     def _layer_ckpt(cls, suffix: str) -> str:
         return cls.LAYER_PREFIX + suffix
-
-    @classmethod
-    def global_checkpoint_tensor_names(cls) -> tuple[str, ...]:
-        return (
-            cls.MODEL_PREFIX + "embed_tokens.weight",
-            cls.MODEL_PREFIX + "norm.weight",
-            cls.MODEL_PREFIX + "output_attn_res_norm.weight",
-            cls.MODEL_PREFIX + "output_attn_res_proj.weight",
-            "language_model.lm_head.weight",
-        )
-
-    @classmethod
-    def checkpoint_tensor_names_for_layer(
-        cls, model_config, layer_id: int
-    ) -> Iterator[str]:
-        prefix = cls.LAYER_PREFIX.format(i=layer_id)
-        for suffix in cls._COMMON_LAYER_SUFFIXES:
-            yield prefix + suffix
-
-        layer_type = model_config.hybrid_attention_config.hybrid_attention_types[
-            layer_id
-        ]
-        attention_suffixes = (
-            cls._KDA_SUFFIXES
-            if layer_type == HybridAttentionType.LINEAR
-            else cls._MLA_SUFFIXES
-        )
-        for suffix in attention_suffixes:
-            yield prefix + suffix
-
-        if layer_id in set(model_config.moe_layer_index):
-            for suffix in cls._MOE_SUFFIXES:
-                yield prefix + suffix
-            expert_prefix = prefix + "block_sparse_moe.experts."
-            for expert_id in range(model_config.expert_num):
-                for projection in ("w1", "w2", "w3"):
-                    yield (f"{expert_prefix}{expert_id}.{projection}.weight_packed")
-                    yield f"{expert_prefix}{expert_id}.{projection}.weight_scale"
-        else:
-            for suffix in cls._DENSE_SUFFIXES:
-                yield prefix + suffix
-
-    @classmethod
-    def expected_checkpoint_tensor_names(cls, model_config) -> Iterator[str]:
-        yield from cls.global_checkpoint_tensor_names()
-        for layer_id in range(model_config.num_layers):
-            yield from cls.checkpoint_tensor_names_for_layer(model_config, layer_id)
-
-    @classmethod
-    def checkpoint_tensor_patterns(cls, model_config) -> set[str]:
-        """Return the compact placeholder-based text-checkpoint manifest."""
-
-        patterns = set(cls.global_checkpoint_tensor_names())
-        patterns.update(cls._layer_ckpt(s) for s in cls._COMMON_LAYER_SUFFIXES)
-        if any(
-            layer_type == HybridAttentionType.LINEAR
-            for layer_type in model_config.hybrid_attention_config.hybrid_attention_types
-        ):
-            patterns.update(cls._layer_ckpt(s) for s in cls._KDA_SUFFIXES)
-        if any(
-            layer_type != HybridAttentionType.LINEAR
-            for layer_type in model_config.hybrid_attention_config.hybrid_attention_types
-        ):
-            patterns.update(cls._layer_ckpt(s) for s in cls._MLA_SUFFIXES)
-        if model_config.moe_layer_index:
-            patterns.update(cls._layer_ckpt(s) for s in cls._MOE_SUFFIXES)
-            for projection in ("w1", "w2", "w3"):
-                patterns.add(
-                    cls._layer_ckpt(
-                        "block_sparse_moe.experts.{expert_id}."
-                        f"{projection}.weight_packed"
-                    )
-                )
-                patterns.add(
-                    cls._layer_ckpt(
-                        "block_sparse_moe.experts.{expert_id}."
-                        f"{projection}.weight_scale"
-                    )
-                )
-        if len(model_config.moe_layer_index) < model_config.num_layers:
-            patterns.update(cls._layer_ckpt(s) for s in cls._DENSE_SUFFIXES)
-        return patterns
 
     @classmethod
     def _custom(
@@ -906,13 +774,6 @@ class KimiK3Weight(ModelDeployWeightInfo):
 class KimiK3MtpWeight(KimiK3Weight):
     """Map the checkpoint MTP layer to runtime local layer zero."""
 
-    _COMMON_LAYER_SUFFIXES = (
-        "input_layernorm.weight",
-        "post_attention_layernorm.weight",
-        "enorm.weight",
-        "hnorm.weight",
-        "eh_proj.weight",
-    )
     IGNORED_SUFFIXES = (
         "self_attention_res_norm.weight",
         "self_attention_res_proj.weight",
@@ -930,28 +791,6 @@ class KimiK3MtpWeight(KimiK3Weight):
                 "shared_head.norm.weight",
             )
         )
-
-    @classmethod
-    def expected_checkpoint_tensor_names(cls, model_config):
-        source = model_config.k3_runtime_config.mtp_source_layer
-        if source is None:
-            raise ValueError("K3 MTP source layer is missing from model config")
-        for name in cls.global_checkpoint_tensor_names():
-            yield name.replace("{i}", str(source))
-        runtime_prefix = cls.LAYER_PREFIX.format(i=0)
-        source_prefix = cls.LAYER_PREFIX.format(i=source)
-        for name in super().checkpoint_tensor_names_for_layer(model_config, 0):
-            yield name.replace(runtime_prefix, source_prefix, 1)
-
-    @classmethod
-    def checkpoint_tensor_patterns(cls, model_config):
-        source = model_config.k3_runtime_config.mtp_source_layer
-        if source is None:
-            raise ValueError("K3 MTP source layer is missing from model config")
-        return {
-            name.replace("{i}", str(source))
-            for name in super().checkpoint_tensor_patterns(model_config)
-        }
 
     def _get_weight_info(self):
         config = self.model_config

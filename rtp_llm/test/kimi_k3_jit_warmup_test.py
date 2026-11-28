@@ -341,7 +341,9 @@ class MlaJitWarmupCudaTest(unittest.TestCase):
             )
             expected_lse = counts.log()[:, None].expand(7, 8)
             torch.testing.assert_close(lse, expected_lse, rtol=1e-3, atol=1e-3)
-            workspace = flashinfer_prefill._get_workspace(spec.device, 7, spec.heads)
+            workspace = flashinfer_prefill._get_workspace(
+                spec.device, 7, spec.heads, batch_size=1, max_q=7, return_lse=True
+            )
             if workspace_pointer is not None:
                 self.assertEqual(workspace.data_ptr(), workspace_pointer)
             workspace_pointer = workspace.data_ptr()

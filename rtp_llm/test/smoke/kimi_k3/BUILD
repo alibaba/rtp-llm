@@ -36,6 +36,7 @@ custom_smoke_test(
     test_envs = {
         # SM103 can fail on the first BS64 Graph replay with NCCL graph registration.
         "NCCL_GRAPH_REGISTER": "0",
+        "RTP_LLM_MTP_ASYNC_DEVICE_STATE": "1",
         "RTP_TEST_WATCHDOG_SECONDS": "7200",
     },
     deps = [

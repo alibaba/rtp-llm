@@ -55,10 +55,6 @@ def kimi_k3_prompt_channel(
     return None, 0
 
 
-def kimi_k3_pending_prompt_token_count(tokenizer: Any, input_ids: list[int]) -> int:
-    return kimi_k3_prompt_channel(tokenizer, input_ids)[1]
-
-
 class _GenerationConfig(Protocol):
     max_new_tokens: int
     temperature: Any

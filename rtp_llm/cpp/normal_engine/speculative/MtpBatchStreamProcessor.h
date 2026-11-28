@@ -18,10 +18,8 @@ public:
                             const ProfilingDebugLoggingConfig& profiling_debug_logging_config,
                             const CacheConfig&                 cache_config,
                             const SpeculativeExecutionConfig&  sp_config,
-                            bool                               warm_up,
-                            bool                               request_lanes = false):
+                            bool                               warm_up):
         NormalBatchStreamProcessor(model_config, pd_sep_config, profiling_debug_logging_config, cache_config, warm_up),
-        request_lanes_(request_lanes),
         propose_step_(sp_config.gen_num_per_cycle),
         vocab_size_(model_config.vocab_size),
         is_block_draft_(isBlockDraftType(sp_config.type)),
@@ -171,7 +169,6 @@ public:
                                            std::vector<torch::Tensor>& draft_token_probs_list);
 
 protected:
-    bool request_lanes_ = false;
     void overlayMtpCacheSnapshots(const StreamGroups& stream_groups,
                                   GptModelInputs&     model_input,
                                   TensorHolder&       host_holder) const;

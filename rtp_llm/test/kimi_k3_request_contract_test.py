@@ -5,7 +5,6 @@ from types import SimpleNamespace
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
 from rtp_llm.models.kimi_k3.kimi_k3_request_contract import (
     apply_kimi_k3_request_contract,
-    kimi_k3_pending_prompt_token_count,
     kimi_k3_pending_prompt_token_ids,
     kimi_k3_prompt_channel,
     validate_kimi_k3_tool_history,
@@ -347,19 +346,17 @@ class KimiK3PendingPromptTest(unittest.TestCase):
 
         tokenizer = Tokenizer()
         for ids, expected in (
-            ([99, 10, 11, 12], 3),
-            ([99, 10, 13, 14, 12], 4),
-            ([10, 11, 12, 99], 0),
-            ([99, 11, 12], 0),
-            ([99, 10, 11], 0),
-            ([99, 900, 901], 0),
-            ([], 0),
+            ([99, 10, 11, 12], ("response", 3)),
+            ([99, 10, 13, 14, 12], ("think", 4)),
+            ([10, 11, 12, 99], (None, 0)),
+            ([99, 11, 12], (None, 0)),
+            ([99, 10, 11], (None, 0)),
+            ([99, 900, 901], (None, 0)),
+            ([], (None, 0)),
         ):
             with self.subTest(ids=ids):
-                self.assertEqual(
-                    kimi_k3_pending_prompt_token_count(tokenizer, ids), expected
-                )
-        self.assertEqual(kimi_k3_pending_prompt_token_count(None, [99]), 0)
+                self.assertEqual(kimi_k3_prompt_channel(tokenizer, ids), expected)
+        self.assertEqual(kimi_k3_prompt_channel(None, [99]), (None, 0))
 
     def test_rejects_invalid_tokenizer_results(self):
         for result in (None, [], "123", ["10"], (10, 11, 12)):

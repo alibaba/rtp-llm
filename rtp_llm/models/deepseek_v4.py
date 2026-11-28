@@ -1066,7 +1066,6 @@ class DeepSeekV4Mtp(DeepSeekV4, DeepSeekV3Mtp):
         config.moe_layer_index = list(range(config.num_layers))
         config.reverse_e_h_norm = True
         config.is_mtp = True
-        config.mtp_draft_prefill_uses_request_lanes = True
         return config
 
     def _create_python_model(self):

@@ -61,6 +61,10 @@ def _dual_scale_source(name, source, row_scale):
     for header in _HEADERS:
         source = source.replace(f'"flashinfer/gemm/{header}"', f'"rtp_{header}"')
         source = source.replace(f'"{header}"', f'"rtp_{header}"')
+    if name.startswith("fp4_gemm_cutlass_store256_"):
+        # Store256 includes the SM100 kernel directly, skipping the header
+        # that declares the RTP scale parameters and epilogues.
+        source = '#include "rtp_fp4_gemm_cutlass.h"\n' + source
     variant = "RowScale" if row_scale else "DualScale"
     source = source.replace("CutlassFp4GemmRunner", f"RtpNvfp4{variant}GemmRunner")
     source = source.replace("DeviceGemmFp4Gemm", f"DeviceGemmNvfp4{variant}")

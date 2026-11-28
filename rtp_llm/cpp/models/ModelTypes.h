@@ -86,8 +86,6 @@ struct GptModelInitParams {
 
     // Warmup wrappers borrow the Python model later used by the real executor.
     bool owns_py_model = true;
-    // Resolved layout passed from speculative batch construction to the draft graph.
-    bool mtp_draft_prefill_uses_request_lanes = false;
 };
 
 enum GptModelInputIndex : size_t {
