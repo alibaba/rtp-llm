@@ -1,20 +1,23 @@
-"""Configure V4 native file transfer and isolate V4.1's FST staging allocator."""
+"""Select CUDA file transfer guards and isolate V4.1's FST staging allocator."""
 
 import inspect
 
 import torch
 
 
-def v41_file_staging_loader(base, model_type, device, *, cuda_backend, use_shm):
-    if (
-        model_type in ("deepseek_v4", "deepseek_v4_dspark")
-        and device.type == "cuda"
-        and cuda_backend == "Cuda"
-        and not use_shm
-    ):
+def cuda_file_loader(base, model_type, device, *, cuda_backend, use_shm, nogds):
+    staged = v41_file_staging_loader(
+        base, model_type, device, cuda_backend=cuda_backend, use_shm=use_shm
+    )
+    if device.type == "cuda" and cuda_backend == "Cuda" and nogds and not use_shm:
         from rtp_llm.models_py.v4_fst_nogds import checked_nogds_loader
 
-        return checked_nogds_loader(base)
+        # The completion ABI belongs to the native reader, not the model.
+        return checked_nogds_loader(staged)
+    return staged
+
+
+def v41_file_staging_loader(base, model_type, device, *, cuda_backend, use_shm):
     if (
         model_type not in ("deepseek_v41", "deepseek_v41_dspark")
         or device.type != "cuda"

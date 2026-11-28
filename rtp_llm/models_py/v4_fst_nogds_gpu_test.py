@@ -9,7 +9,7 @@ import torch
 from fastsafetensors import ParallelLoader, SingleGroup
 from safetensors.torch import save_file
 
-from rtp_llm.models_py.v4_fst_nogds import protect_v4_nogds
+from rtp_llm.models_py.v41_fst_file_pool import cuda_file_loader
 
 
 class ShortFirstRead:
@@ -36,7 +36,33 @@ class FullTransfer(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             filename = str(Path(d) / "weights.safetensors")
             save_file({"scale_bytes": source}, filename)
-            loader = ParallelLoader(
+            workers = []
+
+            class FailFirstRead(ParallelLoader):
+                def __init__(self, **kwargs):
+                    super().__init__(**kwargs)
+                    make = self.loader.copier_constructor
+
+                    def inject(*args):
+                        copier = make(*args)
+                        worker = ShortFirstRead(copier.reader)
+                        workers.append(worker)
+                        copier.reader = worker
+                        return copier
+
+                    self.loader.copier_constructor = inject
+
+            # Exercise the production selection for a model that previously
+            # published unread bytes. Only this temporary fixture goes past EOF.
+            cls = cuda_file_loader(
+                FailFirstRead,
+                "qwen3",
+                torch.device("cuda:0"),
+                cuda_backend="Cuda",
+                use_shm=False,
+                nogds=True,
+            )
+            loader = cls(
                 pg=SingleGroup(),
                 hf_weights_files=[filename],
                 use_tqdm_on_load=False,
@@ -45,18 +71,6 @@ class FullTransfer(unittest.TestCase):
                 use_shm=False,
                 bbuf_size_kb=1024,
             )
-            make = loader.loader.copier_constructor
-            workers = []
-
-            def inject(*args):
-                copier = make(*args)
-                worker = ShortFirstRead(copier.reader)
-                workers.append(worker)
-                copier.reader = worker
-                return copier
-
-            loader.loader.copier_constructor = inject
-            protect_v4_nogds(loader)
             seen = []
             try:
                 for name, data in loader.iterate_weights():

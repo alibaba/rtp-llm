@@ -1,6 +1,6 @@
-"""Check the ali noGDS native completion pointer before publishing a V4 file.
+"""Check the ali noGDS native completion pointer before publishing a CUDA file.
 
-0.1.20+ali returns a destination address on success and nullptr on a worker
+0.1.20+ali and 0.3.4+ali return a destination address on success and nullptr on a worker
 error; the wheel's Python file copier tests only for a negative value. On
 GB200 a failed worker cudaMemcpy can therefore expose unwritten file bytes.
 Keep the native fast path. Only a failed extent is transferred once more,
@@ -16,7 +16,7 @@ def checked_nogds_loader(base):
         def __init__(self, *args, **kwargs):
             super().__init__(*args, **kwargs)
             if kwargs.get("nogds") and not kwargs.get("use_shm"):
-                protect_v4_nogds(self)
+                protect_nogds(self)
 
     return CheckedLoader
 
@@ -48,7 +48,7 @@ def _transfer(fd, gbuf, offset, length, dest_offset, device):
             token = reader.submit_read(fd, host, offset + start, size, 0)
             if token < 0 or reader.wait_read(token) != hptr:
                 raise OSError(
-                    "Native noGDS host read failed while repairing a V4 extent"
+                    "Native noGDS host read failed while repairing a CUDA extent"
                 )
             # Synchronize before the native reader may overwrite the pinned buffer.
             dst[start : start + size].copy_(buf[:size], non_blocking=False)
@@ -77,12 +77,12 @@ class _CheckedReader:
         if result != 0:
             raise OSError("Unexpected native noGDS completion address")
         logging.getLogger(__name__).warning(
-            "V4 FST native H2D failed at file offset %d, length %d; retrying this extent on its owning device",
+            "FST native H2D failed at file offset %d, length %d; retrying this extent on its owning device",
             extent[2],
             extent[3],
         )
         if not expected or self.transfer(*extent, self.device) != expected:
-            raise OSError("Unable to complete V4 native noGDS transfer")
+            raise OSError("Unable to complete native noGDS transfer")
         return expected
 
     def drain(self):
@@ -116,7 +116,7 @@ class _CheckedCopier:
             raise
 
 
-def protect_v4_nogds(loader):
+def protect_nogds(loader):
     # Install per parallel-loader instance, never on the process-global copier
     # registry. FST still assigns files to the same ranks and runs the same
     # ReadSpecs/collectives. Other devices/readers are untouched.
@@ -127,5 +127,8 @@ def protect_v4_nogds(loader):
 
         return create
 
-    for producer in getattr(loader, "loaders", (loader.loader,)):
+    producers = getattr(loader, "loaders", None)
+    if producers is None:
+        producers = (loader.loader,)
+    for producer in producers:
         producer.copier_constructor = wrap(producer.copier_constructor)
