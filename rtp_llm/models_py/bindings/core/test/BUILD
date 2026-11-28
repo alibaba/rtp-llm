@@ -107,6 +107,7 @@ cc_test(
 
 cc_test(
     name = "sample_from_probs_test",
+    linkstatic = True,
     srcs = ["SampleFromProbsTest.cc"],
     deps = [
         # ExecOps state references the platform implementations even though

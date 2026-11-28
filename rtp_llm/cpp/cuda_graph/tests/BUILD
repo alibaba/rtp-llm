@@ -5,6 +5,7 @@ load("@rules_cc//cc:defs.bzl", cuda13_cc_test = "cc_test")
 [
     cuda13_cc_test(
         name = "cuda_graph_replay_retry_integration_test_" + platform["suffix"],
+        linkstatic = True,
         timeout = "short",
         srcs = ["cuda_graph_replay_retry_integration_test.cc"],
         copts = copts(),
@@ -323,6 +324,7 @@ py_test(
 # Original Native CUDA13 replay pool contract; main arm/x86 labels remain separate.
 cuda13_cc_test(
     name = "cuda_graph_replay_retry_integration_test",
+    linkstatic = True,
     srcs = ["cuda_graph_replay_retry_integration_test.cc"],
     copts = copts(),
     deps = [
