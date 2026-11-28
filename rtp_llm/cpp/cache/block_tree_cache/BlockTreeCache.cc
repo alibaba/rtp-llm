@@ -65,7 +65,7 @@ BlockTreeCache::BlockTreeCache(std::unique_ptr<BlockTree>                     tr
             config_.enable_device_cache,
             storage_backend_,
             [this](bool check_watermark) { onWorkflowSettledLocked(check_watermark); }),
-    storer_(tree_.get(), evictor_, *metrics_reporter_, storage_backend_, [this](bool check_watermark) {
+    storer_(tree_.get(), evictor_, storage_backend_, [this](bool check_watermark) {
         onWorkflowSettledLocked(check_watermark);
     }),
     reclaimer_(std::move(reclaimer)),

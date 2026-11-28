@@ -1295,16 +1295,6 @@ private:
     AUTIL_LOG_DECLARE();
 };
 
-class RtpLLMCacheInsertMetrics: public kmonitor::MetricsGroup {
-public:
-    bool init(kmonitor::MetricsGroupManager* manager) override;
-    void report(const kmonitor::MetricsTags* tags);
-
-private:
-    kmonitor::MutableMetric* insert_hard_stop_qps_metric = nullptr;
-    AUTIL_LOG_DECLARE();
-};
-
 class RtpLLMCacheInvariantMetrics: public kmonitor::MetricsGroup {
 public:
     bool init(kmonitor::MetricsGroupManager* manager) override;

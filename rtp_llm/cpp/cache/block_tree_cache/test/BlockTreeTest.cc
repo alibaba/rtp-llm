@@ -410,7 +410,7 @@ TEST(BlockTreeTest, RemoveNodeAndEmptyAncestors) {
     EXPECT_EQ(tree.size(), 0u);
 }
 
-TEST(BlockTreeTest, RemovePendingNodesReleasesAggregatedNonOwnerReferences) {
+TEST(BlockTreeTest, SameKeyPendingNodesReleaseIndependentlyInReverseOrder) {
     BlockTree tree(makeGroupSets(1));
     TreeNode* node = insertAndGetNode(tree, {100}, makeEmpty2DResources(1));
     for (size_t i = 0; i < 3; ++i) {
@@ -422,12 +422,27 @@ TEST(BlockTreeTest, RemovePendingNodesReleasesAggregatedNonOwnerReferences) {
     tree.removePendingNodes({{node, 2}});
     tree.removePendingNodes({{node, 0}});
     EXPECT_EQ(node->non_owner_transfer_ref_count, 1u);
-    const auto blocked = tree.insertNode({100, 200}, makeEmpty2DResources(2), false, false);
-    EXPECT_TRUE(blocked.inserted_nodes.empty());
-    ASSERT_TRUE(blocked.hard_stop);
+    const auto second = tree.insertNode({100}, makeEmpty2DResources(1), false, false);
+    ASSERT_EQ(second.inserted_nodes.size(), 1u);
+    TreeNode* second_node = second.inserted_nodes.front();
+    tree.referenceNodeForNonOwnerTransfer(second_node);
+    EXPECT_EQ(tree.removeNodeAndEmptyAncestors(second_node), tree.root());
+    ASSERT_EQ(tree.pending_node_pool_.size(), 2u);
 
+    const auto active = tree.insertNode({100, 200}, makeEmpty2DResources(2), false, false);
+    ASSERT_EQ(active.inserted_nodes.size(), 2u);
+    EXPECT_NE(active.inserted_nodes.front(), node);
+    EXPECT_NE(active.inserted_nodes.front(), second_node);
+    const auto version = tree.keyVersion();
+
+    tree.removePendingNodes({{second_node, 1}});
+    ASSERT_EQ(tree.pending_node_pool_.size(), 1u);
+    ASSERT_EQ(tree.pending_node_pool_.count(node), 1u);
+    EXPECT_EQ(node->non_owner_transfer_ref_count, 1u);
     tree.removePendingNodes({{node, 1}});
-    EXPECT_EQ(tree.insertNode({100}, makeEmpty2DResources(1), false, false).inserted_nodes.size(), 1u);
+    EXPECT_TRUE(tree.pending_node_pool_.empty());
+    EXPECT_EQ(tree.findNode({100, 200}), active.inserted_nodes);
+    EXPECT_EQ(tree.keyVersion(), version);
 }
 
 TEST(BlockTreeTest, RemovingNonTailNodeUpdatesMovedNodeIndex) {
@@ -634,7 +649,6 @@ TEST(BlockTreeTest, InsertReplacesIdleLowerTierFullResourcesAndKeepsSuffix) {
 
         const auto result = tree.insertNode({100, 200, 300}, make2DResources(1, 3, 20), true, false);
 
-        EXPECT_FALSE(result.hard_stop);
         ASSERT_EQ(result.path.size(), 3u);
         EXPECT_EQ(result.path[0], original.path[0]);
         EXPECT_EQ(result.path[1], original.path[1]);
@@ -668,7 +682,6 @@ TEST(BlockTreeTest, InsertReplacesIdleFrozenLowerTierWithoutReclaimingBacking) {
 
         const auto result = tree.insertNode({100, 200}, make2DResources(1, 2, 20), true, false);
 
-        EXPECT_FALSE(result.hard_stop);
         ASSERT_EQ(result.path.size(), 2u);
         EXPECT_EQ(result.accepted_resource_count, 2u);
         EXPECT_EQ(node->group_set_resources[0].device_blocks, (BlockIndicesType{20}));
@@ -680,7 +693,7 @@ TEST(BlockTreeTest, InsertReplacesIdleFrozenLowerTierWithoutReclaimingBacking) {
     }
 }
 
-TEST(BlockTreeTest, ReplacedEvictionSourcesStayReferencedAcrossInsertExitPaths) {
+TEST(BlockTreeTest, ReplacedEvictionSourcesStayReferencedWithActiveOrPendingSuffix) {
     for (bool pending_suffix : {false, true}) {
         SCOPED_TRACE(pending_suffix);
         BlockTree                                  tree(makeLowerTierFullGroupSets(2));
@@ -709,7 +722,7 @@ TEST(BlockTreeTest, ReplacedEvictionSourcesStayReferencedAcrossInsertExitPaths) 
 
         const auto result = tree.insertNode({100, 200, 300}, make2DResources(2, 3, 20), false, false);
         EXPECT_EQ(result.revoked_evictions.size(), 4u);
-        EXPECT_EQ(result.hard_stop, pending_suffix);
+        EXPECT_EQ(result.inserted_nodes.size(), pending_suffix ? 1u : 0u);
 
         for (size_t group_id = 0; group_id < 2; ++group_id) {
             const auto& group = tree.groupSets()[group_id];
@@ -743,7 +756,6 @@ TEST(BlockTreeTest, InsertReplacesPendingLowerTierPrefixAndKeepsSourceLoadRefere
 
         const auto result = tree.insertNode({100, 200, 300}, make2DResources(1, 3, 20), true, false);
 
-        EXPECT_FALSE(result.hard_stop);
         EXPECT_EQ(result.accepted_resource_count, 3u);
         ASSERT_EQ(result.adopted_nodes.size(), 2u);
         EXPECT_EQ(result.adopted_nodes[0].first, original.path[0]);
@@ -796,7 +808,6 @@ TEST(BlockTreeTest, InsertBatchesReplacedReferencesByGroupAndTier) {
 
     const auto result = tree.insertNode({100, 200, 300, 400, 500}, make2DResources(2, 5, 20), true, false);
 
-    EXPECT_FALSE(result.hard_stop);
     ASSERT_EQ(result.path.size(), 5u);
     EXPECT_EQ(result.accepted_resource_count, 10u);
     for (size_t group_id = 0; group_id < 2; ++group_id) {
@@ -825,7 +836,6 @@ TEST(BlockTreeTest, InsertAdoptsIdleEmptyFullNodeBeforeAddingSuffix) {
     EXPECT_EQ(result.adopted_nodes[0].second, (std::vector<size_t>{0}));
     ASSERT_EQ(result.inserted_nodes.size(), 1u);
     EXPECT_EQ(result.inserted_nodes[0]->cache_key, 300);
-    EXPECT_FALSE(result.hard_stop);
     EXPECT_EQ(empty_resource.device_blocks, (BlockIndicesType{21}));
 }
 
@@ -847,7 +857,7 @@ TEST(BlockTreeTest, InsertAcceptsHostAndDiskIncomingResources) {
     }
 }
 
-TEST(BlockTreeTest, LowerTierInsertDoesNotUseDeviceHardStop) {
+TEST(BlockTreeTest, LowerTierInsertExtendsLoadingPrefix) {
     BlockTree        tree(makeGroupSets(1));
     GroupSetResource existing_host;
     existing_host.host_block = 7;
@@ -866,7 +876,6 @@ TEST(BlockTreeTest, LowerTierInsertDoesNotUseDeviceHardStop) {
     EXPECT_EQ(result.inserted_nodes[0]->cache_key, 200);
     EXPECT_EQ(result.inserted_nodes[0]->group_set_resources[0].getTopTier(), Tier::HOST);
     EXPECT_EQ(node->group_set_resources[0].transfer_state, GroupSetTransferState::LOADING);
-    EXPECT_FALSE(result.hard_stop);
 }
 
 TEST(BlockTreeTest, InsertReusesExistingDeviceFullNodeWithoutOverwritingIt) {
@@ -883,7 +892,6 @@ TEST(BlockTreeTest, InsertReusesExistingDeviceFullNodeWithoutOverwritingIt) {
     ASSERT_EQ(result.inserted_nodes.size(), 1u);
     EXPECT_EQ(result.inserted_nodes[0]->cache_key, 200);
     EXPECT_EQ(result.accepted_resource_count, 1u);
-    EXPECT_FALSE(result.hard_stop);
     const auto path = tree.findNode({100, 200});
     ASSERT_EQ(path.size(), 2u);
     EXPECT_EQ(path[0]->group_set_resources[0].device_blocks, (BlockIndicesType{10}));
@@ -910,7 +918,6 @@ TEST(BlockTreeTest, BusySwaResourceDoesNotGateFullSuffixInsertion) {
     ASSERT_EQ(result.inserted_nodes.size(), 1u);
     EXPECT_EQ(result.inserted_nodes[0]->cache_key, 200);
     EXPECT_EQ(node->group_set_resources[1].transfer_state, GroupSetTransferState::EVICTING);
-    EXPECT_FALSE(result.hard_stop);
 }
 
 TEST(BlockTreeTest, RemoveNodeAndEmptyAncestorsStopsAtBusyEmptyNode) {

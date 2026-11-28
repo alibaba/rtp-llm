@@ -90,7 +90,6 @@ public:
 
     void reportLoadJoin(size_t dependency_count) const;
     void reportLoadJoinWait(int64_t join_wait_latency_us) const;
-    void reportInsertHardStop() const;
     void
     reportInvariantViolation(size_t group_set_id, const char* type, const char* reason, bool stable) const noexcept;
 

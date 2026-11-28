@@ -412,15 +412,6 @@ void BlockTreeCacheMetricsReporter::reportEvictionMetrics(const TransferDescript
     metrics_reporter_->report<RtpLLMCacheEvictionMetrics, RtpLLMCacheEvictionMetricsCollector>(nullptr, &collector);
 }
 
-void BlockTreeCacheMetricsReporter::reportInsertHardStop() const {
-    if (metrics_reporter_ == nullptr) {
-        return;
-    }
-    if (auto* metrics = metrics_reporter_->getMetricsGroup<RtpLLMCacheInsertMetrics>()) {
-        metrics->report(&metrics_reporter_->getTags());
-    }
-}
-
 void BlockTreeCacheMetricsReporter::reportInvariantViolation(size_t      group_set_id,
                                                              const char* type,
                                                              const char* reason,

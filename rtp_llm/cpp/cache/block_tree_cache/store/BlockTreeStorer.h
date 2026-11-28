@@ -7,7 +7,6 @@
 #include <vector>
 
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTree.h"
-#include "rtp_llm/cpp/cache/block_tree_cache/metrics/BlockTreeCacheMetricsReporter.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/evict/BlockTreeEvictor.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/group_set/GroupSet.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/StorageBackend.h"
@@ -21,7 +20,6 @@ public:
 
     BlockTreeStorer(BlockTree*                      tree,
                     BlockTreeEvictor&               evictor,
-                    BlockTreeCacheMetricsReporter&  metrics_reporter,
                     std::shared_ptr<StorageBackend> storage_backend,
                     SettledFn                       settled);
 
@@ -47,7 +45,6 @@ private:
 
     BlockTree*                      tree_;
     BlockTreeEvictor&               evictor_;
-    BlockTreeCacheMetricsReporter&  metrics_reporter_;
     std::shared_ptr<StorageBackend> storage_backend_;
     SettledFn                       settled_;
 };

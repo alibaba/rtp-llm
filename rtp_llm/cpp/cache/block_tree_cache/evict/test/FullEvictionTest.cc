@@ -482,7 +482,7 @@ TEST(FullPruneTest, DetachesBusyClosureAndKeepsTransferSourceAlive) {
     EXPECT_EQ(environment.cache->tree()->findNode({100, 200, 300, 400}).size(), 1u);
     EXPECT_EQ(environment.cache->tree()->findNode({600}).size(), 1u);
     ASSERT_EQ(environment.cache->tree()->pending_node_pool_.size(), 1u);
-    EXPECT_EQ(environment.cache->tree()->pending_node_pool_.at(300).get(), busy_descendant);
+    EXPECT_EQ(environment.cache->tree()->pending_node_pool_.count(busy_descendant), 1u);
     EXPECT_EQ(busy_descendant->parent, nullptr);
     EXPECT_EQ(busy_descendant->index, std::numeric_limits<size_t>::max());
     EXPECT_TRUE(busy_resource.hasTier(Tier::HOST));
@@ -620,7 +620,7 @@ TEST(FullPruneTest, DetachesBusyDescendantGroupResource) {
     path = cache->tree()->findNode({100, 200, 300});
     ASSERT_EQ(path.size(), 1u);
     ASSERT_EQ(cache->tree()->pending_node_pool_.size(), 1u);
-    EXPECT_EQ(cache->tree()->pending_node_pool_.at(300).get(), busy_descendant);
+    EXPECT_EQ(cache->tree()->pending_node_pool_.count(busy_descendant), 1u);
     EXPECT_EQ(busy_descendant->parent, nullptr);
     EXPECT_TRUE(busy_descendant->group_set_resources[0].is_empty());
     EXPECT_EQ(busy_resource.host_block, swa_host_block);
@@ -670,7 +670,7 @@ TEST(FullPruneTest, DetachesBusyClosureRootGroupResource) {
     path = cache->tree()->findNode({100, 200});
     ASSERT_EQ(path.size(), 1u);
     ASSERT_EQ(cache->tree()->pending_node_pool_.size(), 1u);
-    EXPECT_EQ(cache->tree()->pending_node_pool_.at(200).get(), busy_root);
+    EXPECT_EQ(cache->tree()->pending_node_pool_.count(busy_root), 1u);
     EXPECT_EQ(busy_root->parent, nullptr);
     EXPECT_TRUE(busy_root->group_set_resources[0].is_empty());
     EXPECT_EQ(busy_resource.host_block, swa_host_block);

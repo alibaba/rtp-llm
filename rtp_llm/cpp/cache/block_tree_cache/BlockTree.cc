@@ -223,10 +223,6 @@ BlockTreeInsertResult BlockTree::insertNodeImpl(const CacheKeysType&            
 
     for (size_t i = 0; i < cache_keys.size(); ++i) {
         CacheKeyType key = cache_keys[i];
-        if (pending_node_pool_.count(key)) {
-            result.hard_stop = true;
-            break;
-        }
         auto         it  = current->children.find(key);
         if (it != current->children.end()) {
             TreeNode* child = it->second;
@@ -368,7 +364,7 @@ void BlockTree::removeNode(TreeNode* node) {
 
     if (node->parent == nullptr) {
         RTP_LLM_CHECK(node->non_owner_transfer_ref_count == 0);
-        pending_node_pool_.erase(node->cache_key);
+        pending_node_pool_.erase(node);
         return;
     }
     removePublishedKey(node->cache_key);
@@ -383,7 +379,7 @@ void BlockTree::removeNode(TreeNode* node) {
     }
     node->index = std::numeric_limits<size_t>::max();
     if (!canReleaseNode(node)) {
-        pending_node_pool_.emplace(node->cache_key, std::move(node_pool_.back()));
+        pending_node_pool_.emplace(node, std::move(node_pool_.back()));
     }
     node_pool_.pop_back();
     cache_keys_.pop_back();

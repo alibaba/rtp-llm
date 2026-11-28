@@ -8,12 +8,10 @@ namespace rtp_llm {
 
 BlockTreeStorer::BlockTreeStorer(BlockTree*                      tree,
                                  BlockTreeEvictor&               evictor,
-                                 BlockTreeCacheMetricsReporter&  metrics_reporter,
                                  std::shared_ptr<StorageBackend> storage_backend,
                                  SettledFn                       settled):
     tree_(tree),
     evictor_(evictor),
-    metrics_reporter_(metrics_reporter),
     storage_backend_(std::move(storage_backend)),
     settled_(std::move(settled)) {}
 
@@ -38,9 +36,6 @@ void BlockTreeStorer::publishDeviceLocked(const CacheKeysType&                  
                                           bool                                              is_resident,
                                           size_t&                                           resident_prefix_length) {
     const BlockTreeInsertResult insert_result = tree_->insertNode(cache_keys, resources, false, is_resident);
-    if (insert_result.hard_stop) {
-        metrics_reporter_.reportInsertHardStop();
-    }
     const bool resources_inserted = !insert_result.inserted_nodes.empty() || !insert_result.adopted_nodes.empty();
     if (resources_inserted || !insert_result.newly_resident_nodes.empty()) {
         evictor_.onInserted(insert_result);
