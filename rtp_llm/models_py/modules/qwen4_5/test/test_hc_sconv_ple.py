@@ -2037,6 +2037,98 @@ def test_r11_hc_up_mix_sk_1d_and_sconv_decode() -> None:
     print("  PASS: R11 HC 1D fused up-mix (M=1..48, 0 nvjet/cutlass_80) & ShortConv parity verified.")
 
 
+def test_r14_ple_add3_gather_l2_and_sconv_t8_unroll() -> None:
+    print("[Test R14-D0] PLE add3/gather & ShortConv 8-step unrolled ragged prefill parity...")
+    if not torch.cuda.is_available():
+        print("  [SKIP] CUDA not available")
+        return
+    device = torch.device("cuda:0")
+    dtype = torch.bfloat16
+    torch.manual_seed(0)
+
+    # 1. PLE add3 (num_warps=8) + gpu_sharded gather parity across odd M and 16K
+    for M in (7, 256, 1024, 4097):
+        h = torch.randn((1, M, 20480), dtype=dtype, device=device)
+        u = torch.randn((1, M, 20480), dtype=dtype, device=device)
+        c = torch.randn((1, M, 20480), dtype=dtype, device=device)
+        out = ple_add3_triton(h, u, c)
+        ref = h + (u + c)
+        assert float((out - ref).abs().max().item()) == 0.0, f"ple_add3 M={M} mismatch"
+
+    shard_rows = 256
+    shards = [torch.randint(0, 127, (shard_rows, 256), dtype=torch.uint8, device=device).view(torch.float8_e4m3fn) for _ in range(16)]
+    ptrs = torch.tensor([s.data_ptr() for s in shards], dtype=torch.int64, device=device)
+    w_scale = torch.tensor(0.02, dtype=dtype, device=device)
+    ng_ids = torch.randint(0, 16 * shard_rows - 1, (1, 1024, 20), dtype=torch.int64, device=device)
+    out_g = ple_gather_fp8_triton(ng_ids, ptrs, shard_rows, 256, w_scale, is_fp8=True, is_cpu_uva=False)
+    flat_table = torch.cat(shards, dim=0).to(dtype) * w_scale
+    ref_g = flat_table[ng_ids]
+    assert float((out_g - ref_g).abs().max().item()) == 0.0
+
+    # 2. ShortConv 8-step unroll ragged prefill with fused snapshots & tail lengths (<8, ==8, %8 != 0)
+    for C, res, silu in ((256, True, False), (5120, True, True), (12288, False, True), (20480, False, False)):
+        w = torch.randn((C, 1, 4), dtype=dtype, device=device) * 0.25
+        lens = [5, 8, 13, 135]
+        N = sum(lens)
+        x = torch.randn((N, C), dtype=dtype, device=device) * 0.25
+        cu = torch.tensor([0, 5, 13, 26, N], dtype=torch.int32, device=device)
+        bt = 32
+        t_req, t_t0 = [], []
+        for b, ln in enumerate(lens):
+            for t0 in range(0, ln, bt):
+                t_req.append(b)
+                t_t0.append(t0)
+        tile_req = torch.tensor(t_req, dtype=torch.int32, device=device)
+        tile_t0 = torch.tensor(t_t0, dtype=torch.int32, device=device)
+        num_blocks = 32
+        pool = torch.zeros((num_blocks, C * 3), dtype=dtype, device=device)
+        pool_ref = torch.zeros_like(pool)
+        # Snapshots at request 3 page_size=16 mid-tile & tile-end positions plus non-aligned tail
+        snap_ends_list = [16, 32, 48, 64, 80, 96, 112, 128, 132]
+        snap_dst_list = [2, 3, 5, 7, 11, 13, 17, 19, 23]
+        snap_ends = torch.tensor(snap_ends_list, dtype=torch.int32, device=device)
+        req_ss = torch.tensor([0, 0, 0, 0, len(snap_ends_list)], dtype=torch.int32, device=device)
+        snap_dst = torch.tensor(snap_dst_list, dtype=torch.int32, device=device)
+        out = causal_dwconv1d_ragged_prefill_with_snapshots_triton(
+            x, w, cu, tile_req, tile_t0,
+            dst_pool=pool, snap_dst_idx=snap_dst, req_snap_start=req_ss, snap_local_ends=snap_ends,
+            snap_aligned=True, residual=res, use_activation=silu, block_t=bt, clamp_val=2.0,
+        )
+        # Reference per request using causal_dwconv1d_ref
+        pos = 0
+        for b, ln in enumerate(lens):
+            xb = x[pos : pos + ln].unsqueeze(0)
+            ref_b = causal_dwconv1d_ref(xb, w, None, residual=res, use_activation=silu, clamp_val=2.0)
+            assert float((out[pos : pos + ln] - ref_b.squeeze(0)).abs().max().item()) <= 1e-2, f"C={C} req={b}"
+            if b == 3:
+                for idx_s, end_l in zip(snap_dst_list, snap_ends_list):
+                    st_expected = x[pos + end_l - 3 : pos + end_l].t().reshape(C * 3)
+                    pool_ref[idx_s].copy_(st_expected)
+            pos += ln
+        for idx_s, end_l in zip(snap_dst_list, snap_ends_list):
+            assert float((pool[idx_s] - pool_ref[idx_s]).abs().max().item()) == 0.0, f"C={C} snap end={end_l}"
+
+        # CUDA Graph capture + replay for ragged prefill
+        out_cg = torch.empty_like(out)
+        _ = causal_dwconv1d_ragged_prefill_with_snapshots_triton(
+            x, w, cu, tile_req, tile_t0,
+            dst_pool=pool, snap_dst_idx=snap_dst, req_snap_start=req_ss, snap_local_ends=snap_ends,
+            snap_aligned=True, residual=res, use_activation=silu, block_t=bt, out=out_cg, clamp_val=2.0,
+        )
+        g = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(g):
+            causal_dwconv1d_ragged_prefill_with_snapshots_triton(
+                x, w, cu, tile_req, tile_t0,
+                dst_pool=pool, snap_dst_idx=snap_dst, req_snap_start=req_ss, snap_local_ends=snap_ends,
+                snap_aligned=True, residual=res, use_activation=silu, block_t=bt, out=out_cg, clamp_val=2.0,
+            )
+        g.replay()
+        torch.cuda.synchronize()
+        assert float((out_cg - out).abs().max().item()) == 0.0
+
+    print("  PASS: R14-D0 PLE add3/gather & ShortConv 8-step unroll parity + CG verified.")
+
+
 def main() -> int:
     print(
         f"Device: {torch.cuda.get_device_name(0)} "
@@ -2057,6 +2149,7 @@ def main() -> int:
     test_r8_hc_splitk_and_dflash_branch5120()
     test_r9_l2_swapped_hc_and_norm5120()
     test_r11_hc_up_mix_sk_1d_and_sconv_decode()
+    test_r14_ple_add3_gather_l2_and_sconv_t8_unroll()
     run_benchmarks()
     print(f"\nALL TESTS & BENCHMARKS PASSED in {time.perf_counter() - t0:.2f}s!")
     return 0

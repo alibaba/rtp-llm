@@ -4263,6 +4263,168 @@ class Qwen4_5QSATest(unittest.TestCase):
                     self.assertEqual(proc.exitcode, 0, f"R11 TPSP ws={ws} r{rk} exit={proc.exitcode}: {errors}")
                 self.assertEqual(errors, [])
 
+    def test_r14_q4_dsplit_pool4_fast_launch_and_sp_ag_reuse(self) -> None:
+        if not torch.cuda.is_available():
+            self.skipTest("CUDA is required")
+        dev = _device()
+        torch.manual_seed(20261128)
+
+        from rtp_llm.models_py.modules.qwen4_5.qsa_bridge import (
+            _try_run_q4_prefill,
+            _view_mha_kv_and_scale_hnd,
+            build_qsa_neox_cos_sin,
+            qsa_paged_score,
+            qsa_select_causal_from_projected,
+            qsa_sparse_paged_decode_attention,
+            qsa_sparse_prefill_attention,
+        )
+        from rtp_llm.models_py.modules.qwen4_5.attention import (
+            Qwen4_5Attention,
+            Qwen4_5QSAIndexer,
+            dense_linear_bf16_or_tgv,
+        )
+
+        # 1. Fused Pool4+Norm+RoPE & single-chunk bytes_per_query parity
+        arch = _make_mini_arch(max_position_embeddings=2048)
+        idx = Qwen4_5QSAIndexer(arch).to(device=dev, dtype=torch.bfloat16)
+        B_s, S_s = 1, 1024
+        q_unrot = torch.randn((B_s, S_s, 8, 128), device=dev, dtype=torch.bfloat16)
+        raw_k = torch.randn((B_s, S_s, 128), device=dev, dtype=torch.bfloat16)
+        pos = torch.arange(S_s, device=dev, dtype=torch.int32).unsqueeze(0)
+        cos_all, sin_all = build_qsa_neox_cos_sin(pos, 64, 10000.0, torch.bfloat16)
+        sel_fast = qsa_select_causal_from_projected(
+            idx,
+            q_unrot,
+            raw_k,
+            q_norm_gamma=idx.q_norm_gamma,
+            positions=pos,
+            rotary_dim=64,
+            rope_theta=10000.0,
+        )
+        sel_ref = qsa_select_causal_from_projected(
+            idx,
+            q_unrot,
+            raw_k,
+            cos_all,
+            sin_all,
+            q_norm_gamma=idx.q_norm_gamma,
+        )
+        self.assertTrue(torch.equal(sel_fast, sel_ref))
+
+        # 2. _qsa_q4_gqa_dsplit_kernel Dense BF16 (q_per_kv=32) + duplicate check_bad fallback + Paged FP8 (q_per_kv=16/32)
+        T_d, K_d, D_d = 2176, 256, 256
+        q_d = torch.randn((1, 32, S_s, D_d), device=dev, dtype=torch.bfloat16)
+        k_d = torch.randn((1, 1, T_d, D_d), device=dev, dtype=torch.bfloat16)
+        v_d = torch.randn((1, 1, T_d, D_d), device=dev, dtype=torch.bfloat16)
+        blks_d = torch.randint(0, T_d // 4, (1, S_s, K_d // 4), device=dev, dtype=torch.int32)
+        sel_d = (
+            blks_d[:, :, :, None] * 4
+            + torch.arange(4, device=dev, dtype=torch.int32)[None, None, None, :]
+        ).reshape(1, S_s, K_d)
+        # Ensure unique indices for assume_unique_selected=True via deterministic shifted blocks
+        uniq_b = (torch.arange(S_s, device=dev, dtype=torch.int32)[:, None] + torch.arange(K_d // 4, device=dev, dtype=torch.int32)[None, :]) % (T_d // 4)
+        sel_uniq = (
+            uniq_b[None, :, :, None] * 4
+            + torch.arange(4, device=dev, dtype=torch.int32)[None, None, None, :]
+        ).reshape(1, S_s, K_d)
+        out_q4 = qsa_sparse_prefill_attention(
+            q_d, k_d, v_d, sel_uniq, validate_selected=False, assume_unique_selected=True
+        )
+        # Compare against CPU/Direct reference (sel_d with validate=False on small slice or PyTorch ref)
+        out_ref_cpu = qsa_sparse_prefill_attention(
+            q_d[:, :, :32].cpu(), k_d.cpu(), v_d.cpu(), sel_uniq[:, :32].cpu()
+        ).to(dev)
+        self.assertGreaterEqual(_cosine(out_q4[:, :, :32], out_ref_cpu), 0.9999)
+
+        # Test check_bad=True duplicate repair path inside _try_run_q4_prefill
+        sel_dup = sel_uniq.clone()
+        sel_dup[0, 0, :4] = sel_dup[0, 0, 4:8]
+        out_dup = _try_run_q4_prefill(
+            q_d, k_d, v_d, None, None, sel_dup, T=T_d, page_size=4, is_paged=False, assume_unique_selected=False
+        )
+        self.assertIsNotNone(out_dup)
+        assert out_dup is not None
+        out_dup_cpu = qsa_sparse_prefill_attention(
+            q_d[:, :, :8].cpu(), k_d.cpu(), v_d.cpu(), sel_dup[:, :8].cpu()
+        ).to(dev)
+        self.assertGreaterEqual(_cosine(out_dup[:, :, :8], out_dup_cpu), 0.9999)
+
+        # Paged FP8 _try_run_q4_prefill: returns None for q_per_kv>8 (dsplit intentionally dense-only) and runs Q4 for q_per_kv<=8
+        pages = (T_d + 63) // 64 + 4
+        kv_pool = torch.randn((pages, 2, 1, 64, D_d), device=dev, dtype=torch.bfloat16).to(torch.float8_e4m3fn)
+        kv_sc = torch.full((pages, 2, 1, 64), 0.5, device=dev, dtype=torch.float32)
+        bt = torch.arange(1, 1 + (T_d + 63) // 64, device=dev, dtype=torch.int32).unsqueeze(0)
+        kv_hnd, sc_hnd = _view_mha_kv_and_scale_hnd(kv_pool, kv_sc, kv_heads=1, page_size=64, head_dim=D_d)
+        self.assertIsNone(
+            _try_run_q4_prefill(
+                q_d[:, :16].contiguous(), kv_hnd, kv_hnd, sc_hnd, bt, sel_uniq, T=T_d, page_size=64, is_paged=True
+            )
+        )
+        out_pq4 = _try_run_q4_prefill(
+            q_d[:, :8].contiguous(), kv_hnd, kv_hnd, sc_hnd, bt, sel_uniq, T=T_d, page_size=64, is_paged=True, assume_unique_selected=True
+        )
+        self.assertIsNotNone(out_pq4)
+        assert out_pq4 is not None
+        out_p_dir = torch.empty_like(q_d[:, :8].contiguous())
+        from rtp_llm.models_py.modules.qwen4_5.qsa_bridge import _launch_direct_sparse_prefill
+        _launch_direct_sparse_prefill(
+            q_d[:, :8].contiguous(), kv_hnd, kv_hnd, sc_hnd, bt, sel_uniq, out_p_dir, T=T_d, page_size=64, is_paged=True
+        )
+        self.assertGreaterEqual(_cosine(out_pq4, out_p_dir), 0.999)
+
+        # 3. PagedScoreTC qs=64 & Decode fast_launch + CG parity
+        q_ps = torch.randn((2, 512, 8, 128), device=dev, dtype=torch.bfloat16)
+        idx_pool = torch.randn((40, 16, 128), device=dev, dtype=torch.bfloat16)
+        idx_bt = torch.arange(1, 33, device=dev, dtype=torch.int32).reshape(2, 16)
+        ctx_ps = torch.full((2, 512), 256, device=dev, dtype=torch.int32)
+        lg_tc = qsa_paged_score(q_ps, idx_pool, idx_bt, ctx_ps, max_ctx_len=256)
+        lg_cpu = qsa_paged_score(q_ps[:, :4].cpu(), idx_pool.cpu(), idx_bt.cpu(), ctx_ps[:, :4].cpu(), max_ctx_len=256).to(dev)
+        self.assertGreaterEqual(_cosine(lg_tc.view(2, 512, 256)[:, :4], lg_cpu.view(2, 4, 256)), 0.9999)
+
+        q_dec = torch.randn((4, 32, 1, 256), device=dev, dtype=torch.bfloat16)
+        gate_dec = torch.randn((4, 1, 32, 256), device=dev, dtype=torch.bfloat16)
+        bt_dec = bt.expand(4, -1).contiguous()
+        kvl_dec = torch.full((4,), T_d, device=dev, dtype=torch.int32)
+        sel_dec = sel_uniq[:, :1, :128].expand(4, 1, 128).contiguous()
+        d_out = qsa_sparse_paged_decode_attention(
+            q_dec, kv_pool, bt_dec, kvl_dec, sel_dec, page_size=64, kv_heads=1, head_dim=256, kv_scale=kv_sc, output_gate=gate_dec
+        )
+        self.assertEqual(tuple(d_out.shape), (4, 32, 1, 256))
+        g = torch.cuda.CUDAGraph()
+        for _ in range(2):
+            qsa_sparse_paged_decode_attention(
+                q_dec, kv_pool, bt_dec, kvl_dec, sel_dec, page_size=64, kv_heads=1, head_dim=256, kv_scale=kv_sc, output_gate=gate_dec
+            )
+        with torch.cuda.graph(g):
+            d_cg = qsa_sparse_paged_decode_attention(
+                q_dec, kv_pool, bt_dec, kvl_dec, sel_dec, page_size=64, kv_heads=1, head_dim=256, kv_scale=kv_sc, output_gate=gate_dec
+            )
+        g.replay()
+        self.assertGreaterEqual(_cosine(d_out, d_cg), 0.9999)
+
+        # 4. Attention fast positions path & M>48 dense_linear fast exit
+        sa = Qwen4_5Attention.from_config(arch, layer_idx=3).to(device=dev, dtype=torch.bfloat16)
+        h_in = torch.randn((1, 128, arch.hidden_size), device=dev, dtype=torch.bfloat16)
+        sa_out = sa(h_in)
+        self.assertEqual(tuple(sa_out.shape), (1, 128, arch.hidden_size))
+        lin_out = dense_linear_bf16_or_tgv(sa.q_proj, h_in.reshape(128, -1))
+        self.assertTrue(torch.equal(lin_out, sa.q_proj(h_in.reshape(128, -1))))
+
+        # 5. _sp_all_gather_dim0 / _sp_reduce_scatter_dim0 out= buffer fast path
+        from rtp_llm.models_py.model_desc.qwen4_5_runtime import Qwen4_5PagedStateBridge
+        from rtp_llm.models_py.modules.qwen4_5.fast_comm import Qwen4_5FastAllReduce
+        fc_local = Qwen4_5FastAllReduce(None, device=dev)
+        x_sp = torch.randn((64, 128), device=dev, dtype=torch.bfloat16)
+        out_sp = torch.empty((64, 128), device=dev, dtype=torch.bfloat16)
+        res_ag = Qwen4_5PagedStateBridge._sp_all_gather_dim0(
+            x_sp, total_tokens=64, sp_size=1, sp_rank=0, sp_group=None, sp_comm=fc_local, out=out_sp
+        )
+        self.assertTrue(torch.equal(res_ag, x_sp))
+        res_rs = Qwen4_5PagedStateBridge._sp_reduce_scatter_dim0(
+            x_sp, total_tokens=64, sp_size=1, sp_rank=0, sp_group=None, sp_comm=fc_local, out=out_sp
+        )
+        self.assertTrue(torch.equal(res_rs, x_sp))
+
 def _r7_sp2_nccl_cg_worker(
     rank: int,
     world_size: int,

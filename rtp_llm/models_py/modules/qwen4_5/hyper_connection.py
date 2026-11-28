@@ -1599,7 +1599,7 @@ def hc_sconv_decode_opaque_combine_norm_triton(
         | combined.data_ptr() | normed.data_ptr()
     )
     if hidden_size == 5120 and hc_count == 4:
-        if rows <= 64 and sub_c.dtype == res_c.dtype:
+        if rows <= 512 and sub_c.dtype == res_c.dtype:
             sc_bc = 256
             sc_nw = 8 if rows <= 32 else 4
             sconv_sub = _hc_alloc_from_pool(

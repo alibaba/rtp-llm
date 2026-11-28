@@ -3069,6 +3069,55 @@ def _choose_dflash2_tile_and_splits(
     cached = _TILE_SPLIT_CACHE.get(ckey)
     if cached is not None:
         return cached
+    max_possible_kv = max(0, max_blocks * page_size)
+    eff_b_kv = batch_size * num_kv_heads
+    if eff_b_kv >= 32 and q_len >= 4 and gqa_groups >= 8 and max_possible_kv <= 4096:
+        if max_possible_kv <= 32 or max_splits <= 1:
+            if gqa_groups >= 16:
+                res = (4, 16, 64, 1)
+            else:
+                res = (min(8, max(4, q_len)), 8, min(64, max(32, q_len * 8)), 1)
+        elif gqa_groups >= 32:
+            if is_fp8_kv or eff_b_kv >= 48:
+                res = (4, 16, 64, 1)
+            else:
+                block_q = 8 if q_len >= 8 else 4
+                res = (block_q, 8, block_q * 8, 1)
+        elif gqa_groups >= 16:
+            if is_fp8_kv:
+                block_q = 8 if (not has_swa and eff_b_kv >= 64 and q_len >= 8) else 4
+                block_g = 8 if (not has_swa and eff_b_kv >= 64 and q_len >= 8) else 16
+                ns = 1 if (has_swa or eff_b_kv >= 64) else min(int(max_splits), 4)
+                res = (block_q, block_g, block_q * block_g, ns)
+            elif has_swa:
+                res = (2, 16, 32, 1)
+            elif eff_b_kv < 48:
+                res = (2, 16, 32, min(int(max_splits), 2))
+            elif 80 <= eff_b_kv < 112:
+                res = (4, 16, 64, min(int(max_splits), 2))
+            else:
+                res = (4, 16, 64, 1)
+        else:
+            # TP=4 (gqa_groups=8): verified on SM103 148 SMs
+            if is_fp8_kv:
+                block_q = 8 if q_len >= 8 else 4
+                if eff_b_kv >= 80:
+                    ns = min(int(max_splits), 2)
+                else:
+                    ns = min(int(max_splits), 4)
+                res = (block_q, 8, block_q * 8, ns)
+            else:
+                block_q = 8 if (eff_b_kv >= 112 and q_len >= 8 and not has_swa) else 4
+                if eff_b_kv >= 80:
+                    ns = 1
+                elif eff_b_kv >= 48:
+                    ns = min(int(max_splits), 2)
+                else:
+                    ns = min(int(max_splits), 4)
+                res = (block_q, 8, block_q * 8, ns)
+        if len(_TILE_SPLIT_CACHE) < 4096:
+            _TILE_SPLIT_CACHE[ckey] = res
+        return res
     max_g = 16 if (q_len <= 1 or (q_len >= 4 and gqa_groups >= 16)) else 8
     block_g = min(max_g, max(1, int(triton.next_power_of_2(max(1, gqa_groups)))))
     target_m = 64 if q_len >= 4 else 16
@@ -3079,7 +3128,6 @@ def _choose_dflash2_tile_and_splits(
     block_m = block_q * block_g
     num_q_tiles = (q_len + block_q - 1) // block_q
     num_g_tiles = (gqa_groups + block_g - 1) // block_g
-    max_possible_kv = max(0, max_blocks * page_size)
     if max_possible_kv <= 32 or max_splits <= 1 or (is_fp8_kv and max_possible_kv <= 768):
         num_splits = 1
     else:
@@ -3776,7 +3824,7 @@ class _DFlash2PagedFMHADispatcher(FMHAImplBase):
                 qs0, qs1, qs2 = int(q.stride(0)), int(q.stride(1)), int(q.stride(2))
                 gs0, gs1, gs2 = int(gate_arg.stride(0)), int(gate_arg.stride(1)), int(gate_arg.stride(2))
                 os0, os1, os2 = int(out.stride(0)), int(out.stride(1)), int(out.stride(2))
-                if page_aligned and body_splits == 1 and use_fp8_dot:
+                if page_aligned and body_splits == 1 and (use_fp8_dot or not has_swa or block_q >= 8):
                     _launch_triton_cached(
                         _KC_MHA_SINGLE,
                         _dflash2_paged_noncausal_mha_fused_single_triton,
@@ -5557,6 +5605,41 @@ class Qwen4_5DSparkModel(DSparkProposerMixin, GptModelBase):
             and not is_fp8_kv
             and backend_pref in ("auto", "flashinfer")
         )
+        if want_fi and backend_pref == "auto":
+            cpu_pref = getattr(attn_inputs, "prefix_lengths", None)
+            cpu_bt = getattr(attn_inputs, "kv_cache_kernel_block_id", None)
+            dev_bt = getattr(attn_inputs, "kv_cache_kernel_block_id_device", None)
+            bt_ref = dev_bt if dev_bt is not None else cpu_bt
+            b_hint = (
+                int(cpu_pref.numel())
+                if (isinstance(cpu_pref, torch.Tensor) and not cpu_pref.is_cuda)
+                else (int(bt_ref.shape[0]) if (isinstance(bt_ref, torch.Tensor) and bt_ref.ndim == 2) else 0)
+            )
+            local_num_heads = (
+                int(self.layers[0].self_attn.num_heads)
+                if self.layers
+                else max(1, int(self.config.attn_config.head_num // max(1, self.tp_size)))
+            )
+            min_triton_b = 32 if local_num_heads <= 16 else 112
+            if b_hint >= min_triton_b:
+                page_sz = max(1, int(self.config.attn_config.kernel_tokens_per_block or 16))
+                has_real_cpu_pref = (
+                    isinstance(cpu_pref, torch.Tensor)
+                    and not cpu_pref.is_cuda
+                    and cpu_pref.numel() > 0
+                    and int(cpu_pref.max().item()) > 0
+                )
+                max_kv_hint = (
+                    int(cpu_pref.max().item()) + self._dspark_query_width
+                    if has_real_cpu_pref
+                    else (
+                        int(bt_ref.shape[1]) * page_sz
+                        if (isinstance(bt_ref, torch.Tensor) and bt_ref.ndim == 2)
+                        else 0
+                    )
+                )
+                if 0 < max_kv_hint <= 4096:
+                    want_fi = False
         win_lefts = sorted(
             {
                 int(lyr.self_attn.sliding_window)

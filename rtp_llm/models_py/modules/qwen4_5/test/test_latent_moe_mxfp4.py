@@ -4202,6 +4202,174 @@ def test_r13_router_contig_skip_and_masked_tuning(device: torch.device) -> None:
     print("  PASS test_r13_router_contig_skip_and_masked_tuning")
 
 
+def test_r14_mxfp4_u64_scatter_fast_situ_glu_and_hc(device: torch.device) -> None:
+    """Verify R14-M0 fast-math SiTU-GLU, token-u64 contig/masked scatter, gather nw=1, and HC SConv<=512."""
+    import os
+    from rtp_llm.models_py.modules.qwen4_5 import hyper_connection, mxfp4_ops
+    from rtp_llm.models_py.modules.qwen4_5.short_conv import causal_dwconv1d_decode_opaque_triton
+
+    dev_idx = int(device.index or 0)
+    torch.manual_seed(1414)
+
+    # 1. fast_math SiTU-GLU parity & extreme saturation (+ default bit-exact contract preserved)
+    gu = torch.randn((512, 5120), dtype=torch.bfloat16, device=device) * 0.6
+    gu[0, :4] = torch.tensor([-100.0, 0.0, 100.0, 1e4], dtype=torch.bfloat16, device=device)
+    gu[0, 2560:2564] = torch.tensor([-200.0, 25.0, 200.0, -1e4], dtype=torch.bfloat16, device=device)
+    q_ex, sc_ex = situ_glu_fp8_quant_packed(gu, scale_format="deepgemm", fast_math=False)
+    q_fm, sc_fm = situ_glu_fp8_quant_packed(gu, scale_format="deepgemm", fast_math=True)
+    q_ref, sc_ref = situ_glu_fp8_quant_ref(gu, scale_format="deepgemm")
+    assert torch.equal(q_ex.view(torch.uint8), q_ref.view(torch.uint8))
+    assert torch.equal(sc_ex, sc_ref)
+    assert torch.isfinite(q_fm.float()).all()
+    assert (q_fm.view(torch.uint8) == q_ref.view(torch.uint8)).float().mean().item() >= 0.9995
+
+    gu_m = torch.randn((16, 16, 5120), dtype=torch.bfloat16, device=device) * 0.6
+    mm_m = torch.tensor([0, 5, 16, 3] + [0] * 12, dtype=torch.int32, device=device)
+    qm_ex, scm_ex = situ_glu_fp8_quant_masked_packed(gu_m, mm_m, fast_math=False)
+    qm_fm, scm_fm = situ_glu_fp8_quant_masked_packed(gu_m, mm_m, fast_math=True)
+    for e_i in (1, 2, 3):
+        cnt = int(mm_m[e_i].item())
+        qr_e, scr_e = situ_glu_fp8_quant_ref(gu_m[e_i, :cnt], scale_format="deepgemm")
+        assert torch.equal(qm_ex[e_i, :cnt].view(torch.uint8), qr_e.view(torch.uint8))
+        assert torch.equal(scm_ex[e_i, :cnt], scr_e)
+        assert (qm_fm[e_i, :cnt].view(torch.uint8) == qr_e.view(torch.uint8)).float().mean().item() >= 0.999
+
+    # 2. LatentNorm+sigmoid fast MUFU parity
+    moe_ln = Qwen4_5LatentMoE(
+        hidden_size=5120,
+        routed_expert_hidden_size=2560,
+        moe_intermediate_size=2560,
+        shared_expert_intermediate_size=1280,
+        num_experts=64,
+        num_experts_per_tok=10,
+        use_triton_mxfp4=True,
+        dtype=torch.bfloat16,
+        device=device,
+    )
+    for m_ln in (32, 256):
+        dg = torch.randn((m_ln, 5120), dtype=torch.bfloat16, device=device) * 0.5
+        ln_t = moe_ln._run_latent_norm_mul_sigmoid(dg, run_triton=True)
+        ln_r = moe_ln._run_latent_norm_mul_sigmoid(dg, run_triton=False)
+        assert _diff_stats(ln_t, ln_r)[2] >= 0.999999
+
+    # 3. MXFP4 contig token-u64 scatter (dup IDs, unaligned x_q fallback, fast_math vs exact) & masked 1-kern u64
+    if has_deepgemm_fp8_fp4(dev_idx):
+        L_m, I_m, E_m = 2560, 2560, 32
+        w13_u8, w13_sc = quantize_mxfp4(torch.randn((E_m, 2 * I_m, L_m), dtype=torch.bfloat16, device=device) * 0.02)
+        w2_u8, w2_sc = quantize_mxfp4(torch.randn((E_m, L_m, I_m), dtype=torch.bfloat16, device=device) * 0.02)
+        mw_m = prepare_mxfp4_moe_weights(w13_u8=w13_u8, w13_scale=w13_sc, w2_u8=w2_u8, w2_scale=w2_sc)
+        del w13_u8, w13_sc, w2_u8, w2_sc
+
+        prev_fm = os.environ.get("QWEN4_5_SITU_GLU_FAST_MATH")
+        try:
+            xc = torch.randn((1024, L_m), dtype=torch.bfloat16, device=device) * 0.3
+            ids_c = torch.randint(0, E_m * 4, (1024, 10), dtype=torch.int32, device=device)
+            ids_c[:32, 0] = 3
+            ids_c[:32, 1] = 3
+            tw_c = torch.softmax(torch.randn((1024, 10), dtype=torch.float32, device=device), dim=-1)
+            os.environ["QWEN4_5_SITU_GLU_FAST_MATH"] = "1"
+            assert mxfp4_ops._use_situ_glu_fast_math() and not mxfp4_ops._use_situ_glu_masked_fast_math()
+            y_cf = mxfp4_ops.mxfp4_moe_deepgemm_contiguous(xc, ids_c, tw_c, mw_m, ep_start=0, ep_size=4)
+            os.environ["QWEN4_5_SITU_GLU_FAST_MATH"] = "2"
+            assert mxfp4_ops._use_situ_glu_fast_math() and mxfp4_ops._use_situ_glu_masked_fast_math()
+            os.environ["QWEN4_5_SITU_GLU_FAST_MATH"] = "0"
+            assert not mxfp4_ops._use_situ_glu_fast_math() and not mxfp4_ops._use_situ_glu_masked_fast_math()
+            y_ce = mxfp4_ops.mxfp4_moe_deepgemm_contiguous(xc, ids_c, tw_c, mw_m, ep_start=0, ep_size=4)
+            y_cr = mxfp4_moe_forward_ref(xc, ids_c, tw_c, mw_m, ep_start=0, ep_size=4, fp8_activations=True)
+            assert _diff_stats(y_cf, y_ce)[2] >= 0.999999
+            assert _diff_stats(y_cf, y_cr)[2] >= 0.9999
+
+            # Unaligned x_q fallback (data_ptr & 7 != 0)
+            xq_a, xsc_a = per_token_group_quant_fp8_ue8m0(xc[:64], scale_format="raw")
+            pad_q = torch.empty((64, L_m + 1), dtype=torch.uint8, device=device)
+            pad_q[:, 1:].copy_(xq_a.view(torch.uint8))
+            xq_un = pad_q[:, 1:].view(torch.float8_e4m3fn)
+            assert (xq_un.data_ptr() & 7) != 0
+            y_qu = mxfp4_ops.mxfp4_moe_deepgemm_contiguous(
+                None, ids_c[:64], tw_c[:64], mw_m, ep_start=0, ep_size=2, prequant_fp8=(xq_un, xsc_a)
+            )
+            y_qa = mxfp4_ops.mxfp4_moe_deepgemm_contiguous(
+                None, ids_c[:64], tw_c[:64], mw_m, ep_start=0, ep_size=2, prequant_fp8=(xq_a, xsc_a)
+            )
+            assert torch.equal(y_qu, y_qa)
+
+            # Masked packed 1-kernel u64 scatter (dup IDs, unaligned row_bytes fallback, fast_math vs exact, CG)
+            os.environ["QWEN4_5_SITU_GLU_FAST_MATH"] = "1"
+            M_pk = 128
+            sc_off = L_m
+            meta_off = L_m + L_m // 32
+            row_bytes = meta_off + 80
+            assert (row_bytes & 7) == 0
+            all_b = torch.zeros((M_pk, row_bytes), dtype=torch.uint8, device=device)
+            xm_pk = torch.randn((M_pk, L_m), dtype=torch.bfloat16, device=device) * 0.3
+            xq_pk, xsc_pk = per_token_group_quant_fp8_ue8m0(xm_pk, scale_format="raw")
+            ids_pk = torch.randint(0, E_m * 4, (M_pk, 10), dtype=torch.int32, device=device)
+            ids_pk[:16, 0] = 2
+            ids_pk[:16, 1] = 2
+            tw_pk = torch.softmax(torch.randn((M_pk, 10), dtype=torch.float32, device=device), dim=-1)
+            all_b[:, :L_m].copy_(xq_pk.view(torch.uint8))
+            all_b[:, sc_off : sc_off + L_m // 32].copy_(xsc_pk)
+            all_b[:, meta_off : meta_off + 40].view(torch.int32).copy_(ids_pk)
+            all_b[:, meta_off + 40 : meta_off + 80].view(torch.float32).copy_(tw_pk)
+            packed = (all_b, L_m, sc_off, meta_off, row_bytes, 10)
+            y_pk_f = mxfp4_ops.mxfp4_moe_deepgemm_masked(
+                None, ids_pk[:0], tw_pk[:0], mw_m, ep_start=0, ep_size=4, prequant_packed=packed
+            )
+            y_pk_ref = mxfp4_ops.mxfp4_moe_deepgemm_masked(
+                None, ids_pk, tw_pk, mw_m, ep_start=0, ep_size=4, prequant_fp8=(xq_pk, xsc_pk)
+            )
+            assert _diff_stats(y_pk_f, y_pk_ref)[2] >= 0.999999
+            # Unaligned row_bytes fallback (row_bytes & 7 != 0) parity
+            all_bu = torch.zeros((M_pk, row_bytes + 4), dtype=torch.uint8, device=device)
+            all_bu[:, :row_bytes].copy_(all_b)
+            packed_u = (all_bu, L_m, sc_off, meta_off, row_bytes + 4, 10)
+            y_pk_u = mxfp4_ops.mxfp4_moe_deepgemm_masked(
+                None, ids_pk[:0], tw_pk[:0], mw_m, ep_start=0, ep_size=4, prequant_packed=packed_u
+            )
+            assert torch.equal(y_pk_u, y_pk_f)
+            g_pk = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(g_pk):
+                y_pk_cg = mxfp4_ops.mxfp4_moe_deepgemm_masked(
+                    None, ids_pk[:0], tw_pk[:0], mw_m, ep_start=0, ep_size=4, prequant_packed=packed
+                )
+            g_pk.replay()
+            torch.cuda.synchronize(device)
+            assert torch.equal(y_pk_cg, y_pk_f)
+        finally:
+            if prev_fm is None:
+                os.environ.pop("QWEN4_5_SITU_GLU_FAST_MATH", None)
+            else:
+                os.environ["QWEN4_5_SITU_GLU_FAST_MATH"] = prev_fm
+
+    # 4. HC SConv+combine+norm split fast path (rows=128, 256)
+    H_hc, HC = 5120, 4
+    w_sc = torch.randn((H_hc, 4), dtype=torch.bfloat16, device=device) * 0.2
+    w_hc = torch.randn((HC * H_hc,), dtype=torch.bfloat16, device=device) * 0.2
+    b_hc = torch.randn((HC * H_hc,), dtype=torch.bfloat16, device=device) * 0.2
+    for B_hc in (128, 256):
+        raw_sub = torch.randn((B_hc, 1, H_hc), dtype=torch.bfloat16, device=device) * 0.3
+        res_hc = torch.randn((B_hc, 1, HC * H_hc), dtype=torch.bfloat16, device=device) * 0.3
+        inj_hc = torch.rand((B_hc, 1, HC), dtype=torch.bfloat16, device=device) * 1.5
+        pool_f = torch.randn((B_hc * 2, H_hc * 3), dtype=torch.bfloat16, device=device) * 0.2
+        pool_r = pool_f.clone()
+        bt_hc = torch.arange(B_hc * 2, dtype=torch.int32, device=device).view(B_hc, 2)
+        sb_hc = torch.full((B_hc,), 10, dtype=torch.int32, device=device)
+        cf, nf = hyper_connection.hc_sconv_decode_opaque_combine_norm_triton(
+            raw_sub, res_hc, inj_hc, w_hc, b_hc, w_sc, pool_f, bt_hc, sb_hc,
+            page_size=16, conv_residual=True, conv_use_silu=True, clamp_val=1.5,
+        )
+        sub_r = causal_dwconv1d_decode_opaque_triton(
+            raw_sub, w_sc, pool_r, bt_hc, sb_hc,
+            page_size=16, pool_col_offset=0, residual=True, use_activation=True,
+            round_pre_act=False, clamp_val=1.5,
+        )
+        cr, nr = hyper_connection.hc_combine_and_norm_triton(sub_r, res_hc, inj_hc, w_hc, b_hc, eps=1e-6)
+        assert float((pool_f - pool_r).abs().max().item()) == 0.0
+        assert _diff_stats(cf, cr)[0] == 0.0 and _diff_stats(nf, nr)[0] == 0.0
+
+    print("  PASS test_r14_mxfp4_u64_scatter_fast_situ_glu_and_hc")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Qwen 4.5-Flash LatentMoE & SM100 MXFP4 test suite")
     parser.add_argument("--distributed", action="store_true", help="Run multi-GPU FastAllReduce/TP/EP tests")
@@ -4272,6 +4440,7 @@ def main() -> int:
         test_r11_warmup_mem_and_masked_kernels(device)
         test_r12_norm_router_and_prequant_scatter(device)
         test_r13_router_contig_skip_and_masked_tuning(device)
+        test_r14_mxfp4_u64_scatter_fast_situ_glu_and_hc(device)
 
     if args.distributed:
         test_distributed_fast_comm_tp_ep(world_size=args.world_size)

@@ -704,12 +704,55 @@ def _compute_ue8m0_fp8_block32(y_g, eps: tl.constexpr):
 
 
 @triton.jit
-def _situ_glu_fp32_to_bf16(gate, up, gate_beta: tl.constexpr, up_beta: tl.constexpr):
+def _situ_glu_fp32_to_bf16(
+    gate,
+    up,
+    gate_beta: tl.constexpr,
+    up_beta: tl.constexpr,
+    FAST_MATH: tl.constexpr = False,
+):
     inv_gb: tl.constexpr = 1.0 / gate_beta
     inv_ub: tl.constexpr = 1.0 / up_beta
-    sig_gate = tl.div_rn(1.0, 1.0 + libdevice.exp(-gate))
-    g = gate_beta * libdevice.tanh(gate * inv_gb) * sig_gate
-    u = up_beta * libdevice.tanh(up * inv_ub)
+    if FAST_MATH:
+        log2e: tl.constexpr = 1.4426950408889634
+        exp_neg = tl.inline_asm_elementwise(
+            "ex2.approx.ftz.f32 $0, $1;",
+            "=f,f",
+            [-gate * log2e],
+            dtype=tl.float32,
+            is_pure=True,
+            pack=1,
+        )
+        sig_gate = tl.inline_asm_elementwise(
+            "rcp.approx.ftz.f32 $0, $1;",
+            "=f,f",
+            [1.0 + exp_neg],
+            dtype=tl.float32,
+            is_pure=True,
+            pack=1,
+        )
+        th_g = tl.inline_asm_elementwise(
+            "tanh.approx.f32 $0, $1;",
+            "=f,f",
+            [gate * inv_gb],
+            dtype=tl.float32,
+            is_pure=True,
+            pack=1,
+        )
+        th_u = tl.inline_asm_elementwise(
+            "tanh.approx.f32 $0, $1;",
+            "=f,f",
+            [up * inv_ub],
+            dtype=tl.float32,
+            is_pure=True,
+            pack=1,
+        )
+        g = gate_beta * th_g * sig_gate
+        u = up_beta * th_u
+    else:
+        sig_gate = tl.div_rn(1.0, 1.0 + libdevice.exp(-gate))
+        g = gate_beta * libdevice.tanh(gate * inv_gb) * sig_gate
+        u = up_beta * libdevice.tanh(up * inv_ub)
     return (g * u).to(tl.bfloat16).to(tl.float32)
 
 
@@ -1007,6 +1050,7 @@ def _situ_glu_fp8_quant_packed_kernel(
     HAS_ACTIVE_ROWS: tl.constexpr,
     NUM_EP_GROUPS: tl.constexpr,
     BSEARCH_ITERS: tl.constexpr,
+    FAST_MATH: tl.constexpr = False,
 ):
     pid_m = tl.program_id(0).to(tl.int64)
     pid_d = tl.program_id(1)
@@ -1029,7 +1073,9 @@ def _situ_glu_fp8_quant_packed_kernel(
         up_ptr + pid_m * stride_u_row + up_offset + offs_d, mask=mask_d, other=0.0
     ).to(tl.float32)
 
-    y = _situ_glu_fp32_to_bf16(gate, up, gate_beta=gate_beta, up_beta=up_beta)
+    y = _situ_glu_fp32_to_bf16(
+        gate, up, gate_beta=gate_beta, up_beta=up_beta, FAST_MATH=FAST_MATH
+    )
     y = tl.where(mask_d, y, 0.0).reshape((GROUPS, 32))
 
     q, biased = _compute_ue8m0_fp8_block32(y, eps=eps)
@@ -1102,6 +1148,7 @@ def _situ_glu_fp8_quant_packed_1d_kernel(
     HAS_ROW_BOUNDS: tl.constexpr,
     NUM_EP_GROUPS: tl.constexpr,
     BSEARCH_ITERS: tl.constexpr,
+    FAST_MATH: tl.constexpr = False,
 ):
     """Row-per-CTA SiTU-GLU + block-32 UE8M0 FP8 quant (exact D % 128 == 0 fast path)."""
     row = tl.program_id(0).to(tl.int64)
@@ -1154,7 +1201,9 @@ def _situ_glu_fp8_quant_packed_1d_kernel(
         offs = t * BLOCK_D + tl.arange(0, BLOCK_D)
         gate = tl.load(g_row + offs).to(tl.float32)
         up = tl.load(u_row + offs).to(tl.float32)
-        y = _situ_glu_fp32_to_bf16(gate, up, gate_beta=gate_beta, up_beta=up_beta)
+        y = _situ_glu_fp32_to_bf16(
+            gate, up, gate_beta=gate_beta, up_beta=up_beta, FAST_MATH=FAST_MATH
+        )
         q, biased = _compute_ue8m0_fp8_block32(y.reshape((GROUPS, 32)), eps=eps)
         tl.store(q_row + offs, q.reshape((BLOCK_D,)))
 
@@ -1192,6 +1241,7 @@ def _situ_glu_fp8_quant_masked_packed_kernel(
     eps: tl.constexpr,
     BLOCK_D: tl.constexpr,
     CHUNK_M: tl.constexpr,
+    FAST_MATH: tl.constexpr = False,
 ):
     e = tl.program_id(0).to(tl.int64)
     pid_mc = tl.program_id(1).to(tl.int64)
@@ -1216,7 +1266,9 @@ def _situ_glu_fp8_quant_masked_packed_kernel(
         row_base = x_ebase + m * stride_xm
         gate = tl.load(row_base + offs_d, mask=mask_d, other=0.0).to(tl.float32)
         up = tl.load(row_base + D + offs_d, mask=mask_d, other=0.0).to(tl.float32)
-        y = _situ_glu_fp32_to_bf16(gate, up, gate_beta=gate_beta, up_beta=up_beta)
+        y = _situ_glu_fp32_to_bf16(
+            gate, up, gate_beta=gate_beta, up_beta=up_beta, FAST_MATH=FAST_MATH
+        )
         y = tl.where(mask_d, y, 0.0).reshape((GROUPS, 32))
         q, biased = _compute_ue8m0_fp8_block32(y, eps=eps)
         _store_deepgemm_row_packed(
@@ -1250,12 +1302,15 @@ def _situ_glu_quant_masked_tile(
     GROUPS: tl.constexpr,
     PACKS: tl.constexpr,
     shifts,
+    FAST_MATH: tl.constexpr = False,
 ):
     """Compute one ``BLOCK_D``-wide SiTU-GLU + block-32 UE8M0 FP8 quant tile."""
     offs_d = t * BLOCK_D + tl.arange(0, BLOCK_D)
     gate = tl.load(x_base + offs_d).to(tl.float32)
     up = tl.load(x_base + D + offs_d).to(tl.float32)
-    y = _situ_glu_fp32_to_bf16(gate, up, gate_beta=gate_beta, up_beta=up_beta)
+    y = _situ_glu_fp32_to_bf16(
+        gate, up, gate_beta=gate_beta, up_beta=up_beta, FAST_MATH=FAST_MATH
+    )
     q, biased = _compute_ue8m0_fp8_block32(y.reshape((GROUPS, 32)), eps=eps)
     tl.store(q_base + offs_d, q.reshape((BLOCK_D,)))
     packed = tl.sum(
@@ -1296,6 +1351,7 @@ def _situ_glu_fp8_quant_masked_row_tile_persistent_kernel(
     eps: tl.constexpr,
     BLOCK_D: tl.constexpr,
     E_PAD: tl.constexpr,
+    FAST_MATH: tl.constexpr = False,
 ):
     """Row-and-tile persistent masked SiTU-GLU + FP8 quant balancing hot skewed experts across SMs."""
     offs_e, ends, total_rows = _masked_prefix_map(masked_m_ptr, max_m, E, E_PAD)
@@ -1326,6 +1382,7 @@ def _situ_glu_fp8_quant_masked_row_tile_persistent_kernel(
             GROUPS=GROUPS,
             PACKS=PACKS,
             shifts=shifts,
+            FAST_MATH=FAST_MATH,
         )
 
 
@@ -1349,6 +1406,7 @@ def _situ_glu_fp8_quant_masked_row_persistent_kernel(
     eps: tl.constexpr,
     BLOCK_D: tl.constexpr,
     E_PAD: tl.constexpr,
+    FAST_MATH: tl.constexpr = False,
 ):
     """Row-per-task persistent masked SiTU-GLU + FP8 quant (computes expert offset once per row)."""
     offs_e, ends, total_rows = _masked_prefix_map(masked_m_ptr, max_m, E, E_PAD)
@@ -1381,6 +1439,7 @@ def _situ_glu_fp8_quant_masked_row_persistent_kernel(
                 GROUPS=GROUPS,
                 PACKS=PACKS,
                 shifts=shifts,
+                FAST_MATH=FAST_MATH,
             )
 
 
@@ -1407,6 +1466,7 @@ def _situ_glu_fp8_quant_masked_packed_persistent_kernel(
     BLOCK_D: tl.constexpr,
     D_TILES: tl.constexpr,
     E_PAD: tl.constexpr,
+    FAST_MATH: tl.constexpr = False,
 ):
     offs_e, ends, total_rows = _masked_prefix_map(masked_m_ptr, max_m, E, E_PAD)
     if total_rows == 0:
@@ -1430,7 +1490,9 @@ def _situ_glu_fp8_quant_masked_packed_persistent_kernel(
         row_base = e * stride_xe + m * stride_xm
         gate = tl.load(x_ptr + row_base + offs_d, mask=mask_d, other=0.0).to(tl.float32)
         up = tl.load(x_ptr + row_base + D + offs_d, mask=mask_d, other=0.0).to(tl.float32)
-        y = _situ_glu_fp32_to_bf16(gate, up, gate_beta=gate_beta, up_beta=up_beta)
+        y = _situ_glu_fp32_to_bf16(
+            gate, up, gate_beta=gate_beta, up_beta=up_beta, FAST_MATH=FAST_MATH
+        )
         y = tl.where(mask_d, y, 0.0).reshape((GROUPS, 32))
         q, biased = _compute_ue8m0_fp8_block32(y, eps=eps)
         g_idx = pid_d * GROUPS + tl.arange(0, GROUPS)
@@ -1656,6 +1718,7 @@ def situ_glu_fp8_quant_packed(
     zero_unused_scales: bool = True,
     max_active_rows: Optional[torch.Tensor] = None,
     active_row_bounds: Optional[Tuple[torch.Tensor, torch.Tensor, torch.Tensor]] = None,
+    fast_math: bool = False,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """Fused SiTU-GLU(gate_beta=4.0, up_beta=25.0) + block-32 UE8M0 FP8 quantization.
 
@@ -1742,6 +1805,7 @@ def situ_glu_fp8_quant_packed(
         rb_m_idx, rb_offs, rb_cnts = active_row_bounds
     else:
         rb_m_idx = rb_offs = rb_cnts = q
+    use_fast = bool(fast_math)
     with _cuda_device_ctx(g_2d.device):
         if bd_1d > 0 and D // bd_1d <= 16:
             nw_1d = 2 if (has_row_bounds or M >= 4096) else 4
@@ -1774,6 +1838,7 @@ def situ_glu_fp8_quant_packed(
                 HAS_ROW_BOUNDS=has_row_bounds,
                 NUM_EP_GROUPS=num_ep_groups,
                 BSEARCH_ITERS=bsearch_iters,
+                FAST_MATH=use_fast,
                 num_warps=nw_1d,
             )
         else:
@@ -1805,6 +1870,7 @@ def situ_glu_fp8_quant_packed(
                 HAS_ACTIVE_ROWS=has_active_rows,
                 NUM_EP_GROUPS=num_ep_groups,
                 BSEARCH_ITERS=bsearch_iters,
+                FAST_MATH=use_fast,
                 num_warps=4,
             )
     if scale_format == "raw":
@@ -1825,6 +1891,7 @@ def situ_glu_fp8_quant_masked_packed(
     out_sc: Optional[torch.Tensor] = None,
     actual_m: Optional[int] = None,
     actual_rows: Optional[int] = None,
+    fast_math: bool = False,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """Fused SiTU-GLU + block-32 UE8M0 FP8 quant for 3D masked MoE ``[E, max_m, 2*D]``."""
     if group_size != 32:
@@ -1870,6 +1937,7 @@ def situ_glu_fp8_quant_masked_packed(
     use_row_tile = (row_est is not None and row_est <= 640) or (
         row_est is None and max_m <= 128
     )
+    use_fast = bool(fast_math)
     if E <= _MASKED_PERSIST_MAX_E and D >= 512 and D % 512 == 0 and E > 0 and max_m > 0:
         sm_count = _get_sm_count(int(x_c.device.index or 0))
         d_tiles_512 = D // 512
@@ -1877,11 +1945,13 @@ def situ_glu_fp8_quant_masked_packed(
         if use_row_tile:
             # Spread (row, 512-col tile) pairs across SMs to saturate small/skewed batches
             # without hot-expert serialization.
-            num_ctas = min(sm_count * 4, E * max_m * d_tiles_512)
+            num_ctas = min(sm_count * 6, E * max_m * d_tiles_512)
             kernel = _situ_glu_fp8_quant_masked_row_tile_persistent_kernel
+            nw_persist = 2
         else:
             num_ctas = min(sm_count * 6, E * max_m)
             kernel = _situ_glu_fp8_quant_masked_row_persistent_kernel
+            nw_persist = 4
         with _cuda_device_ctx(x_c.device):
             kernel[(num_ctas,)](
                 x_c,
@@ -1902,7 +1972,8 @@ def situ_glu_fp8_quant_masked_packed(
                 eps=float(eps),
                 BLOCK_D=512,
                 E_PAD=e_pad,
-                num_warps=4,
+                FAST_MATH=use_fast,
+                num_warps=nw_persist,
             )
     elif E <= _MASKED_PERSIST_MAX_E:
         num_ctas = _masked_persist_ctas(x_c.device, E, max_m, d_tiles)
@@ -1928,6 +1999,7 @@ def situ_glu_fp8_quant_masked_packed(
             BLOCK_D=BLOCK_D,
             D_TILES=d_tiles,
             E_PAD=max(32, triton.next_power_of_2(E)),
+            FAST_MATH=use_fast,
             num_warps=4,
         )
     else:
@@ -1953,6 +2025,7 @@ def situ_glu_fp8_quant_masked_packed(
             eps=float(eps),
             BLOCK_D=BLOCK_D,
             CHUNK_M=_MASKED_CHUNK_M,
+            FAST_MATH=use_fast,
             num_warps=4,
         )
     return q, sc

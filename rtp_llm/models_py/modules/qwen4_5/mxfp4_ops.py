@@ -62,6 +62,19 @@ _MASKED_WS_CACHE: Dict[Tuple[int, int], torch.Tensor] = {}
 _CONTIG_TLS = threading.local()
 
 
+def _use_situ_glu_fast_math() -> bool:
+    return os.environ.get("QWEN4_5_SITU_GLU_FAST_MATH", "1") != "0"
+
+
+def _use_situ_glu_masked_fast_math() -> bool:
+    """Keep masked decode/verify exact unless explicitly forced (tanh.approx hurts QSA prefix/verify parity)."""
+    return os.environ.get("QWEN4_5_SITU_GLU_FAST_MATH", "1").strip().lower() in (
+        "2",
+        "all",
+        "masked",
+    )
+
+
 def _get_contig_sync_state(
     dev: torch.device, need_i32: int
 ) -> Tuple[torch.Tensor, torch.cuda.Event, torch.Tensor]:
@@ -2883,6 +2896,66 @@ def _claim_contig_slot(
 
 
 @triton.jit(do_not_specialize=["stride_q_row", "stride_sc_row", "stride_out_q_row", "stride_out_sc_k"])
+def _scatter_fp8_to_contig_tok_u64_kernel(
+    x_q_ptr,
+    x_sc_ptr,
+    topk_ids_ptr,
+    offsets_ptr,
+    write_cnt_ptr,
+    out_q_ptr,
+    out_sc_ptr,
+    dst_slots_ptr,
+    M,
+    ep_start,
+    num_experts,
+    stride_q_row: tl.int64,
+    stride_sc_row: tl.int64,
+    stride_out_q_row: tl.int64,
+    stride_out_sc_k: tl.int64,
+    TOP_K: tl.constexpr,
+    TOP_K_PAD: tl.constexpr,
+    K_U64: tl.constexpr,
+    BLOCK_U64: tl.constexpr,
+    NUM_PACKS: tl.constexpr,
+    PACKS_PAD: tl.constexpr,
+):
+    """Token-level vectorized uint64 + int32 scatter for contiguous DeepGEMM (K <= 4096, 8B-aligned)."""
+    tok = tl.program_id(0).to(tl.int64)
+    if tok >= M:
+        return
+    sk = tl.arange(0, TOP_K_PAD)
+    mk = sk < TOP_K
+    gid = tl.load(topk_ids_ptr + tok * TOP_K + sk, mask=mk, other=-1).to(tl.int32)
+    le = gid - ep_start
+    valid = mk & (le >= 0) & (le < num_experts)
+    le_s = tl.where(valid, le, 0)
+    pos = tl.where(valid, tl.atomic_add(write_cnt_ptr + le_s, 1, mask=valid), -1)
+    off_e = tl.where(valid, tl.load(offsets_ptr + le_s, mask=valid, other=0), 0)
+    slots = tl.where(valid, off_e + pos, -1)
+    tl.store(dst_slots_ptr + tok * TOP_K + sk, slots, mask=mk)
+    # Sync CTA so Warp 0 global writes to dst_slots are visible to all warps before loading sl.
+    tl.debug_barrier()
+    if tl.sum((slots >= 0).to(tl.int32), axis=0) == 0:
+        return
+
+    ou = tl.arange(0, BLOCK_U64)
+    mu = ou < K_U64
+    xq_u64 = tl.cast(x_q_ptr + tok * stride_q_row, tl.pointer_type(tl.uint64))
+    qv = tl.load(xq_u64 + ou, mask=mu, other=0)
+    op = tl.arange(0, PACKS_PAD)
+    mp = op < NUM_PACKS
+    xsc_i32 = tl.cast(x_sc_ptr + tok * stride_sc_row, tl.pointer_type(tl.int32))
+    pv = tl.load(xsc_i32 + op, mask=mp, other=0)
+
+    for k in range(TOP_K):
+        sl = tl.load(dst_slots_ptr + tok * TOP_K + k).to(tl.int64)
+        if sl >= 0:
+            oq_u64 = tl.cast(out_q_ptr + sl * stride_out_q_row, tl.pointer_type(tl.uint64))
+            tl.store(oq_u64 + ou, qv, mask=mu)
+            tl.store(out_sc_ptr + op.to(tl.int64) * stride_out_sc_k + sl, pv, mask=mp)
+
+
+@triton.jit(do_not_specialize=["stride_q_row", "stride_sc_row", "stride_out_q_row", "stride_out_sc_k"])
 def _scatter_fp8_to_contig_1shot_kernel(
     x_q_ptr,
     x_sc_ptr,
@@ -3202,12 +3275,47 @@ def mxfp4_moe_deepgemm_contiguous(
 
     xq_c = x_q if x_q.stride(-1) == 1 else x_q.contiguous()
     xsc_c = x_sc_raw if x_sc_raw.stride(-1) == 1 else x_sc_raw.contiguous()
-    if (
-        L <= 4096
-        and num_groups % 4 == 0
+    aligned_sc = (
+        num_groups % 4 == 0
         and (xsc_c.data_ptr() & 3) == 0
         and (xsc_c.stride(0) & 3) == 0
+    )
+    if (
+        L <= 4096
+        and L % 8 == 0
+        and top_k <= 16
+        and aligned_sc
+        and (xq_c.data_ptr() & 7) == 0
+        and (xq_c.stride(0) & 7) == 0
+        and (a_fp8.data_ptr() & 7) == 0
+        and (a_fp8.stride(0) & 7) == 0
     ):
+        k_u64 = L // 8
+        _scatter_fp8_to_contig_tok_u64_kernel[(M,)](
+            xq_c.view(torch.uint8),
+            xsc_c,
+            ids_c,
+            offsets,
+            write_cnt,
+            a_fp8.view(torch.uint8),
+            a_scale,
+            dst_slots.view(-1),
+            M,
+            e_lo,
+            E_local,
+            xq_c.stride(0),
+            xsc_c.stride(0),
+            a_fp8.stride(0),
+            a_scale.stride(1),
+            TOP_K=top_k,
+            TOP_K_PAD=max(16, triton.next_power_of_2(top_k)),
+            K_U64=k_u64,
+            BLOCK_U64=max(16, triton.next_power_of_2(k_u64)),
+            NUM_PACKS=num_packs,
+            PACKS_PAD=max(16, triton.next_power_of_2(num_packs)),
+            num_warps=2,
+        )
+    elif L <= 4096 and aligned_sc:
         _scatter_fp8_to_contig_1shot_kernel[(M_total,)](
             xq_c.view(torch.uint8),
             xsc_c,
@@ -3276,6 +3384,7 @@ def mxfp4_moe_deepgemm_contiguous(
         zero_unused_scales=False,
         max_active_rows=active_rows_t,
         active_row_bounds=(m_indices, offsets, counts),
+        fast_math=_use_situ_glu_fast_math(),
     )
     del gate_up
 
@@ -3291,7 +3400,15 @@ def mxfp4_moe_deepgemm_contiguous(
         )
     del h_fp8, h_scale
 
-    BLOCK_K = 512 if L >= 512 else triton.next_power_of_2(max(L, 64))
+    if M >= 1024 and L >= 1024:
+        BLOCK_K = 1024
+        gather_warps = 1
+    elif M >= 1024 and L >= 512:
+        BLOCK_K = 512
+        gather_warps = 1
+    else:
+        BLOCK_K = 512 if L >= 512 else triton.next_power_of_2(max(L, 64))
+        gather_warps = 4
     _gather_slot_weighted_reduce_kernel[(M, triton.cdiv(L, BLOCK_K))](
         down_out,
         dst_slots,
@@ -3303,7 +3420,7 @@ def mxfp4_moe_deepgemm_contiguous(
         out.stride(0),
         TOP_K=top_k,
         BLOCK_K=BLOCK_K,
-        num_warps=(2 if M >= 1024 else 4),
+        num_warps=gather_warps,
     )
     return out
 
@@ -3474,6 +3591,94 @@ def _quant_scatter_parallel_tile_kernel(
         E_local,
         TOP_K=TOP_K,
     )
+
+
+@triton.jit(
+    do_not_specialize=[
+        "M",
+        "sc_off",
+        "meta_off",
+        "row_bytes",
+        "e_lo",
+        "E_local",
+        "stride_aqe",
+        "stride_aqm",
+        "stride_asce",
+        "stride_asck",
+    ]
+)
+def _scatter_packed_tok_u64_masked_kernel(
+    all_ptr,
+    masked_m_ptr,
+    dst_pos_ptr,
+    aq_ptr,
+    asc_ptr,
+    M,
+    sc_off: tl.int64,
+    meta_off: tl.int64,
+    row_bytes: tl.int64,
+    e_lo,
+    E_local,
+    stride_aqe: tl.int64,
+    stride_aqm: tl.int64,
+    stride_asce: tl.int64,
+    stride_asck: tl.int64,
+    TOP_K: tl.constexpr,
+    TOP_K_PAD: tl.constexpr,
+    K_U64: tl.constexpr,
+    BLOCK_U64: tl.constexpr,
+    NUM_PACKS: tl.constexpr,
+    PACKS_PAD: tl.constexpr,
+):
+    """Fused slot-assign + single-read uint64 packed-FP8 masked expert scatter."""
+    m = tl.program_id(0).to(tl.int64)
+    if m >= M:
+        return
+    row_base = all_ptr + m * row_bytes
+    ids_base = tl.cast(row_base + meta_off, tl.pointer_type(tl.int32))
+    sk = tl.arange(0, TOP_K_PAD)
+    mk = sk < TOP_K
+    e_raw = tl.load(ids_base + sk, mask=mk, other=-1).to(tl.int32)
+    _assign_token_slots(
+        e_raw, mk, masked_m_ptr, dst_pos_ptr + m * TOP_K + sk, e_lo, E_local
+    )
+    # Sync CTA so Warp 0 global writes to dst_pos are visible to all warps before loading pk_slot.
+    tl.debug_barrier()
+    pos_chk = tl.load(dst_pos_ptr + m * TOP_K + sk, mask=mk, other=-1)
+    if tl.sum((pos_chk >= 0).to(tl.int32), axis=0) == 0:
+        return
+
+    all_u64 = tl.cast(row_base, tl.pointer_type(tl.uint64))
+    ou = tl.arange(0, BLOCK_U64)
+    mu = ou < K_U64
+    qv = tl.load(all_u64 + ou, mask=mu, other=0)
+
+    sc_i32 = tl.cast(row_base + sc_off, tl.pointer_type(tl.int32))
+    op = tl.arange(0, PACKS_PAD)
+    mp = op < NUM_PACKS
+    pk = tl.load(sc_i32 + op, mask=mp, other=0)
+
+    for k in range(TOP_K):
+        ek = tl.load(ids_base + k).to(tl.int32) - e_lo
+        pk_slot = tl.load(dst_pos_ptr + m * TOP_K + k)
+        if (
+            pk_slot >= 0
+            and pk_slot.to(tl.int64) * stride_aqm < stride_aqe
+            and ek >= 0
+            and ek < E_local
+        ):
+            ek_s = ek.to(tl.int64)
+            pk_s = pk_slot.to(tl.int64)
+            dst_u64 = tl.cast(
+                aq_ptr + ek_s * stride_aqe + pk_s * stride_aqm,
+                tl.pointer_type(tl.uint64),
+            )
+            tl.store(dst_u64 + ou, qv, mask=mu)
+            tl.store(
+                asc_ptr + ek_s * stride_asce + op.to(tl.int64) * stride_asck + pk_s,
+                pk,
+                mask=mp,
+            )
 
 
 @triton.jit(
@@ -3978,7 +4183,45 @@ def mxfp4_moe_deepgemm_masked(
         assert all_buf is not None
         block_l = 512 if (L % 512 == 0) else (256 if (L % 256 == 0) else 128)
         top_k_pad = max(16, triton.next_power_of_2(top_k))
-        if top_k <= 16:
+        if (
+            top_k <= 16
+            and L <= 4096
+            and L % 8 == 0
+            and num_groups % 4 == 0
+            and (all_buf.data_ptr() & 7) == 0
+            and (row_bytes & 7) == 0
+            and (sc_off & 3) == 0
+            and (meta_off & 3) == 0
+            and (a_fp8.data_ptr() & 7) == 0
+            and (a_fp8.stride(0) & 7) == 0
+            and (a_fp8.stride(1) & 7) == 0
+        ):
+            k_u64 = L // 8
+            _scatter_packed_tok_u64_masked_kernel[(M,)](
+                all_buf,
+                masked_m,
+                dst_pos.view(-1),
+                a_fp8.view(torch.uint8),
+                a_scale,
+                M,
+                sc_off,
+                meta_off,
+                row_bytes,
+                e_lo,
+                E_local,
+                a_fp8.stride(0),
+                a_fp8.stride(1),
+                a_scale.stride(0),
+                a_scale.stride(2),
+                TOP_K=top_k,
+                TOP_K_PAD=top_k_pad,
+                K_U64=k_u64,
+                BLOCK_U64=max(16, triton.next_power_of_2(k_u64)),
+                NUM_PACKS=num_packs,
+                PACKS_PAD=max(16, triton.next_power_of_2(num_packs)),
+                num_warps=2,
+            )
+        elif top_k <= 16:
             _assign_masked_slots_packed_kernel[(M,)](
                 all_buf,
                 masked_m,
@@ -4147,6 +4390,7 @@ def mxfp4_moe_deepgemm_masked(
         out_sc=h_scale,
         actual_m=M,
         actual_rows=max(1, (M * top_k) // max(ep_size, 1)),
+        fast_math=_use_situ_glu_masked_fast_math(),
     )
 
     with _dg_jit_serialize("masked", int(w2_i8.shape[0]), int(w2_i8.shape[1]), int(h_fp8.shape[-1])):
@@ -4215,7 +4459,7 @@ def mxfp4_moe_deepgemm_masked(
         HAS_SCALE_GATE=has_sg,
         TOP_K=top_k,
         BLOCK_K=BLOCK_K,
-        num_warps=(2 if M >= 128 else 4),
+        num_warps=(1 if (M >= 128 and BLOCK_K >= 512) else (2 if M >= 16 else 4)),
     )
     return out
 
@@ -4393,6 +4637,7 @@ def mxfp4_moe_flashinfer(
         scale_format="flashinfer",
         m_indptr=m_indptr,
         zero_unused_scales=False,
+        fast_math=_use_situ_glu_fast_math(),
     )
 
     down_out = torch.empty((cum_m, L), dtype=torch.bfloat16, device=dev)

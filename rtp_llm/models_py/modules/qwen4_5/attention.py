@@ -185,13 +185,20 @@ def _extract_bf16_linear_weight(mod: Any, x: torch.Tensor) -> Optional[torch.Ten
     return w
 
 
-def _try_bf16_tgv(x: torch.Tensor, w: torch.Tensor) -> Optional[torch.Tensor]:
-    if not _is_bf16_tgv_enabled() or not x.is_cuda:
+def _try_bf16_tgv(x: torch.Tensor, w: torch.Tensor, *, check_env: bool = True) -> Optional[torch.Tensor]:
+    if not x.is_cuda or x.dtype != torch.bfloat16:
         return None
     k_dim = int(x.shape[-1])
-    m_rows = int(x.numel() // k_dim)
+    if k_dim <= 0:
+        return None
+    m_rows = int(x.shape[0]) if x.ndim == 2 else int(x.numel() // k_dim)
+    if m_rows <= 0 or m_rows > 48:
+        return None
     n_dim = int(w.shape[0])
-    if _select_bf16_tgv_tactic(m_rows, k_dim, n_dim) is None:
+    tactic = _select_bf16_tgv_tactic(m_rows, k_dim, n_dim)
+    if tactic is None:
+        return None
+    if check_env and not _is_bf16_tgv_enabled():
         return None
     dev_idx = int(x.device.index) if x.device.index is not None else int(torch.cuda.current_device())
     if dev_idx not in _TGV_WARMED_DEVS and torch.cuda.is_current_stream_capturing():
@@ -200,8 +207,7 @@ def _try_bf16_tgv(x: torch.Tensor, w: torch.Tensor) -> Optional[torch.Tensor]:
         mm_fn, tgv_fn, tactic_num = get_sm10x_bf16_tgv_backend(x.device)
     if tgv_fn is not None:
         _TGV_WARMED_DEVS.add(dev_idx)
-        tactic = _select_bf16_tgv_tactic(m_rows, k_dim, n_dim, tactic_num=tactic_num)
-        if tactic is None:
+        if tactic >= tactic_num:
             return None
         spec = can_sm10x_bf16_tgv(x, w, tactic=tactic)
         if spec is not None:
@@ -217,21 +223,29 @@ def _try_bf16_tgv(x: torch.Tensor, w: torch.Tensor) -> Optional[torch.Tensor]:
 
 def dense_weight_bf16_or_tgv(x: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
     """Run ``F.linear(x, weight)`` or FlashInfer ``tgv`` on winning ``(M, K, N)`` buckets."""
-    if _is_bf16_weight_ready(weight, x):
-        tgv_out = _try_bf16_tgv(x, weight)
-        if tgv_out is not None:
-            return tgv_out
+    if x.is_cuda and x.dtype == torch.bfloat16 and x.ndim >= 2:
+        k_dim = int(x.shape[-1])
+        m_rows = int(x.shape[0]) if x.ndim == 2 else (int(x.numel() // k_dim) if k_dim > 0 else 0)
+        if 0 < m_rows <= 48 and _is_bf16_weight_ready(weight, x) and _is_bf16_tgv_enabled():
+            tgv_out = _try_bf16_tgv(x, weight, check_env=False)
+            if tgv_out is not None:
+                return tgv_out
     return F.linear(x, weight)
 
 
 def dense_linear_bf16_or_tgv(mod: Any, x: torch.Tensor) -> torch.Tensor:
     """Run ``mod(x)`` via FlashInfer BF16 ``tgv`` when in BF16 fallback on winning buckets."""
-    if _is_bf16_tgv_enabled():
-        w = _extract_bf16_linear_weight(mod, x)
-        if w is not None:
-            tgv_out = _try_bf16_tgv(x, w)
-            if tgv_out is not None:
-                return tgv_out
+    if x.is_cuda and x.dtype == torch.bfloat16 and x.ndim >= 2:
+        k_dim = int(x.shape[-1])
+        m_rows = int(x.shape[0]) if x.ndim == 2 else (int(x.numel() // k_dim) if k_dim > 0 else 0)
+        if 0 < m_rows <= 48:
+            w = getattr(mod, "weight", None)
+            if isinstance(w, torch.Tensor) and w.dtype == torch.bfloat16 and _is_bf16_tgv_enabled():
+                w_ok = _extract_bf16_linear_weight(mod, x)
+                if w_ok is not None:
+                    tgv_out = _try_bf16_tgv(x, w_ok, check_env=False)
+                    if tgv_out is not None:
+                        return tgv_out
     return mod(x)
 
 
@@ -1481,38 +1495,54 @@ class Qwen4_5Attention(nn.Module):
                         if qsa_source_k_norm_gamma is not None
                         else self.indexer.k_norm_gamma
                     )
-                if cur_offset == 0 and past_raw is None:
-                    pos_all = pos
-                else:
-                    past_len_resolved = (
-                        int(past_raw.shape[1]) if past_raw is not None else cur_offset
-                    )
-                    prefix_pos = (
-                        torch.arange(past_len_resolved, device=device, dtype=pos.dtype)
-                        .unsqueeze(0)
-                        .expand(bsz, past_len_resolved)
-                    )
-                    pos_all = torch.cat([prefix_pos, pos], dim=1)
-                cos_all, sin_all = build_qsa_neox_cos_sin(
-                    pos_all,
-                    self.indexer_rotary_dim,
-                    self.rope_theta,
-                    hidden_states.dtype,
-                )
                 cp_s, cp_r, cp_g = self._resolve_cp_indexer_dist()
-                qsa_selected = qsa_select_causal_from_projected(
-                    self.indexer,
-                    q_idx,
-                    cur_raw,
-                    cos_all,
-                    sin_all,
-                    past_raw_keys=past_raw,
-                    k_norm_gamma=k_gamma,
-                    sp_size=cp_s,
-                    sp_rank=cp_r,
-                    sp_group=cp_g,
-                    fast_all_reduce=self.fast_all_reduce,
-                )
+                if cur_offset == 0 and past_raw is None and q_idx.is_cuda and q_idx.dtype == torch.bfloat16:
+                    qsa_selected = qsa_select_causal_from_projected(
+                        self.indexer,
+                        q_idx,
+                        cur_raw,
+                        past_raw_keys=None,
+                        k_norm_gamma=k_gamma,
+                        positions=pos,
+                        rotary_dim=self.indexer_rotary_dim,
+                        rope_theta=self.rope_theta,
+                        sp_size=cp_s,
+                        sp_rank=cp_r,
+                        sp_group=cp_g,
+                        fast_all_reduce=self.fast_all_reduce,
+                    )
+                else:
+                    if cur_offset == 0 and past_raw is None:
+                        pos_all = pos
+                    else:
+                        past_len_resolved = (
+                            int(past_raw.shape[1]) if past_raw is not None else cur_offset
+                        )
+                        prefix_pos = (
+                            torch.arange(past_len_resolved, device=device, dtype=pos.dtype)
+                            .unsqueeze(0)
+                            .expand(bsz, past_len_resolved)
+                        )
+                        pos_all = torch.cat([prefix_pos, pos], dim=1)
+                    cos_all, sin_all = build_qsa_neox_cos_sin(
+                        pos_all,
+                        self.indexer_rotary_dim,
+                        self.rope_theta,
+                        hidden_states.dtype,
+                    )
+                    qsa_selected = qsa_select_causal_from_projected(
+                        self.indexer,
+                        q_idx,
+                        cur_raw,
+                        cos_all,
+                        sin_all,
+                        past_raw_keys=past_raw,
+                        k_norm_gamma=k_gamma,
+                        sp_size=cp_s,
+                        sp_rank=cp_r,
+                        sp_group=cp_g,
+                        fast_all_reduce=self.fast_all_reduce,
+                    )
             attn_out = qsa_sparse_prefill_attention(
                 q_bhtd,
                 k_bhtd,

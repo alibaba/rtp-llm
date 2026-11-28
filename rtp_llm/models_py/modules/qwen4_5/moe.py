@@ -331,6 +331,7 @@ def _latent_norm_mul_sigmoid_kernel(
         x_down = tl.load(dg_base + offs, mask=mask, other=0.0).to(tl.float32)
         ssq += tl.sum(x_down * x_down, axis=0)
     inv_rms = tl.rsqrt(ssq / L + eps)
+    log2e: tl.constexpr = 1.4426950408889634
     for off in range(0, L, BLOCK_K):
         offs = off + tl.arange(0, BLOCK_K)
         mask = offs < L
@@ -338,7 +339,22 @@ def _latent_norm_mul_sigmoid_kernel(
         x_gate = tl.load(dg_base + L + offs, mask=mask, other=0.0).to(tl.float32)
         w_ln = tl.load(ln_w_ptr + offs, mask=mask, other=0.0).to(tl.float32)
         normed = (x_down * inv_rms * (1.0 + w_ln)).to(out_ptr.dtype.element_ty)
-        sig_g = tl.div_rn(1.0, 1.0 + libdevice.exp(-x_gate)).to(out_ptr.dtype.element_ty)
+        exp_neg = tl.inline_asm_elementwise(
+            "ex2.approx.ftz.f32 $0, $1;",
+            "=f,f",
+            [-x_gate * log2e],
+            dtype=tl.float32,
+            is_pure=True,
+            pack=1,
+        )
+        sig_g = tl.inline_asm_elementwise(
+            "rcp.approx.ftz.f32 $0, $1;",
+            "=f,f",
+            [1.0 + exp_neg],
+            dtype=tl.float32,
+            is_pure=True,
+            pack=1,
+        ).to(out_ptr.dtype.element_ty)
         out = (normed.to(tl.float32) * sig_g.to(tl.float32)).to(out_ptr.dtype.element_ty)
         tl.store(out_base + offs, out, mask=mask)
 

@@ -750,6 +750,13 @@ class TestDFlash2ModulesAndParity(unittest.TestCase):
 
 class TestQwen4_5DSpark5LayerExecution(unittest.TestCase):
     def _run_5layer_e2e(self, device: str) -> None:
+        _cpu_rng = torch.random.get_rng_state()
+        self.addCleanup(torch.random.set_rng_state, _cpu_rng)
+        if str(device).startswith("cuda") and torch.cuda.is_available():
+            _cuda_dev = torch.device(device)
+            _cuda_rng = torch.cuda.get_rng_state(_cuda_dev)
+            self.addCleanup(torch.cuda.set_rng_state, _cuda_rng, _cuda_dev)
+        torch.manual_seed(3)
         cfg, mw = _load_dspark_model_weights(MOCK_8L_DFLASH, device=device)
         model = Qwen4_5DSparkModel(
             cfg, ParallelismConfig(), mw, max_generate_batch_size=4
@@ -2473,6 +2480,11 @@ class TestDFlash2Phase2MHAAndTP4(unittest.TestCase):
         from rtp_llm.ops import AttentionConfigs
 
         device = torch.device("cuda:0")
+        _cpu_rng = torch.random.get_rng_state()
+        _cuda_rng = torch.cuda.get_rng_state(device)
+        self.addCleanup(torch.cuda.set_rng_state, _cuda_rng, device)
+        self.addCleanup(torch.random.set_rng_state, _cpu_rng)
+        torch.manual_seed(0)
         _, draft_dir = _resolve_mock_dflash_dirs()
         cfg, mw = _load_dspark_model_weights(draft_dir, device=str(device))
 
@@ -3530,6 +3542,113 @@ class TestDFlash2Phase2MHAAndTP4(unittest.TestCase):
                 os.environ["QWEN4_5_DFLASH_KV_DTYPE"] = old_env
             else:
                 os.environ.pop("QWEN4_5_DFLASH_KV_DTYPE", None)
+
+    @unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
+    @torch.no_grad()
+    def test_dflash2_r14_bf16_fused_single_and_high_b_splitkv_gpu(self) -> None:
+        """Verify R14-D0 BF16 fused_single, B=32..128 tile/split parity, auto Triton short-ctx routing & CG."""
+        import torch.nn.functional as F
+        from rtp_llm.models_py.model_desc import qwen4_5_dspark_model as dm
+        from rtp_llm.models_py.model_desc.qwen4_5_dspark_model import (
+            _DFlash2PagedFMHADispatcher,
+            _DFlash2SplitKVWorkspace,
+        )
+        from rtp_llm.ops import AttentionConfigs
+
+        device = torch.device("cuda:0")
+        _, draft_dir = _resolve_mock_dflash_dirs()
+        cfg, mw = _load_dspark_model_weights(draft_dir, device=str(device))
+
+        # 1. Verify _choose_dflash2_tile_and_splits picks optimal SM103 configs across TP4(8), TP2(16), TP1(32)
+        self.assertEqual(dm._choose_dflash2_tile_and_splits(32, 8, 1, 8, 16, 128, has_swa=False, is_fp8_kv=True), (8, 8, 64, 4))
+        self.assertEqual(dm._choose_dflash2_tile_and_splits(96, 8, 1, 8, 16, 128, has_swa=False, is_fp8_kv=True), (8, 8, 64, 2))
+        self.assertEqual(dm._choose_dflash2_tile_and_splits(128, 8, 1, 8, 16, 128, has_swa=False, is_fp8_kv=False), (8, 8, 64, 1))
+        self.assertEqual(dm._choose_dflash2_tile_and_splits(32, 8, 1, 16, 16, 128, has_swa=False, is_fp8_kv=False), (2, 16, 32, 2))
+        self.assertEqual(dm._choose_dflash2_tile_and_splits(64, 8, 1, 16, 16, 128, has_swa=False, is_fp8_kv=False), (4, 16, 64, 1))
+        self.assertEqual(dm._choose_dflash2_tile_and_splits(96, 8, 1, 16, 16, 128, has_swa=True, is_fp8_kv=False), (2, 16, 32, 1))
+        self.assertEqual(dm._choose_dflash2_tile_and_splits(96, 8, 1, 32, 16, 128, has_swa=False, is_fp8_kv=True), (4, 16, 64, 1))
+        self.assertEqual(dm._choose_dflash2_tile_and_splits(128, 8, 1, 32, 16, 128, has_swa=False, is_fp8_kv=False), (4, 16, 64, 1))
+
+        # 2. BF16 fused_single + SWA (2,16) + FP8 (8,8) parity & CG across B=32, 64, 96, 128 (page_size=128)
+        ps, ctx, q_len, h_q, d = 128, 512, 8, 16, 256
+        pps = (ctx + q_len + ps - 1) // ps
+        for B in (32, 64, 96, 128):
+            kv_buf = torch.randn((B * pps, 2, 1, ps, d), dtype=torch.bfloat16, device=device) * 0.05
+            kv_snap = kv_buf.clone()
+            q = torch.randn((B * q_len, h_q, d), dtype=torch.bfloat16, device=device) * 0.1
+            k = torch.randn((B * q_len, 1, d), dtype=torch.bfloat16, device=device) * 0.1
+            v = torch.randn((B * q_len, 1, d), dtype=torch.bfloat16, device=device) * 0.1
+            gate = torch.randn((B * q_len, h_q, d), dtype=torch.bfloat16, device=device) * 0.1
+            bt = torch.arange(B * pps, dtype=torch.int32, device=device).view(B, pps)
+            pref = torch.full((B,), ctx, dtype=torch.int32, device=device)
+            pref[-1] = 0
+            pref[-2] = 200
+            act = torch.ones((B,), dtype=torch.bool, device=device)
+            act[-1] = False
+            pos = torch.where(
+                act[:, None],
+                pref[:, None] + torch.arange(q_len, dtype=torch.int32, device=device)[None, :],
+                torch.full((B, q_len), -1, dtype=torch.int32, device=device),
+            ).reshape(-1)
+            ai = type("_AI", (), {})()
+            ai.kv_cache_kernel_block_id_device = bt
+            ai.prefix_lengths = pref
+            ai.input_lengths = torch.full((B,), q_len, dtype=torch.int32, device=device)
+            acfg = AttentionConfigs()
+            acfg.head_num, acfg.kv_head_num, acfg.size_per_head = h_q, 1, d
+            acfg.kernel_tokens_per_block, acfg.is_causal, acfg.dtype = ps, False, torch.bfloat16
+            ws = _DFlash2SplitKVWorkspace(B, h_q, q_len, 8, d, device=device)
+            tr_disp = _DFlash2PagedFMHADispatcher(
+                acfg, ai, use_triton_paged=True, use_flashinfer=False, is_cuda_graph=True,
+                query_positions=pos, prefix_lengths=pref, active_requests=act, query_width=q_len, split_kv_workspace=ws,
+            )
+            eg_disp = _DFlash2PagedFMHADispatcher(
+                acfg, ai, use_triton_paged=False, use_flashinfer=False,
+                query_positions=pos, prefix_lengths=pref, active_requests=act, query_width=q_len,
+            )
+            kv_bf = type("_KV", (), {})()
+            kv_bf.kv_cache_base = kv_buf
+            for swa in (128, None):
+                kv_buf.copy_(kv_snap)
+                ref_o = eg_disp.append_and_attend(q, k, v, kv_bf, sliding_window=swa, output_gate=gate)
+                kv_buf.copy_(kv_snap)
+                with torch.inference_mode():
+                    _ = tr_disp.append_and_attend(q, k, v, kv_bf, sliding_window=swa, output_gate=gate)
+                    kv_buf.copy_(kv_snap)
+                    g = torch.cuda.CUDAGraph()
+                    with torch.cuda.graph(g):
+                        cg_o = tr_disp.append_and_attend(q, k, v, kv_bf, sliding_window=swa, output_gate=gate)
+                    kv_buf.copy_(kv_snap)
+                    g.replay()
+                    torch.cuda.synchronize()
+                cos = F.cosine_similarity(cg_o[:-q_len].float().reshape(-1), ref_o[:-q_len].float().reshape(-1), dim=0).item()
+                self.assertGreaterEqual(cos, 0.9999, f"R14 B={B} BF16 swa={swa}: {cos}")
+                self.assertEqual(float(cg_o[-q_len:].abs().max().item()), 0.0)
+
+        # 3. Verify auto backend routes B=128 ctx=2048 to Triton (0 FI workspace) while keeping B=8/long-ctx FlashInfer
+        m_auto = Qwen4_5DSparkModel(cfg, ParallelismConfig(), mw, max_generate_batch_size=128, dflash_kv_dtype="bf16")
+        spec = cfg._dflash2_spec
+        pps16 = (2048 + 16 + ps - 1) // ps
+        kv_layers = [
+            LayerKVCache(torch.zeros((128 * pps16, 2, 1, ps, spec.head_dim), dtype=torch.bfloat16, device=device), ps, i, "default")
+            for i in range(spec.num_hidden_layers)
+        ]
+        m_auto.kv_cache = _MultiLayerDictKVCache(kv_layers)
+        p_in_128 = _make_dflash2_inputs(
+            batch_size=128, prefix_lens=[2048] * 128, query_width=8, anchor_ids=[15] * 128,
+            block_table=torch.arange(128 * pps16, dtype=torch.int32, device=device).view(128, pps16),
+            noise_token_id=cfg.dspark_noise_token_id, device=str(device), use_device_mirrors=True, is_target_verify=False,
+        )
+        fmha_128 = m_auto.prepare_fmha_impl(p_in_128, is_cuda_graph=True)
+        self.assertFalse(fmha_128.use_flashinfer)
+        self.assertEqual(len(m_auto._flashinfer_workspace_holder), 0)
+        p_in_8 = _make_dflash2_inputs(
+            batch_size=8, prefix_lens=[2048] * 8, query_width=8, anchor_ids=[15] * 8,
+            block_table=torch.arange(8 * pps16, dtype=torch.int32, device=device).view(8, pps16),
+            noise_token_id=cfg.dspark_noise_token_id, device=str(device), use_device_mirrors=True, is_target_verify=False,
+        )
+        fmha_8 = m_auto.prepare_fmha_impl(p_in_8, is_cuda_graph=True)
+        self.assertTrue(fmha_8.use_flashinfer)
 
 
 @torch.no_grad()

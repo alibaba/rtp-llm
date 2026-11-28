@@ -3298,11 +3298,14 @@ class Qwen4_5PagedStateBridge:
         sp_rank: int,
         sp_group: Any,
         sp_comm: Any = None,
+        out: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         if total_tokens == 0:
+            if out is not None and tuple(out.shape) == (0, *x_loc.shape[1:]):
+                return out
             return torch.empty((0, *x_loc.shape[1:]), dtype=x_loc.dtype, device=x_loc.device)
         if sp_comm is not None and hasattr(sp_comm, "all_gather_sp"):
-            return sp_comm.all_gather_sp(x_loc, total_tokens=total_tokens)
+            return sp_comm.all_gather_sp(x_loc, total_tokens=total_tokens, out=out)
         chunk = (total_tokens + sp_size - 1) // sp_size
         padded_t = sp_size * chunk
         rest = tuple(x_loc.shape[1:])
@@ -3319,7 +3322,14 @@ class Qwen4_5PagedStateBridge:
             chunks = [torch.empty_like(cpu_in) for _ in range(sp_size)]
             dist.all_gather(chunks, cpu_in, group=sp_group)
             full_cpu = torch.cat(chunks, dim=0)[:total_tokens]
-            return full_cpu.to(device=x_c.device, dtype=x_c.dtype) if x_c.is_cuda else full_cpu
+            res_g = full_cpu.to(device=x_c.device, dtype=x_c.dtype) if x_c.is_cuda else full_cpu
+            if out is not None and tuple(out.shape) == (total_tokens, *rest):
+                out.copy_(res_g)
+                return out
+            return res_g
+        if out is not None and out.is_contiguous() and tuple(out.shape) == (padded_t, *rest) and out.dtype == x_c.dtype and out.device == x_c.device:
+            dist.all_gather_into_tensor(out.view(sp_size, chunk, *rest), src_pad, group=sp_group)
+            return out[:total_tokens]
         dst_full = torch.empty((padded_t, *rest), dtype=x_c.dtype, device=x_c.device)
         dist.all_gather_into_tensor(dst_full.view(sp_size, chunk, *rest), src_pad, group=sp_group)
         return dst_full[:total_tokens]
@@ -3333,11 +3343,14 @@ class Qwen4_5PagedStateBridge:
         sp_rank: int,
         sp_group: Any,
         sp_comm: Any = None,
+        out: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         if total_tokens == 0:
+            if out is not None and tuple(out.shape) == (0, *x_full.shape[1:]):
+                return out
             return torch.empty((0, *x_full.shape[1:]), dtype=x_full.dtype, device=x_full.device)
         if sp_comm is not None and hasattr(sp_comm, "reduce_scatter_sp"):
-            return sp_comm.reduce_scatter_sp(x_full, total_tokens=total_tokens)
+            return sp_comm.reduce_scatter_sp(x_full, total_tokens=total_tokens, out=out)
         from rtp_llm.models_py.modules.qwen4_5.fast_comm import sp_slice_bounds
 
         s0, s1 = sp_slice_bounds(total_tokens, sp_size, sp_rank)
@@ -3354,7 +3367,14 @@ class Qwen4_5PagedStateBridge:
             cpu_in = (src_pad.detach().cpu() if src_pad.is_cuda else src_pad).clone()
             dist.all_reduce(cpu_in, op=dist.ReduceOp.SUM, group=sp_group)
             out_cpu = cpu_in[s0:s1]
-            return out_cpu.to(device=x_c.device, dtype=x_c.dtype) if x_c.is_cuda else out_cpu.clone()
+            res_g = out_cpu.to(device=x_c.device, dtype=x_c.dtype) if x_c.is_cuda else out_cpu.clone()
+            if out is not None and tuple(out.shape) == (s1 - s0, *rest):
+                out.copy_(res_g)
+                return out
+            return res_g
+        if (s1 - s0) == chunk and out is not None and out.is_contiguous() and tuple(out.shape) == (chunk, *rest) and out.dtype == x_c.dtype and out.device == x_c.device:
+            dist.reduce_scatter_tensor(out, src_pad, op=dist.ReduceOp.SUM, group=sp_group)
+            return out
         dst_chunk = torch.empty((chunk, *rest), dtype=x_c.dtype, device=x_c.device)
         dist.reduce_scatter_tensor(dst_chunk, src_pad, op=dist.ReduceOp.SUM, group=sp_group)
         return dst_chunk[: s1 - s0]
@@ -7136,14 +7156,28 @@ class Qwen4_5PagedStateBridge:
             return full_kv_batched[src_id]
 
         flat_pos_2d = flat_positions.unsqueeze(0)
+        is_local_kv = isinstance(kv_cache, LocalKVCache)
+        sp_ag_buf = (
+            torch.empty(
+                (((total_tokens + eff_sp - 1) // eff_sp) * eff_sp, self.cfg.hidden_size),
+                dtype=dtype,
+                device=device,
+            )
+            if (sp_active and total_tokens > 0)
+            else None
+        )
 
         for layer in model.layers:
             assert isinstance(layer, Qwen4_5DecoderLayer)
             lid = layer.layer_idx
             layer_caches = (
-                {(c.tag if isinstance(c.tag, str) else str(c.tag)): c for c in kv_cache.get_layer_cache_groups(lid)}
-                if kv_cache is not None
-                else {}
+                kv_cache.layer_caches[lid]
+                if is_local_kv
+                else (
+                    {(c.tag if isinstance(c.tag, str) else str(c.tag)): c for c in kv_cache.get_layer_cache_groups(lid)}
+                    if kv_cache is not None
+                    else {}
+                )
             )
 
             # 1. Optional PLE (Layer 1) — packed hashing, 1 gather + 1 AllReduce, 1 W_kv GEMM, 1 conv+scatter + fused HC combine/norm
@@ -7374,6 +7408,7 @@ class Qwen4_5PagedStateBridge:
                     sp_rank=eff_rk,
                     sp_group=eff_grp,
                     sp_comm=eff_comm,
+                    out=sp_ag_buf,
                 )
 
             # 3. Attention Core (Packed GDN or Whole-Sequence QSA / FullAttn)

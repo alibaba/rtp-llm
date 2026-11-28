@@ -750,7 +750,7 @@ def ple_gather_fp8_triton(
             m_tok = n // h_ng
             br = 8 if m_tok >= 64 else (4 if m_tok >= 8 else 1)
             nw = 4 if (br >= 4 or head_dim >= 256) else 2
-            ev_first = is_cpu_uva or n >= 4096
+            ev_first = is_cpu_uva
             ptr_or = (
                 ids_c.data_ptr()
                 | pointer_table.data_ptr()
@@ -794,7 +794,7 @@ def ple_gather_fp8_triton(
             return out
         rows_per_cta = 8 if n >= 64 else 4
         bd = max(16, triton.next_power_of_2(head_dim))
-        ev_first = is_cpu_uva or n >= 4096
+        ev_first = is_cpu_uva
         ptr_or = (
             ids_c.data_ptr()
             | pointer_table.data_ptr()
@@ -1055,8 +1055,9 @@ def ple_add3_triton(
     if total == 0:
         return out
     block = 1024
+    num_warps = 8
     ptr_or = h_c.data_ptr() | u_c.data_ptr() | c_c.data_ptr() | out.data_ptr()
-    key = (h_c.device.index, "ple_add3", h_c.dtype, u_c.dtype, c_c.dtype, out.dtype, block)
+    key = (h_c.device.index, "ple_add3", h_c.dtype, u_c.dtype, c_c.dtype, out.dtype, block, num_warps)
     triton_fast_launch(
         _PLE_TRITON_CACHE,
         key,
@@ -1067,7 +1068,7 @@ def ple_add3_triton(
         ptr_or,
         (h_c, u_c, c_c, out, total),
         {"BLOCK": block},
-        num_warps=4,
+        num_warps=num_warps,
     )
     return out
 

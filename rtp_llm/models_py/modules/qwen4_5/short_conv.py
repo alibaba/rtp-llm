@@ -504,6 +504,123 @@ def _causal_dwconv1d_verify_k4_kernel(
 
 
 @triton.jit
+def _sconv_k4_step(
+    s0,
+    s1,
+    s2,
+    xf,
+    w0,
+    w1,
+    w2,
+    w3,
+    out_ty: tl.constexpr,
+    ROUND_PRE_ACT: tl.constexpr,
+    USE_SILU: tl.constexpr,
+    RESIDUAL: tl.constexpr,
+    HAS_CLAMP: tl.constexpr,
+    CLAMP_VAL: tl.constexpr,
+):
+    acc = s0 * w0 + s1 * w1 + s2 * w2 + xf * w3
+    if ROUND_PRE_ACT:
+        acc = acc.to(out_ty).to(tl.float32)
+    if USE_SILU:
+        acc = acc * tl.sigmoid(acc)
+    if RESIDUAL:
+        acc = xf + acc
+    if HAS_CLAMP:
+        acc = acc.to(out_ty).to(tl.float32)
+        acc = tl.minimum(tl.maximum(acc, -CLAMP_VAL), CLAMP_VAL)
+    return acc.to(out_ty)
+
+
+@triton.jit
+def _sconv_k4_run_segment(
+    s0,
+    s1,
+    s2,
+    dt,
+    seg_end,
+    base_tok,
+    X_PTR,
+    OUT_PTR,
+    stride_xn: tl.int64,
+    stride_on: tl.int64,
+    x_col,
+    o_col,
+    c_mask,
+    w0,
+    w1,
+    w2,
+    w3,
+    out_ty: tl.constexpr,
+    ROUND_PRE_ACT: tl.constexpr,
+    USE_SILU: tl.constexpr,
+    RESIDUAL: tl.constexpr,
+    HAS_CLAMP: tl.constexpr,
+    CLAMP_VAL: tl.constexpr,
+):
+    while dt + 7 < seg_end:
+        rx = (base_tok + dt) * stride_xn + x_col
+        ro = (base_tok + dt) * stride_on + o_col
+        x0 = tl.load(X_PTR + rx + 0 * stride_xn, mask=c_mask, other=0.0).to(tl.float32)
+        x1 = tl.load(X_PTR + rx + 1 * stride_xn, mask=c_mask, other=0.0).to(tl.float32)
+        x2 = tl.load(X_PTR + rx + 2 * stride_xn, mask=c_mask, other=0.0).to(tl.float32)
+        x3 = tl.load(X_PTR + rx + 3 * stride_xn, mask=c_mask, other=0.0).to(tl.float32)
+        x4 = tl.load(X_PTR + rx + 4 * stride_xn, mask=c_mask, other=0.0).to(tl.float32)
+        x5 = tl.load(X_PTR + rx + 5 * stride_xn, mask=c_mask, other=0.0).to(tl.float32)
+        x6 = tl.load(X_PTR + rx + 6 * stride_xn, mask=c_mask, other=0.0).to(tl.float32)
+        x7 = tl.load(X_PTR + rx + 7 * stride_xn, mask=c_mask, other=0.0).to(tl.float32)
+        a0 = _sconv_k4_step(s0, s1, s2, x0, w0, w1, w2, w3, out_ty, ROUND_PRE_ACT, USE_SILU, RESIDUAL, HAS_CLAMP, CLAMP_VAL)
+        a1 = _sconv_k4_step(s1, s2, x0, x1, w0, w1, w2, w3, out_ty, ROUND_PRE_ACT, USE_SILU, RESIDUAL, HAS_CLAMP, CLAMP_VAL)
+        a2 = _sconv_k4_step(s2, x0, x1, x2, w0, w1, w2, w3, out_ty, ROUND_PRE_ACT, USE_SILU, RESIDUAL, HAS_CLAMP, CLAMP_VAL)
+        a3 = _sconv_k4_step(x0, x1, x2, x3, w0, w1, w2, w3, out_ty, ROUND_PRE_ACT, USE_SILU, RESIDUAL, HAS_CLAMP, CLAMP_VAL)
+        a4 = _sconv_k4_step(x1, x2, x3, x4, w0, w1, w2, w3, out_ty, ROUND_PRE_ACT, USE_SILU, RESIDUAL, HAS_CLAMP, CLAMP_VAL)
+        a5 = _sconv_k4_step(x2, x3, x4, x5, w0, w1, w2, w3, out_ty, ROUND_PRE_ACT, USE_SILU, RESIDUAL, HAS_CLAMP, CLAMP_VAL)
+        a6 = _sconv_k4_step(x3, x4, x5, x6, w0, w1, w2, w3, out_ty, ROUND_PRE_ACT, USE_SILU, RESIDUAL, HAS_CLAMP, CLAMP_VAL)
+        a7 = _sconv_k4_step(x4, x5, x6, x7, w0, w1, w2, w3, out_ty, ROUND_PRE_ACT, USE_SILU, RESIDUAL, HAS_CLAMP, CLAMP_VAL)
+        tl.store(OUT_PTR + ro + 0 * stride_on, a0, mask=c_mask)
+        tl.store(OUT_PTR + ro + 1 * stride_on, a1, mask=c_mask)
+        tl.store(OUT_PTR + ro + 2 * stride_on, a2, mask=c_mask)
+        tl.store(OUT_PTR + ro + 3 * stride_on, a3, mask=c_mask)
+        tl.store(OUT_PTR + ro + 4 * stride_on, a4, mask=c_mask)
+        tl.store(OUT_PTR + ro + 5 * stride_on, a5, mask=c_mask)
+        tl.store(OUT_PTR + ro + 6 * stride_on, a6, mask=c_mask)
+        tl.store(OUT_PTR + ro + 7 * stride_on, a7, mask=c_mask)
+        s0, s1, s2 = x5, x6, x7
+        dt += 8
+    while dt < seg_end:
+        xf = tl.load(X_PTR + (base_tok + dt) * stride_xn + x_col, mask=c_mask, other=0.0).to(tl.float32)
+        acc = _sconv_k4_step(s0, s1, s2, xf, w0, w1, w2, w3, out_ty, ROUND_PRE_ACT, USE_SILU, RESIDUAL, HAS_CLAMP, CLAMP_VAL)
+        tl.store(OUT_PTR + (base_tok + dt) * stride_on + o_col, acc, mask=c_mask)
+        s0, s1, s2 = s1, s2, xf
+        dt += 1
+    return s0, s1, s2, dt
+
+
+@triton.jit
+def _sconv_store_snapshot(
+    lo,
+    SNAP_DST_PTR,
+    DST_PTR,
+    dst_stride_row: tl.int64,
+    dst_col_offset: tl.int64,
+    dst_rows: tl.int64,
+    c_offs,
+    c_mask,
+    s0,
+    s1,
+    s2,
+):
+    dst_idx = tl.load(SNAP_DST_PTR + lo).to(tl.int64)
+    if (dst_idx > 0) & (dst_idx < dst_rows):
+        dst_ty = DST_PTR.dtype.element_ty
+        dst_base = DST_PTR + dst_idx * dst_stride_row + dst_col_offset + c_offs.to(tl.int64) * 3
+        tl.store(dst_base + 0, s0.to(dst_ty), mask=c_mask)
+        tl.store(dst_base + 1, s1.to(dst_ty), mask=c_mask)
+        tl.store(dst_base + 2, s2.to(dst_ty), mask=c_mask)
+
+
+@triton.jit
 def _causal_dwconv1d_ragged_prefill_k4_kernel(
     X_PTR,
     W_PTR,
@@ -602,30 +719,8 @@ def _causal_dwconv1d_ragged_prefill_k4_kernel(
             ).to(tl.float32)
 
     out_ty = OUT_PTR.dtype.element_ty
-    x_ptr = X_PTR + (req_start + t_start) * stride_xn + x_col
-    o_ptr = OUT_PTR + (req_start + t_start) * stride_on + o_col
-
-    for _dt in range(tile_len):
-        xf = tl.load(x_ptr, mask=c_mask, other=0.0).to(tl.float32)
-        acc = s0 * w0 + s1 * w1 + s2 * w2 + xf * w3
-        if ROUND_PRE_ACT:
-            acc = acc.to(out_ty).to(tl.float32)
-        if USE_SILU:
-            acc = acc * tl.sigmoid(acc)
-        if RESIDUAL:
-            acc = xf + acc
-        if HAS_CLAMP:
-            acc = acc.to(out_ty).to(tl.float32)
-            acc = tl.minimum(tl.maximum(acc, -CLAMP_VAL), CLAMP_VAL)
-        tl.store(o_ptr, acc.to(out_ty), mask=c_mask)
-        s0 = s1
-        s1 = s2
-        s2 = xf
-        x_ptr += stride_xn
-        o_ptr += stride_on
-
+    base_tok = req_start + t_start
     if FUSED_SNAP:
-        tile_end = t_start + tile_len
         rs = tl.load(REQ_SNAP_START_PTR + b).to(tl.int64)
         re = tl.load(REQ_SNAP_START_PTR + b + 1).to(tl.int64)
         lo = rs
@@ -633,19 +728,57 @@ def _causal_dwconv1d_ragged_prefill_k4_kernel(
         while lo < hi:
             mid = (lo + hi) >> 1
             v_end = tl.load(SNAP_ENDS_PTR + mid).to(tl.int64)
-            if v_end < tile_end:
+            if v_end <= t_start:
                 lo = mid + 1
             else:
                 hi = mid
-        if lo < re:
-            if tl.load(SNAP_ENDS_PTR + lo).to(tl.int64) == tile_end:
-                dst_idx = tl.load(SNAP_DST_PTR + lo).to(tl.int64)
-                if (dst_idx > 0) & (dst_idx < dst_rows):
-                    dst_ty = DST_PTR.dtype.element_ty
-                    dst_base = DST_PTR + dst_idx * dst_stride_row + dst_col_offset + c_offs.to(tl.int64) * 3
-                    tl.store(dst_base + 0, s0.to(dst_ty), mask=c_mask)
-                    tl.store(dst_base + 1, s1.to(dst_ty), mask=c_mask)
-                    tl.store(dst_base + 2, s2.to(dst_ty), mask=c_mask)
+
+        tile_end = t_start + tile_len
+        v0_end = tl.load(
+            SNAP_ENDS_PTR + lo, mask=(lo < re), other=tile_end + 1
+        ).to(tl.int64)
+        dt = tl.zeros((), dtype=tl.int64)
+        if v0_end < tile_end:
+            # Mid-tile snapshots exist (e.g. page_size=16 inside block_t=32):
+            # run 8-step unrolled segments stopping cleanly at each boundary.
+            while dt < tile_len:
+                seg_end = tl.cast(tile_len, tl.int64)
+                if lo < re:
+                    v_end = tl.load(SNAP_ENDS_PTR + lo).to(tl.int64)
+                    seg_end = tl.minimum(seg_end, v_end - t_start)
+                s0, s1, s2, dt = _sconv_k4_run_segment(
+                    s0, s1, s2, dt, seg_end, base_tok,
+                    X_PTR, OUT_PTR, stride_xn, stride_on, x_col, o_col, c_mask,
+                    w0, w1, w2, w3, out_ty, ROUND_PRE_ACT, USE_SILU, RESIDUAL, HAS_CLAMP, CLAMP_VAL,
+                )
+                do_snap = lo < re
+                while do_snap:
+                    if tl.load(SNAP_ENDS_PTR + lo).to(tl.int64) - t_start == dt:
+                        _sconv_store_snapshot(
+                            lo, SNAP_DST_PTR, DST_PTR, dst_stride_row, dst_col_offset, dst_rows, c_offs, c_mask, s0, s1, s2,
+                        )
+                        lo += 1
+                        do_snap = lo < re
+                    else:
+                        do_snap = False
+        else:
+            # Fast single-pass tile when no mid-tile snapshot falls inside (page_size >= block_t).
+            s0, s1, s2, _ = _sconv_k4_run_segment(
+                s0, s1, s2, dt, tile_len, base_tok,
+                X_PTR, OUT_PTR, stride_xn, stride_on, x_col, o_col, c_mask,
+                w0, w1, w2, w3, out_ty, ROUND_PRE_ACT, USE_SILU, RESIDUAL, HAS_CLAMP, CLAMP_VAL,
+            )
+            if v0_end == tile_end:
+                _sconv_store_snapshot(
+                    lo, SNAP_DST_PTR, DST_PTR, dst_stride_row, dst_col_offset, dst_rows, c_offs, c_mask, s0, s1, s2,
+                )
+    else:
+        dt = tl.zeros((), dtype=tl.int64)
+        s0, s1, s2, _ = _sconv_k4_run_segment(
+            s0, s1, s2, dt, tile_len, base_tok,
+            X_PTR, OUT_PTR, stride_xn, stride_on, x_col, o_col, c_mask,
+            w0, w1, w2, w3, out_ty, ROUND_PRE_ACT, USE_SILU, RESIDUAL, HAS_CLAMP, CLAMP_VAL,
+        )
 
 
 @triton.jit
@@ -1471,8 +1604,6 @@ def causal_dwconv1d_ragged_prefill_with_snapshots_triton(
             block_c = min(512, max(64, triton.next_power_of_2(C)))
             if C <= 256 and block_t % 4 == 0:
                 sub_num = 4
-            elif block_t % 2 == 0:
-                sub_num = 2
             else:
                 sub_num = 1
             sub_t = block_t // sub_num
