@@ -74,6 +74,18 @@ dsv4_py_test(
     env = {"RTP_TEST_WATCHDOG_SECONDS": "300"},
 )
 
+# Clearing the three kernel caches forces a full recompilation on each GPU.
+dsv4_sm100_py_test(
+    name = "test_cp_metadata_triton_recompile",
+    extra_srcs = ["test_cp_metadata_triton.py"],
+    args = ["-m", "manual"],
+    deps = _DSV4_TEST_DEPS,
+    tags = [
+        "heavy",
+        "manual",
+    ],
+)
+
 [
     dsv4_py_test(
         name = name,
