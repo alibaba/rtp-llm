@@ -2,6 +2,7 @@
 
 import tempfile
 import unittest
+from itertools import product
 from pathlib import Path
 from unittest import mock
 
@@ -20,7 +21,14 @@ class _MlaLoader(NewModelLoader):
 
 
 def load_checkpoint(
-    method, device, *, compressed, fp8_source=False, random_online=False
+    method,
+    device,
+    *,
+    compressed,
+    fp8_source=False,
+    random_online=False,
+    source_config=None,
+    dtype=torch.bfloat16,
 ):
     h, q, r, k, p, v = (
         (1024, 128, 128, 128, 128, 128)
@@ -42,7 +50,23 @@ def load_checkpoint(
     g = torch.Generator().manual_seed(418)
     data = {}
     for name, (n, cols) in shape.items():
-        if fp8_source:
+        if method in ("fp8", "fp8_per_channel"):
+            data[name + ".weight"] = torch.randint(-7, 8, (n, cols), generator=g).to(
+                torch.float8_e4m3fn
+            )
+            scale_shape = (1,) if method == "fp8" else (n, 1)
+            # Not powers of two: rounding the scales through BF16 instead of
+            # FP16 before dequantization changes the projected values.
+            data[name + ".weight_scale"] = (
+                torch.rand(scale_shape, generator=g) * 0.125 + 0.875
+            )
+            if (
+                method == "fp8"
+                and source_config is not None
+                and not source_config.is_dynamic()
+            ):
+                data[name + ".input_scale"] = torch.tensor([0.25])
+        elif fp8_source:
             data[name + ".weight"] = torch.randint(-4, 5, (n, cols), generator=g).to(
                 torch.float8_e4m3fn
             )
@@ -61,7 +85,7 @@ def load_checkpoint(
     data["kv_a_layernorm.weight"] = torch.ones(r, dtype=torch.bfloat16)
     if compressed:
         data["q_a_layernorm.weight"] = torch.ones(q, dtype=torch.bfloat16)
-    qc = QuantizationConfig(method)
+    qc = QuantizationConfig(method, source_config=source_config)
     args = dict(
         hidden_size=h,
         num_heads=heads,
@@ -71,7 +95,7 @@ def load_checkpoint(
         rope_head_dim=p,
         v_head_dim=v,
         layer_idx=0,
-        params_dtype=torch.bfloat16,
+        params_dtype=dtype,
         quant_config=qc,
     )
     with tempfile.TemporaryDirectory() as root:
@@ -80,7 +104,7 @@ def load_checkpoint(
             {"model_type": "deepseek2", "attention": args},
             NewLoaderConfig(
                 device=device,
-                compute_dtype=torch.bfloat16,
+                compute_dtype=dtype,
                 load_method="scratch",
                 quant_config=qc,
             ),
@@ -90,6 +114,83 @@ def load_checkpoint(
 
 
 class QuantizedMlaTest(unittest.TestCase):
+    def test_floating_fp8_projections_use_compute_dtype(self):
+        # Only the quantized GEMM backend selection is stubbed. Scratch
+        # loading, floating projections and absorb/decode multiplies are real.
+        with mock.patch.object(torch.version, "hip", None), mock.patch.object(
+            fp8, "_select_fp8_runtime_backend", return_value=fp8._CUDA_SCALED_MM
+        ):
+            for dtype, method, compressed in product(
+                (torch.float16, torch.bfloat16), ("fp8", "fp8_per_channel"), (False, True)
+            ):
+                with self.subTest(dtype=dtype, method=method, compressed=compressed):
+                    layer, data = load_checkpoint(
+                        method, "cpu", compressed=compressed, dtype=dtype
+                    )
+
+                    def reference(name):
+                        return data[name + ".weight"].to(dtype) * data[
+                            name + ".weight_scale"
+                        ].to(dtype)
+
+                    q = reference("q_a_proj" if compressed else "q_proj")
+                    kv = reference("kv_a_proj_with_mqa")
+                    x = torch.eye(q.size(1), dtype=dtype)[::19]
+                    self.assertIsNone(layer._fused_qkv_a_runtime)
+                    torch.testing.assert_close(
+                        torch.nn.functional.linear(x, layer._fused_qkv_a_w),
+                        torch.cat((x @ q.T, x @ kv.T), -1),
+                        rtol=0, atol=0,
+                    )
+                    kv_b = reference("kv_b_proj").view(2, 64, 64)
+                    for view, expected in (
+                        (layer._kc_w, kv_b[:, :32]),
+                        (layer._vc_w, kv_b[:, 32:].mT),
+                    ):
+                        probe = torch.eye(view.size(1), dtype=dtype).expand(2, -1, -1)
+                        torch.testing.assert_close(
+                            torch.bmm(probe, view), expected, rtol=0, atol=0
+                        )
+
+    @unittest.skipUnless(
+        torch.cuda.is_available() and not torch.version.hip
+        and torch.cuda.get_device_capability() >= (9, 0),
+        "requires CUDA row-scaled FP8 GEMM",
+    )
+    def test_calibrated_fp8_prefill(self):
+        from rtp_llm.config.quant_config import (
+            Fp8PerChannelCompressedQuantConfig,
+            Fp8PerTensorCompressedQuantConfig,
+        )
+        from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.flashinfer_mla import (
+            MlaFlashInferPrefillOp,
+        )
+
+        for method, config in (
+            ("fp8", Fp8PerTensorCompressedQuantConfig(dynamic=False)),
+            ("fp8_per_channel", Fp8PerChannelCompressedQuantConfig()),
+        ):
+            for dtype in (torch.float16, torch.bfloat16):
+                with self.subTest(method=method, dtype=dtype):
+                    layer, data = load_checkpoint(
+                        method, "cuda:0", compressed=True, dtype=dtype, source_config=config
+                    )
+                    prefill = MlaFlashInferPrefillOp.__new__(MlaFlashInferPrefillOp)
+                    prefill.weights = [layer._build_mla_kernel_weights()]
+                    prefill.quant_config = config
+                    layer.release_checkpoint_only_weights()
+                    x = torch.eye(64, dtype=dtype, device="cuda") * 0.045
+                    # Each row has one nonzero. Dynamic row quantization
+                    # preserves its magnitude; a fixed input scale does not.
+                    activation = x.float()
+                    if method == "fp8":
+                        scale = data["kv_b_proj.input_scale"].to(x.device)
+                        activation = (activation / scale).to(torch.float8_e4m3fn).float() * scale
+                    weight = data["kv_b_proj.weight"].float().to(x.device)
+                    scale = data["kv_b_proj.weight_scale"].to(x.device)
+                    expected = ((activation @ weight.T) * scale.reshape(1, -1)).to(dtype)
+                    torch.testing.assert_close(prefill._project_kv_b(x, 0), expected)
+
     def test_online_fused_and_prefill_round_fp8_only_once(self):
         from rtp_llm.models_py.kernels.cuda import fp8_quant
 

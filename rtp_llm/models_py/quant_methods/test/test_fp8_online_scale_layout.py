@@ -21,6 +21,7 @@ from rtp_llm.models_py.layers.linear import (
 )
 from rtp_llm.models_py.model_loader import NewLoaderConfig, NewModelLoader
 from rtp_llm.models_py.module_base import RtpModule
+from rtp_llm.models_py.new_models.qwen2.language import Qwen2MLP
 from rtp_llm.models_py.quant_methods import fp8
 from rtp_llm.models_py.quant_methods.base import QuantizationConfig
 
@@ -75,8 +76,8 @@ def _checkpoint(kind):
     }
 
 
-def _load(directory, kind, tp, rank, backend):
-    root = _owner(kind, tp, rank)
+def _load(directory, kind, tp, rank, backend, root=None):
+    root = _owner(kind, tp, rank) if root is None else root
     loader = NewModelLoader(
         SimpleNamespace(model_type="layout_fixture"),
         NewLoaderConfig(device="cpu", tp_size=tp, tp_rank=rank),
@@ -94,7 +95,160 @@ def _load(directory, kind, tp, rank, backend):
     return root.proj
 
 
+def _pack_cpu(scale, mn):
+    exponents = (scale.view(torch.int32) >> 23).to(torch.int64)
+    exponents = exponents.repeat_interleave(128, dim=0)[:mn]
+    exponents = torch.nn.functional.pad(exponents, (0, (-exponents.shape[1]) % 4))
+    parts = exponents.reshape(mn, -1, 4)
+    packed = sum(parts[..., i] << (8 * i) for i in range(4)).to(torch.int32)
+    return packed.T.contiguous().T
+
+
 class OnlineFp8ScaleLayoutTest(unittest.TestCase):
+    def _check_prequant_partial_io(self, device):
+        # Same partial-tile geometry as the calibrated FT fixture.
+        n, k = 257, 521
+        values = ((torch.arange(n * k).reshape(n, k) % 13) - 6).float()
+        codes = values.to(torch.float8_e4m3fn)
+        scales = 2.0 ** (torch.arange(15).reshape(3, 5) % 5 - 2).float()
+        layer = ColumnParallelLinear(k, n, quant_config=QuantizationConfig("fp8_block")).to(device)
+        layer.load_weights({"weight": codes, "weight_scale_inv": scales})
+        x = torch.zeros(2, 3, k, device=device, dtype=torch.bfloat16)
+        x[..., -1] = 1
+        expected = (values[:, -1] * scales[:, -1].repeat_interleave(128)[:n]).to(x)
+        if device == "cpu":
+            def gemm(a, b, out, **kwargs):
+                self.assertEqual(tuple(a[0].shape), (6, 640))
+                w, scale = b
+                self.assertEqual(tuple(w.shape), (384, 640))
+                self.assertFalse(w.view(torch.uint8)[n:].any())
+                self.assertFalse(w.view(torch.uint8)[:, k:].any())
+                out.copy_(a[0].float() @ (w.float() * scale.repeat_interleave(128, 0).repeat_interleave(128, 1)).T)
+
+            with mock.patch.object(fp8, "_select_fp8_runtime_backend", return_value=fp8._CUDA_DEEP_GEMM), mock.patch.object(
+                fp8, "_resolve_sgl_per_token_group_quant", return_value=lambda x, **kw: (x, None)
+            ), mock.patch.object(fp8, "_resolve_fp8_gemm_nt", return_value=gemm):
+                layer.process_weights_after_loading()
+                actual = layer(x)
+        else:
+            layer.process_weights_after_loading()
+            actual = layer(x)
+        self.assertEqual(tuple(actual.shape), (2, 3, n))
+        torch.testing.assert_close(actual, expected.expand_as(actual), rtol=0.01, atol=0.01)
+
+    def test_prequant_partial_io_uses_whole_gemm_tiles(self):
+        self._check_prequant_partial_io("cpu")
+
+    def _check_tp2_ffn_device_gemms(self):
+        width, hidden = 640, 128
+        names = ("proj.gate_proj", "proj.up_proj", "proj.down_proj")
+        source = (
+            torch.arange(width)[:, None].expand(width, hidden) % 7 - 3,
+            torch.arange(width)[:, None].expand(width, hidden) % 11 - 5,
+            torch.arange(width)[None, :].expand(hidden, width) % 13 - 6,
+        )
+        state = {name + ".weight": w.bfloat16() for name, w in zip(names, source)}
+        with tempfile.TemporaryDirectory() as directory:
+            save_file(state, os.path.join(directory, "model.safetensors"))
+            for reader in checkpoint_readers("scratch", "fastsafetensors"):
+                for rank in range(2):
+                    root = RtpModule()
+                    root.proj = Qwen2MLP(
+                        hidden, width, tp_size=2, tp_rank=rank,
+                        params_dtype=torch.bfloat16,
+                        quant_config=QuantizationConfig("fp8_block_online"),
+                    )
+                    mlp = _load(directory, None, 2, rank, reader, root).cuda()
+                    gate, down = mlp.gate_up_proj, mlp.down_proj
+                    gate.process_weights_after_loading()
+                    down.process_weights_after_loading()
+                    x = torch.zeros((1, hidden), device="cuda", dtype=torch.bfloat16)
+                    x[0, -1] = 1
+                    # Rank 1 contains both real source rows and zero padding.
+                    expected = torch.cat([
+                        torch.nn.functional.pad(w[:, -1], (0, 128)).chunk(2)[rank]
+                        for w in source[:2]
+                    ]).to(x)
+                    torch.testing.assert_close(gate(x)[0], expected, rtol=0.06, atol=0.01)
+                    act = x.new_zeros(1, 384)
+                    act[0, 131] = 1
+                    # Run this rank's real down GEMM; no TP communicator is
+                    # needed to check its contribution before the all-reduce.
+                    expected = source[2][:, rank * 384 + 131].to(x)
+                    torch.testing.assert_close(
+                        down.quant_method.apply(down, act)[0], expected, rtol=0.06, atol=0.01
+                    )
+
+    def test_tp2_ffn_global_tile_and_scale_parity(self):
+        # Old Qwen FFN pads each complete 640-channel projection to 768
+        # before quantizing and splitting: rank 1 starts at 384, not 320.
+        width, hidden, local = 640, 128, 384
+        rng = torch.Generator().manual_seed(71)
+        values = [
+            torch.randn(shape, generator=rng, dtype=torch.bfloat16)
+            for shape in ((width, hidden), (width, hidden), (hidden, width))
+        ]
+        for matrix, factor in zip(values, (1, 7, 3)):
+            matrix.mul_(factor)
+        names = ["proj.gate_proj", "proj.up_proj", "proj.down_proj"]
+        for mode in ("float_scale", "packed", "prequant"):
+            packed = mode == "packed"
+            state, expected = {}, []
+            for index, (name, value) in enumerate(zip(names, values)):
+                dim = 0 if index < 2 else 1
+                pad = (0, 0, 0, 128) if dim == 0 else (0, 128)
+                full = torch.nn.functional.pad(value, pad)
+                ref_w, ref_s = fp8_quant.per_block_cast_to_fp8(
+                    full if packed else full.float(), use_ue8m0=packed
+                )
+                if mode == "prequant":
+                    # HF carries only the real rows/columns and scale blocks.
+                    # Deliberately distinct calibrated scales; added blocks
+                    # have zero codes and a neutral (positive) scale.
+                    state[name + ".weight"] = ref_w.narrow(dim, 0, width).contiguous()
+                    ref_s.add_(0.25)
+                    state[name + ".weight_scale_inv"] = ref_s.narrow(dim, 0, 5).contiguous()
+                    ref_s.narrow(dim, 5, 1).fill_(1)
+                else:
+                    state[name + ".weight"] = value
+                expected.append((ref_w, ref_s))
+            with tempfile.TemporaryDirectory() as directory:
+                save_file(state, os.path.join(directory, "model.safetensors"))
+                for reader in checkpoint_readers("scratch", "fastsafetensors"):
+                    for rank in range(2):
+                        with self.subTest(mode=mode, reader=reader, rank=rank):
+                            root = RtpModule()
+                            root.proj = Qwen2MLP(
+                                hidden, width, tp_size=2, tp_rank=rank,
+                                params_dtype=torch.bfloat16,
+                                quant_config=QuantizationConfig(
+                                    "fp8_block" if mode == "prequant" else "fp8_block_online"
+                                ),
+                            )
+                            mlp = _load(directory, None, 2, rank, reader, root)
+                            with mock.patch.object(
+                                fp8, "_select_fp8_runtime_backend", return_value=fp8._CUDA_DEEP_GEMM
+                            ), mock.patch.object(fp8, "is_deep_gemm_e8m0_used", return_value=packed), mock.patch.object(
+                                fp8_quant, "_transform_scale_ue8m0", side_effect=_pack_cpu
+                            ):
+                                for layer in (mlp.gate_up_proj, mlp.down_proj):
+                                    layer.process_weights_after_loading()
+                            for layer, indices, dim in (
+                                (mlp.gate_up_proj, (0, 1), 0), (mlp.down_proj, (2,), 1)
+                            ):
+                                codes = torch.cat([
+                                    expected[i][0].narrow(dim, rank * local, local).view(torch.uint8)
+                                    for i in indices
+                                ], dim=0)
+                                scales = torch.cat([
+                                    expected[i][1].narrow(dim, rank * 3, 3) for i in indices
+                                ], dim=0)
+                                if packed:
+                                    scales = _pack_cpu(scales, codes.shape[0])
+                                    self.assertEqual(layer.weight_scale.stride(0), 1)
+                                torch.testing.assert_close(layer.weight.view(torch.uint8), codes, rtol=0, atol=0)
+                                torch.testing.assert_close(layer.weight_scale, scales, rtol=0, atol=0)
+
     def _check_partial_projection_tiles(self, device):
         for kind in ("merged_partial", "qkv_partial"):
             checkpoint = _checkpoint(kind)
@@ -159,6 +313,8 @@ class OnlineFp8ScaleLayoutTest(unittest.TestCase):
             self.assertEqual(os.environ["TEST_FP8_FLOAT_SCALE_DEVICE"], "rocm")
             self.assertIsNotNone(torch.version.hip)
         self._check_partial_projection_tiles("cuda")
+        self._check_prequant_partial_io("cuda")
+        self._check_tp2_ffn_device_gemms()
 
     def test_tp2_cannot_join_partial_projection_tiles(self):
         for kind in ("merged_partial", "qkv_partial"):
@@ -303,16 +459,6 @@ class OnlineFp8ScaleLayoutTest(unittest.TestCase):
     def test_direct_source_quantization_matches_main_and_not_round_trip(self):
         # Only CUDA's final scale packing is replaced; real source checkpoint,
         # TP dispatch and production quantization arithmetic run on CPU.
-        def pack_cpu(scale, mn):
-            exponents = (scale.view(torch.int32) >> 23).to(torch.int64)
-            exponents = exponents.repeat_interleave(128, dim=0)[:mn]
-            exponents = torch.nn.functional.pad(
-                exponents, (0, (-exponents.shape[1]) % 4)
-            )
-            parts = exponents.reshape(mn, -1, 4)
-            packed = sum(parts[..., i] << (8 * i) for i in range(4)).to(torch.int32)
-            return packed.T.contiguous().T
-
         def main_reference(source):
             # main f559bb4 fp8_kernel.per_block_cast_to_fp8(use_ue8m0=True)
             n, k = source.shape
@@ -374,7 +520,7 @@ class OnlineFp8ScaleLayoutTest(unittest.TestCase):
                                 ), mock.patch.object(
                                     fp8_quant,
                                     "_transform_scale_ue8m0",
-                                    side_effect=pack_cpu,
+                                    side_effect=_pack_cpu,
                                 ):
                                     layer.process_weights_after_loading()
                                 torch.testing.assert_close(
@@ -385,7 +531,7 @@ class OnlineFp8ScaleLayoutTest(unittest.TestCase):
                                 )
                                 torch.testing.assert_close(
                                     layer.weight_scale,
-                                    pack_cpu(expected_scale, source.shape[0]),
+                                    _pack_cpu(expected_scale, source.shape[0]),
                                     rtol=0,
                                     atol=0,
                                 )

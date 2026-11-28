@@ -1,3 +1,4 @@
+import copy
 import fnmatch
 import re
 from abc import ABC, abstractmethod
@@ -221,11 +222,17 @@ class QuantizationConfig:
         original runtime algorithm. Only the parameter staging ABI changes,
         and the format adapter must validate all kernels and scales as usual.
         """
+        if self.quant_type in ("fp8_block", "FP8_PER_BLOCK"):
+            encoded = copy.copy(self)
+            encoded.ft_block_fp8_snapshot = True
+            return encoded
         if self.quant_type not in ("fp8_online", "fp8_block_online", "fp8_per_channel_online"):
             return self
         encoded = QuantizationConfig(self.quant_type.removesuffix("_online"), self.source_config,
                                      self.ignored_layers, self.hw_kernel_config)
         encoded.ft_encoded_online_source = self.quant_type
+        if self.quant_type == "fp8_block_online":
+            encoded.ft_block_fp8_snapshot = True
         return encoded
 
     @staticmethod

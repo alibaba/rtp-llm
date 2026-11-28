@@ -1625,6 +1625,31 @@ class TestFp8AlreadyQuantizedForward(unittest.TestCase):
         except RuntimeError as error:
             self.skipTest(str(error))
 
+    @unittest.skipIf(_is_hip_runtime(), "CUDA scaled GEMM only")
+    def test_cuda_per_channel_fp16_with_bias(self):
+        for method in ("fp8_per_channel", "fp8_per_channel_online"):
+            with self.subTest(method=method):
+                layer = ColumnParallelLinear(
+                    input_size=64, output_size=32, tp_size=1, tp_rank=0,
+                    quant_config=_make_qc(method), params_dtype=torch.float16,
+                    prefix="proj", bias=True,
+                ).cuda()
+                g = torch.Generator(device="cuda").manual_seed(728)
+                w = torch.randn(32, 64, generator=g, device="cuda").half()
+                bias = torch.linspace(-1.5, 2.5, 32, device="cuda").half()
+                values = {"proj.weight": w, "proj.bias": bias}
+                if method == "fp8_per_channel":
+                    values["proj.weight"], values["proj.weight_scale"] = (
+                        scaled_fp8_per_token_quant(w)
+                    )
+                layer.load_weights(values)
+                layer.process_weights_after_loading()
+                x = torch.randn(4, 8, 64, generator=g, device="cuda").half()
+                qx, sx = scaled_fp8_per_token_quant(x.view(-1, 64))
+                accum = qx.float() @ layer.weight.float().T
+                expected = (accum * sx * layer.weight_scale + bias).half()
+                torch.testing.assert_close(layer(x), expected.view(4, 8, 32))
+
     def test_cuda_quant_helpers_validate_native_layout_contract(self):
         empty_group_input = torch.empty(0, 128, device="cuda")
         empty_output, empty_scale = sgl_per_token_group_quant_fp8(

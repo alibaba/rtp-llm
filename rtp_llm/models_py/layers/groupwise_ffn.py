@@ -9,14 +9,20 @@ from rtp_llm.models_py.quant_methods.groupwise import groupwise_settings, uses_g
 from rtp_llm.models_py.read_spec import LoadedCheckpointTensor, ReadSpec, unwrap_checkpoint_tensor
 
 
+_BLOCK_FP8 = ("fp8_block_online", "fp8_block", "FP8_PER_BLOCK")
+
+
 def _linear(cls, padded_cls, width, widths, kwargs):
     config = kwargs.get("quant_config")
-    if config is None or config.quant_type not in ("awq", "gptq"):
+    if config is None or config.quant_type not in ("awq", "gptq", *_BLOCK_FP8):
         return cls(**widths(width), **kwargs)
-    method, bits, group = groupwise_settings(config)
     tp = kwargs["tp_size"]
     if type(tp) is not int or tp <= 0:
         raise ValueError(f"Invalid FFN TP size {tp!r}")
+    # FT already contains the producer's TP shards (padded or unpadded).
+    # Its importer, not the HF read plan below, determines their physical width.
+    if getattr(config, "ft_block_fp8_snapshot", False):
+        return cls(**widths(width), **kwargs)
     parent = kwargs["prefix"].rsplit(".", 1)[0]
     down = not config.is_layer_ignored(parent + ".down_proj")
     gate_up = not (
@@ -25,9 +31,19 @@ def _linear(cls, padded_cls, width, widths, kwargs):
     )
     if not (down or gate_up):
         return cls(**widths(width), **kwargs)
-    alignment = tp * math.lcm(
-        group if down else 1, 32 // bits, 8 if method == "awq" and gate_up else 1
-    )
+    if config.quant_type in _BLOCK_FP8:
+        # The complete TP1 fused matrix can keep its original tile grid,
+        # even across a projection boundary. With TP, pad each projection
+        # BEFORE the split, as OldLoader's FFN transpose_pad/pad_w13 did.
+        if tp == 1:
+            return cls(**widths(width), **kwargs)
+        block_n, block_k = config.fp8_block_size
+        alignment = tp * math.lcm(block_n if gate_up else 1, block_k if down else 1)
+    else:
+        method, bits, group = groupwise_settings(config)
+        alignment = tp * math.lcm(
+            group if down else 1, 32 // bits, 8 if method == "awq" and gate_up else 1
+        )
     padded = (width + alignment - 1) // alignment * alignment
     if padded == width:
         return cls(**widths(width), **kwargs)
@@ -64,6 +80,14 @@ class _PaddedFFN:
             return axis, 1, count
         if part == "bias":
             return (0, 1, count) if up else None
+        if part == "weight_scale_inv" and self.quant_config.quant_type in _BLOCK_FP8:
+            block_n, block_k = self.fp8_scale_block_size()
+            if count > 1 and self.checkpoint_intermediate_size % block_n:
+                raise ValueError(
+                    "A fused FP8 scale grid crosses an unaligned gate/up boundary; "
+                    "use separate gate_proj/up_proj checkpoint tensors"
+                )
+            return (0, block_n, count) if up else (1, block_k, 1)
         if part == "g_idx":
             return None if up else (0, 1, 1)
         if part not in ("qweight", "qzeros", "scales"):
@@ -121,14 +145,15 @@ class _PaddedFFN:
                         raise ValueError(f"Truncated padded FFN checkpoint slice for {name}")
                 part = name.rsplit(".", 1)[-1]
                 if tensor.shape[axis] < count * width:
-                    method, bits, group = groupwise_settings(self.quant_config)
                     # Positive scales and exactly zero decoded weights for all
                     # added groups/output channels. A partially occupied down
                     # group keeps its original zero point; its extra activation
                     # lanes are zero from gate/up. GPTQ v1 stores zero_point - 1.
-                    fill = 1 if part == "scales" else 0
-                    if part == "qweight" and method == "gptq" and not uses_gptq_v2(self.quant_config):
-                        fill = 0xffffffff // ((1 << bits) - 1)
+                    fill = 1 if part in ("scales", "weight_scale_inv") else 0
+                    if part in ("qweight", "g_idx"):
+                        method, bits, group = groupwise_settings(self.quant_config)
+                        if part == "qweight" and method == "gptq" and not uses_gptq_v2(self.quant_config):
+                            fill = 0xffffffff // ((1 << bits) - 1)
                     out_shape = list(tensor.shape)
                     out_shape[axis] = count * width
                     result = tensor.new_full(out_shape, fill)
@@ -143,21 +168,8 @@ class _PaddedFFN:
 
 
 class _PaddedGateUp(_PaddedFFN, MergedColumnParallelLinear):
-    def _checked_lora_factors(self, a, b, input_size, output_size):
-        # PEFT describes the checkpoint, not TP's padded parameter. A fused B
-        # contains [gate, up]; insert zeros after EACH projection before the
-        # normal merged-column sharder selects this rank's gate and up rows.
-        parts = output_size // self.padded_intermediate_size
-        width = self.checkpoint_intermediate_size
-        a, b = super()._checked_lora_factors(a, b, input_size, parts * width)
-        b = torch.nn.functional.pad(
-            b.reshape(parts, width, -1), (0, 0, 0, self.padded_intermediate_size - width)
-        )
-        return a, b.flatten(0, 1)
+    pass
 
 
 class _PaddedDown(_PaddedFFN, RowParallelLinear):
-    def _checked_lora_factors(self, a, b, input_size, output_size):
-        width = self.checkpoint_intermediate_size
-        a, b = super()._checked_lora_factors(a, b, width, output_size)
-        return torch.nn.functional.pad(a, (0, input_size - width)), b
+    pass

@@ -12,6 +12,12 @@ CUDA architecture requirements depend on the quantization method and its runtime
 
 ## GPTQ/AWQ
 Supports int4 and int8. Model weights needs to be quantified in advance(use AutoGPTQForCausalLM/AutoAWQForCausalLM).<br>
+For inference, the packed dense and expert kernels accept FP16 or BF16
+activations on CUDA SM80+ or ROCm gfx942/gfx950. A supported MoE router is
+also required. On V100 (SM70) and T4 (SM75), the offline converter can write
+the corresponding CUDA weight layout, but there is no AWQ/GPTQ inference
+kernel. The CUDA 12 build target alone does not provide one.
+
 The model config needs to contain quantization related config, containing bits, group_size, quant_method.<br>
 GPTQ config example:
 ``` json
@@ -67,6 +73,12 @@ You can use Load Quant by set args, Example<br>
 python3 -m rtp_llm.start_server --checkpoint_path XXXX  --model_type qwen_3  --quantization fp8_per_block
 ```
 
+For dense Llama/Qwen HF feed-forward layers with tensor parallelism (TP),
+the intermediate width need not be a multiple of `128 × TP`. The loader
+pads the gate, up, and down projections together **before** splitting them
+across ranks, so the 128-channel scale blocks keep their checkpoint positions.
+This does not relax the block-alignment requirements on TP-sharded Q/K/V.
+
 You can Provide PreQuantified Model Weight, The model config needs to contain quantization related config<br>
 
 
@@ -105,7 +117,11 @@ scale per output channel. SM8.x uses PyTorch's CUDA mixed-dtype linear
 operator. On SM90 and SM100 the loader checks that the installed Triton compiler
 can run the packed-weight kernel before publishing the model. Other devices
 (including SM120) are not enabled for this dense path; CPU loading is for
-staging only. This does not imply support for every MoE executor.
+staging only. INT8 expert projections use the grouped integer kernel on
+CUDA SM80+ or ROCm gfx942/gfx950, subject to router support. A model that
+also quantizes dense layers must meet the dense requirements above.
+On V100/T4, INT8 weights can be converted offline, but neither dense nor
+expert W8A16 inference is available.
 
 Example:
 ```

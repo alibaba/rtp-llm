@@ -545,6 +545,17 @@ class LlamaCheckpointFormatsTest(unittest.TestCase):
                         torch.testing.assert_close(proj.weight, expected.bfloat16(), atol=0, rtol=0)
                         shape = (12, 1) if mode == "fp8_per_channel_online" else (1, 1)
                         torch.testing.assert_close(proj.weight_scale, torch.ones(shape))
+                        if mode == "fp8_block_online":
+                            mlp = model.layers[0].mlp
+                            for leaf, stem, axis in (
+                                (mlp.gate_up_proj, "w1", 0),
+                                (mlp.down_proj, "w2", 1),
+                            ):
+                                source = raw[f"layers.0.feed_forward.{stem}.weight"]
+                                pad = (0, 0, 0, 248) if axis == 0 else (0, 248)
+                                expected = torch.nn.functional.pad(source, pad).chunk(2, axis)[rank]
+                                staged = leaf.weight[:128] if axis == 0 else leaf.weight
+                                torch.testing.assert_close(staged, expected.bfloat16())
             # Packed FP8 looks similar, but raw Meta archives do not carry its scales.
             cp = MetaLlamaCheckpoint.open(root)
             model = make_loader(root, online_quant="fp8_block")._create_checkpoint_model(cp)

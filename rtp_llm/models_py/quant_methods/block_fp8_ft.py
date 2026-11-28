@@ -276,6 +276,10 @@ def block_ft_bindings(
         value = decode_weight(values)
         layer.weight.data = layer.weight.new_empty(full_shape)
         layer.weight.copy_(value)
+        # PEFT factors still address the original, unpadded global FFN.
+        # The executor, on the other hand, consumes the producer's wider shard.
+        layer.checkpoint_intermediate_size = logical_width * checkpoint.topology.tp_size
+        layer.padded_intermediate_size = ffn_width * checkpoint.topology.tp_size
         if projection == "gate_up":
             layer.output_size = layer.output_size_per_partition = full_shape[0]
         else:

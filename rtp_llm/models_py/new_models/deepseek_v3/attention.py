@@ -30,6 +30,8 @@ from rtp_llm.models_py.layers.norm import RMSNorm
 from rtp_llm.models_py.module_base import RtpModule
 from rtp_llm.models_py.quant_methods.base import QuantizationConfig
 from rtp_llm.models_py.quant_methods.fp8 import (
+    Fp8LinearMethod,
+    Fp8PerChannelLinearMethod,
     _resolve_fp8_gemm_nt,
     _resolve_requant_weight_ue8m0,
     _resolve_sgl_per_token_group_quant,
@@ -144,47 +146,38 @@ class _MlaKernelWeights(dict):
         self.kv_b_projection = kv_b_projection
 
 
-def _rounded_fp8_values(weight: torch.Tensor) -> torch.Tensor:
-    # The legacy MLA kc/vc derivation loads both the FP8 codes and block
-    # scales through the model compute dtype before dequantization.  Preserve
-    # that rounding only for these kernel-facing BF16 views; the projection
-    # modules themselves keep the original FP8 weight and FP32 scale.
-    return weight.to(torch.bfloat16).to(torch.float32)
-
-
-def _dequant_fp8_to_bf16(
+def _dequant_fp8_weight(
     weight: torch.Tensor,
     scale: torch.Tensor,
     block_size: tuple[int, int],
+    dtype: torch.dtype,
 ) -> torch.Tensor:
-    """Dequantize per-tensor, per-channel, or per-block FP8 to BF16."""
+    """Materialize a floating MLA projection in the model's compute dtype."""
     n, k = weight.shape
-    w = _rounded_fp8_values(weight)
-    s = scale.to(torch.bfloat16).to(torch.float32)
+    # The legacy loader rounds both operands through the compute dtype before
+    # multiplying in FP32. This matters even when the final dtype is FP16.
+    w = weight.to(dtype).float()
+    s = scale.to(dtype).float()
     if s.numel() == 1:
-        return (w * s.reshape(1, 1)).to(torch.bfloat16)
-    if s.dim() == 1 and s.shape[0] == n:
-        return (w * s.reshape(n, 1)).to(torch.bfloat16)
-    if s.dim() == 2 and tuple(s.shape) == (n, 1):
-        return (w * s).to(torch.bfloat16)
-    if s.dim() == 2 and tuple(s.shape) == (1, n):
-        return (w * s.t()).to(torch.bfloat16)
-    if s.dim() != 2:
+        s = s.reshape(1, 1)
+    elif tuple(s.shape) in ((n,), (n, 1), (1, n)):
+        s = s.reshape(n, 1)
+    elif s.dim() == 2:
+        block_n, block_k = block_size
+        expected = (math.ceil(n / block_n), math.ceil(k / block_k))
+        if tuple(s.shape) != expected:
+            raise ValueError(
+                f"FP8 block scale shape must be {expected} for weight "
+                f"{tuple(weight.shape)}, got {tuple(scale.shape)}"
+            )
+        s = s.repeat_interleave(block_n, dim=0).repeat_interleave(block_k, dim=1)
+        s = s[:n, :k]
+    else:
         raise ValueError(
             f"Unsupported FP8 scale shape {tuple(scale.shape)} for "
             f"weight {tuple(weight.shape)}"
         )
-
-    block_n, block_k = block_size
-    expected = (math.ceil(n / block_n), math.ceil(k / block_k))
-    if tuple(s.shape) != expected:
-        raise ValueError(
-            f"FP8 block scale shape must be {expected} for weight "
-            f"{tuple(weight.shape)}, got {tuple(scale.shape)}"
-        )
-    s = s.repeat_interleave(block_n, dim=0).repeat_interleave(block_k, dim=1)
-    s = s[:n, :k]
-    return (w * s).to(torch.bfloat16)
+    return (w * s).to(dtype)
 
 
 def _is_fp8_block_scale(linear: LinearBase, scale: torch.Tensor) -> bool:
@@ -198,15 +191,12 @@ def _is_fp8_block_scale(linear: LinearBase, scale: torch.Tensor) -> bool:
     return tuple(scale.shape) == expected
 
 
-def _linear_weight_bf16(linear: LinearBase) -> torch.Tensor:
-    """Return a linear's weight as bf16, dequantizing it when it is FP8.
+def _floating_linear_weight(linear: LinearBase) -> torch.Tensor:
+    """Return a linear's compute-dtype weight, dequantizing it when it is FP8.
 
-    Used by the MLA post-load derivations (fused qkv-a, kc/vc) which run
-    through torch.cat / torch.bmm — neither supports fp8 — even though the
-    forward projections themselves keep running the fp8 weights via DeepGEMM.
-    Called from the attention module's post-load hook, which fires before the
-    child linears' own hook (parent-before-child), so the scale is still under
-    `weight_scale_inv`; `weight_scale` is checked too for robustness.
+    The floating fused A projection and the decode KC/VC matrices must
+    match their activation dtype for F.linear and torch.bmm. Quantized
+    projection kernels retain their own FP8 weights and full-precision scales.
     """
     w = linear.weight.data
     fp8_dtypes = (torch.float8_e4m3fn,)
@@ -216,8 +206,10 @@ def _linear_weight_bf16(linear: LinearBase) -> torch.Tensor:
         return w
     scale = _fp8_scale_parameter(linear)
     if scale is None:
-        raise RuntimeError(f"fp8 linear {type(linear).__name__} is missing block scale")
-    return _dequant_fp8_to_bf16(w, scale.data, linear.fp8_scale_block_size())
+        raise RuntimeError(f"fp8 linear {type(linear).__name__} is missing its scale")
+    return _dequant_fp8_weight(
+        w, scale.data, linear.fp8_scale_block_size(), linear.params_dtype
+    )
 
 
 def _fp8_scale_parameter(linear: LinearBase) -> Optional[nn.Parameter]:
@@ -602,11 +594,6 @@ class DeepSeekV32MlaAttention(RtpModule):
         (utils/model_weight.py). q_b_proj stays in its quantized linear module;
         _build_mla_kernel_weights creates only a view over that storage.
         """
-        # These derivations run through torch.cat / torch.bmm, which do not
-        # support fp8, so dequantize the (possibly fp8-per-block) weights to
-        # bf16 here. The forward projections still execute the fp8 weights via
-        # the linear's DeepGEMM apply — this only affects the kc/vc + fused
-        # views consumed by the MLA kernel.
         if getattr(self, "_resident_mla_ready", False):
             return
         q_a_scale = _fp8_scale_parameter(self.q_a_proj)
@@ -644,25 +631,25 @@ class DeepSeekV32MlaAttention(RtpModule):
             )
             self._fused_qkv_a_w = fused_a_weight
         else:
-            q_a_w = _linear_weight_bf16(self.q_a_proj)
-            kv_a_w = _linear_weight_bf16(self.kv_a_proj_with_mqa)
+            q_a_w = _floating_linear_weight(self.q_a_proj)
+            kv_a_w = _floating_linear_weight(self.kv_a_proj_with_mqa)
             quantize_q = self._online_int8 and not self.quant_config.is_layer_ignored(
                 self.q_a_proj.prefix
             )
             quantize_kv = self._online_int8 and not self.quant_config.is_layer_ignored(
                 self.kv_a_proj_with_mqa.prefix
             )
-            fused_a_bf16 = (
+            fused_a = (
                 torch.cat((q_a_w, kv_a_w)) if quantize_q == quantize_kv else None
             )
-            if fused_a_bf16 is None:
+            if fused_a is None:
                 self._fused_qkv_a_runtime = _MixedMlaAProjection(
                     q_a_w, kv_a_w, quantize_q
                 )
             elif quantize_q:
-                self._fused_qkv_a_runtime = _MlaInt8Projection(fused_a_bf16)
+                self._fused_qkv_a_runtime = _MlaInt8Projection(fused_a)
             elif self.q_lora_rank > 0 and not is_hip and self._online_fp8:
-                fused_a_weight, fused_a_scale = _quantize_online_mla_weight(fused_a_bf16)
+                fused_a_weight, fused_a_scale = _quantize_online_mla_weight(fused_a)
                 self._fused_qkv_a_runtime = _CudaRuntimeFusedFp8Linear(
                     fused_a_weight,
                     fused_a_scale,
@@ -670,11 +657,11 @@ class DeepSeekV32MlaAttention(RtpModule):
                 )
                 self._fused_qkv_a_w = fused_a_weight
             else:
-                self._fused_qkv_a_w = fused_a_bf16
+                self._fused_qkv_a_w = fused_a
 
         # kv_b_proj weight: [num_heads * (nope + v_head), kv_lora_rank].
         # Reshape to [kv_lora_rank, num_heads, nope+v_head] then slice.
-        kv_b_w = _linear_weight_bf16(self.kv_b_proj)
+        kv_b_w = _floating_linear_weight(self.kv_b_proj)
         head_num = self.num_heads
         nope = self.nope_head_dim
         v_head = self.v_head_dim
@@ -683,8 +670,8 @@ class DeepSeekV32MlaAttention(RtpModule):
             self._kc_w = t[:, :, :nope].permute(1, 2, 0).contiguous()
             self._vc_w = t[:, :, nope:].transpose(0, 1).contiguous()
         # _kv_b_w: [kv_lora_rank, head_num * (nope + v_head)] — transposed kv_b
-        # for BF16 FlashInfer prefill. Decode/absorb always consumes the exact
-        # BF16 checkpoint-derived kc/vc views above. CUDA online-FP8 builds a
+        # for floating FlashInfer prefill. Decode/absorb consumes the floating
+        # checkpoint-derived kc/vc views above. CUDA online-FP8 builds a
         # separate quantized prefill view only after those derivations.
         kv_b_scale = _fp8_scale_parameter(self.kv_b_proj)
         if self._online_int8 and not self.quant_config.is_layer_ignored(
@@ -735,16 +722,26 @@ class DeepSeekV32MlaAttention(RtpModule):
                 self._kv_b_runtime_s,
             )
         elif kv_b_scale is not None:
-            (
-                weights[W.mla_kv_b_w],
-                weights[W.mla_kv_b_s],
-            ) = _kernel_fp8_weight_and_scale(
-                kv_b_weight,
-                kv_b_scale.data,
-            )
+            if isinstance(
+                self.kv_b_proj.quant_method, (Fp8LinearMethod, Fp8PerChannelLinearMethod)
+            ):
+                # Keep the calibrated input scale and backend-specific row
+                # layout with the child that owns them. The legacy factory's
+                # block layout cannot represent those contracts.
+                weights.kv_b_projection = self.kv_b_proj
+                weights[W.mla_kv_b_w] = kv_b_weight
+                weights[W.mla_kv_b_s] = kv_b_scale.data
+            else:
+                (
+                    weights[W.mla_kv_b_w],
+                    weights[W.mla_kv_b_s],
+                ) = _kernel_fp8_weight_and_scale(
+                    kv_b_weight,
+                    kv_b_scale.data,
+                )
         else:
             if self._kv_b_w is None:
-                raise RuntimeError("BF16 MLA kv_b runtime view was not constructed")
+                raise RuntimeError("floating MLA kv_b runtime view was not constructed")
             weights[W.mla_kv_b_w] = self._kv_b_w
         weights[W.mla_kc] = self._kc_w
         weights[W.mla_vc] = self._vc_w

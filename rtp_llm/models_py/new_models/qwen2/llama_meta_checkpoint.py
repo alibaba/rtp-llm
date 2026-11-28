@@ -66,6 +66,15 @@ def load_meta_checkpoint(model, checkpoint):
         # Meta consolidated files are raw model weights, not FT runtime snapshots:
         # checkpoint dtype is converted to the requested parameter compute dtype.
         tensor = tensor.to(dtype=leaf.weight.dtype)
+        if hasattr(leaf, "checkpoint_intermediate_size"):
+            # The owner read only real channels from this rank's global FFN
+            # interval. Meta binds the tensor directly, bypassing load_weights.
+            width = leaf.padded_intermediate_size // leaf.tp_size
+            missing = width - tensor.shape[dim]
+            if missing:
+                tensor = torch.nn.functional.pad(
+                    tensor, (0, missing) if dim == 1 else (0, 0, 0, missing)
+                )
         return LoadedCheckpointTensor(tensor, spec) if wrapped and spec else tensor
 
     def permute(value, head_dim):

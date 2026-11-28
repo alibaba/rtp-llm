@@ -45,6 +45,20 @@ def _copy_checked(target: torch.Tensor, source: torch.Tensor, label: str) -> Non
     copy_weight_(target, source, label)
 
 
+def _lora_partition(factor, axis, rank, width):
+    """Slice at the producer's stride and zero-fill only its missing channels."""
+    start = min(rank * width, factor.shape[axis])
+    count = min(width, factor.shape[axis] - start)
+    view = factor.narrow(axis, start, count)
+    if count == width:
+        return view.contiguous()
+    shape = list(factor.shape)
+    shape[axis] = width
+    padded = factor.new_zeros(shape)
+    padded.narrow(axis, 0, count).copy_(view)
+    return padded
+
+
 class LinearBase(RtpModule):
     # The module owns both checkpoint sharding and its executor representation.
     supports_independent_weight_updates = True
@@ -466,17 +480,10 @@ class RowParallelLinear(LinearBase):
     def _shard_lora_factors(self, name, a, b):
         if name != "weight":
             raise ValueError(f"Unexpected LoRA projection {name!r}")
-        a, b = self._checked_lora_factors(
-            a, b, self.input_size_per_partition * self.tp_size, self.output_size
-        )
-        return (
-            a.narrow(
-                1,
-                self.tp_rank * self.input_size_per_partition,
-                self.input_size_per_partition,
-            ).contiguous(),
-            b,
-        )
+        width = self.input_size_per_partition
+        global_width = getattr(self, "checkpoint_intermediate_size", width * self.tp_size)
+        a, b = self._checked_lora_factors(a, b, global_width, self.output_size)
+        return _lora_partition(a, 1, self.tp_rank, width), b
 
     def __init__(
         self,
@@ -678,7 +685,7 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
     def _shard_lora_factors(self, name, a, b):
         shard_id = self._get_shard_id(name)
         local_rows = self.output_size_per_partition // len(self.shard_names)
-        global_rows = local_rows * self.tp_size
+        global_rows = getattr(self, "checkpoint_intermediate_size", local_rows * self.tp_size)
         if shard_id < 0:
             if name != "weight":
                 raise ValueError(f"Unexpected LoRA projection {name!r}")
@@ -687,17 +694,15 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
             )
             return a, torch.cat(
                 [
-                    b.narrow(
-                        0, index * global_rows + self.tp_rank * local_rows, local_rows
-                    )
-                    for index in range(len(self.shard_names))
+                    _lora_partition(plane, 0, self.tp_rank, local_rows)
+                    for plane in b.split(global_rows)
                 ],
                 dim=0,
             )
         a, b = self._checked_lora_factors(a, b, self.input_size, global_rows)
         fused = b.new_zeros(self.output_size_per_partition, b.shape[1])
         fused.narrow(0, shard_id * local_rows, local_rows).copy_(
-            b.narrow(0, self.tp_rank * local_rows, local_rows)
+            _lora_partition(b, 0, self.tp_rank, local_rows)
         )
         return a, fused
 

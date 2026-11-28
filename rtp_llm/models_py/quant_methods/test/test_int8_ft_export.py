@@ -18,6 +18,7 @@ from rtp_llm.model_loader.per_tensor_int8_quant_weight import PerTensorInt8Quant
 from rtp_llm.model_loader.weight_module import AtomicWeight
 from rtp_llm.models_py.checkpoint_reader_test_support import has_native_fst
 from rtp_llm.models_py.fst_range_reader import iter_fst_range_tensors
+from rtp_llm.models_py.quant_methods.groupwise_export import GroupwiseExportModule
 from rtp_llm.models_py.quant_methods.int8 import (
     Int8ExportState,
     PrequantizedInt8ExportModule,
@@ -32,6 +33,45 @@ from rtp_llm.utils.model_weight import CkptWeightInfo, W, transpose
 
 
 class Int8FTExportTest(unittest.TestCase):
+    def test_legacy_cuda_groupwise_export_layouts(self):
+        # File-format parity on CPU; this does not launch a V100/T4 GEMM.
+        dev = CudaImpl.__new__(CudaImpl)
+        generator = torch.Generator().manual_seed(7017)
+        for method in ("awq", "gptq"):
+            for bits in (4, 8):
+                pack = 32 // bits
+                shape = (64, 64 // pack) if method == "awq" else (64 // pack, 64)
+                weight, zero = (
+                    torch.randint(
+                        -(2**31), 2**31, s, dtype=torch.int32, generator=generator
+                    )
+                    for s in (shape, (4, 64 // pack))
+                )
+                scale = torch.rand(4, 64, generator=generator).half()
+                for stacked in (False, True):
+                    inputs = (weight, zero, scale)
+                    legacy = dev.preprocess_groupwise_weight_params
+                    if stacked:
+                        inputs = tuple(
+                            torch.stack((x.T, x.flip((0,)).T)) for x in inputs
+                        )
+                        legacy = dev.preprocess_moe_groupwise_weight_params
+                    module = GroupwiseExportModule(
+                        *inputs, method=method, bits=bits, group_size=16, stacked=stacked
+                    )
+                    for arch in (70, 75):
+                        with self.subTest(
+                            method=method, bits=bits, stacked=stacked, arch=arch
+                        ):
+                            dev.py_env_configs = SimpleNamespace(
+                                runtime_config=SimpleNamespace(specify_gpu_arch=str(arch))
+                            )
+                            reference = legacy(
+                                *inputs, "cpu", method == "gptq", method == "awq", bits
+                            )
+                            actual = module.export(platform="Cuda", arch=arch)
+                            torch.testing.assert_close(actual, reference, atol=0, rtol=0)
+
     def test_groupwise_offline_dense_and_expert_zero_format(self):
         # Run the real platform weight packers on CPU, not a native GPU kernel.
         for impl in (CudaImpl, RocmImpl):
@@ -225,14 +265,19 @@ class Int8FTExportTest(unittest.TestCase):
             )
 
     def test_weight_only_dense_and_expert_bytes_match_main_device_layout(self):
-        for platform, impl in (("Cuda", CudaImpl), ("ROCm", RocmImpl)):
+        for platform, impl, arch in (
+            ("Cuda", CudaImpl, 70),
+            ("Cuda", CudaImpl, 75),
+            ("Cuda", CudaImpl, 90),
+            ("ROCm", RocmImpl, 90),
+        ):
             device = impl.__new__(impl)
             for stacked in (False, True):
                 weight = (torch.arange(64 * 32).reshape(64, 32) % 127).float() - 63
                 if stacked:
                     weight = torch.stack((weight.T, (weight / 2).T))
                 module = WeightOnlyInt8ExportModule(weight, stacked=stacked)
-                actual, scale = module.export(platform=platform, arch=90)
+                actual, scale = module.export(platform=platform, arch=arch)
                 matrices = [x.T.contiguous() for x in weight] if stacked else [weight]
                 expected, expected_scales = [], []
                 for matrix in matrices:
@@ -240,7 +285,7 @@ class Int8FTExportTest(unittest.TestCase):
                     q_ref = (matrix / scale_ref).round().clamp(-128, 127).to(torch.int8)
                     expected.append(
                         device.preprocess_weights_for_mixed_gemm(
-                            q_ref, torch.int8, "90"
+                            q_ref, torch.int8, str(arch)
                         )
                     )
                     expected_scales.append(scale_ref)

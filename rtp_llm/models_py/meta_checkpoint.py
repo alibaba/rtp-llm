@@ -144,6 +144,12 @@ class MetaLlamaCheckpoint:
                 raise ValueError(f"Meta replicated tensors disagree: {name}")
             return values[0]
         begin, end, _ = slices[concat_dim].indices(shape[concat_dim])
+        if begin == end:
+            # TP may assign only padded FFN channels to this rank. Preserve
+            # the checkpoint dtype and all other requested dimensions.
+            local = list(slices)
+            local[concat_dim] = slice(0, 0)
+            return self._slice(self.entries[name][0], name, tuple(local))
         chunks, offset = [], 0
         for path in self.entries[name]:
             size = self._shape(path, name)[concat_dim]

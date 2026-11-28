@@ -89,12 +89,27 @@ class BlockFTTest(unittest.TestCase):
                 torch.testing.assert_close(m.proj.weight.view(torch.uint8), expected)
 
     def test_padded_tp_ffn_keeps_producer_shards_and_zero_scale_blocks(self):
+        from rtp_llm.config.quant_config import Fp8BlockWiseQuantConfig
+        from rtp_llm.models_py.lora_checkpoint import prepare_ft_lora_merge
+        from rtp_llm.models_py.model_loader import NewModelLoader
+        from rtp_llm.models_py.new_models.qwen2.language import Qwen2MLP
+        from rtp_llm.models_py.quant_methods.base import QuantizationConfig
+
         # The producer pads 320 real channels to 512 BEFORE TP2 splitting.
         # Rank 0 therefore owns 256 real channels, not 160. A rank-local crop
         # loses channels 160..255 even if the target shapes look correct.
         hidden, logical, width = 128, 160, 256
         gate_key = "layers.0.ffn_weights.intermediate_weight13.kernel"
         down_key = "layers.0.ffn_weights.intermediate_weight2.kernel"
+        cfg = QuantizationConfig(
+            "fp8_block", Fp8BlockWiseQuantConfig(is_quanted=True)
+        ).for_ft_snapshot()
+        # Nonperiodic changes on both sides of the *physical* TP boundary.
+        gate_b, up_b, down_a = torch.zeros(3, 2 * logical)
+        gate_b[[159, 193, 300]] = 2
+        up_b[[111, 270, 300]] = 4
+        down_a[[101, 233, 300]] = 1
+        x = torch.eye(1, hidden)
 
         def scale_key(key):
             return key.removesuffix(".kernel") + ".weight_only_quant_scale"
@@ -140,19 +155,34 @@ class BlockFTTest(unittest.TestCase):
                     )
                 )
                 actual = 0.0
+                adapted = 0.0
+                adapter = Path(root) / "adapter"
+                adapter.mkdir()
+                (adapter / "adapter_config.json").write_text(json.dumps({"r": 1, "lora_alpha": 1}))
+                factors = {"down_proj": (down_a[None], x.T)}
+                if packed:
+                    factors["gate_up_proj"] = x, torch.cat((gate_b, up_b))[:, None]
+                else:
+                    factors.update(gate_proj=(x, gate_b[:, None]), up_proj=(x, up_b[:, None]))
+                save_file(
+                    {
+                        f"{name}.lora_{part}.weight": t.clone().contiguous()
+                        for name, pair in factors.items()
+                        for part, t in zip("AB", pair)
+                    },
+                    str(adapter / "adapter_model.safetensors"),
+                )
                 for rank in range(2):
                     cp = FTCheckpoint.open(
                         root, CheckpointTopology(tp_size=2, tp_rank=rank)
                     )
-                    m = torch.nn.Module()
-                    m.gate = linear(2 * logical, hidden).proj
-                    m.down = linear(hidden, logical).proj
+                    m = Qwen2MLP(hidden, 2 * logical, 2, rank, cfg)
                     found = block_ft_ffn_width(cp, down_key, logical, hidden)
                     self.assertEqual(found, width)
                     bindings = []
                     for name, key, projection in (
-                        ("gate", gate_key, "gate_up"),
-                        ("down", down_key, "down"),
+                        ("gate_up_proj", gate_key, "gate_up"),
+                        ("down_proj", down_key, "down"),
                     ):
                         bindings.extend(
                             block_ft_bindings(
@@ -173,7 +203,7 @@ class BlockFTTest(unittest.TestCase):
                             )
                     cp.load_parameters(m, tuple(bindings))
                     self.assertEqual(
-                        (m.gate.output_size, m.down.input_size), (2 * width, width)
+                        (m.gate_up_proj.output_size, m.down_proj.input_size), (2 * width, width)
                     )
 
                     def decoded(proj):
@@ -185,11 +215,25 @@ class BlockFTTest(unittest.TestCase):
                             ).repeat_interleave(128, 1)
                         )
 
-                    gate, up = decoded(m.gate)[:, 0].chunk(2)
-                    actual += (decoded(m.down) @ (torch.nn.functional.silu(gate) * up))[
+                    gate, up = decoded(m.gate_up_proj)[:, 0].chunk(2)
+                    actual += (decoded(m.down_proj) @ (torch.nn.functional.silu(gate) * up))[
                         0
                     ].item()
+                    prepare_ft_lora_merge(m, NewModelLoader, "adapter", str(adapter))()
+                    gate, up = decoded(m.gate_up_proj)[:, 0].chunk(2)
+                    down = decoded(m.down_proj)
+                    adapted += (down @ (torch.nn.functional.silu(gate) * up))[0].item()
+                    live = min(width, 2 * logical - rank * width)
+                    rows = slice(rank * width, rank * width + live)
+                    torch.testing.assert_close(gate[:live], 2**rank + gate_b[rows])
+                    torch.testing.assert_close(up[:live], 2**(rank + 1) + up_b[rows])
+                    torch.testing.assert_close(down[0, :live], 3 + down_a[rows])
+                    for tail in (gate[live:], up[live:], down[:, live:]):
+                        self.assertEqual(tail.count_nonzero().item(), 0)
                 self.assertAlmostEqual(actual, ref, delta=0.01)
+                base = torch.where(torch.arange(2 * logical) < width, 1.0, 2.0)
+                dense = torch.nn.functional.silu(base + gate_b) * (2 * base + up_b) * (3 + down_a)
+                self.assertAlmostEqual(adapted, dense.sum().item(), delta=0.01)
 
     def test_real_file_into_block_linear_owner_and_output(self):
         n, k = 257, 521  # partial N, K blocks and packed int32 padding

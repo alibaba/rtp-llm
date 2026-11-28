@@ -841,6 +841,34 @@ class Fp8OnlineLinearMethod(FloatingStartupLoRA, QuantizeMethodBase):
         return output.view(*output_shape)
 
 
+def _cuda_per_channel_mm(layer, x, bias):
+    qinput, x_scale = _resolve_per_token_quant()(x)
+    scale = layer.weight_scale
+    if x.dtype == torch.float16:
+        # CUDA's row-scaled FP8 GEMM only returns BF16. A tensor-scaled
+        # FP8 GEMM can accumulate to FP32: apply the separable row/column
+        # scales and bias there, then round directly to FP16.
+        one = scale.new_ones(1)
+        output = torch._scaled_mm(
+            qinput, layer.weight.t(), scale_a=one, scale_b=one, out_dtype=torch.float32
+        )
+        if isinstance(output, tuple):
+            output = output[0]
+        output.mul_(x_scale).mul_(scale)
+        if bias is not None:
+            output.add_(bias)
+        return output.to(x.dtype)
+    output = torch._scaled_mm(
+        qinput,
+        layer.weight.t(),
+        scale_a=x_scale,
+        scale_b=scale,
+        bias=bias,
+        out_dtype=x.dtype,
+    )
+    return output[0] if isinstance(output, tuple) else output
+
+
 @register_quant_method("fp8_per_channel_online")
 class Fp8PerChannelOnlineLinearMethod(_RocmPtpcEpilogueMixin, FloatingStartupLoRA, QuantizeMethodBase):
     """Online FP8 per-channel quantization for the new loader.
@@ -939,7 +967,6 @@ class Fp8PerChannelOnlineLinearMethod(_RocmPtpcEpilogueMixin, FloatingStartupLoR
             _ROCM_HIPBLASLT_PTPC,
         ):
             raise RuntimeError("FP8 per-channel backend was not initialized")
-        out_dtype = x.dtype
         input_2d = x.reshape(-1, x.shape[-1])
         if not input_2d.is_contiguous():
             input_2d = input_2d.contiguous()
@@ -963,18 +990,7 @@ class Fp8PerChannelOnlineLinearMethod(_RocmPtpcEpilogueMixin, FloatingStartupLoR
             if bias is not None and self._runtime_backend != _ROCM_HIPBLASLT_PTPC:
                 output = output + bias.to(output.dtype)
         else:
-            # Per-token activation quant: [M, K] -> fp8 + [M, 1] fp32.
-            qinput, x_scale = _resolve_per_token_quant()(input_2d)
-            output = torch._scaled_mm(
-                qinput,
-                layer.weight.t(),
-                scale_a=x_scale,
-                scale_b=layer.weight_scale,
-                bias=bias,
-                out_dtype=out_dtype,
-            )
-            if isinstance(output, tuple):
-                output = output[0]
+            output = _cuda_per_channel_mm(layer, input_2d, bias)
 
         return output.view(*output_shape)
 
@@ -1079,7 +1095,6 @@ class Fp8PerChannelLinearMethod(_RocmPtpcEpilogueMixin, QuantizeMethodBase):
             _ROCM_HIPBLASLT_PTPC,
         ):
             raise RuntimeError("FP8 per-channel backend was not initialized")
-        out_dtype = x.dtype
         input_2d = x.reshape(-1, x.shape[-1])
         if not input_2d.is_contiguous():
             input_2d = input_2d.contiguous()
@@ -1103,17 +1118,7 @@ class Fp8PerChannelLinearMethod(_RocmPtpcEpilogueMixin, QuantizeMethodBase):
             if bias is not None and self._runtime_backend != _ROCM_HIPBLASLT_PTPC:
                 output = output + bias.to(output.dtype)
         else:
-            qinput, x_scale = _resolve_per_token_quant()(input_2d)
-            output = torch._scaled_mm(
-                qinput,
-                layer.weight.t(),
-                scale_a=x_scale,
-                scale_b=layer.weight_scale,
-                bias=bias,
-                out_dtype=out_dtype,
-            )
-            if isinstance(output, tuple):
-                output = output[0]
+            output = _cuda_per_channel_mm(layer, input_2d, bias)
         return output.view(*output_shape)
 
 
@@ -1203,6 +1208,8 @@ class Fp8BlockOnlineLinearMethod(FloatingStartupLoRA, QuantizeMethodBase):
             # At TP=1 this is the complete fused matrix: its tiles may cross
             # projection boundaries. With TP, neighboring global rows can be
             # on another rank, so joining partial tiles would change the scale.
+            # FFN owners handle this by padding gate/up AND down before TP;
+            # a bare fused linear has no matching input owner to do so safely.
             if getattr(layer, "tp_size", None) != 1 and any(
                 rows % self.BLOCK for rows in shard_sizes
             ):
@@ -1411,6 +1418,17 @@ class Fp8BlockLinearMethod(Fp8BlockOnlineLinearMethod):
         weight = layer.weight.data
         scale = layer.weight_scale_inv.data
         _validate_fp8_block_scales(weight, scale, block_size[0], block_size[1])
+        logical_n, logical_k = weight.shape
+        pad_n, pad_k = -logical_n % block_size[0], -logical_k % block_size[1]
+        if pad_n or pad_k:
+            # Quantized checkpoints may omit the last tile's padding. Extend
+            # the codes with exact zeros before ROCm shuffle or UE8M0 packing;
+            # the checkpoint scale grid already covers both partial tiles.
+            weight = torch.nn.functional.pad(
+                weight.view(torch.uint8), (0, pad_k, 0, pad_n)
+            ).view(weight.dtype)
+        layer._fp8_logical_input_size = logical_k
+        layer._fp8_logical_output_size = logical_n
         if self._runtime_backend == _ROCM_AITER_BLOCK:
             weight, scale = _prepare_rocm_fp8_block_weight(weight, scale)
         if self._runtime_backend == _CUDA_DEEP_GEMM and is_deep_gemm_e8m0_used(
