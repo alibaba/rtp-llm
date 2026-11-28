@@ -76,6 +76,7 @@ from rtp_llm.multimodal.multimodal_util import (
 from rtp_llm.multimodal.vit_metrics import (
     HASH_FILL,
     REMOTE_EMBEDDING,
+    VIT_PHASE_METRICS,
     vit_request_source,
 )
 from rtp_llm.ops import MMPreprocessConfig, MultimodalInput, VitSeparation
@@ -2249,8 +2250,15 @@ class MMProcessEngine:
         region: Optional[str] = None,
         input_inspection_enabled: Optional[bool] = None,
         fields: Optional[Dict[str, str]] = None,
+        queued_at: Optional[float] = None,
     ) -> Optional[concurrent.futures.Future]:
-        if time.monotonic() >= deadline:
+        started_at = time.monotonic()
+        if queued_at is not None:
+            _report_vit_metric(
+                GaugeMetrics.VIT_COMPUTE_QUEUE_RT_US_METRIC,
+                (started_at - queued_at) * 1_000_000,
+            )
+        if started_at >= deadline:
             error = FtRuntimeException(
                 ExceptionType.GENERATE_TIMEOUT,
                 "ViT queue wait timed out before execution",
@@ -2340,6 +2348,7 @@ class MMProcessEngine:
                         region,
                         input_inspection_enabled,
                         inspection_fields.get(),
+                        time.monotonic() if VIT_PHASE_METRICS else None,
                     )
                     self._async_tasks[entry].future = future
                     future.add_done_callback(

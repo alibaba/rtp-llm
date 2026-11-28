@@ -639,7 +639,8 @@ def init_vit_group_args(parser, vit_config):
         default=0,
         help=(
             "Source download concurrency per ViT engine. On the native network path this also "
-            "sizes the shared connection cache; 0 uses the preprocessing worker count. "
+            "sizes the shared connection cache without creating one thread per download; "
+            "0 uses the preprocessing worker count. "
             "On the Python path 0 shares the default I/O pool."
         ),
     )

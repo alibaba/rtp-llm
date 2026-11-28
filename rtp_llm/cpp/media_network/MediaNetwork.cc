@@ -10,6 +10,7 @@
 #include <pybind11/stl.h>
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -18,11 +19,13 @@
 #include <string_view>
 #include <strings.h>
 #include <deque>
+#include <functional>
 #include <future>
 #include <list>
 #include <map>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <thread>
@@ -142,19 +145,45 @@ struct Request {
     long        connect_ms = 3000, idle_ms = 20000, budget_ms = 30000;
     int         attempts = 1;
     bool        media    = true;
+    bool        observe  = false;
 };
+struct RangeMetadata {
+    std::string url, etag;
+    size_t      length;
+    bool        strip_headers;
+};
+bool strong_etag(const std::string& tag);
+
+struct QueueSignal {
+    std::mutex              mu;
+    std::condition_variable cv;
+    size_t                  revision = 0;
+    std::atomic<bool>       cancelled{false};
+
+    void notify() {
+        std::lock_guard<std::mutex> lock(mu);
+        ++revision;
+        cv.notify_one();
+    }
+};
+
 struct Job {
     Request           req;
     Clock::time_point submitted = Clock::now(), deadline, finished;
     std::atomic<bool> canceled{false}, completed{false};
     std::string       error;
     Bytes             body;
+    std::optional<RangeMetadata> ranges;
+    bool                         range_attempted = false;
+    bool                         observe         = false;
+    std::array<int64_t, 11>      phases_us{};
     long              status  = 0;
     bool              hit     = false;
     int               retries = 0, connect_retries = 0, proxy_attempts = 0, fallbacks = 0;
     // One subscription per caller. Cancellation of the owner only stops the
     // shared transfer when every other caller has also cancelled.
     std::shared_ptr<std::atomic<size_t>> subscribers;
+    std::weak_ptr<QueueSignal>           queue_signal;
     std::vector<std::shared_ptr<Job>>    followers;
     std::atomic<bool>                    released{false};
     bool                                 owner = false, joined = false;
@@ -166,24 +195,24 @@ struct Job {
     }
 
     void cancel() {
-        canceled = true;
+        if (canceled.exchange(true))
+            return;
         release_subscription();
+        if (auto signal = queue_signal.lock()) {
+            signal->cancelled = true;
+            signal->notify();
+        }
     }
     bool stop_transfer() const {
         return owner ? subscribers->load() == 0 : canceled.load();
     }
 };
-struct RangeMetadata {
-    std::string url, etag;
-    curl_off_t  length         = -1;
-    bool        strip_headers  = false;
-    bool        accepts_ranges = true;
-};
-
 struct Transfer {
+    explicit Transfer(Job& job): job(job) {}
     Job&                                            job;
     std::string                                     body;
     Clock::time_point                               last_io           = Clock::now();
+    Clock::time_point                               submitted, admitted;
     bool                                            large             = false;
     bool                                            received_response = false;
     long                                            status            = 0;
@@ -193,7 +222,8 @@ struct Transfer {
     size_t                                          content_length      = 0;
     std::unique_ptr<rtp_llm::media::ContentDecoder> decoder;
 
-    RangeMetadata*          probe       = nullptr;
+    size_t                  range_chunk_bytes = 0;
+    bool                    accepts_ranges = false, split_body = false;
     const std::atomic_bool* stop_ranges = nullptr;
     std::string             expected_range, content_range, etag;
     size_t                  range_length = 0;
@@ -260,17 +290,16 @@ size_t read_header(char* bytes, size_t size, size_t count, void* ptr) noexcept {
             transfer.decoder.reset();
             transfer.etag.clear();
             transfer.content_range.clear();
-            if (transfer.probe)
-                transfer.probe->accepts_ranges = true;
-        } else if (transfer.probe && !transfer.headers_complete && line.size() >= 14
+            transfer.accepts_ranges = false;
+        } else if (transfer.range_chunk_bytes && !transfer.headers_complete && line.size() >= 14
                    && !strncasecmp(bytes, "Accept-Ranges:", 14)) {
             const auto start = line.find_first_not_of(" \t", 14);
             if (start != line.npos) {
                 const auto end                 = line.find_last_not_of(" \t");
-                transfer.probe->accepts_ranges = lower(std::string(line.substr(start, end - start + 1))) != "none";
+                transfer.accepts_ranges        = lower(std::string(line.substr(start, end - start + 1))) == "bytes";
             }
-        } else if ((transfer.probe || transfer.range_length) && !transfer.headers_complete && line.size() >= 5
-                   && !strncasecmp(bytes, "ETag:", 5)) {
+        } else if ((transfer.range_chunk_bytes || transfer.range_length) && !transfer.headers_complete
+                   && line.size() >= 5 && !strncasecmp(bytes, "ETag:", 5)) {
             transfer.etag = line.substr(5);
             transfer.etag.erase(0, transfer.etag.find_first_not_of(" \t"));
             transfer.etag.erase(transfer.etag.find_last_not_of(" \t") + 1);
@@ -291,6 +320,17 @@ size_t read_header(char* bytes, size_t size, size_t count, void* ptr) noexcept {
         } else if (transfer.job.req.media && transfer.status == 200 && !transfer.headers_complete) {
             if (line.empty()) {
                 transfer.headers_complete = true;
+                if (transfer.range_chunk_bytes && transfer.accepts_ranges
+                    && transfer.content_length > transfer.range_chunk_bytes
+                    && (!transfer.has_encoding_header || lower(transfer.content_encoding) == "identity")
+                    && strong_etag(transfer.etag)) {
+                    if (transfer.job.req.limit && transfer.content_length > transfer.job.req.limit)
+                        transfer.large = true;
+                    else
+                        transfer.split_body = true;
+                    // Small and unsupported responses continue on the original GET.
+                    return 0;
+                }
                 if (transfer.has_encoding_header) {
                     transfer.decoder = rtp_llm::media::ContentDecoder::create(
                         lower(transfer.content_encoding),
@@ -314,7 +354,8 @@ size_t read_header(char* bytes, size_t size, size_t count, void* ptr) noexcept {
                 auto value                   = line.find_first_not_of(" \t", 17);
                 if (value != line.npos)
                     transfer.content_encoding.append(line.substr(value));
-            } else if (transfer.job.req.limit && line.size() >= 15 && !strncasecmp(bytes, "Content-Length:", 15)) {
+            } else if ((transfer.job.req.limit || transfer.range_chunk_bytes) && line.size() >= 15
+                       && !strncasecmp(bytes, "Content-Length:", 15)) {
                 auto pos = line.find_first_not_of(" \t", 15);
                 if (pos != line.npos)
                     std::from_chars(bytes + pos, bytes + line.size(), transfer.content_length);
@@ -409,6 +450,8 @@ void validate_proxied_media_host(const Endpoint& dest, Job& job) {
 // easy handles for one transfer; the multi handle retains connections between transfers.
 class CurlConnectionPool {
 public:
+    using Completion = std::function<void(CURLcode)>;
+
     explicit CurlConnectionPool(long capacity): capacity_(capacity), multi_(curl_multi_init(), curl_multi_cleanup) {
         if (!multi_ || curl_multi_setopt(multi_.get(), CURLMOPT_MAXCONNECTS, capacity) != CURLM_OK)
             throw Failure("curl connection pool initialization failed");
@@ -419,18 +462,23 @@ public:
     }
 
     std::future<CURLcode> submit(CURL* easy, Transfer& transfer) {
-        std::promise<CURLcode> done;
-        auto                   result = done.get_future();
+        auto done   = std::make_shared<std::promise<CURLcode>>();
+        auto result = done->get_future();
+        submit(easy, transfer, [done](CURLcode code) { done->set_value(code); });
+        return result;
+    }
+
+    void submit(CURL* easy, Transfer& transfer, Completion done) {
+        transfer.submitted = Clock::now();
         {
             std::lock_guard<std::mutex> lock(mu_);
-            if (stopping_) {
-                done.set_value(CURLE_FAILED_INIT);
-                return result;
+            if (!stopping_) {
+                pending_.push_back({easy, transfer, std::move(done)});
+                curl_multi_wakeup(multi_.get());
+                return;
             }
-            pending_.push_back({easy, transfer, std::move(done)});
         }
-        curl_multi_wakeup(multi_.get());
-        return result;
+        done(CURLE_FAILED_INIT);
     }
 
     void stop() {
@@ -448,13 +496,18 @@ private:
     struct Pending {
         CURL*                  easy;
         Transfer&              transfer;
-        std::promise<CURLcode> done;
+        Completion             done;
     };
-    using Transfers = std::map<CURL*, std::promise<CURLcode>>;
+    struct Active {
+        Transfer&  transfer;
+        Completion done;
+    };
+    using Transfers = std::map<CURL*, Active>;
     void drive() {
         Transfers active;
         for (;;) {
             int poll_ms = 60000;
+            std::vector<std::pair<Completion, CURLcode>> rejected;
             {
                 std::lock_guard<std::mutex> lock(mu_);
                 if (stopping_)
@@ -465,25 +518,27 @@ private:
                     const auto remaining =
                         std::chrono::ceil<std::chrono::milliseconds>(transfer.job.deadline - now).count();
                     if (transfer.canceled()) {
-                        done.set_value(CURLE_ABORTED_BY_CALLBACK);
+                        rejected.emplace_back(std::move(done), CURLE_ABORTED_BY_CALLBACK);
                     } else if (remaining <= 0) {
-                        done.set_value(CURLE_OPERATION_TIMEDOUT);
+                        rejected.emplace_back(std::move(done), CURLE_OPERATION_TIMEDOUT);
                     } else if (active.size() >= capacity_) {
                         // A queued fragment still consumes its parent request's deadline.
                         poll_ms = static_cast<int>(std::min<int64_t>(poll_ms, remaining));
                         ++it;
                         continue;
                     } else {
-                        transfer.last_io = now;
+                        transfer.last_io = transfer.admitted = now;
                         curl_easy_setopt(easy, CURLOPT_TIMEOUT_MS, static_cast<long>(remaining));
                         if (curl_multi_add_handle(multi_.get(), easy) == CURLM_OK)
-                            active.emplace(easy, std::move(done));
+                            active.emplace(easy, Active{transfer, std::move(done)});
                         else
-                            done.set_value(CURLE_FAILED_INIT);
+                            rejected.emplace_back(std::move(done), CURLE_FAILED_INIT);
                     }
                     it = pending_.erase(it);
                 }
             }
+            for (auto& [done, code] : rejected)
+                done(code);
             int running = 0;
             if (curl_multi_perform(multi_.get(), &running) != CURLM_OK)
                 break;
@@ -495,25 +550,39 @@ private:
                     auto transfer = active.extract(msg->easy_handle);
                     auto result   = msg->data.result;
                     curl_multi_remove_handle(multi_.get(), transfer.key());
-                    transfer.mapped().set_value(result);
+                    transfer.mapped().done(result);
                 }
             }
-            if (completed)
+            if (completed) {
+                // A rejected range can cancel siblings holding the remaining
+                // handles. Release those handles before waiting for more I/O.
+                for (auto it = active.begin(); it != active.end();) {
+                    auto entry = it++;
+                    if (!entry->second.transfer.canceled())
+                        continue;
+                    auto transfer = active.extract(entry);
+                    curl_multi_remove_handle(multi_.get(), transfer.key());
+                    transfer.mapped().done(CURLE_ABORTED_BY_CALLBACK);
+                }
                 continue;
+            }
             if (curl_multi_poll(multi_.get(), nullptr, 0, active.empty() ? poll_ms : std::min(poll_ms, 1000), nullptr)
                 != CURLM_OK)
                 break;
         }
 
-        std::lock_guard<std::mutex> lock(mu_);
-        stopping_ = true;
-        for (auto& [easy, result] : active) {
-            curl_multi_remove_handle(multi_.get(), easy);
-            result.set_value(CURLE_FAILED_INIT);
+        std::list<Pending> pending;
+        {
+            std::lock_guard<std::mutex> lock(mu_);
+            stopping_ = true;
+            pending.swap(pending_);
         }
-        for (auto& pending : pending_)
-            pending.done.set_value(CURLE_FAILED_INIT);
-        pending_.clear();
+        for (auto& [easy, item] : active) {
+            curl_multi_remove_handle(multi_.get(), easy);
+            item.done(CURLE_FAILED_INIT);
+        }
+        for (auto& item : pending)
+            item.done(CURLE_FAILED_INIT);
     }
 
     size_t                                                capacity_;
@@ -543,7 +612,7 @@ void configure_transfer(CURL*              curl,
         if (name.empty() || name.find_first_of(" :\r\n\t") != std::string::npos || name.find('\0') != std::string::npos
             || value.find_first_of("\r\n") != std::string::npos || value.find('\0') != std::string::npos)
             throw Failure("invalid_header");
-        if ((transfer.probe || transfer.range_length) && lower(name) == "accept-encoding")
+        if (transfer.range_length && lower(name) == "accept-encoding")
             continue;
         if (!strip || safe_on_redirect(name))
             headers.append(name + ": " + value);
@@ -565,8 +634,9 @@ void configure_transfer(CURL*              curl,
         curl_easy_setopt(curl, CURLOPT_CAINFO, policy.ca.c_str());
     curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT_MS, std::min<long>(ms, req.connect_ms));
     curl_easy_setopt(curl, CURLOPT_TIMEOUT_MS, static_cast<long>(ms));
-    if (transfer.probe || transfer.range_length) {
+    if (transfer.range_length || transfer.range_chunk_bytes)
         curl_easy_setopt(curl, CURLOPT_SUPPRESS_CONNECT_HEADERS, 1L);
+    if (transfer.range_length) {
         curl_easy_setopt(curl, CURLOPT_ACCEPT_ENCODING, "identity");
     } else {
         curl_easy_setopt(curl, CURLOPT_ACCEPT_ENCODING, req.media ? "gzip, deflate, br, zstd" : "");
@@ -581,13 +651,108 @@ void configure_transfer(CURL*              curl,
     curl_easy_setopt(curl, CURLOPT_XFERINFOFUNCTION, progress);
     curl_easy_setopt(curl, CURLOPT_XFERINFODATA, &transfer);
     curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 0L);
-    if (transfer.probe) {
-        curl_easy_setopt(curl, CURLOPT_NOBODY, 1L);
-    } else if (req.method != "GET") {
+    if (req.method != "GET") {
         curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE_LARGE, static_cast<curl_off_t>(req.body.size()));
         curl_easy_setopt(curl, CURLOPT_POSTFIELDS, req.body.data());
         curl_easy_setopt(curl, CURLOPT_CUSTOMREQUEST, req.method.c_str());
     }
+}
+
+enum Phase {
+    HTTP_ADMISSION,
+    DNS_VALIDATION,
+    CURL_DNS,
+    TCP_CONNECT,
+    TLS_CONNECT,
+    FIRST_BYTE,
+    RESPONSE_BODY,
+    RETRY_DELAY,
+    RANGE_DOWNLOAD,
+    RESULT_DELIVERY,
+    RESULT_COPY
+};
+
+int64_t elapsed_us(Clock::time_point start, Clock::time_point end = Clock::now()) {
+    return std::chrono::duration_cast<std::chrono::microseconds>(end - start).count();
+}
+
+void record_http_phases(CURL* curl, Transfer& transfer) {
+    if (!transfer.job.observe)
+        return;
+    auto& phases = transfer.job.phases_us;
+    auto  get    = [curl](CURLINFO info) {
+        curl_off_t value = 0;
+        curl_easy_getinfo(curl, info, &value);
+        return value;
+    };
+    if (transfer.admitted == Clock::time_point{}) {
+        phases[HTTP_ADMISSION] += elapsed_us(transfer.submitted);
+        return;
+    }
+    phases[HTTP_ADMISSION] += elapsed_us(transfer.submitted, transfer.admitted);
+    const auto dns   = get(CURLINFO_NAMELOOKUP_TIME_T);
+    const auto tcp   = get(CURLINFO_CONNECT_TIME_T);
+    const auto tls   = get(CURLINFO_APPCONNECT_TIME_T);
+    const auto ready = get(CURLINFO_PRETRANSFER_TIME_T);
+    const auto first = get(CURLINFO_STARTTRANSFER_TIME_T);
+    const auto total = get(CURLINFO_TOTAL_TIME_T);
+    phases[CURL_DNS] += dns;
+    phases[TCP_CONNECT] += std::max<curl_off_t>(0, tcp - dns);
+    phases[TLS_CONNECT] += std::max<curl_off_t>(0, tls - tcp);
+    // libcurl reports no start-transfer time if no response arrived.
+    if (ready > 0)
+        phases[FIRST_BYTE] += std::max<curl_off_t>(0, (first > 0 ? first : total) - ready);
+    if (first > 0)
+        phases[RESPONSE_BODY] += std::max<curl_off_t>(0, total - first);
+}
+
+std::string finish_exchange(CURL* curl, Transfer& transfer, CURLcode rc, const Policy& policy) {
+    auto&       job = transfer.job;
+    const auto& req = job.req;
+    record_http_phases(curl, transfer);
+    if (job.stop_transfer())
+        throw Failure("cancelled");
+    if (transfer.large)
+        throw Failure("too_large");
+    if (transfer.split_body && rc == CURLE_WRITE_ERROR) {
+        job.status = transfer.status;
+        return {};
+    }
+    if (rc != CURLE_OK && !(req.media && rc == CURLE_TOO_MANY_REDIRECTS)) {
+        auto stopped = transfer.failure();
+        if (!stopped.empty())
+            throw Failure(stopped);
+        if (rc == CURLE_OPERATION_TIMEDOUT) {
+            double pretransfer = 0;
+            curl_easy_getinfo(curl, CURLINFO_PRETRANSFER_TIME, &pretransfer);
+            throw Failure(!transfer.received_response && pretransfer == 0 ? "connect_timeout" : "timeout");
+        }
+        if (rc == CURLE_URL_MALFORMAT || rc == CURLE_UNSUPPORTED_PROTOCOL)
+            throw Failure("invalid_url");
+        if (rc == CURLE_COULDNT_RESOLVE_HOST && req.media && policy.internal)
+            throw Failure("dns");
+        if (transfer.received_response)
+            throw Failure("body_transport");
+        throw Failure("transport");
+    }
+    curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &job.status);
+    if (req.media
+        && (job.status == 301 || job.status == 302 || job.status == 303 || job.status == 307 || job.status == 308)) {
+        char* redirect = nullptr;
+        curl_easy_getinfo(curl, CURLINFO_REDIRECT_URL, &redirect);
+        if (redirect) {
+            return redirect;
+        }
+    }
+    if (transfer.decoder) {
+        try {
+            transfer.decoder->finish();
+        } catch (const std::exception&) {
+            throw Failure("body_transport");
+        }
+    }
+    job.body = std::make_shared<const std::string>(std::move(transfer.body));
+    return {};
 }
 
 void exchange(CurlConnectionPool& connections,
@@ -595,7 +760,7 @@ void exchange(CurlConnectionPool& connections,
               Job&                job,
               const Policy&       policy,
               const std::string&  proxy,
-              RangeMetadata*      probe = nullptr) {
+              size_t              range_chunk_bytes = 0) {
     auto&       req   = job.req;
     std::string url   = req.media ? rewrite(req.url, policy) : req.url;
     const auto  first = endpoint(url, policy, req.media);
@@ -603,62 +768,33 @@ void exchange(CurlConnectionPool& connections,
     for (int hop = 0; hop <= 30; ++hop) {
         auto dest = endpoint(url, policy, req.media);
         strip     = strip || dest.origin != first.origin;
-        if (req.media && policy.internal && !proxy.empty())
-            validate_proxied_media_host(dest, job);
+        if (req.media && policy.internal && !proxy.empty()) {
+            const auto start = Clock::now();
+            try {
+                validate_proxied_media_host(dest, job);
+            } catch (...) {
+                if (job.observe)
+                    job.phases_us[DNS_VALIDATION] += elapsed_us(start);
+                throw;
+            }
+            if (job.observe)
+                job.phases_us[DNS_VALIDATION] += elapsed_us(start);
+        }
         Transfer transfer{job};
-        transfer.probe = probe;
+        transfer.range_chunk_bytes = range_chunk_bytes;
         HeaderList headers;
         configure_transfer(curl, transfer, headers, policy, url, proxy, strip);
         auto rc = connections.submit(curl, transfer).get();
-        if (job.stop_transfer())
-            throw Failure("cancelled");
-        if (transfer.large)
-            throw Failure("too_large");
-        if (rc != CURLE_OK && !(req.media && rc == CURLE_TOO_MANY_REDIRECTS)) {
-            auto stopped = transfer.failure();
-            if (!stopped.empty())
-                throw Failure(stopped);
-            if (rc == CURLE_OPERATION_TIMEDOUT) {
-                double pretransfer = 0;
-                curl_easy_getinfo(curl, CURLINFO_PRETRANSFER_TIME, &pretransfer);
-                throw Failure(!transfer.received_response && pretransfer == 0 ? "connect_timeout" : "timeout");
+        auto redirect = finish_exchange(curl, transfer, rc, policy);
+        if (redirect.empty()) {
+            if (transfer.split_body) {
+                job.range_attempted = true;
+                job.ranges.emplace(
+                    RangeMetadata{std::move(url), std::move(transfer.etag), transfer.content_length, strip});
             }
-            if (rc == CURLE_URL_MALFORMAT || rc == CURLE_UNSUPPORTED_PROTOCOL)
-                throw Failure("invalid_url");
-            if (rc == CURLE_COULDNT_RESOLVE_HOST && req.media && policy.internal)
-                throw Failure("dns");
-            if (transfer.received_response)
-                throw Failure("body_transport");
-            throw Failure("transport");
-        }
-        curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &job.status);
-        if (req.media
-            && (job.status == 301 || job.status == 302 || job.status == 303 || job.status == 307
-                || job.status == 308)) {
-            char* redirect = nullptr;
-            curl_easy_getinfo(curl, CURLINFO_REDIRECT_URL, &redirect);
-            if (redirect) {
-                url = redirect;
-                continue;
-            }
-        }
-        if (probe) {
-            probe->url           = url;
-            probe->strip_headers = strip;
-            probe->etag          = std::move(transfer.etag);
-            if (!transfer.has_encoding_header || lower(transfer.content_encoding) == "identity")
-                curl_easy_getinfo(curl, CURLINFO_CONTENT_LENGTH_DOWNLOAD_T, &probe->length);
             return;
         }
-        if (transfer.decoder) {
-            try {
-                transfer.decoder->finish();
-            } catch (const std::exception&) {
-                throw Failure("body_transport");
-            }
-        }
-        job.body = std::make_shared<const std::string>(std::move(transfer.body));
-        return;
+        url = std::move(redirect);
     }
     throw Failure("redirect_limit");
 }
@@ -679,24 +815,46 @@ struct RangePart {
     std::future<CURLcode>                               done;
 };
 
+bool valid_range(const Transfer& response, CURLcode code, const std::string& etag) {
+    return code == CURLE_OK && response.status == 206 && response.headers_complete
+           && response.body.size() == response.range_length && (response.etag.empty() || response.etag == etag);
+}
+
 bool strong_etag(const std::string& tag) {
     return tag.size() >= 2 && tag.front() == '"' && tag.back() == '"'
            && std::all_of(
                tag.begin() + 1, tag.end() - 1, [](unsigned char c) { return c != '"' && c > 0x20 && c != 0x7f; });
 }
 
+struct DirectDownload {
+    explicit DirectDownload(std::shared_ptr<Job> job): job(std::move(job)) {}
+    std::shared_ptr<Job>                                job;
+    std::unique_ptr<CURL, decltype(&curl_easy_cleanup)> curl{curl_easy_init(), curl_easy_cleanup};
+    std::optional<Transfer>                             transfer;
+    std::optional<HeaderList>                           headers;
+    std::string                                         url, initial_url, origin;
+    int                                                 hops = 0, connect_retries = 0;
+    bool                                                strip = false;
+};
+
 class Network {
 public:
-    Network(int workers, size_t capacity, Policy policy): capacity_(capacity), policy_(std::move(policy)) {
-        if (workers < 1)
-            throw std::invalid_argument("expected at least one network worker");
+    Network(int concurrency, size_t capacity, Policy policy):
+        capacity_(capacity), concurrency_(concurrency), policy_(std::move(policy)) {
+        if (concurrency < 1)
+            throw std::invalid_argument("expected positive network concurrency");
         static const auto init = curl_global_init(CURL_GLOBAL_DEFAULT);
         if (init != CURLE_OK)
             throw Failure("curl initialization failed");
-        connections_ = std::make_unique<CurlConnectionPool>(workers);
+        connections_ = std::make_unique<CurlConnectionPool>(concurrency);
         try {
-            deadline_thread_ = std::thread([this] { expire_retries(); });
-            for (int i = 0; i < workers; ++i)
+            deadline_thread_ = std::thread([this] { expire_queued(); });
+            dispatcher_      = std::thread([this] {
+                while (auto job = take_ready(false))
+                    start_direct(job);
+            });
+            // These workers only handle proxy DNS and segmented responses.
+            for (int i = 0; i < std::min(concurrency, 8); ++i)
                 workers_.emplace_back([this] { work(); });
         } catch (...) {
             close();
@@ -711,11 +869,13 @@ public:
             || (req.media ? req.method != "GET" : (req.method != "GET" && req.method != "POST" && req.method != "PUT")))
             throw std::invalid_argument("invalid network request options");
         auto job      = std::make_shared<Job>();
+        job->queue_signal     = queue_signal_;
         job->deadline         = job->submitted + std::chrono::milliseconds(req.budget_ms);
+        job->observe          = req.observe;
         job->req      = std::move(req);
         const auto& request   = job->req;
-        const bool  cacheable = capacity_ && !request.cache_key.empty();
-        if (cacheable && request.media) {
+        const bool  shareable = request.media && !request.cache_key.empty();
+        if (shareable) {
             try {
                 endpoint(rewrite(request.url, policy_), policy_, true);
             } catch (const Failure& error) {
@@ -725,7 +885,7 @@ public:
         std::lock_guard<std::mutex> lock(mu_);
         if (closed_)
             throw Failure("network is closed");
-        if (cacheable) {
+        if (shareable) {
             if (Clock::now() >= job->deadline)
                 job->error = "timeout";
             if (!job->error.empty() || cached(*job)) {
@@ -733,9 +893,12 @@ public:
                 return job;
             }
         }
-        if (queue_.size() + follower_count_ >= 4096)
-            throw Failure("network queue full");
-        if (cacheable && request.media) {
+        if (queue_.size() + blocking_queue_.size() + follower_count_ >= 4096) {
+            discard_cancelled();
+            if (queue_.size() + blocking_queue_.size() + follower_count_ >= 4096)
+                throw Failure("network queue full");
+        }
+        if (shareable) {
             const auto [begin, end] = flights_.equal_range(request.cache_key);
             for (auto flight = begin; flight != end; ++flight) {
                 if (!compatible(*flight->second, *job))
@@ -761,12 +924,11 @@ public:
             job->owner       = true;
         }
         enqueue(job);
-        cv_.notify_one();
         return job;
     }
     std::shared_ptr<Job> next() {
         std::unique_lock<std::mutex> lock(mu_);
-        done_cv_.wait(lock, [this] { return !done_.empty() || (closed_ && active_ == 0 && queue_.empty()); });
+        done_cv_.wait(lock, [this] { return !done_.empty() || drained(); });
         if (done_.empty())
             return {};
         auto job = done_.front();
@@ -781,14 +943,19 @@ public:
             closed_ = true;
             for (const auto& entry : queue_)
                 cancel_group(*entry.second);
+            for (const auto& entry : blocking_queue_)
+                cancel_group(*entry.second);
             for (const auto& job : running_)
                 cancel_group(*job);
         }
         cv_.notify_all();
-        deadline_cv_.notify_all();
+        blocking_cv_.notify_all();
+        queue_signal_->notify();
         if (deadline_thread_.joinable())
             deadline_thread_.join();
         connections_->stop();
+        if (dispatcher_.joinable())
+            dispatcher_.join();
         for (auto& worker : workers_)
             if (worker.joinable())
                 worker.join();
@@ -800,13 +967,41 @@ private:
     using Entry = std::pair<std::string, Bytes>;
     // Fresh requests and retries compete by the time they became eligible.
     using Pending = std::multimap<Clock::time_point, std::shared_ptr<Job>>;
+    static bool blocking(const Job& job) {
+        return !job.req.proxy.empty() || job.ranges.has_value();
+    }
+    bool drained() const {
+        return closed_ && active_ == 0 && queue_.empty() && blocking_queue_.empty();
+    }
+    Pending::iterator queue_job(const std::shared_ptr<Job>& job) {
+        auto&      queue            = blocking(*job) ? blocking_queue_ : queue_;
+        const auto entry            = queue.emplace(job->queued_since, job);
+        const bool earlier_deadline = queued_deadlines_.empty() || job->deadline < queued_deadlines_.begin()->first;
+        try {
+            queued_deadlines_.emplace(job->deadline, entry);
+        } catch (...) {
+            queue.erase(entry);
+            throw;
+        }
+        if (earlier_deadline)
+            queue_signal_->notify();
+        (blocking(*job) ? blocking_cv_ : cv_).notify_one();
+        return entry;
+    }
+    void remove_queued(Pending::iterator entry) {
+        const auto [begin, end] = queued_deadlines_.equal_range(entry->second->deadline);
+        const auto expiry       = std::find_if(begin, end, [&](const auto& pair) { return pair.second == entry; });
+        queued_deadlines_.erase(expiry);
+        auto& queue = blocking(*entry->second) ? blocking_queue_ : queue_;
+        queue.erase(entry);
+    }
     void enqueue(const std::shared_ptr<Job>& job) {
-        const auto entry = queue_.emplace(job->queued_since, job);
+        const auto entry = queue_job(job);
         if (job->owner) {
             try {
                 flights_.emplace(job->req.cache_key, job);
             } catch (...) {
-                queue_.erase(entry);
+                remove_queued(entry);
                 throw;
             }
         }
@@ -868,13 +1063,15 @@ private:
         }
     }
     bool read_ranges(Job& job, const RangeMetadata& meta, const std::string& proxy) {
-        const size_t                           total  = static_cast<size_t>(meta.length);
-        const size_t                           window = std::min<size_t>(8, workers_.size());
+        const size_t                           total  = meta.length;
+        const size_t                           window = std::min<size_t>(4, concurrency_);
         std::atomic_bool                       stop{false};
         std::deque<std::unique_ptr<RangePart>> pending;
         std::string                            body;
         size_t                                 next = 0;
         try {
+            if (job.req.limit)
+                body.reserve(total);
             while (next < total || !pending.empty()) {
                 while (next < total && pending.size() < window) {
                     auto&        part            = *pending.emplace_back(std::make_unique<RangePart>(job));
@@ -889,14 +1086,19 @@ private:
                     // a normal GET, which validates every hop and filters its headers.
                     configure_transfer(
                         part.curl.get(), part.transfer, part.headers, policy_, meta.url, proxy, meta.strip_headers);
-                    part.done = connections_->submit(part.curl.get(), part.transfer);
+                    auto done       = std::make_shared<std::promise<CURLcode>>();
+                    auto completion = done->get_future();
+                    connections_->submit(part.curl.get(), part.transfer, [&part, &meta, &stop, done](CURLcode code) {
+                        if (!valid_range(part.transfer, code, meta.etag))
+                            stop = true;
+                        done->set_value(code);
+                    });
+                    part.done = std::move(completion);
                     next += length;
                 }
                 auto& part     = *pending.front();
                 auto& response = part.transfer;
-                if (part.done.get() != CURLE_OK || response.status != 206 || !response.headers_complete
-                    || response.body.size() != response.range_length
-                    || (!response.etag.empty() && response.etag != meta.etag)) {
+                if (!valid_range(response, part.done.get(), meta.etag) || stop.load()) {
                     stop = true;
                     return false;
                 }
@@ -912,34 +1114,30 @@ private:
         return true;
     }
 
-    void download(CURL* curl, Job& job, const std::string& proxy) {
-        if (job.req.media && policy_.range_chunk_bytes) {
-            const auto& headers     = proxy.empty() ? job.req.headers : job.req.proxy_headers;
-            const bool  conditional = std::any_of(headers.begin(), headers.end(), [](const auto& header) {
-                auto name = lower(header.first);
-                return name == "range" || name.rfind("if-", 0) == 0;
-            });
-            if (!conditional) {
-                RangeMetadata meta;
-                try {
-                    exchange(*connections_, curl, job, policy_, proxy, &meta);
-                } catch (const Failure& e) {
-                    const std::string reason = e.what();
-                    if (reason != "transport" && reason != "body_transport" && reason != "timeout"
-                        && reason != "connect_timeout")
-                        throw;
-                    // Some GET-only endpoints close a HEAD without a response.
-                }
-                if (job.status == 200 && meta.accepts_ranges && meta.length > 0
-                    && static_cast<uint64_t>(meta.length) > policy_.range_chunk_bytes && strong_etag(meta.etag)) {
-                    if (job.req.limit && static_cast<uint64_t>(meta.length) > job.req.limit)
-                        throw Failure("too_large");
-                    if (read_ranges(job, meta, proxy))
-                        return;
-                }
-            }
+    size_t eligible_range_chunk(const Job& job, const std::string& proxy) const {
+        if (!policy_.range_chunk_bytes || !job.req.media || job.range_attempted)
+            return 0;
+        const auto& headers = proxy.empty() ? job.req.headers : job.req.proxy_headers;
+        for (const auto& [name, value] : headers) {
+            auto normalized = lower(name);
+            if (normalized == "range" || normalized.rfind("if-", 0) == 0)
+                return 0;
         }
-        exchange(*connections_, curl, job, policy_, proxy);
+        return policy_.range_chunk_bytes;
+    }
+    void download(CURL* curl, Job& job, const std::string& proxy) {
+        if (!job.ranges)
+            exchange(*connections_, curl, job, policy_, proxy, eligible_range_chunk(job, proxy));
+        if (job.ranges) {
+            const auto meta = std::move(*job.ranges);
+            job.ranges.reset();
+            const auto started = Clock::now();
+            const bool read    = read_ranges(job, meta, proxy);
+            if (job.observe)
+                job.phases_us[RANGE_DOWNLOAD] += elapsed_us(started);
+            if (!read)
+                exchange(*connections_, curl, job, policy_, proxy);
+        }
     }
 
     void perform(CURL* curl, Job& job) {
@@ -967,6 +1165,18 @@ private:
         }
     }
 
+    static bool retry_status(const Job& job) {
+        return job.req.media
+               && (job.status == 408 || job.status == 429 || job.status == 500 || job.status == 502 || job.status == 503
+                   || job.status == 504);
+    }
+    static bool retry_error(const std::string& reason) {
+        return reason == "transport" || reason == "timeout" || reason == "body_transport" || reason == "dns";
+    }
+    static bool can_retry(const Job& job) {
+        return job.retries + 1 < job.req.attempts;
+    }
+
     // Run one outer attempt. A retryable result yields the worker back to the queue.
     bool run_attempt(CURL* curl, Job& job) {
         const auto& req = job.req;
@@ -976,32 +1186,21 @@ private:
             throw Failure("timeout");
         if (req.media && !job.owner)
             endpoint(rewrite(req.url, policy_), policy_, true);
-        const bool can_retry = job.retries + 1 < req.attempts;
         try {
             perform(curl, job);
-            return can_retry && req.media
-                   && (job.status == 408 || job.status == 429 || job.status == 500 || job.status == 502
-                       || job.status == 503 || job.status == 504);
+            return can_retry(job) && retry_status(job);
         } catch (const Failure& e) {
-            const std::string reason = e.what();
-            if (!can_retry
-                || (reason != "transport" && reason != "timeout" && reason != "body_transport" && reason != "dns"))
+            if (!can_retry(job) || !retry_error(e.what()))
                 throw;
             return true;
         }
     }
     void schedule_retry(const std::shared_ptr<Job>& job, Clock::time_point now) {
         job->queued_since = now + std::chrono::milliseconds(200 << job->retries);
-        auto entry        = queue_.emplace(job->queued_since, job);
-        try {
-            retry_deadlines_.emplace(job->deadline, entry);
-        } catch (...) {
-            queue_.erase(entry);
-            throw;
-        }
+        if (job->observe)
+            job->phases_us[RETRY_DELAY] += elapsed_us(now, std::min(job->deadline, job->queued_since));
+        queue_job(job);
         ++job->retries;
-        cv_.notify_one();
-        deadline_cv_.notify_one();
     }
     void complete_followers(const std::shared_ptr<Job>& job, Clock::time_point now) {
         const auto [begin, end] = flights_.equal_range(job->req.cache_key);
@@ -1040,7 +1239,6 @@ private:
         next->followers = std::move(remaining);
         follower_count_ += next->followers.size();
         enqueue(next);
-        cv_.notify_one();
     }
     void complete(const std::shared_ptr<Job>& job, Clock::time_point now) {
         if (job->error.empty() && !job->stop_transfer()) {
@@ -1063,62 +1261,212 @@ private:
         for (const auto& waiter : job.followers)
             waiter->queue_time += now - std::max(job.queued_since, waiter->queued_since);
     }
-    // A retry can expire even when every worker is serving another origin.
-    void expire_retries() {
-        std::unique_lock<std::mutex> lock(mu_);
-        while (!closed_) {
-            if (retry_deadlines_.empty()) {
-                deadline_cv_.wait(lock);
-                continue;
+    void discard_cancelled() {
+        auto now = Clock::now();
+        for (auto* queue : {&queue_, &blocking_queue_}) {
+            for (auto it = queue->begin(); it != queue->end();) {
+                auto entry = it++;
+                auto job   = entry->second;
+                if (job->stop_transfer()) {
+                    remove_queued(entry);
+                    account_queue(*job, now);
+                    job->error = "cancelled";
+                    complete(job, now);
+                }
             }
-            auto       first    = retry_deadlines_.begin();
-            const auto deadline = first->first;
-            const auto now      = Clock::now();
-            if (now < deadline) {
-                deadline_cv_.wait_until(lock, deadline);
-                continue;
-            }
-            auto entry = first->second;
-            auto job   = entry->second;
-            retry_deadlines_.erase(first);
-            queue_.erase(entry);
-            account_queue(*job, now);
-            job->error = "timeout";
-            complete(job, now);
+        }
+        for (auto& flight : flights_) {
+            auto&      followers = flight.second->followers;
+            const auto remaining = std::remove_if(followers.begin(), followers.end(), [&](const auto& caller) {
+                if (!caller->canceled.load())
+                    return false;
+                caller->error = "cancelled";
+                finish(caller);
+                --follower_count_;
+                return true;
+            });
+            followers.erase(remaining, followers.end());
         }
     }
-    std::shared_ptr<Job> take_ready() {
+    // Initial requests and retries both expire while all transfer slots are busy.
+    void expire_queued() {
+        auto& signal = *queue_signal_;
+        for (;;) {
+            size_t revision;
+            {
+                std::lock_guard<std::mutex> lock(signal.mu);
+                revision = signal.revision;
+            }
+            auto next = Clock::time_point::max();
+            {
+                std::lock_guard<std::mutex> lock(mu_);
+                if (closed_)
+                    return;
+                if (signal.cancelled.exchange(false))
+                    discard_cancelled();
+                while (!queued_deadlines_.empty()) {
+                    auto       first = queued_deadlines_.begin();
+                    const auto now   = Clock::now();
+                    if (now < first->first) {
+                        next = first->first;
+                        break;
+                    }
+                    auto entry = first->second;
+                    auto job   = entry->second;
+                    queued_deadlines_.erase(first);
+                    auto& queue = blocking(*job) ? blocking_queue_ : queue_;
+                    queue.erase(entry);
+                    account_queue(*job, now);
+                    job->error = job->stop_transfer() ? "cancelled" : "timeout";
+                    complete(job, now);
+                }
+            }
+            std::unique_lock<std::mutex> lock(signal.mu);
+            auto                         changed = [&] { return revision != signal.revision; };
+            if (next == Clock::time_point::max())
+                signal.cv.wait(lock, changed);
+            else
+                signal.cv.wait_until(lock, next, changed);
+        }
+    }
+    std::shared_ptr<Job> take_ready(bool blocking_worker) {
+        auto&                        queue = blocking_worker ? blocking_queue_ : queue_;
+        auto&                        cv    = blocking_worker ? blocking_cv_ : cv_;
         std::unique_lock<std::mutex> lock(mu_);
         for (;;) {
-            if (queue_.empty()) {
+            if (queue.empty()) {
                 if (closed_)
                     return {};
-                cv_.wait(lock);
+                cv.wait(lock);
                 continue;
             }
-            auto       entry    = queue_.begin();
+            if (!closed_ && active_ >= concurrency_) {
+                cv.wait(lock);
+                continue;
+            }
+            auto       entry    = queue.begin();
             const auto eligible = entry->first;
             const auto now      = Clock::now();
             if (!closed_ && now < eligible) {
-                cv_.wait_until(lock, eligible);
+                cv.wait_until(lock, eligible);
                 continue;
             }
             auto job = entry->second;
-            if (job->retries) {
-                const auto [begin, end] = retry_deadlines_.equal_range(job->deadline);
-                auto expiry = std::find_if(begin, end, [&](const auto& pair) { return pair.second == entry; });
-                retry_deadlines_.erase(expiry);
-            }
-            queue_.erase(entry);
+            remove_queued(entry);
             account_queue(*job, now);
             running_.insert(job);
             ++active_;
             return job;
         }
     }
+    void finish_attempt(const std::shared_ptr<Job>& job, bool retry) {
+        std::lock_guard<std::mutex> lock(mu_);
+        running_.erase(job);
+        --active_;
+        cv_.notify_one();
+        blocking_cv_.notify_one();
+        const auto now = Clock::now();
+        if (retry && !job->stop_transfer()) {
+            if (now >= job->deadline)
+                job->error = "timeout";
+            else {
+                try {
+                    schedule_retry(job, now);
+                    return;
+                } catch (const std::exception& e) {
+                    job->error = e.what();
+                }
+            }
+        }
+        complete(job, now);
+        if (drained())
+            done_cv_.notify_all();
+    }
+    void direct_error(const std::shared_ptr<Job>& job, const std::string& reason) {
+        const bool retry = can_retry(*job) && retry_error(reason);
+        if (!retry)
+            job->error = reason;
+        finish_attempt(job, retry);
+    }
+    void submit_direct(const std::shared_ptr<DirectDownload>& state) {
+        auto& job = *state->job;
+        try {
+            if (state->hops > 30)
+                throw Failure("redirect_limit");
+            auto dest    = endpoint(state->url, policy_, job.req.media);
+            state->strip = state->strip || dest.origin != state->origin;
+            state->transfer.emplace(job);
+            state->transfer->range_chunk_bytes = eligible_range_chunk(job, "");
+            state->headers.emplace();
+            configure_transfer(
+                state->curl.get(), *state->transfer, *state->headers, policy_, state->url, "", state->strip);
+            connections_->submit(
+                state->curl.get(), *state->transfer, [this, state](CURLcode code) { direct_completed(state, code); });
+        } catch (const std::exception& error) {
+            direct_error(state->job, error.what());
+        }
+    }
+    void direct_completed(const std::shared_ptr<DirectDownload>& state, CURLcode code) {
+        auto& job = *state->job;
+        try {
+            auto redirect = finish_exchange(state->curl.get(), *state->transfer, code, policy_);
+            if (!redirect.empty()) {
+                state->url = std::move(redirect);
+                ++state->hops;
+                submit_direct(state);
+                return;
+            }
+            if (state->transfer->split_body) {
+                job.range_attempted = true;
+                job.ranges.emplace(RangeMetadata{std::move(state->url),
+                                                 std::move(state->transfer->etag),
+                                                 state->transfer->content_length,
+                                                 state->strip});
+                std::lock_guard<std::mutex> lock(mu_);
+                if (closed_ || job.stop_transfer())
+                    throw Failure("cancelled");
+                job.queued_since = Clock::now();
+                queue_job(state->job);
+                running_.erase(state->job);
+                --active_;
+                cv_.notify_one();
+                return;
+            }
+        } catch (const std::exception& error) {
+            std::string reason = error.what();
+            if (reason == "connect_timeout") {
+                if (job.req.media && state->connect_retries < 2 && Clock::now() < job.deadline) {
+                    ++state->connect_retries;
+                    ++job.connect_retries;
+                    state->url   = state->initial_url;
+                    state->hops  = 0;
+                    state->strip = false;
+                    submit_direct(state);
+                    return;
+                }
+                reason = "timeout";
+            }
+            direct_error(state->job, reason);
+            return;
+        }
+        finish_attempt(state->job, can_retry(job) && retry_status(job));
+    }
+    void start_direct(const std::shared_ptr<Job>& job) {
+        try {
+            auto state = std::make_shared<DirectDownload>(job);
+            if (!state->curl)
+                throw Failure("curl initialization failed");
+            state->url         = job->req.media ? rewrite(job->req.url, policy_) : job->req.url;
+            state->initial_url = state->url;
+            state->origin      = endpoint(state->url, policy_, job->req.media).origin;
+            submit_direct(state);
+        } catch (const std::exception& error) {
+            direct_error(job, error.what());
+        }
+    }
     void work() {
         std::unique_ptr<CURL, decltype(&curl_easy_cleanup)> curl(curl_easy_init(), curl_easy_cleanup);
-        while (auto job = take_ready()) {
+        while (auto job = take_ready(true)) {
             bool retry = false;
             try {
                 if (!curl)
@@ -1127,34 +1475,20 @@ private:
             } catch (const std::exception& e) {
                 job->error = e.what();
             }
-            std::lock_guard<std::mutex> lock(mu_);
-            running_.erase(job);
-            --active_;
-            const auto now = Clock::now();
-            if (retry && !job->stop_transfer()) {
-                if (now >= job->deadline)
-                    job->error = "timeout";
-                else {
-                    try {
-                        schedule_retry(job, now);
-                        continue;
-                    } catch (const std::exception& e) {
-                        job->error = e.what();
-                    }
-                }
-            }
-            complete(job, now);
+            finish_attempt(job, retry);
         }
     }
-    size_t                                                      capacity_, active_ = 0, follower_count_ = 0;
+    size_t capacity_, concurrency_, active_ = 0, follower_count_ = 0;
     Policy                                                      policy_;
     std::unordered_multimap<std::string, std::shared_ptr<Job>>  flights_;
     bool                                                        closed_ = false;
     std::mutex                                                  mu_;
-    std::condition_variable                                     cv_, done_cv_, deadline_cv_;
-    Pending                                                     queue_;
-    std::multimap<Clock::time_point, Pending::iterator>         retry_deadlines_;
+    std::condition_variable                                     cv_, blocking_cv_, done_cv_;
+    std::shared_ptr<QueueSignal>                                queue_signal_ = std::make_shared<QueueSignal>();
+    Pending                                                     queue_, blocking_queue_;
+    std::multimap<Clock::time_point, Pending::iterator>         queued_deadlines_;
     std::thread                                                 deadline_thread_;
+    std::thread                                                 dispatcher_;
     std::deque<std::shared_ptr<Job>>                            done_;
     std::unordered_set<std::shared_ptr<Job>>                    running_;
     std::unique_ptr<CurlConnectionPool>                         connections_;
@@ -1202,10 +1536,12 @@ PYBIND11_MODULE(_media_network, m) {
         .def_readwrite("idle_ms", &Request::idle_ms)
         .def_readwrite("budget_ms", &Request::budget_ms)
         .def_readwrite("attempts", &Request::attempts)
+        .def_readwrite("observe", &Request::observe)
         .def_readwrite("media", &Request::media);
     py::class_<Job, std::shared_ptr<Job>>(m, "Job").def("cancel", &Job::cancel).def("result", [](const Job& j) {
         if (!j.completed.load())
             throw std::logic_error("transfer still in progress");
+        auto   delivery_started = j.observe ? Clock::now() : Clock::time_point{};
         size_t size   = j.body && j.error.empty() ? j.body->size() : 0;
         auto*  buffer = PyBytes_FromStringAndSize(nullptr, size);
         if (!buffer)
@@ -1220,6 +1556,13 @@ PYBIND11_MODULE(_media_network, m) {
                 std::memcpy(destination, j.body->data(), size);
             }
         }
+        py::tuple phases;
+        if (j.observe) {
+            auto values             = j.phases_us;
+            values[RESULT_DELIVERY] = elapsed_us(j.finished, delivery_started);
+            values[RESULT_COPY]     = elapsed_us(delivery_started);
+            phases                  = py::tuple(py::cast(values));
+        }
         return py::make_tuple(
             j.status,
             j.error,
@@ -1229,7 +1572,8 @@ PYBIND11_MODULE(_media_network, m) {
             py::make_tuple(j.proxy_attempts, j.fallbacks, j.connect_retries),
             std::chrono::duration<double, std::milli>(j.finished - j.submitted - j.queue_time).count(),
             std::chrono::duration<double, std::milli>(j.queue_time).count(),
-            j.joined);
+            j.joined,
+            std::move(phases));
     });
     py::class_<Network>(m, "Network")
         .def(py::init<int, size_t, Policy>())

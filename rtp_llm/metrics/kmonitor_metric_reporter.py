@@ -308,6 +308,7 @@ class GaugeMetrics(Enum):
     VIT_OUTPUT_TOKEN_COUNT_METRIC = "rtp_llm_vit_output_token_count"
     VIT_INPUT_IMAGE_COUNT_METRIC = "rtp_llm_vit_input_image_count"
     VIT_IMAGE_FETCH_RT_US_METRIC = "rtp_llm_vit_image_fetch_rt_us"
+    VIT_COMPUTE_QUEUE_RT_US_METRIC = "rtp_llm_vit_compute_queue_rt_us"
     VIT_HTTP_PHASE_RT_US_METRIC = "rtp_llm_vit_http_phase_rt_us"
     VIT_HTTP_BODY_BYTES_METRIC = "rtp_llm_vit_http_body_bytes"
     VIT_PREPROCESS_RESULT_BYTES_METRIC = "rtp_llm_vit_preprocess_result_bytes"

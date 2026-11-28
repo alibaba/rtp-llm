@@ -155,7 +155,7 @@ class MediaNetworkTest(unittest.TestCase):
         self.assertEqual(self.server.visits.count("/slow"), 1)
         self.assertTrue(self.fetch("/slow", cache_key="image")[3])
 
-    def test_zero_capacity_bypasses_cache_and_inflight_reuse(self):
+    def test_zero_capacity_bypasses_resident_cache_but_shares_inflight(self):
         self.net = native.Network(2, 0, native.Policy())
         self.addCleanup(self.net.close)
         started, release = self.server.gates["/slow"]
@@ -168,8 +168,10 @@ class MediaNetworkTest(unittest.TestCase):
         third = self.fetch("/slow", cache_key="image")
         for result in (first.result(), second.result(), third):
             self.assertEqual(result[:4], (200, "", b"slow", False))
-            self.assertFalse(result[8])
-        self.assertEqual(self.server.visits.count("/slow"), 3)
+        self.assertFalse(first.result()[8])
+        self.assertTrue(second.result()[8])
+        self.assertFalse(third[8])
+        self.assertEqual(self.server.visits.count("/slow"), 2)
 
     def test_cancelling_first_caller_preserves_other_image_waiters(self):
         started, release = self.server.gates["/slow"]
@@ -314,6 +316,26 @@ class MediaNetworkTest(unittest.TestCase):
         release_busy.set()
         self.assertIs(self.net.next(), busy)
         self.assertEqual(busy.result()[:3], (200, "", b"slow"))
+
+    def test_initial_deadline_and_cancel_complete_while_only_slot_is_busy(self):
+        self.net.close()
+        self.net = native.Network(1, 100, native.Policy())
+        started, release = threading.Event(), threading.Event()
+        self.server.gates["/slow"] = started, release
+        busy = self.submit("/slow")
+        try:
+            self.assertTrue(started.wait(2))
+            timed = self.submit("/timed", budget_ms=150)
+            cancelled = self.submit("/cancelled")
+            cancelled.cancel()
+            self.assertIs(self.net.next(), cancelled)
+            self.assertEqual(cancelled.result()[1], "cancelled")
+            self.assertIs(self.net.next(), timed)
+            self.assertEqual(timed.result()[1], "timeout")
+            self.assertEqual(self.server.visits, ["/slow"])
+        finally:
+            release.set()
+        self.assertIs(self.net.next(), busy)
 
     def test_close_drains_backoff_and_its_waiters(self):
         owner, _, release_retry = self.start_retry_with_one_worker()
@@ -570,22 +592,35 @@ class RangeDownloadTest(unittest.TestCase):
         class Origin(Handler):
             def do_HEAD(self):
                 visits.append(("HEAD", self.path, None))
-                self.send_response(405 if self.path == "/get-only" else 200)
-                if self.path != "/no-length":
-                    self.send_header("Content-Length", str(len(data)))
-                if self.path != "/no-etag":
-                    self.send_header("ETag", '"v1"')
-                if self.path == "/no-ranges":
-                    self.send_header("Accept-Ranges", "none")
+                self.send_response(405)
                 self.end_headers()
 
             def do_GET(self):
                 interval = self.headers.get("Range")
                 visits.append(("GET", self.path, interval))
                 if not interval or self.path == "/ignore":
-                    self.reply(200, data)
+                    self.send_response(200)
+                    if self.path != "/no-length":
+                        self.send_header("Content-Length", str(len(data)))
+                    if self.path != "/no-etag":
+                        self.send_header("ETag", '"v1"')
+                    if self.path != "/no-ranges":
+                        self.send_header("Accept-Ranges", "bytes")
+                    self.end_headers()
+                    try:
+                        self.wfile.write(data)
+                    except OSError:
+                        pass
                     return
                 start, end = map(int, interval.removeprefix("bytes=").split("-"))
+                if self.path == "/reject-second-range":
+                    if start == 0:
+                        occupied.set()
+                        release.wait(5)
+                    else:
+                        occupied.wait(3)
+                        self.reply(412, b"")
+                        return
                 if self.path == "/hold-ranges" and start < 8:
                     barrier.wait(timeout=3)
                     occupied.set()
@@ -604,7 +639,10 @@ class RangeDownloadTest(unittest.TestCase):
                 )
                 self.send_header("ETag", '"v2"' if self.path == "/changed" else '"v1"')
                 self.end_headers()
-                self.wfile.write(part)
+                try:
+                    self.wfile.write(part)
+                except OSError:
+                    pass
 
         self.origin = ThreadingHTTPServer(("127.0.0.1", 0), Origin)
         self.base = f"http://127.0.0.1:{self.origin.server_port}"
@@ -638,8 +676,7 @@ class RangeDownloadTest(unittest.TestCase):
                 self.visits.clear()
                 result = self.fetch(self.network(size), "/small")
                 self.assertEqual(result[:3], (200, "", self.body))
-                expected = [("HEAD", "/small", None)] if size else []
-                self.assertEqual(self.visits, expected + [("GET", "/small", None)])
+                self.assertEqual(self.visits, [("GET", "/small", None)])
 
     def test_parallel_ranges_and_cache(self):
         for proxy in (False, True):
@@ -653,7 +690,7 @@ class RangeDownloadTest(unittest.TestCase):
                     (200, "", self.body, False),
                 )
                 self.assertTrue(self.fetch(net, path, proxy, cache_key="image")[3])
-                self.assertEqual(self.visits[0], ("HEAD", target, None))
+                self.assertEqual(self.visits[0], ("GET", target, None))
                 self.assertCountEqual(
                     self.visits[1:],
                     [("GET", target, f"bytes={r}") for r in ("0-3", "4-7", "8-9")],
@@ -662,7 +699,6 @@ class RangeDownloadTest(unittest.TestCase):
     def test_unsupported_metadata_and_invalid_ranges_fall_back(self):
         net = self.network(4)
         for path in (
-            "/get-only",
             "/no-length",
             "/no-etag",
             "/no-ranges",
@@ -673,12 +709,23 @@ class RangeDownloadTest(unittest.TestCase):
             with self.subTest(path=path):
                 self.visits.clear()
                 self.assertEqual(self.fetch(net, path)[:3], (200, "", self.body))
-                self.assertEqual(self.visits[0], ("HEAD", path, None))
-                self.assertEqual(self.visits.count(("GET", path, None)), 1)
-                if path in ("/get-only", "/no-length", "/no-etag", "/no-ranges"):
-                    self.assertEqual(len(self.visits), 2)
+                self.assertEqual(self.visits[0], ("GET", path, None))
+                if path in ("/no-length", "/no-etag", "/no-ranges"):
+                    self.assertEqual(len(self.visits), 1)
                 else:
+                    self.assertEqual(self.visits.count(("GET", path, None)), 2)
                     self.assertTrue(any(interval for _, _, interval in self.visits))
+
+    def test_rejected_range_stops_a_stalled_sibling_before_fallback(self):
+        started = time.monotonic()
+        try:
+            result = self.fetch(self.network(4), "/reject-second-range", budget_ms=2000)
+            self.assertEqual(result[:3], (200, "", self.body))
+            self.assertTrue(self.occupied.is_set())
+            self.assertLess(time.monotonic() - started, 1.5)
+            self.assertEqual(self.visits.count(("GET", "/reject-second-range", None)), 2)
+        finally:
+            self.release.set()
 
     def test_queued_request_keeps_its_deadline(self):
         net = self.network(4)
@@ -697,7 +744,7 @@ class RangeDownloadTest(unittest.TestCase):
     def test_size_limit_before_body(self):
         result = self.fetch(self.network(4), "/limit", limit=len(self.body) - 1)
         self.assertEqual(result[1], "too_large")
-        self.assertEqual(self.visits, [("HEAD", "/limit", None)])
+        self.assertEqual(self.visits, [("GET", "/limit", None)])
 
 
 if __name__ == "__main__":

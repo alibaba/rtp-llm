@@ -20,6 +20,19 @@ current_network = contextvars.ContextVar("vit_media_network", default=None)
 
 
 prepared_url_bytes = contextvars.ContextVar("vit_prepared_url_bytes", default=None)
+_NATIVE_HTTP_PHASES = (
+    "native_io_admission",
+    "native_proxy_dns_validation",
+    "native_curl_dns",
+    "native_tcp",
+    "native_tls",
+    "native_first_byte",
+    "native_body",
+    "native_retry_backoff",
+    "native_ranges",
+    "native_result_delivery_wait",
+    "native_result_copy",
+)
 
 
 def uses_url_loader(func):
@@ -92,7 +105,7 @@ class MediaNetwork:
             self.proxy_headers = download_proxy.DOWNLOAD_HEADERS
             self.report_proxy = download_proxy._report_proxy_metric
         self.config = config
-        workers = (
+        concurrency = (
             config.vit_source_download_concurrency
             or config.mm_preprocess_max_workers
             or 1
@@ -100,7 +113,7 @@ class MediaNetwork:
         ranges = config.mm_download_range_config
         if ranges["enable"]:
             policy.range_chunk_bytes = ranges["chunk_size_bytes"]
-        self.pool = native.Network(workers, max(0, config.url_cache_item_num), policy)
+        self.pool = native.Network(concurrency, max(0, config.url_cache_item_num), policy)
         self.pending = {}
         self.lock = threading.Lock()
         self.thread = threading.Thread(
@@ -146,6 +159,8 @@ class MediaNetwork:
             url = prepared.url
         req.url = url
         req.headers = _get_http_heads(headers_text)
+        if VIT_PHASE_METRICS and hasattr(req, "observe"):
+            req.observe = True
         req.limit = max_bytes
         remaining = deadline - time.monotonic()
         req.budget_ms = max(0, int(1000 * (min(30.0, remaining) if v41 else remaining)))
@@ -193,6 +208,14 @@ class MediaNetwork:
                         result[7] * 1000,
                         tags={"phase": "worker_queue", "source": source},
                     )
+                if len(result) > 9:
+                    for phase, duration_us in zip(_NATIVE_HTTP_PHASES, result[9]):
+                        if duration_us:
+                            kmonitor.report(
+                                GaugeMetrics.VIT_HTTP_PHASE_RT_US_METRIC,
+                                duration_us,
+                                tags={"phase": phase, "source": source},
+                            )
                 if joined:
                     return
                 for _ in range(connect_retries):
