@@ -159,13 +159,17 @@ std::shared_ptr<torch::Event> runtimeCreateEvent() {
 
 void runtimeWriteCacheStore(const torch_ext::PyCacheStoreInputs& cache_store_inputs,
                             const torch_ext::LayerKVCache&       layer_kv,
-                            const CacheConfig&                   cache_config,
+                            const CacheTopology&                 cache_topology,
+                            bool                                 use_opaque_kv_cache_store,
+                            size_t                               base_seq_size_per_block,
                             std::shared_ptr<CacheStore>          cache_store,
                             size_t                               cache_model_id,
                             int                                  cp_rank,
                             int                                  cp_size,
                             std::shared_ptr<torch::Event>        pre_created_event,
-                            CacheStoreCompletionRegistrar        register_store_completion) {
+                            CacheStoreCompletionRegistrar        register_store_completion,
+                            std::optional<uint32_t>              cache_key_layer_id,
+                            std::optional<bool>                  group_transfer_policy) {
     const auto& param = cache_store_inputs;
     const auto  requireHostTensor =
         [](const torch::Tensor& tensor, const char* name, int64_t expected_dim, c10::ScalarType expected_type) {
@@ -215,7 +219,7 @@ void runtimeWriteCacheStore(const torch_ext::PyCacheStoreInputs& cache_store_inp
 
     const size_t max_blocks_per_batch = static_cast<size_t>(param.host_kv_cache_offset.size(1));
 
-    const auto& group = cache_config.groupForLayer(layer_kv.layer_id, layer_kv.tag);
+    const auto& group = cache_topology.groupForLayer(layer_kv.layer_id, layer_kv.tag);
     RTP_LLM_CHECK_WITH_INFO(
         group.spec != nullptr, "cache-store tag=%s has no KVCacheSpec attached", layer_kv.tag.c_str());
 
@@ -225,7 +229,7 @@ void runtimeWriteCacheStore(const torch_ext::PyCacheStoreInputs& cache_store_inp
     const size_t kv_scale_stride_bytes           = group.kvScaleStrideBytes();
     const size_t kv_block_transfer_bytes         = group.kvBlockStrideBytes();
     const size_t kv_scale_transfer_bytes         = group.kvScaleStrideBytes();
-    const bool   use_group_cache_transfer_policy = cache_config.usesGroupCacheTransferPolicy();
+    const bool   use_group_cache_transfer_policy = group_transfer_policy.value_or(cache_topology.groups().size() > 1);
 
     RTP_LLM_CHECK_WITH_INFO(
         seq_size_per_block > 0, "cache-store tag=%s has zero tokens_per_block", layer_kv.tag.c_str());
@@ -313,7 +317,6 @@ void runtimeWriteCacheStore(const torch_ext::PyCacheStoreInputs& cache_store_inp
             continue;
         }
 
-        const size_t base_seq_size_per_block = cache_config.seq_size_per_block;
         RTP_LLM_CHECK_WITH_INFO(base_seq_size_per_block > 0 && seq_size_per_block >= base_seq_size_per_block
                                     && seq_size_per_block % base_seq_size_per_block == 0,
                                 "cache-store tag=%s tokens_per_block=%zu is incompatible with "
@@ -387,7 +390,7 @@ void runtimeWriteCacheStore(const torch_ext::PyCacheStoreInputs& cache_store_inp
             const std::string cache_key = makeCacheKey(
                 cache_model_id,
                 std::to_string(cache_keys[static_cast<int64_t>(batch_id)][static_cast<int64_t>(key_index)]),
-                cache_config.cacheKeyLayerId(layer_kv.layer_id),
+                cache_key_layer_id.value_or(static_cast<uint32_t>(layer_kv.layer_id)),
                 layer_kv.tag);
             const int32_t block_id = host_kv_cache_offset[input_index][static_cast<int64_t>(offset_index)];
             // Host block-offset tables use -1 as the null block sentinel.
@@ -422,7 +425,7 @@ void runtimeWriteCacheStore(const torch_ext::PyCacheStoreInputs& cache_store_inp
                 // full row. Dividing here would slice an already-sliced row.
             }
 
-            const bool use_opaque_key_prefix = cache_config.use_opaque_kv_cache_store || use_group_cache_transfer_policy
+            const bool use_opaque_key_prefix = use_opaque_kv_cache_store || use_group_cache_transfer_policy
                                                || group.spec->type == KVCacheSpecType::MultiHeadLatentAttention;
             void*                 kv_addr = kv_cache_data + static_cast<size_t>(block_id) * kv_block_stride_bytes;
             std::shared_ptr<void> kv_block_addr(kv_cache_owner, kv_addr);

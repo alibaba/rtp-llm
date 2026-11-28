@@ -5,6 +5,7 @@ import os
 from typing import Any, Dict, Optional
 
 import torch
+
 from rtp_llm.config.py_config_modules import VitConfig
 from rtp_llm.config.quant_config import (
     CompressedW4A8Int4PerChannelQuantConfig,
@@ -183,6 +184,7 @@ class ModelConfig(CppModelConfig):
         "enable_fp32_lm_head",
         "enable_output_vocab_pruning",
         "has_lm_head_bias",
+        "cache_tag_prefix",
         "tie_word_embeddings",
         "quantization",
         "mm_related_params",

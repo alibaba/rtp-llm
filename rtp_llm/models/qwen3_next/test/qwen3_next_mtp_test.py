@@ -16,6 +16,7 @@ from rtp_llm.models.qwen3_next.qwen3_next_mtp import (
     Qwen35DenseMTP,
     Qwen35DenseMTPWeight,
 )
+from rtp_llm.models_py.utils.kvcache import DRAFT_CACHE_TAG_PREFIX
 from rtp_llm.multimodal.multimodal_mixin_register import get_multimodal_mixin_cls
 from rtp_llm.multimodal.multimodal_mixins.qwen3_5_moe.qwen3_5_moe_mixin import (
     Qwen3_5MoeMixin,
@@ -138,9 +139,7 @@ class Qwen35DenseMTPTest(unittest.TestCase):
         self.assertIs(_model_factory["qwen35_dense_mtp"], Qwen35DenseMTP)
         self.assertEqual(config.num_layers, 1)
         self.assertTrue(config.is_mtp)
-        self.assertFalse(
-            config.linear_attention_config.supports_history_state_reclaim
-        )
+        self.assertFalse(config.linear_attention_config.supports_history_state_reclaim)
         self.assertEqual(config.moe_style, 0)
         self.assertEqual(list(config.moe_layer_index), [])
         self.assertTrue(config.hybrid_attention_config.enable_hybrid_attention)
@@ -150,7 +149,9 @@ class Qwen35DenseMTPTest(unittest.TestCase):
         )
         self.assertEqual(config.attn_config.rope_config.style, RopeStyle.Base)
         self.assertEqual(len(config.kv_cache_spec_descs), 1)
-        self.assertEqual(config.kv_cache_spec_descs[0][0].tag, "full")
+        self.assertEqual(
+            config.kv_cache_spec_descs[0][0].tag, DRAFT_CACHE_TAG_PREFIX + "full"
+        )
         self.assertEqual(
             config.kv_cache_spec_descs[0][0].cache_type, KVCacheSpecType.MHA
         )
@@ -193,7 +194,7 @@ class Qwen35DenseMTPTest(unittest.TestCase):
     def test_dense_mtp_uses_qwen35_multimodal_mixin(self):
         self.assertIs(get_multimodal_mixin_cls("qwen35_dense_mtp"), Qwen3_5MoeMixin)
 
-    def test_propose_config_keeps_full_tag_and_target_pp_partition(self):
+    def test_propose_config_keeps_draft_full_tag_and_target_pp_partition(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             Path(temp_dir, "config.json").write_text(json.dumps(self._config()))
             engine_config = SimpleNamespace(
@@ -234,7 +235,10 @@ class Qwen35DenseMTPTest(unittest.TestCase):
                     )
                     self.assertEqual(len(config.kv_cache_spec_descs), 1)
                     self.assertEqual(len(config.kv_cache_spec_descs[0]), 1)
-                    self.assertEqual(config.kv_cache_spec_descs[0][0].tag, "full")
+                    self.assertEqual(
+                        config.kv_cache_spec_descs[0][0].tag,
+                        DRAFT_CACHE_TAG_PREFIX + "full",
+                    )
                     self.assertEqual(
                         config.kv_cache_spec_descs[0][0].cache_type, KVCacheSpecType.MHA
                     )

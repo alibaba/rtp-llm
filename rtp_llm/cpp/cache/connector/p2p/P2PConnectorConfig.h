@@ -1,5 +1,6 @@
 #pragma once
 
+#include "rtp_llm/cpp/cache/CacheConfig.h"
 #include "rtp_llm/cpp/cache/CacheGroupType.h"
 #include "rtp_llm/cpp/cache/CacheTopology.h"
 #include "rtp_llm/cpp/cache/connector/p2p/transfer/TransferBackendConfig.h"
@@ -20,6 +21,17 @@ inline int64_t getP2PTransferListenPort(int64_t cache_store_listen_port) {
     return cache_store_listen_port > 0 ? cache_store_listen_port + 1 : cache_store_listen_port;
 }
 
+// Pool lookups use module-local layer IDs. The PD protocol concatenates the
+// physical modules on each stage and numbers wire keys across the whole model.
+struct P2PModuleLayers {
+    std::map<std::string, uint32_t> stage_offsets;
+
+    uint32_t stageOffset(const std::string& tag) const {
+        const auto it = stage_offsets.find(tag);
+        return it == stage_offsets.end() ? 0 : it->second;
+    }
+};
+
 struct P2PConnectorSchedulerConfig {
     int64_t load_cache_timeout_ms = 5000;
     std::vector<std::string> worker_grpc_addrs;
@@ -34,6 +46,11 @@ struct P2PConnectorSchedulerConfig {
     bool                                 local_full_page_rr              = false;
     int                                  decode_transfer_layer_end       = std::numeric_limits<int>::max();
     std::map<std::string, size_t>        physical_block_bytes_by_group;
+    // Tag -> owning cache module, derived from CacheConfig by the multi-module
+    // production factory. Empty means the legacy single-module (module 0) view.
+    std::map<std::string, size_t>        module_by_tag;
+    std::vector<std::string>             block_table_tags;
+    P2PModuleLayers                      module_layers;
     size_t                               cache_key_tokens_per_block = 1;
     int                                  cp_rank = 0;
     int                                  cp_size = 1;
@@ -73,10 +90,20 @@ struct P2PConnectorWorkerConfig {
     int64_t  tp_rank       = 0;
     uint32_t layer_all_num = 0;
     uint32_t global_layer_begin = 0;
+    P2PModuleLayers module_layers;
+
+    uint32_t wireLayerId(const std::string& tag, uint32_t module_local_id) const {
+        return global_layer_begin + module_layers.stageOffset(tag) + module_local_id;
+    }
 
     std::shared_ptr<const CacheTopology> topology;
     size_t                               cache_key_tokens_per_block = 1;
-    int                                  cp_size = 1;
+    // Prefill page-RR shard geometry. cp_size==1 disables RR remap (legacy path);
+    // cp_size>1 makes LayerCacheBufferUtil register cache_keys[cp_rank + i*cp_size]
+    // for the i-th rank-local owned block (Stage 4 fix).
+    int  cp_rank          = 0;
+    int  cp_size          = 1;
+    bool kv_cache_sharded = false;
 
     // Only LINEAR_QKV needs the physical spec to build byte ranges. A tag may
     // be shared by the main model and a draft with different local geometry.
@@ -122,6 +149,11 @@ struct P2PConnectorWorkerConfig {
         config.tp_size                                 = parallelism_config.tp_size;
         config.tp_rank                                 = parallelism_config.tp_rank;
         config.layer_all_num                           = layer_all_num;
+        config.kv_cache_sharded                        = parallelism_config.prefill_cp_config.kv_cache_sharded;
+        if (config.kv_cache_sharded && parallelism_config.tp_size > 1) {
+            config.cp_size = static_cast<int>(parallelism_config.tp_size);
+            config.cp_rank = static_cast<int>(parallelism_config.tp_rank);
+        }
         return config;
     }
 };
@@ -132,6 +164,50 @@ struct P2PConnectorConfig {
 
     P2PConnectorSchedulerConfig scheduler_config;
     P2PConnectorWorkerConfig    worker_config;
+
+    // Build the P2P transfer view for a multi-module cache configuration.
+    //
+    // Every module keeps its own module-local topology and pools; the
+    // P2P layer needs one executable view that can validate and address any
+    // module's buffers. This view only unions the groups (tags are globally
+    // unique after the MTP rename) and, per module-local layer id, the union of
+    // tags that own that layer. The owning module for a tag is still resolved
+    // through LayerBlockConverter::moduleOfTag at buffer construction, so this
+    // is a transfer-only address space, never a shared cache topology.
+    static std::shared_ptr<const CacheTopology> buildTransferTopology(const CacheConfig& cache_config) {
+        std::vector<GroupBase>   groups;
+        std::map<int, LayerBase> merged_layers;
+        groups.reserve(static_cast<size_t>(cache_config.allGroupNums()));
+        for (size_t module_id = 0; module_id < cache_config.moduleCount(); ++module_id) {
+            const auto& module_topology = cache_config.topology(module_id);
+            for (const auto& group : module_topology.groups()) {
+                if (!module_topology.layerIdsForGroup(group.tag).empty()) {
+                    groups.push_back(group);
+                }
+            }
+            for (const auto& layer : module_topology.layers()) {
+                auto& merged    = merged_layers[layer.layer_id];
+                merged.layer_id = layer.layer_id;
+                for (const auto& tag : layer.group_tags) {
+                    if (std::find(merged.group_tags.begin(), merged.group_tags.end(), tag)
+                        == merged.group_tags.end()) {
+                        merged.group_tags.push_back(tag);
+                    }
+                }
+            }
+        }
+        std::vector<LayerBase> layers;
+        layers.reserve(merged_layers.size());
+        for (auto& [layer_id, layer] : merged_layers) {
+            RTP_LLM_CHECK_WITH_INFO(
+                static_cast<size_t>(layer_id) == layers.size(),
+                "P2P transfer topology requires contiguous module-local layer ids; got layer_id=%d at index=%zu",
+                layer_id,
+                layers.size());
+            layers.push_back(std::move(layer));
+        }
+        return CacheTopology::create(std::move(groups), std::move(layers));
+    }
 
     static P2PConnectorConfig create(const RuntimeConfig&     runtime_config,
                                      const CacheStoreConfig&  cache_store_config,
@@ -154,6 +230,53 @@ struct P2PConnectorConfig {
                                                             PDSepConfig{}.load_cache_timeout_ms;
         config.scheduler_config.load_cache_timeout_ms = normalized_timeout;
         config.worker_config.load_cache_timeout_ms    = normalized_timeout;
+        return config;
+    }
+
+    // Multi-module production factory: install the transfer view derived from
+    // every module so draft (mtp_*) tags are valid for route
+    // validation, payload lookup, and expected-buffer accounting.
+    static P2PConnectorConfig create(const RuntimeConfig&     runtime_config,
+                                     const CacheStoreConfig&  cache_store_config,
+                                     const ParallelismConfig& parallelism_config,
+                                     const PDSepConfig&       pd_sep_config,
+                                     uint32_t                 layer_all_num,
+                                     size_t                   llm_kv_block_size_bytes,
+                                     const CacheConfig&       cache_config) {
+        P2PConnectorConfig config = create(runtime_config,
+                                           cache_store_config,
+                                           parallelism_config,
+                                           pd_sep_config,
+                                           layer_all_num,
+                                           llm_kv_block_size_bytes);
+        auto topology                    = buildTransferTopology(cache_config);
+        config.scheduler_config.topology = topology;
+        config.worker_config.topology    = std::move(topology);
+        config.scheduler_config.block_table_tags = cache_config.allGroupTags();
+        auto& linear_specs = config.worker_config.linear_specs_by_layer;
+        linear_specs.resize(config.worker_config.topology->layers().size());
+        for (const auto& layer : config.worker_config.topology->layers()) {
+            for (const auto& tag : layer.group_tags) {
+                const auto& spec = config.worker_config.topology->group(tag).spec;
+                if (spec->tp_transfer.mode == TpCacheTransferMode::LINEAR_QKV) {
+                    linear_specs[layer.layer_id].emplace(tag, spec);
+                }
+            }
+        }
+        uint32_t stage_offset = 0;
+        for (size_t module_id = 0; module_id < cache_config.moduleCount(); ++module_id) {
+            const auto& module_topology = cache_config.topology(module_id);
+            for (const auto& tag : module_topology.groupTags()) {
+                RTP_LLM_CHECK_WITH_INFO(config.worker_config.module_layers.stage_offsets.emplace(tag, stage_offset).second,
+                                        "P2P transfer topology duplicate cache tag=%s",
+                                        tag.c_str());
+                if (!module_topology.layerIdsForGroup(tag).empty()) {
+                    config.scheduler_config.module_by_tag.emplace(tag, module_id);
+                }
+            }
+            stage_offset += module_topology.layers().size();
+        }
+        config.scheduler_config.module_layers = config.worker_config.module_layers;
         return config;
     }
 };

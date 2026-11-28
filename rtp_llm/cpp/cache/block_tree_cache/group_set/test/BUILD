@@ -30,7 +30,10 @@ cc_test(
     exec_properties = {"gpu": "L20_CU13"},
     srcs = ["GroupSetTest.cc"],
     copts = test_copts,
-    deps = test_deps + ["//rtp_llm/cpp/cache/block_tree_cache/transfer/test:block_transfer_engine_test_utils"],
+    deps = test_deps + [
+        "//rtp_llm/cpp/cache/block_tree_cache/transfer/test:block_transfer_engine_test_utils",
+        "//rtp_llm/cpp/cache/test:cache_config_test_access",
+    ],
     env = {},
     tags = ["L20_CU13"],
 )

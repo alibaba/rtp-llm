@@ -76,8 +76,9 @@ struct KeyShardSpec {
 struct TransferRoute {
     struct LayerMapping {
         int global_id;
-        int src_local_id;
-        int dst_local_id;
+        // RPC indices in each stage's main-then-draft layer order.
+        int src_stage_layer_id;
+        int dst_stage_layer_id;
     };
 
     int         route_id = 0;
@@ -101,6 +102,10 @@ struct TransferRoute {
     size_t                    dst_slice_payload_bytes    = 0;
     bool                      linear_qkv_segments        = false;
     bool                      filter_prefill_keys        = false;
+    // PP route projection uses the destination stage's block geometry at the scheduling rank.
+    CacheGroupPolicy          dst_group_policy;
+    int                       dst_physical_cp_size = 1;
+    int                       dst_physical_cp_rank = 0;
 };
 
 struct TransferPlan {

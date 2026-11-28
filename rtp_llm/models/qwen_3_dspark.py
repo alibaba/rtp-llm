@@ -67,6 +67,13 @@ class Qwen3DSpark(QwenV3):
         return False
 
     @classmethod
+    def _post_build_model_config(cls, model_config) -> None:
+        super()._post_build_model_config(model_config)
+        from rtp_llm.models_py.utils.kvcache import declare_draft_cache_tags
+
+        declare_draft_cache_tags(model_config)
+
+    @classmethod
     def _create_config(cls, ckpt_path: str) -> ModelConfig:
         dspark = get_config_from_path(ckpt_path)
         assert dspark is not None, f"config.json missing under {ckpt_path}"

@@ -110,6 +110,13 @@ void encodeTestRecord(void* data, size_t payload_bytes) {
     std::memcpy(bytes + encoded - sizeof(crc), &crc, sizeof(crc));
 }
 
+std::shared_ptr<const CacheConfig> makeTestCacheConfig(const CacheTopology& topology) {
+    auto cache_config                            = std::make_shared<CacheConfig>();
+    cache_config->seq_size_per_block             = topology.groups().front().seqSizePerBlock();
+    cache_config->setTopology(0, topology.groups(), topology.layers());
+    return cache_config;
+}
+
 BackingLayout makeTestBackingLayout(size_t payload_bytes, bool enable_crc, bool physical_geometry) {
     const size_t storage_bytes = enable_crc ? CrcCopyWorkspace::encodedBytes(payload_bytes) : payload_bytes;
     return {physical_geometry ? payload_bytes : 0, storage_bytes, ((storage_bytes + 4095) / 4096) * 4096, enable_crc};
@@ -151,7 +158,7 @@ GroupSetPtr makeTestGroupSet(size_t                               group_set_id,
         }
     }
     group_set->initialize(group_set_id,
-                          std::move(topology),
+                          makeTestCacheConfig(*topology),
                           std::move(group_tags),
                           makeTestBackingLayout(payload_bytes, enable_crc, physical_payload_bytes > 0));
     return group_set;

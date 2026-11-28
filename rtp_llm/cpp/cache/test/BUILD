@@ -66,6 +66,15 @@ cc_test(
 )
 
 cc_library(
+    name = "cache_config_test_access",
+    srcs = ["CacheConfigTestAccess.cc"],
+    hdrs = ["CacheConfigTestAccess.h"],
+    copts = test_copts,
+    deps = ["//rtp_llm/cpp/cache:cache_config"],
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
     name = "cache_config_test_utils",
     hdrs = [
         "CacheConfigTestUtils.h",
@@ -73,6 +82,7 @@ cc_library(
     ],
     copts = test_copts,
     deps = [
+        ":cache_config_test_access",
         "//rtp_llm/cpp/cache:cache_config",
         "//rtp_llm/cpp/cache:cache_types",
         "//rtp_llm/cpp/config:model_config",
@@ -85,6 +95,7 @@ cc_test(
     srcs = ["CacheTopologyTest.cc"],
     copts = test_copts,
     deps = [
+        ":cache_config_test_access",
         "//rtp_llm/cpp/cache:cache_config",
         "@com_google_googletest//:gtest",
         "@com_google_googletest//:gtest_main",
@@ -180,6 +191,7 @@ cc_test(
     data = [],
     copts = test_copts,
     deps = [
+        ":cache_config_test_access",
         "//rtp_llm/cpp/cache:cp_slot_mapper",
         "@com_google_googletest//:gtest",
         "@com_google_googletest//:gtest_main",

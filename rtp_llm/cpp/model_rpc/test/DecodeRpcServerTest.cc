@@ -196,6 +196,9 @@ TEST(DecodeRpcServerTest, PipelineHandoffCarriesStageLocalGeometry) {
     for (int stage_id = 0; stage_id < 2; ++stage_id) {
         auto* stage = layout.add_stages();
         stage->set_main_layer_begin(stage_id * 2);
+        if (stage_id == 0) {
+            stage->add_block_table_tags("full");
+        }
         stage->set_main_layer_count(2);
         stage->add_worker_indices(stage_id * 2);
         stage->add_worker_indices(stage_id * 2 + 1);
@@ -231,8 +234,8 @@ TEST(DecodeRpcServerTest, PipelineHandoffCarriesStageLocalGeometry) {
     for (const auto& route : plan.plan.routes) {
         for (const auto& layer : route.layers) {
             EXPECT_EQ(route.src_rank / 2, route.dst_rank / 2);
-            EXPECT_EQ(layer.src_local_id, layer.global_id % 2);
-            EXPECT_EQ(layer.dst_local_id, layer.global_id % 2);
+            EXPECT_EQ(layer.src_stage_layer_id, layer.global_id % 2);
+            EXPECT_EQ(layer.dst_stage_layer_id, layer.global_id % 2);
             layers_by_rank.emplace(layer.global_id, route.dst_rank);
         }
     }

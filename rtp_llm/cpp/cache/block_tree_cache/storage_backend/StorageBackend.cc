@@ -173,18 +173,18 @@ StorageBackend::~StorageBackend() {
                             "StorageBackend must be shutdown before derived destruction");
 }
 
-bool StorageBackend::init(std::shared_ptr<const CacheTopology> topology,
-                          PoolsByTag                           pools_by_tag,
-                          BufferResolver                       buffer_resolver) {
+bool StorageBackend::init(std::shared_ptr<const CacheConfig> cache_config,
+                          PoolsByTag                         pools_by_tag,
+                          StorageBufferResolver              buffer_resolver) {
     if (init_attempted_) {
         RTP_LLM_LOG_ERROR("StorageBackend initialization has already been attempted");
         return false;
     }
-    RTP_LLM_CHECK(topology && buffer_resolver);
-    RTP_LLM_CHECK(pools_by_tag.size() == topology->groups().size());
+    RTP_LLM_CHECK(cache_config && buffer_resolver);
+    RTP_LLM_CHECK(pools_by_tag.size() == static_cast<size_t>(cache_config->allGroupNums()));
     std::unordered_set<const DeviceBlockPool*> seen_pools;
     for (const auto& [tag, pool] : pools_by_tag) {
-        (void)topology->group(tag);
+        (void)cache_config->group(tag);
         RTP_LLM_CHECK_WITH_INFO(pool != nullptr, "null storage pool for tag=%s", tag.c_str());
         RTP_LLM_CHECK_WITH_INFO(
             seen_pools.emplace(pool.get()).second, "storage tags must own distinct pools: tag=%s", tag.c_str());
@@ -197,14 +197,14 @@ bool StorageBackend::init(std::shared_ptr<const CacheTopology> topology,
         RTP_LLM_LOG_ERROR("StorageBackend executor cannot be shared between backends");
         return false;
     }
-    topology_            = std::move(topology);
-    pools_by_tag_        = std::move(pools_by_tag);
-    buffer_resolver_     = std::move(buffer_resolver);
-    const auto fail_init = [this] {
+    cache_config_            = std::move(cache_config);
+    pools_by_tag_            = std::move(pools_by_tag);
+    storage_buffer_resolver_ = std::move(buffer_resolver);
+    const auto fail_init     = [this] {
         shutdownImpl();
-        buffer_resolver_ = {};
+        storage_buffer_resolver_ = {};
         pools_by_tag_.clear();
-        topology_.reset();
+        cache_config_.reset();
         return false;
     };
     bool impl_initialized = false;
@@ -367,7 +367,7 @@ void StorageBackend::validateRequest(const StorageRequest& request, bool allow_n
         std::unordered_set<std::string> seen_tags;
         for (const auto& handle : request.handles[key_index]) {
             RTP_LLM_CHECK_WITH_INFO(!handle.tag.empty(), "storage handle has empty tag at key=%zu", key_index);
-            (void)topology().group(handle.tag);
+            (void)cache_config_->group(handle.tag);
             RTP_LLM_CHECK_WITH_INFO(seen_tags.emplace(handle.tag).second,
                                     "storage request has duplicate tag=%s at key=%zu",
                                     handle.tag.c_str(),
@@ -380,24 +380,36 @@ void StorageBackend::validateRequest(const StorageRequest& request, bool allow_n
     }
 }
 
-const CacheTopology& StorageBackend::topology() const {
-    RTP_LLM_CHECK(topology_ != nullptr);
-    return *topology_;
-}
-
 const DeviceBlockPoolPtr& StorageBackend::devicePool(const std::string& tag) const {
     return pools_by_tag_.at(tag);
 }
 
 std::vector<BlockInfo> StorageBackend::convertIndexToBuffer(int layer_id, const std::string& tag, int block_id) const {
-    RTP_LLM_CHECK(static_cast<bool>(buffer_resolver_));
-    (void)topology().group(tag);
-    return buffer_resolver_(layer_id, tag, block_id);
+    return resolveStorageBuffer(layer_id, tag, block_id);
+}
+
+const CacheConfig& StorageBackend::cacheConfig() const {
+    RTP_LLM_CHECK(cache_config_ != nullptr);
+    return *cache_config_;
+}
+
+std::vector<BlockInfo>
+StorageBackend::resolveStorageBuffer(int layer_ordinal, const std::string& tag, int block_id) const {
+    RTP_LLM_CHECK(static_cast<bool>(storage_buffer_resolver_));
+    const size_t module_id = cache_config_->moduleOfTag(tag);
+    const auto   layer_ids = cache_config_->layerIdsForGroup(module_id, tag);
+    RTP_LLM_CHECK_WITH_INFO(layer_ordinal >= 0 && static_cast<size_t>(layer_ordinal) < layer_ids.size(),
+                            "pool layer ordinal=%d out of range [0, %zu) for tag=%s",
+                            layer_ordinal,
+                            layer_ids.size(),
+                            tag.c_str());
+    return storage_buffer_resolver_(layer_ordinal, tag, block_id);
 }
 
 bool StorageBackend::isHandleRequired(size_t key_index, size_t matched_key_count, std::string_view tag) const {
     RTP_LLM_CHECK(key_index < matched_key_count);
-    const size_t reuse_count = topology().group(tag).reuseBlockCount(matched_key_count);
+    const GroupBase& group       = cache_config_->group(tag);
+    const size_t     reuse_count = group.reuseBlockCount(matched_key_count);
     return matched_key_count - key_index <= reuse_count;
 }
 

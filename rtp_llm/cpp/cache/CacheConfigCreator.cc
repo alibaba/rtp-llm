@@ -4,6 +4,7 @@
 #include <limits>
 #include <map>
 #include <numeric>
+#include <set>
 #include <utility>
 #include <cstring>
 #include <rapidjson/document.h>
@@ -59,49 +60,28 @@ KVCacheBlockBudget blockBudgetForConfig(const CacheConfig& config) {
     KVCacheBlockBudget budget;
     budget.max_baseline_block_num = config.maxBaselineBlockNum();
     addBudgetBytes(budget.explicit_pool_reserve_bytes, config.linear_replay.reserve_bytes);
-    for (size_t gid = 0; gid < config.topology().groups().size(); ++gid) {
-        const auto& group          = config.topology().groups()[gid];
-        size_t      group_bytes    = 0;
-        const auto  append_segment = [&](const CacheConfig& source, const GroupBase& segment, bool main) {
-            const auto   layer_ids = source.layerIdsForGroup(segment.tag);
-            const size_t layer_count =
-                main ? std::count_if(
-                           layer_ids.begin(),
-                           layer_ids.end(),
-                           [&source](int id) { return id >= 0 && static_cast<uint32_t>(id) < source.layer_num; }) :
-                        layer_ids.size();
-            addBudgetBytes(group_bytes, segment.kvBlockStrideBytes(), layer_count);
-            addBudgetBytes(group_bytes, segment.kvScaleStrideBytes(), layer_count);
-        };
-        // Exactly the physical segments assembled by BlockPoolConfigHelper:
-        // target layers use the target Spec, draft layers use their own Specs.
-        append_segment(config, group, true);
-        for (const auto& sub : config.mtp_sub_configs) {
-            RTP_LLM_CHECK_WITH_INFO(sub != nullptr, "MTP cache configuration is null for tag=%s", group.tag.c_str());
-            RTP_LLM_CHECK_WITH_INFO(gid < sub->topology().groups().size(),
-                                    "MTP cache configuration is missing group index=%zu for tag=%s",
-                                    gid,
-                                    group.tag.c_str());
-            RTP_LLM_CHECK_WITH_INFO(sub->topology().groups()[gid].tag == group.tag,
-                                    "MTP group order is inconsistent for tag=%s",
-                                    group.tag.c_str());
-            append_segment(*sub, sub->topology().groups()[gid], false);
-        }
-        const auto& policy = group.policy;
-        if (policy.explicit_block_num > 0) {
-            if (policy.charge_to_paged_budget) {
-                addBudgetBytes(budget.explicit_pool_reserve_bytes, group_bytes, policy.explicit_block_num);
+    // Each module owns an independent pool per group tag, so the paged-HBM
+    // budget is the sum over every module's own group byte layout.
+    for (size_t module_id = 0; module_id < config.moduleCount(); ++module_id) {
+        const auto& module_topology = config.topology(module_id);
+        for (const auto& group : module_topology.groups()) {
+            const size_t group_bytes = module_topology.blockSizeBytesForGroup(group.tag);
+            const auto&  policy      = group.policy;
+            if (policy.explicit_block_num > 0) {
+                if (policy.charge_to_paged_budget) {
+                    addBudgetBytes(budget.explicit_pool_reserve_bytes, group_bytes, policy.explicit_block_num);
+                }
+                continue;
             }
-            continue;
-        }
-        switch (policy.group_type) {
-            case CacheGroupType::FULL:
-            case CacheGroupType::LINEAR:
-                addBudgetBytes(budget.paged_block_bytes, group_bytes, config.blockWeight(group.tag));
-                break;
-            case CacheGroupType::SWA:
-                addBudgetBytes(budget.swa_block_bytes, group_bytes, config.blockWeight(group.tag));
-                break;
+            switch (policy.group_type) {
+                case CacheGroupType::FULL:
+                case CacheGroupType::LINEAR:
+                    addBudgetBytes(budget.paged_block_bytes, group_bytes, config.blockWeight(group.tag));
+                    break;
+                case CacheGroupType::SWA:
+                    addBudgetBytes(budget.swa_block_bytes, group_bytes, config.blockWeight(group.tag));
+                    break;
+            }
         }
     }
     return budget;
@@ -125,16 +105,15 @@ void resolvePoolBlockWeights(CacheConfig& config, const std::string& json, int64
         RTP_LLM_CHECK_WITH_INFO(weights.emplace(tag, static_cast<uint32_t>(it->value.GetUint64())).second,
                                 "KV_CACHE_POOL_BLOCK_WEIGHTS has duplicate pool '%s'",
                                 tag.c_str());
-        const auto group = std::find_if(config.groups().begin(),
-                                        config.groups().end(),
-                                        [&](const GroupBase& candidate) { return candidate.tag == tag; });
-        if (group == config.groups().end()) {
-            /** PP accepts weight entries for pools outside the configured model. */
+        const auto tags = config.allGroupTags();
+        if (std::find(tags.begin(), tags.end(), tag) == tags.end()) {
+            // Every PP rank sees the deployment config, including tags owned by other stages.
             RTP_LLM_CHECK_WITH_INFO(pp_size > 1,
-                                    "KV_CACHE_POOL_BLOCK_WEIGHTS has unknown pool '%s' in merged target/draft topology",
+                                    "KV_CACHE_POOL_BLOCK_WEIGHTS has unknown pool '%s' in cache topology",
                                     tag.c_str());
             continue;
         }
+        const auto* group = &config.group(tag);
         RTP_LLM_CHECK_WITH_INFO(group->policy.memory_placement == CacheMemoryPlacement::DEVICE,
                                 "KV_CACHE_POOL_BLOCK_WEIGHTS pool '%s' must be DEVICE resident",
                                 tag.c_str());
@@ -144,12 +123,7 @@ void resolvePoolBlockWeights(CacheConfig& config, const std::string& json, int64
                                 group->policy.explicit_block_num);
     }
     config.pool_block_weights = std::move(weights);
-    // Children have the merged logical topology, including empty target-only
-    // groups. Their physical views must publish the same pool capacities.
-    for (auto& sub : config.mtp_sub_configs) {
-        RTP_LLM_CHECK_WITH_INFO(sub != nullptr, "MTP cache configuration is null while resolving pool weights");
-        sub->pool_block_weights = config.pool_block_weights;
-    }
+
 }
 
 std::pair<uint32_t, uint32_t> resolveSeqSizes(const ModelConfig& model_config, const KVCacheConfig& kv_cache_config) {
@@ -277,6 +251,7 @@ CacheGroupPolicy makeGroupPolicy(const KVCacheSpecDesc& desc, int sliding_window
 }
 
 void populateGroups(CacheConfig&                 config,
+                    size_t                       module_id,
                     const ModelConfig&           model_config,
                     const SpecBuildContext&      ctx,
                     const StageLayerRange&       range) {
@@ -310,7 +285,7 @@ void populateGroups(CacheConfig&                 config,
             }
         }
     }
-    config.setTopology(std::move(groups), std::move(layers));
+    config.setTopology(module_id, std::move(groups), std::move(layers));
 }
 
 CacheConfig createConfigFromDescs(const ModelConfig&       model_config,
@@ -324,8 +299,8 @@ CacheConfig createConfigFromDescs(const ModelConfig&       model_config,
     const auto ctx =
         makeSpecBuildContext(model_config, parallelism_config, seq_size, kernel_seq_size, gen_num_per_cycle);
     CacheConfig config;
-    config.dtype                   = ctx.dtype;
-    config.layer_num               = range.size;
+    auto&       main = config.moduleMetadata(0);
+    main.dtype       = ctx.dtype;
     config.global_layer_begin      = range.begin;
     config.cache_min_replay_tokens = std::max(1, model_config.cache_min_replay_tokens);
     config.cache_key_hash_seed     = model_config.cache_key_hash_seed;
@@ -340,20 +315,19 @@ CacheConfig createConfigFromDescs(const ModelConfig&       model_config,
                             "local PageRR allocation requires kv_cache_sharded transport metadata");
 
     config.seq_size_per_block = seq_size;
-    config.use_mla            = model_config.attn_config.use_mla;
-    config.is_sparse          = model_config.attn_config.is_sparse;
-    populateGroups(config, model_config, ctx, range);
+    main.use_mla             = model_config.attn_config.use_mla;
+    main.is_sparse           = model_config.attn_config.is_sparse;
+    populateGroups(config, 0, model_config, ctx, range);
     for (const auto& group : config.topology().groups()) {
         const bool opaque =
             group.spec->type == KVCacheSpecType::OpaqueKV || group.spec->type == KVCacheSpecType::OpaqueState;
         /** The first decode allocation decides reuse for all cache groups in the request. */
-        config.disable_decode_first_malloc_device_reuse |= opaque;
+        main.disable_decode_first_malloc_device_reuse |= opaque;
         if (config.layerIdsForGroup(group.tag).empty()) {
             continue;
         }
-        config.use_typed_cache_regions |= opaque;
-        config.use_opaque_kv_cache_store |= opaque;
-        config.is_sparse |= group.spec->type == KVCacheSpecType::OpaqueKV;
+        main.use_opaque_kv_cache_store |= opaque;
+        main.is_sparse |= group.spec->type == KVCacheSpecType::OpaqueKV;
     }
     return config;
 }
@@ -386,7 +360,7 @@ CacheConfig CacheConfigCreator::createBasicConfig(const ModelConfig&       model
     auto config =
         createConfigFromDescs(model_config, parallelism_config, kv_cache_config, gen_num_per_cycle, range);
     RTP_LLM_CHECK_WITH_INFO(kv_cache_config.reuse_cache_tail_blocks > 0, "reuse_cache_tail_blocks must be positive");
-    config.reuse_cache_tail_blocks = kv_cache_config.reuse_cache_tail_blocks;
+    config.moduleMetadata(0).reuse_cache_tail_blocks = kv_cache_config.reuse_cache_tail_blocks;
     {
         auto groups = config.topology().groups();
         for (auto& group : groups) {
@@ -403,7 +377,7 @@ CacheConfig CacheConfigCreator::createBasicConfig(const ModelConfig&       model
                 group.policy.charge_to_paged_budget = group.policy.memory_placement == CacheMemoryPlacement::DEVICE;
             }
         }
-        config.setTopology(std::move(groups), config.topology().layers());
+        config.setTopology(0, std::move(groups), config.topology().layers());
     }
     if (!kv_cache_config.enable_linear_cache_reclaim) {
         return config;
@@ -432,7 +406,7 @@ CacheConfig CacheConfigCreator::createBasicConfig(const ModelConfig&       model
     }
     RTP_LLM_CHECK_WITH_INFO(!parallelism_config.prefill_cp_config.kv_cache_sharded,
                             "enable_linear_cache_reclaim does not support CP-sharded KV cache");
-    config.enable_linear_cache_reclaim = true;
+    config.moduleMetadata(0).enable_linear_cache_reclaim = true;
     return config;
 }
 
@@ -463,7 +437,7 @@ CacheConfig CacheConfigCreator::createWarmupConfig(const ModelConfig&       mode
     for (auto& group : groups) {
         group.block_num = 2;
     }
-    config.setTopology(std::move(groups), config.topology().layers());
+    config.setTopology(0, std::move(groups), config.topology().layers());
     return config;
 }
 
@@ -472,31 +446,45 @@ CacheConfig CacheConfigCreator::createConfig(const ModelConfig&                 
                                              const KVCacheConfig&                             kv_cache_config,
                                              const std::optional<SpeculativeExecutionConfig>& sp_config,
                                              const ModelConfig*                               draft_model_config,
-                                             bool                                             is_mtp,
-                                             bool                                             is_eagle) {
+                                             bool /*is_mtp*/,
+                                             bool /*is_eagle*/) {
     RTP_LLM_CHECK_WITH_INFO(draft_model_config == nullptr || sp_config.has_value(),
                             "draft cache configuration requires speculative execution configuration");
+    // Main state-ring geometry must agree across PP stages, including stages
+    // that lack a local draft module.
+    const bool has_speculative_round =
+        draft_model_config != nullptr
+        || (parallelism_config.pp_size > 1 && sp_config && sp_config->type != SP_TYPE_NONE);
     RTP_LLM_CHECK_WITH_INFO(
-        draft_model_config == nullptr
+        !has_speculative_round
             || (sp_config->gen_num_per_cycle >= 0 && sp_config->gen_num_per_cycle <= std::numeric_limits<int>::max()),
         "draft proposal token count must fit a non-negative int");
-    const int  gen_num_per_cycle  = draft_model_config != nullptr ? sp_config->gen_num_per_cycle : 0;
-    auto config = createMainModelCacheConfig(model_config, parallelism_config, kv_cache_config, gen_num_per_cycle);
+    const int  gen_num_per_cycle  = has_speculative_round ? sp_config->gen_num_per_cycle : 0;
+    auto       config = createMainModelCacheConfig(model_config, parallelism_config, kv_cache_config, gen_num_per_cycle);
     if (draft_model_config != nullptr) {
         const auto layout = RankLayout::fromParallelismConfig(parallelism_config);
-        RTP_LLM_CHECK_WITH_INFO(layout.isLastStage(), "draft cache configuration is only valid on the last PP stage");
+        // The draft topology registers every draft tag on every PP stage;
+        // stages without local draft layers keep the group definitions for
+        // block ID allocation but bind no layers.
         const StageLayerRange draft_range{0, static_cast<uint32_t>(draft_model_config->num_layers)};
-        auto                  draft =
-            createBasicConfig(*draft_model_config, parallelism_config, kv_cache_config, gen_num_per_cycle, draft_range);
-        // DSpARK/DFlash are single multi-layer block-draft models; gamma is
-        // the proposal width, not a count of independent one-layer modules.
-        int num_mtp_modules = is_mtp && !is_eagle && !isBlockDraftType(sp_config->type) ? gen_num_per_cycle : 1;
-        RTP_LLM_CHECK_WITH_INFO(num_mtp_modules > 0, "draft cache configuration requires at least one module");
-        config.mtp_sub_configs.reserve(static_cast<size_t>(num_mtp_modules));
-        for (int module = 0; module < num_mtp_modules; ++module) {
-            config.mtp_sub_configs.push_back(config.mergeMTPModule(draft, module, config.layer_num));
+        auto draft_config = createBasicConfig(
+            *draft_model_config, parallelism_config, kv_cache_config, gen_num_per_cycle, draft_range);
+        RTP_LLM_CHECK_WITH_INFO(config.local_kv_cache_sharded == draft_config.local_kv_cache_sharded,
+                                "target and MTP must use the same local KV cache layout");
+        RTP_LLM_CHECK_WITH_INFO(draft_config.seq_size_per_block == config.seq_size_per_block,
+                                "target cache-key block span %zu differs from the independently parsed MTP span %zu",
+                                config.seq_size_per_block,
+                                draft_config.seq_size_per_block);
+        if (!layout.isLastStage()) {
+            draft_config.setTopology(0, draft_config.groups(), {});
         }
+        // The draft module declares its own module-scoped tags in the Python
+        // model description (``ModelConfig.cache_tag_prefix``); no implicit
+        // renaming happens here.  Cross-module duplicates are rejected by
+        // ``validateCrossModuleInvariants``.
+        config.addMtpModule(draft_config.topologyPtr(0), draft_config.moduleMetadata(0));
     }
+    config.validateCrossModuleInvariants();
     resolvePoolBlockWeights(config, kv_cache_config.kv_cache_pool_block_weights, parallelism_config.pp_size);
     return config;
 }
@@ -512,24 +500,20 @@ void CacheConfigCreator::configureLinearReplay(CacheConfig&                     
         || (sp_config->type != SP_TYPE_MTP && sp_config->type != SP_TYPE_EAGLE && sp_config->type != SP_TYPE_EAGLE3)) {
         return;
     }
-    std::vector<int> group_ids;
+    std::vector<std::string> group_tags;
     size_t           layer_count = 0;
-    for (size_t group_id = 0; group_id < config.groups().size(); ++group_id) {
-        const auto& group = config.groups()[group_id];
+    for (const auto& group : config.groups()) {
         if (group.policy.group_type != CacheGroupType::LINEAR
             || group.policy.memory_placement != CacheMemoryPlacement::DEVICE) {
             continue;
         }
-        const auto layers        = config.layerIdsForGroup(group.tag);
-        const auto target_layers = std::count_if(layers.begin(), layers.end(), [&](int layer) {
-            return layer >= 0 && static_cast<uint32_t>(layer) < config.layer_num;
-        });
+        const auto target_layers = config.layerIdsForGroup(group.tag).size();
         if (target_layers > 0) {
-            group_ids.push_back(static_cast<int>(group_id));
-            layer_count += static_cast<size_t>(target_layers);
+            group_tags.push_back(group.tag);
+            layer_count += target_layers;
         }
     }
-    if (group_ids.empty()) {
+    if (group_tags.empty()) {
         return;
     }
 #if !USING_CUDA || USE_PPU
@@ -551,7 +535,7 @@ void CacheConfigCreator::configureLinearReplay(CacheConfig&                     
                                 && linear.linear_num_key_heads % tp == 0 && linear.linear_num_value_heads % tp == 0,
                             "LINEAR replay requires head counts divisible by attention TP");
     RTP_LLM_CHECK_WITH_INFO(linear.linear_conv_kernel_dim > 1, "LINEAR replay requires convolution history");
-    config.linear_replay = LinearReplayPlan::create(std::move(group_ids),
+    config.linear_replay = LinearReplayPlan::create(std::move(group_tags),
                                                     slot_count,
                                                     sp_config->gen_num_per_cycle + 1,
                                                     {linear.linear_num_key_heads / tp, linear.linear_key_head_dim},
@@ -569,8 +553,10 @@ uint32_t CacheConfigCreator::computeLocalBlockNum(const CacheConfig&            
                                                   const std::optional<WarmUpResult>&               warm_up_result,
                                                   const std::optional<SpeculativeExecutionConfig>& sp_config,
                                                   BlockTreeCrcWorkspacePlan*                       crc_plan) {
-    if (crc_plan)
+    config.validateCrossModuleInvariants();
+    if (crc_plan) {
         *crc_plan = {};
+    }
     uint32_t block_num = 0;
     if (kv_cache_config.test_block_num > 0) {
         RTP_LLM_LOG_INFO("KVCacheConfig explicitly specified baseline kv cache block num %d",
@@ -644,7 +630,7 @@ uint32_t CacheConfigCreator::computeLocalBlockNum(const CacheConfig&            
     RTP_LLM_LOG_INFO("cache layout created: baseline_blocks=%u, baseline_token_span=%lu, draft_modules=%zu",
                      block_num,
                      kv_cache_seq_len,
-                     config.mtp_sub_configs.size());
+                     config.moduleCount() - 1);
     if (kv_cache_seq_len < static_cast<uint64_t>(model_config.max_seq_len)) {
         RTP_LLM_LOG_WARNING("cache baseline token span %lu is below max_seq_len %ld (before per-pool block weights)",
                             kv_cache_seq_len,
@@ -695,31 +681,39 @@ CacheConfigCreator::sizingSignature(const CacheConfig& config, uint32_t baseline
             value >>= 8;
         }
     };
-    number(1);  // Signature format version.
-    // Main #1574's tail-retention knob replaces the old linear_step sizing
-    // input in the cross-rank sizing signature.
-    number(static_cast<uint64_t>(config.reuse_cache_tail_blocks));
-    number(config.groups().size());
-    for (const auto& group : config.groups()) {
-        number(group.tag.size());
-        for (unsigned char character : group.tag) {
-            byte(character);
-        }
-        const auto& policy = group.policy;
-        number(static_cast<uint64_t>(policy.group_type));
-        number(policy.explicit_block_num);
-        number(policy.charge_to_paged_budget);
-        number(static_cast<uint64_t>(policy.memory_placement));
-        number(policy.enable_prefix_reuse);
-        number(policy.reservable);
-        number(policy.active_tail_blocks);
-        number(policy.validate_tail_blocks);
-        number(static_cast<uint64_t>(policy.cp_mapping));
-        number(static_cast<uint64_t>(policy.cp_slice));
-        number(policy.sliding_window_size);
-        number(config.blockWeight(group.tag));
-        if (baseline > 0) {
-            number(config.layerIdsForGroup(group.tag).empty() ? 0 : config.blockNumForGroup(group, baseline));
+    number(3);  // Signature format version: 2 introduced the module-scoped
+    // layout; 3 folds in the full-tag topology (groups without local layers
+    // are recorded with zero baseline capacity).
+    number(config.moduleCount());
+    for (size_t module_id = 0; module_id < config.moduleCount(); ++module_id) {
+        const auto& module_topology = config.topology(module_id);
+        const auto& metadata       = config.moduleMetadata(module_id);
+        number(static_cast<uint64_t>(metadata.reuse_cache_tail_blocks));
+        number(metadata.enable_linear_cache_reclaim);
+        number(module_topology.layers().empty());
+        number(module_topology.groups().size());
+        for (const auto& group : module_topology.groups()) {
+            number(group.tag.size());
+            for (unsigned char character : group.tag) {
+                byte(character);
+            }
+            const auto& policy = group.policy;
+            number(static_cast<uint64_t>(policy.group_type));
+            number(policy.explicit_block_num);
+            number(policy.charge_to_paged_budget);
+            number(static_cast<uint64_t>(policy.memory_placement));
+            number(policy.enable_prefix_reuse);
+            number(policy.reservable);
+            number(policy.active_tail_blocks);
+            number(policy.validate_tail_blocks);
+            number(static_cast<uint64_t>(policy.cp_mapping));
+            number(static_cast<uint64_t>(policy.cp_slice));
+            number(policy.sliding_window_size);
+            number(config.blockWeight(group.tag));
+            if (baseline > 0) {
+                number(module_topology.layerIdsForGroup(group.tag).empty() ? 0
+                                                                          : config.blockNumForGroup(group, baseline));
+            }
         }
     }
     SizingSignature result{};

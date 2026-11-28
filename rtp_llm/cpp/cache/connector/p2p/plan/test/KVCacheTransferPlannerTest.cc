@@ -166,6 +166,11 @@ PipelineTransferLayout pipeline(const std::vector<int>& cuts, const ShardLayout&
     int                    layer_begin = 0;
     for (int count : cuts) {
         auto& stage            = result.stages.emplace_back();
+        if (layer_begin == 0) {
+            for (const auto& entry : shards.groups) {
+                stage.block_table_tags.push_back(entry.first);
+            }
+        }
         stage.main_layer_begin = layer_begin;
         stage.main_layer_count = count;
         stage.main_shards      = shards;
@@ -197,10 +202,10 @@ TEST(PlannerPipeline, CoversDifferentStageCutsInBothDirections) {
             EXPECT_EQ(route.src_partition.count, 2);
             ASSERT_FALSE(route.layers.empty());
             for (const auto& layer : route.layers) {
-                EXPECT_EQ(layer.global_id, source_stage.main_layer_begin + layer.src_local_id);
-                EXPECT_EQ(layer.global_id, target_stage.main_layer_begin + layer.dst_local_id);
-                EXPECT_LT(layer.src_local_id, source_stage.main_layer_count);
-                EXPECT_LT(layer.dst_local_id, target_stage.main_layer_count);
+                EXPECT_EQ(layer.global_id, source_stage.main_layer_begin + layer.src_stage_layer_id);
+                EXPECT_EQ(layer.global_id, target_stage.main_layer_begin + layer.dst_stage_layer_id);
+                EXPECT_LT(layer.src_stage_layer_id, source_stage.main_layer_count);
+                EXPECT_LT(layer.dst_stage_layer_id, target_stage.main_layer_count);
                 EXPECT_TRUE(seen.emplace(layer.global_id, route.dst_rank % 2).second);
             }
         }
@@ -223,6 +228,7 @@ TEST(PlannerPipeline, PreservesCpKeyRulesAndUsesPublishedDraftGeometry) {
     auto& mixed_dst                       = dst.stages[1];
     for (auto* side : {&src, &dst}) {
         auto& root                       = side->stages.front();
+        root.block_table_tags.push_back("mixed");
         root.main_shards.groups["mixed"] = root.main_shards.groups.at(kFullTag);
         root.layer_tags.front().push_back("mixed");
     }
@@ -240,12 +246,12 @@ TEST(PlannerPipeline, PreservesCpKeyRulesAndUsesPublishedDraftGeometry) {
             ASSERT_EQ(route.layers.size(), 1u);
             const auto& layer = route.layers.front();
             if (layer.global_id == 5) {
-                EXPECT_EQ(layer.src_local_id, 2);
-                EXPECT_EQ(layer.dst_local_id, 3);
+                EXPECT_EQ(layer.src_stage_layer_id, 2);
+                EXPECT_EQ(layer.dst_stage_layer_id, 3);
             } else {
                 EXPECT_EQ(layer.global_id, 0);
-                EXPECT_EQ(layer.src_local_id, 0);
-                EXPECT_EQ(layer.dst_local_id, 0);
+                EXPECT_EQ(layer.src_stage_layer_id, 0);
+                EXPECT_EQ(layer.dst_stage_layer_id, 0);
             }
             ++mixed_routes;
         }
@@ -254,8 +260,8 @@ TEST(PlannerPipeline, PreservesCpKeyRulesAndUsesPublishedDraftGeometry) {
             if (layer.global_id == 8) {
                 EXPECT_EQ(route.src_bytes, 2 * kMlaBlockBytes);
                 EXPECT_EQ(route.dst_rank, 2);
-                EXPECT_EQ(layer.src_local_id, 5);
-                EXPECT_EQ(layer.dst_local_id, 2);
+                EXPECT_EQ(layer.src_stage_layer_id, 5);
+                EXPECT_EQ(layer.dst_stage_layer_id, 2);
                 for (auto pos : KVCacheTransferPlanner::resolveKeys(route.src_keys, 5)) {
                     if (pos >= 2) {  // A Decode hit on the first two keys leaves [2, 5) to copy.
                         EXPECT_TRUE(draft_positions.insert(pos).second);

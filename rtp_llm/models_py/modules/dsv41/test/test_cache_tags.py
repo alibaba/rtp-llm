@@ -68,6 +68,29 @@ class CacheTagsTest(unittest.TestCase):
         self.assertEqual(CACHE.swa_region_for_layer(cache, 0), "swa_kv")
         self.assertEqual(CACHE.swa_region_for_layer(cache, 1), "decoder_swa_kv")
 
+    def test_draft_decoder_swa_uses_its_published_pool(self):
+        from rtp_llm.models_py.utils.kvcache import ModuleLocalKVCache
+
+        native_group = SimpleNamespace(tag="mtp_decoder_swa_kv")
+        lookups = []
+        native = SimpleNamespace(
+            group_tags=[native_group.tag],
+            get_layer_cache_groups=lambda layer: [native_group],
+            get_layer_cache=lambda layer, tag: lookups.append((layer, tag)),
+        )
+        cache = ModuleLocalKVCache(native)
+        region = CACHE.swa_region_for_layer(cache, 0)
+        self.assertEqual(region, "decoder_swa_kv")
+        cache.get_layer_cache(0, region)
+        self.assertEqual(lookups, [(0, "mtp_decoder_swa_kv")])
+        table = torch.tensor([[7, 9]], dtype=torch.int32)
+        inputs = {
+            native_group.tag: SimpleNamespace(kv_cache_kernel_block_id_device=table)
+        }
+        torch.testing.assert_close(
+            CACHE.build_block_tables_batched(cache, inputs)[region], table
+        )
+
     def test_bounded_swa_routing_is_layer_specific(self):
         def get(layer, tag):
             if (layer < 21) != (tag == "swa_kv"):

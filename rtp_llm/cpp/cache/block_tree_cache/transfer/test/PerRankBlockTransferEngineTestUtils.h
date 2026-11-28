@@ -40,6 +40,8 @@ std::shared_ptr<const CacheTopology> makeTestTopology(std::vector<TestGroupConfi
 
 void encodeTestRecord(void* data, size_t payload_bytes);
 
+std::shared_ptr<const CacheConfig> makeTestCacheConfig(const CacheTopology& topology);
+
 BackingLayout makeTestBackingLayout(size_t payload_bytes, bool enable_crc, bool physical_geometry = false);
 
 GroupSetPtr makeTestGroupSet(size_t                               group_set_id,

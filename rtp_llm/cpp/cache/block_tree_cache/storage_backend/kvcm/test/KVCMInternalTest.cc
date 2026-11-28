@@ -39,8 +39,15 @@ GroupBase makeGroup(std::string tag, int layer_id, CacheGroupType type, size_t k
     return group;
 }
 
-StorageBackend::BufferResolver unusedResolver() {
+StorageBackend::StorageBufferResolver unusedResolver() {
     return [](int, const std::string&, int) { return std::vector<BlockInfo>{}; };
+}
+
+std::shared_ptr<const CacheConfig> wrapTopologyAsConfig(std::shared_ptr<const CacheTopology> topology) {
+    auto config                            = std::make_shared<CacheConfig>();
+    config->seq_size_per_block             = topology->groups().front().seqSizePerBlock();
+    config->setTopology(0, topology->groups(), topology->layers());
+    return config;
 }
 
 class InvalidAggregatePolicy: public FullLayerGroupPolicy {
@@ -125,7 +132,10 @@ TEST(KVCMInternalTest, FullAggregateUsesCanonicalNameOrderIndependentOfNumericGr
     auto topology = CacheTopology::create(
         {makeGroup("z_group", 0, CacheGroupType::FULL), makeGroup("a_group", 1, CacheGroupType::FULL)},
         {{0, {"z_group"}}, {1, {"a_group"}}});
-    FullLayerGroupPolicy policy(*topology, unusedResolver(), /*full_group_tags=*/{"z_group", "a_group"}, /*other_group_tags=*/{});
+    FullLayerGroupPolicy policy(wrapTopologyAsConfig(topology),
+                                unusedResolver(),
+                                /*full_group_tags=*/{"z_group", "a_group"},
+                                /*other_group_tags=*/{});
     ASSERT_TRUE(policy.init());
 
     GroupPolicy::LocationSpecGroups groups;
@@ -151,11 +161,11 @@ TEST(KVCMInternalTest, FullAggregateUsesCanonicalNameOrderIndependentOfNumericGr
 
 TEST(KVCMInternalTest, FullLinearPolicyPreservesTheSameCanonicalFullIdentityAndSortsCombinedSpecs) {
     auto                       topology = CacheTopology::create({makeGroup("z_group", 0, CacheGroupType::FULL),
-                                           makeGroup("a_group", 1, CacheGroupType::FULL),
-                                           makeGroup("z_linear", 2, CacheGroupType::LINEAR),
-                                           makeGroup("a_linear", 3, CacheGroupType::LINEAR)},
-                                          {{0, {"z_group"}}, {1, {"a_group"}}, {2, {"z_linear"}}, {3, {"a_linear"}}});
-    FullLinearLayerGroupPolicy policy(*topology,
+                                                                 makeGroup("a_group", 1, CacheGroupType::FULL),
+                                                                 makeGroup("z_linear", 2, CacheGroupType::LINEAR),
+                                                                 makeGroup("a_linear", 3, CacheGroupType::LINEAR)},
+                                                                {{0, {"z_group"}}, {1, {"a_group"}}, {2, {"z_linear"}}, {3, {"a_linear"}}});
+    FullLinearLayerGroupPolicy policy(wrapTopologyAsConfig(topology),
                                       unusedResolver(),
                                       /*full_group_tags=*/{"z_group", "a_group"},
                                       /*other_group_tags=*/{"z_linear", "a_linear"});
@@ -186,7 +196,7 @@ TEST(KVCMInternalTest, Dsv41CompactGroupsPreserveSpecsAndWriteSelection) {
     }
     auto topology = CacheTopology::create(std::move(groups), {{0, tags}});
     FullLinearLayerGroupPolicy policy(
-        *topology, unusedResolver(), {tags[0], tags[1], tags[2]}, {tags[3], tags[4]});
+        wrapTopologyAsConfig(topology), unusedResolver(), {tags[0], tags[1], tags[2]}, {tags[3], tags[4]});
     ASSERT_TRUE(policy.init());
     const std::vector<StorageBlockHandle> full_handles{{tags[0], 1}, {tags[1], 1}, {tags[2], 1}};
     auto all_handles = full_handles;
@@ -216,7 +226,8 @@ TEST(KVCMInternalTest, Dsv41CompactGroupsPreserveSpecsAndWriteSelection) {
 
 TEST(KVCMInternalTest, InvalidAggregateBuildDoesNotPublishPartialState) {
     auto topology = CacheTopology::create({makeGroup("full", 0, CacheGroupType::FULL)}, {{0, {"full"}}});
-    InvalidAggregatePolicy policy(*topology, unusedResolver(), /*full_group_tags=*/{"full"}, /*other_group_tags=*/{});
+    InvalidAggregatePolicy policy(
+        wrapTopologyAsConfig(topology), unusedResolver(), /*full_group_tags=*/{"full"}, /*other_group_tags=*/{});
     ASSERT_TRUE(policy.init());
 
     GroupPolicy::LocationSpecGroups groups{{"existing", {"existing_spec"}}};
@@ -229,8 +240,10 @@ TEST(KVCMInternalTest, FullAndLinearTP2LoadsOnlyTheNewestLinearLocation) {
     auto topology = CacheTopology::create(
         {makeGroup("full", 0, CacheGroupType::FULL), makeGroup("linear", 1, CacheGroupType::LINEAR)},
         {{0, {"full"}}, {1, {"linear"}}});
-    FullLinearLayerGroupPolicy policy(
-        *topology, unusedResolver(), /*full_group_tags=*/{"full"}, /*other_group_tags=*/{"linear"});
+    FullLinearLayerGroupPolicy policy(wrapTopologyAsConfig(topology),
+                                      unusedResolver(),
+                                      /*full_group_tags=*/{"full"},
+                                      /*other_group_tags=*/{"linear"});
     ASSERT_TRUE(policy.init());
     GroupPolicy::LocationSpecGroups groups;
     ASSERT_TRUE(policy.buildLocationSpecGroups(/*tp_size=*/2, groups));
@@ -256,8 +269,10 @@ TEST(KVCMInternalTest, FullAndLinearTP2ReturnsNoRemotePrefixWithoutLinearState) 
     auto topology = CacheTopology::create(
         {makeGroup("full", 0, CacheGroupType::FULL), makeGroup("linear", 1, CacheGroupType::LINEAR)},
         {{0, {"full"}}, {1, {"linear"}}});
-    FullLinearLayerGroupPolicy policy(
-        *topology, unusedResolver(), /*full_group_tags=*/{"full"}, /*other_group_tags=*/{"linear"});
+    FullLinearLayerGroupPolicy policy(wrapTopologyAsConfig(topology),
+                                      unusedResolver(),
+                                      /*full_group_tags=*/{"full"},
+                                      /*other_group_tags=*/{"linear"});
     ASSERT_TRUE(policy.init());
     GroupPolicy::LocationSpecGroups groups;
     ASSERT_TRUE(policy.buildLocationSpecGroups(/*tp_size=*/2, groups));
@@ -275,8 +290,10 @@ TEST(KVCMInternalTest, FullAndLinearTP2RejectsIncompleteRankSet) {
     auto topology = CacheTopology::create(
         {makeGroup("full", 0, CacheGroupType::FULL), makeGroup("linear", 1, CacheGroupType::LINEAR)},
         {{0, {"full"}}, {1, {"linear"}}});
-    FullLinearLayerGroupPolicy policy(
-        *topology, unusedResolver(), /*full_group_tags=*/{"full"}, /*other_group_tags=*/{"linear"});
+    FullLinearLayerGroupPolicy policy(wrapTopologyAsConfig(topology),
+                                      unusedResolver(),
+                                      /*full_group_tags=*/{"full"},
+                                      /*other_group_tags=*/{"linear"});
     ASSERT_TRUE(policy.init());
     GroupPolicy::LocationSpecGroups groups;
     ASSERT_TRUE(policy.buildLocationSpecGroups(/*tp_size=*/2, groups));
@@ -288,7 +305,8 @@ TEST(KVCMInternalTest, FullAndLinearTP2RejectsIncompleteRankSet) {
 
 TEST(KVCMInternalTest, FullOnlyTP2RejectsMissingAndDuplicateRanks) {
     auto topology = CacheTopology::create({makeGroup("full", 0, CacheGroupType::FULL)}, {{0, {"full"}}});
-    FullLayerGroupPolicy policy(*topology, unusedResolver(), /*full_group_tags=*/{"full"}, /*other_group_tags=*/{});
+    FullLayerGroupPolicy policy(
+        wrapTopologyAsConfig(topology), unusedResolver(), /*full_group_tags=*/{"full"}, /*other_group_tags=*/{});
     ASSERT_TRUE(policy.init());
     GroupPolicy::LocationSpecGroups groups;
     ASSERT_TRUE(policy.buildLocationSpecGroups(/*tp_size=*/2, groups));
@@ -312,8 +330,10 @@ TEST(KVCMInternalTest, FullAndLinearTP2RejectsDuplicateFullOrLinearSpecs) {
     auto topology = CacheTopology::create(
         {makeGroup("full", 0, CacheGroupType::FULL), makeGroup("linear", 1, CacheGroupType::LINEAR)},
         {{0, {"full"}}, {1, {"linear"}}});
-    FullLinearLayerGroupPolicy policy(
-        *topology, unusedResolver(), /*full_group_tags=*/{"full"}, /*other_group_tags=*/{"linear"});
+    FullLinearLayerGroupPolicy policy(wrapTopologyAsConfig(topology),
+                                      unusedResolver(),
+                                      /*full_group_tags=*/{"full"},
+                                      /*other_group_tags=*/{"linear"});
     ASSERT_TRUE(policy.init());
     GroupPolicy::LocationSpecGroups groups;
     ASSERT_TRUE(policy.buildLocationSpecGroups(/*tp_size=*/2, groups));
@@ -348,7 +368,8 @@ TEST(KVCMInternalTest, FullLinearMultiGroupLoadMatrixCoversTP1TP2AndTwoFullGroup
         for (size_t linear_id = 0; linear_id < test_case.linear_group_count; ++linear_id) {
             linear_group_tags.push_back("linear" + std::to_string(linear_id));
         }
-        FullLinearLayerGroupPolicy policy(*topology, unusedResolver(), full_group_tags, linear_group_tags);
+        FullLinearLayerGroupPolicy policy(
+            wrapTopologyAsConfig(topology), unusedResolver(), full_group_tags, linear_group_tags);
         ASSERT_TRUE(policy.init());
         GroupPolicy::LocationSpecGroups groups;
         ASSERT_TRUE(policy.buildLocationSpecGroups(test_case.tp_size, groups));
@@ -431,7 +452,7 @@ TEST(KVCMInternalTest, FullLinearMultiGroupWriteMatrixPreservesAvailableStatesAn
         for (const auto& test_case : cases) {
             SCOPED_TRACE(::testing::Message() << "tp=" << tp_size << " keys=" << test_case.include_linear.size());
             auto topology = makeMultiGroupTopology(/*full_group_count=*/1, /*linear_group_count=*/2);
-            FullLinearLayerGroupPolicy policy(*topology,
+            FullLinearLayerGroupPolicy policy(wrapTopologyAsConfig(topology),
                                               unusedResolver(),
                                               /*full_group_tags=*/{"full0"},
                                               /*other_group_tags=*/{"linear0", "linear1"});
@@ -450,8 +471,10 @@ TEST(KVCMInternalTest, FullLinearMultiGroupWriteMatrixPreservesAvailableStatesAn
     }
 
     auto                       topology = makeMultiGroupTopology(/*full_group_count=*/1, /*linear_group_count=*/2);
-    FullLinearLayerGroupPolicy policy(
-        *topology, unusedResolver(), /*full_group_tags=*/{"full0"}, /*other_group_tags=*/{"linear0", "linear1"});
+    FullLinearLayerGroupPolicy policy(wrapTopologyAsConfig(topology),
+                                      unusedResolver(),
+                                      /*full_group_tags=*/{"full0"},
+                                      /*other_group_tags=*/{"linear0", "linear1"});
     ASSERT_TRUE(policy.init());
     GroupPolicy::LocationSpecGroups groups;
     ASSERT_TRUE(policy.buildLocationSpecGroups(/*tp_size=*/2, groups));
@@ -462,7 +485,7 @@ TEST(KVCMInternalTest, FullLinearMultiGroupWriteMatrixPreservesAvailableStatesAn
 
 TEST(KVCMInternalTest, FullLinearTwoFullGroupsRejectPartialFullState) {
     auto                       topology = makeMultiGroupTopology(/*full_group_count=*/2, /*linear_group_count=*/2);
-    FullLinearLayerGroupPolicy policy(*topology,
+    FullLinearLayerGroupPolicy policy(wrapTopologyAsConfig(topology),
                                       unusedResolver(),
                                       /*full_group_tags=*/{"full0", "full1"},
                                       /*other_group_tags=*/{"linear0", "linear1"});
@@ -489,7 +512,7 @@ TEST(KVCMInternalTest, FullAndLinearWriteSelectionKeepsEveryAvailableState) {
         {{0, {"full"}}, {1, {"linear"}}});
     const auto handles = std::vector<std::vector<StorageBlockHandle>>{
         {{"full", 10}, {"linear", 20}}, {{"full", 11}}, {{"full", 12}, {"linear", 22}}, {{"full", 13}, {"linear", 23}}};
-    FullLinearLayerGroupPolicy policy(*topology, unusedResolver(), {"full"}, {"linear"});
+    FullLinearLayerGroupPolicy policy(wrapTopologyAsConfig(topology), unusedResolver(), {"full"}, {"linear"});
     ASSERT_TRUE(policy.init());
     GroupPolicy::LocationSpecGroups groups;
     ASSERT_TRUE(policy.buildLocationSpecGroups(/*tp_size=*/2, groups));
@@ -502,17 +525,19 @@ TEST(KVCMInternalTest, FullAndLinearWritesNameAllGroupsToUpgradeExistingFullOnly
     auto topology = CacheTopology::create(
         {makeGroup("full", 0, CacheGroupType::FULL), makeGroup("linear", 1, CacheGroupType::LINEAR)},
         {{0, {"full"}}, {1, {"linear"}}});
-    FullLinearLayerGroupPolicy policy(
-        *topology, unusedResolver(), /*full_group_tags=*/{"full"}, /*other_group_tags=*/{"linear"});
+    FullLinearLayerGroupPolicy policy(wrapTopologyAsConfig(topology),
+                                      unusedResolver(),
+                                      /*full_group_tags=*/{"full"},
+                                      /*other_group_tags=*/{"linear"});
     ASSERT_TRUE(policy.init());
     GroupPolicy::LocationSpecGroups groups;
     ASSERT_TRUE(policy.buildLocationSpecGroups(/*tp_size=*/2, groups));
 
     std::vector<std::string> selected;
     const auto               all_groups = std::vector<std::vector<StorageBlockHandle>>{{{"full", 10}, {"linear", 20}},
-                                                                         {{"full", 11}, {"linear", 21}},
-                                                                         {{"full", 12}, {"linear", 22}},
-                                                                         {{"full", 13}, {"linear", 23}}};
+                                                                                       {{"full", 11}, {"linear", 21}},
+                                                                                       {{"full", 12}, {"linear", 22}},
+                                                                                       {{"full", 13}, {"linear", 23}}};
     ASSERT_TRUE(policy.getNeedWriteGroups(makeStorageRequest(all_groups), all_groups.size(), selected));
     EXPECT_EQ(selected, (std::vector<std::string>{"FfullLlinear", "FfullLlinear", "FfullLlinear", "FfullLlinear"}));
 
@@ -526,7 +551,10 @@ TEST(KVCMInternalTest, FullOnlyTP2PreservesOffsetAndCanonicalMultiGroupWrites) {
     auto topology = CacheTopology::create(
         {makeGroup("z_full", 0, CacheGroupType::FULL), makeGroup("a_full", 1, CacheGroupType::FULL)},
         {{0, {"z_full"}}, {1, {"a_full"}}});
-    FullLayerGroupPolicy policy(*topology, unusedResolver(), /*full_group_tags=*/{"z_full", "a_full"}, /*other_group_tags=*/{});
+    FullLayerGroupPolicy policy(wrapTopologyAsConfig(topology),
+                                unusedResolver(),
+                                /*full_group_tags=*/{"z_full", "a_full"},
+                                /*other_group_tags=*/{});
     ASSERT_TRUE(policy.init());
     GroupPolicy::LocationSpecGroups groups;
     ASSERT_TRUE(policy.buildLocationSpecGroups(/*tp_size=*/2, groups));
@@ -554,7 +582,10 @@ TEST(KVCMInternalTest, FullOnlySelectsAggregateOrSingletonFromAvailableGroups) {
     auto topology = CacheTopology::create(
         {makeGroup("z_full", 0, CacheGroupType::FULL), makeGroup("a_full", 1, CacheGroupType::FULL)},
         {{0, {"z_full"}}, {1, {"a_full"}}});
-    FullLayerGroupPolicy policy(*topology, unusedResolver(), /*full_group_tags=*/{"z_full", "a_full"}, /*other_group_tags=*/{});
+    FullLayerGroupPolicy policy(wrapTopologyAsConfig(topology),
+                                unusedResolver(),
+                                /*full_group_tags=*/{"z_full", "a_full"},
+                                /*other_group_tags=*/{});
     ASSERT_TRUE(policy.init());
     GroupPolicy::LocationSpecGroups groups;
     ASSERT_TRUE(policy.buildLocationSpecGroups(/*tp_size=*/2, groups));
@@ -567,7 +598,8 @@ TEST(KVCMInternalTest, FullOnlySelectsAggregateOrSingletonFromAvailableGroups) {
 
 TEST(KVCMInternalTest, SingleFullGroupUsesEmptyWriteGroupShortcut) {
     auto topology = CacheTopology::create({makeGroup("full", 0, CacheGroupType::FULL)}, {{0, {"full"}}});
-    FullLayerGroupPolicy policy(*topology, unusedResolver(), /*full_group_tags=*/{"full"}, /*other_group_tags=*/{});
+    FullLayerGroupPolicy policy(
+        wrapTopologyAsConfig(topology), unusedResolver(), /*full_group_tags=*/{"full"}, /*other_group_tags=*/{});
     ASSERT_TRUE(policy.init());
     GroupPolicy::LocationSpecGroups groups;
     ASSERT_TRUE(policy.buildLocationSpecGroups(/*tp_size=*/2, groups));
@@ -582,8 +614,10 @@ TEST(KVCMInternalTest, RejectsUnsupportedWriteMasksAndUnknownGroups) {
     auto topology = CacheTopology::create(
         {makeGroup("full", 0, CacheGroupType::FULL), makeGroup("linear", 1, CacheGroupType::LINEAR)},
         {{0, {"full"}}, {1, {"linear"}}});
-    FullLinearLayerGroupPolicy policy(
-        *topology, unusedResolver(), /*full_group_tags=*/{"full"}, /*other_group_tags=*/{"linear"});
+    FullLinearLayerGroupPolicy policy(wrapTopologyAsConfig(topology),
+                                      unusedResolver(),
+                                      /*full_group_tags=*/{"full"},
+                                      /*other_group_tags=*/{"linear"});
     ASSERT_TRUE(policy.init());
     GroupPolicy::LocationSpecGroups groups;
     ASSERT_TRUE(policy.buildLocationSpecGroups(/*tp_size=*/2, groups));
@@ -603,7 +637,7 @@ TEST(KVCMInternalTest, DefaultPolicyRejectsUnusedTopologyGroupWithoutPublishingR
         ++resolver_calls;
         return std::vector<BlockInfo>{};
     };
-    DefaultLayerGroupPolicy policy(*topology, resolver, {"unused", "full"}, {});
+    DefaultLayerGroupPolicy policy(wrapTopologyAsConfig(topology), resolver, {"unused", "full"}, {});
     EXPECT_FALSE(policy.init());
     EXPECT_TRUE(policy.groups().empty());
     GroupPolicy::LocationSpecGroups groups{{"sentinel", {"existing"}}};
@@ -615,7 +649,7 @@ TEST(KVCMInternalTest, DefaultPolicyRejectsUnusedTopologyGroupWithoutPublishingR
 TEST(KVCMInternalTest, FullPolicyRejectsUnusedGroupWithoutPublishingRegistration) {
     auto topology = CacheTopology::create(
         {makeGroup("full", 0, CacheGroupType::FULL), makeGroup("unused", 0, CacheGroupType::FULL)}, {{0, {"full"}}});
-    FullLayerGroupPolicy policy(*topology, unusedResolver(), {"full", "unused"}, {});
+    FullLayerGroupPolicy policy(wrapTopologyAsConfig(topology), unusedResolver(), {"full", "unused"}, {});
     EXPECT_FALSE(policy.init());
     EXPECT_TRUE(policy.groups().empty());
     GroupPolicy::LocationSpecGroups groups{{"sentinel", {"existing"}}};
@@ -637,7 +671,7 @@ TEST(KVCMInternalTest, FullOtherInitRejectsUnusedTopologyGroupWithoutResolvingBu
             ++resolver_calls;
             return std::vector<BlockInfo>{};
         };
-        FullLinearLayerGroupPolicy policy(*topology, resolver, {"full"}, {"linear"});
+        FullLinearLayerGroupPolicy policy(wrapTopologyAsConfig(topology), resolver, {"full"}, {"linear"});
         EXPECT_FALSE(policy.init()) << "used tag=" << used_tag;
         EXPECT_TRUE(policy.groups().empty());
         EXPECT_EQ(resolver_calls, 0u);
@@ -645,9 +679,9 @@ TEST(KVCMInternalTest, FullOtherInitRejectsUnusedTopologyGroupWithoutResolvingBu
 }
 
 TEST(KVCMInternalTest, PreservesHeterogeneousBlockSizesAndScalesLocationSpecsLinearly) {
-    constexpr int          group_count = 19;
-    std::vector<GroupBase> groups;
-    std::vector<LayerBase> layers;
+    constexpr int            group_count = 19;
+    std::vector<GroupBase>   groups;
+    std::vector<LayerBase>   layers;
     std::vector<std::string> full_group_tags;
     groups.reserve(group_count);
     layers.reserve(group_count);
@@ -659,7 +693,8 @@ TEST(KVCMInternalTest, PreservesHeterogeneousBlockSizesAndScalesLocationSpecsLin
         full_group_tags.push_back(tag);
     }
     auto                 topology = CacheTopology::create(std::move(groups), std::move(layers));
-    FullLayerGroupPolicy policy(*topology, unusedResolver(), full_group_tags, /*other_group_tags=*/{});
+    FullLayerGroupPolicy policy(
+        wrapTopologyAsConfig(topology), unusedResolver(), full_group_tags, /*other_group_tags=*/{});
     ASSERT_TRUE(policy.init());
     ASSERT_EQ(policy.groups().size(), group_count);
     for (int group_id = 0; group_id < group_count; ++group_id) {
@@ -681,10 +716,10 @@ TEST(KVCMInternalTest, PreservesHeterogeneousBlockSizesAndScalesLocationSpecsLin
 TEST(KVCMInternalTest, UsesExactMtpPhysicalSizeForRemoteBufferValidation) {
     auto topology = CacheTopology::create({makeGroup("default", 0, CacheGroupType::FULL, /*stride=*/32)},
                                           {{0, {"default"}}, {1, {"default"}}, {2, {"default"}}});
-    const std::array<size_t, 3>    layer_bytes{32, 64, 64};
-    std::array<uint8_t, 3>         storage{};
-    StorageBackend::BufferResolver resolver = [&layer_bytes,
-                                               &storage](int layer_id, const std::string& tag, int block_id) {
+    const std::array<size_t, 3>           layer_bytes{32, 64, 64};
+    std::array<uint8_t, 3>                storage{};
+    StorageBackend::StorageBufferResolver resolver = [&layer_bytes,
+                                                      &storage](int layer_id, const std::string& tag, int block_id) {
         EXPECT_EQ(tag, "default");
         EXPECT_EQ(block_id, 7);
         BlockInfo info;
@@ -693,7 +728,7 @@ TEST(KVCMInternalTest, UsesExactMtpPhysicalSizeForRemoteBufferValidation) {
         info.size_bytes = layer_bytes.at(static_cast<size_t>(layer_id));
         return std::vector<BlockInfo>{info};
     };
-    FullLayerGroupPolicy policy(*topology,
+    FullLayerGroupPolicy policy(wrapTopologyAsConfig(topology),
                                 std::move(resolver),
                                 /*full_group_tags=*/{"default"},
                                 /*other_group_tags=*/{},
@@ -711,10 +746,10 @@ TEST(KVCMInternalTest, UsesExactMtpPhysicalSizeForRemoteBufferValidation) {
 }
 
 TEST(KVCMInternalTest, FullLinearLocationSpecsScaleLinearlyWithManyLinearGroups) {
-    constexpr int          linear_group_count = 19;
-    constexpr int          group_count        = linear_group_count + 1;
-    std::vector<GroupBase> groups;
-    std::vector<LayerBase> layers;
+    constexpr int            linear_group_count = 19;
+    constexpr int            group_count        = linear_group_count + 1;
+    std::vector<GroupBase>   groups;
+    std::vector<LayerBase>   layers;
     std::vector<std::string> linear_group_tags;
     groups.reserve(group_count);
     layers.reserve(group_count);
@@ -730,7 +765,8 @@ TEST(KVCMInternalTest, FullLinearLocationSpecsScaleLinearlyWithManyLinearGroups)
     }
 
     auto                       topology = CacheTopology::create(std::move(groups), std::move(layers));
-    FullLinearLayerGroupPolicy policy(*topology, unusedResolver(), /*full_group_tags=*/{"full"}, linear_group_tags);
+    FullLinearLayerGroupPolicy policy(
+        wrapTopologyAsConfig(topology), unusedResolver(), /*full_group_tags=*/{"full"}, linear_group_tags);
     ASSERT_TRUE(policy.init());
 
     GroupPolicy::LocationSpecGroups location_groups;
@@ -748,7 +784,7 @@ TEST(KVCMInternalTest, FullLinearLocationSpecsScaleLinearlyWithManyLinearGroups)
 
 TEST(KVCMInternalTest, RejectsOverlappingMembershipAndMoreThanSixtyFourGroups) {
     auto one_group = CacheTopology::create({makeGroup("full", 0, CacheGroupType::FULL)}, {{0, {"full"}}});
-    EXPECT_FALSE(DefaultLayerGroupPolicy(*one_group, unusedResolver(), {"full"}, {"full"}).init());
+    EXPECT_FALSE(DefaultLayerGroupPolicy(wrapTopologyAsConfig(one_group), unusedResolver(), {"full"}, {"full"}).init());
 
     std::vector<GroupBase>   groups;
     std::vector<LayerBase>   layers;
@@ -760,7 +796,7 @@ TEST(KVCMInternalTest, RejectsOverlappingMembershipAndMoreThanSixtyFourGroups) {
         full_group_tags.push_back(tag);
     }
     auto too_many = CacheTopology::create(std::move(groups), std::move(layers));
-    EXPECT_FALSE(FullLayerGroupPolicy(*too_many, unusedResolver(), full_group_tags, {}).init());
+    EXPECT_FALSE(FullLayerGroupPolicy(wrapTopologyAsConfig(too_many), unusedResolver(), full_group_tags, {}).init());
 }
 
 TEST(KVCMInternalTest, BufferRoutingUsesStableTagsAndValidatesAggregateSize) {
@@ -777,7 +813,8 @@ TEST(KVCMInternalTest, BufferRoutingUsesStableTagsAndValidatesAggregateSize) {
         info.size_bytes = storage.size();
         return std::vector<BlockInfo>{info};
     };
-    FullLayerGroupPolicy policy(*topology, resolver, /*full_group_tags=*/{"semantic_tag"}, /*other_group_tags=*/{});
+    FullLayerGroupPolicy policy(
+        wrapTopologyAsConfig(topology), resolver, /*full_group_tags=*/{"semantic_tag"}, /*other_group_tags=*/{});
     ASSERT_TRUE(policy.init());
 
     kv_cache_manager::BlockBuffers buffers;
@@ -803,7 +840,8 @@ TEST(KVCMInternalTest, SameLayerGroupsRouteBySemanticTagNotNumericOrder) {
         info.size_bytes = z_storage.size();
         return std::vector<BlockInfo>{info};
     };
-    FullLayerGroupPolicy policy(*topology, resolver, /*full_group_tags=*/{"z_group", "a_group"}, /*other_group_tags=*/{});
+    FullLayerGroupPolicy policy(
+        wrapTopologyAsConfig(topology), resolver, /*full_group_tags=*/{"z_group", "a_group"}, /*other_group_tags=*/{});
     ASSERT_TRUE(policy.init());
 
     kv_cache_manager::BlockBuffers buffers;
@@ -836,7 +874,8 @@ TEST(KVCMInternalTest, BufferSizeMismatchDoesNotPublishPartialBuffers) {
         info.size_bytes = tag == "full" ? valid_storage.size() : invalid_storage.size();
         return std::vector<BlockInfo>{info};
     };
-    FullLayerGroupPolicy policy(*topology, resolver, /*full_group_tags=*/{"full", "other"}, /*other_group_tags=*/{});
+    FullLayerGroupPolicy policy(
+        wrapTopologyAsConfig(topology), resolver, /*full_group_tags=*/{"full", "other"}, /*other_group_tags=*/{});
     ASSERT_TRUE(policy.init());
 
     kv_cache_manager::BlockBuffers buffers(1);
@@ -863,7 +902,7 @@ TEST(KVCMInternalTest, BufferMemoryTypeFollowsBackingStorage) {
         info.size_bytes = storage.size();
         return std::vector<BlockInfo>{info};
     };
-    FullLayerGroupPolicy policy(*topology, resolver, /*full_group_tags=*/{"full"}, /*other_group_tags=*/{});
+    FullLayerGroupPolicy policy(wrapTopologyAsConfig(topology), resolver, /*full_group_tags=*/{"full"}, /*other_group_tags=*/{});
     ASSERT_TRUE(policy.init());
 
     kv_cache_manager::BlockBuffers buffers;
@@ -878,10 +917,95 @@ TEST(KVCMInternalTest, RejectsInvalidGroupModeInputs) {
     auto topology = CacheTopology::create(
         {makeGroup("full", 0, CacheGroupType::FULL), makeGroup("linear", 1, CacheGroupType::LINEAR)},
         {{0, {"full"}}, {1, {"linear"}}});
-    EXPECT_FALSE(FullLayerGroupPolicy(*topology, unusedResolver(), {}, {}).init());
-    EXPECT_FALSE(FullLayerGroupPolicy(*topology, unusedResolver(), {"full"}, {"linear"}).init());
-    EXPECT_FALSE(FullLinearLayerGroupPolicy(*topology, unusedResolver(), {}, {"linear"}).init());
-    EXPECT_FALSE(FullLinearLayerGroupPolicy(*topology, unusedResolver(), {"full"}, {}).init());
+    EXPECT_FALSE(FullLayerGroupPolicy(wrapTopologyAsConfig(topology), unusedResolver(), {}, {}).init());
+    EXPECT_FALSE(FullLayerGroupPolicy(wrapTopologyAsConfig(topology), unusedResolver(), {"full"}, {"linear"}).init());
+    EXPECT_FALSE(FullLinearLayerGroupPolicy(wrapTopologyAsConfig(topology), unusedResolver(), {}, {"linear"}).init());
+    EXPECT_FALSE(FullLinearLayerGroupPolicy(wrapTopologyAsConfig(topology), unusedResolver(), {"full"}, {}).init());
+}
+
+TEST(KVCMInternalTest, ConfigPolicyKeepsTagOrderAndLocalLayerOrdinals) {
+    CacheConfig config;
+    config.seq_size_per_block                    = 8;
+    // Protocol IDs follow sorted tags within each module. Draft mask bits
+    // follow layer encounter order, where mtp_linear precedes mtp_aux.
+    config.setTopology(0,
+                       {makeGroup("full1", 0, CacheGroupType::FULL, /*stride=*/32),
+                        makeGroup("full0", 0, CacheGroupType::FULL, /*stride=*/48)},
+                       {{0, {"full0"}}, {1, {"full1"}}, {2, {"full0"}}});
+    CacheModuleMetadata draft_metadata;
+    ::rtp_llm::test::CacheConfigTestAccess::addMtpModule(
+        config,
+        CacheTopology::create({makeGroup("mtp_linear", 0, CacheGroupType::LINEAR, /*stride=*/64),
+                               makeGroup("mtp_aux", 0, CacheGroupType::FULL, /*stride=*/40)},
+                              {{0, {"mtp_linear"}}, {1, {"mtp_aux"}}}),
+        draft_metadata);
+    config.validateCrossModuleInvariants();
+
+    std::vector<std::pair<int, std::string>> resolver_calls;
+    auto                                     resolver = [&](int layer_ordinal, const std::string& tag, int) {
+        resolver_calls.emplace_back(layer_ordinal, tag);
+        BlockInfo info;
+        info.is_cuda    = true;
+        info.addr       = &config;
+        info.size_bytes = config.group(tag).kvBlockStrideBytes();
+        return std::vector<BlockInfo>{info};
+    };
+    FullLinearLayerGroupPolicy policy(
+        std::make_shared<CacheConfig>(config), resolver, {"full0", "full1", "mtp_aux"}, {"mtp_linear"});
+    ASSERT_TRUE(policy.init());
+
+    GroupPolicy::LocationSpecGroups location_groups;
+    ASSERT_TRUE(policy.buildLocationSpecGroups(/*tp_size=*/1, location_groups));
+    const auto& spec_info = policy.spec_info_map();
+    ASSERT_EQ(spec_info.size(), 4u);
+    EXPECT_EQ(spec_info.at("tp0_Ffull0").group_id, 0);
+    EXPECT_EQ(spec_info.at("tp0_Ffull1").group_id, 1);
+    EXPECT_EQ(spec_info.at("tp0_Fmtp_aux").group_id, 2);
+    EXPECT_EQ(spec_info.at("tp0_Lmtp_linear").group_id, 3);
+    EXPECT_EQ(policy.groups().at(2).group_name_bithash, 8u);
+    EXPECT_EQ(policy.groups().at(3).group_name_bithash, 4u);
+
+    kv_cache_manager::BlockBuffers buffers;
+    ASSERT_TRUE(policy.genBlockBuffers({"full0"}, {7}, buffers));
+    ASSERT_EQ(buffers.size(), 1u);
+    EXPECT_EQ(buffers.front().iovs.size(), 2u);
+    EXPECT_EQ(resolver_calls, (std::vector<std::pair<int, std::string>>{{0, "full0"}, {1, "full0"}}));
+
+    resolver_calls.clear();
+    ASSERT_TRUE(policy.genBlockBuffers({"mtp_linear"}, {7}, buffers));
+    EXPECT_EQ(resolver_calls, (std::vector<std::pair<int, std::string>>{{0, "mtp_linear"}}));
+
+    auto request = makeStorageRequest({{{"full1", 10}, {"full0", 11}, {"mtp_linear", 12}, {"mtp_aux", 13}}});
+    std::vector<std::string> selected;
+    ASSERT_TRUE(policy.getNeedWriteGroups(request, 1, selected));
+    EXPECT_EQ(selected, (std::vector<std::string>{"Ffull0Ffull1Fmtp_auxLmtp_linear"}));
+}
+
+TEST(KVCMInternalTest, ConfigPolicyAcceptsSixtyFourGroupsAndRejectsSixtyFive) {
+    auto make_config = [](size_t group_count) {
+        CacheConfig              config;
+        std::vector<GroupBase>   groups;
+        std::vector<LayerBase>   layers;
+        std::vector<std::string> tags;
+        config.seq_size_per_block                    = 8;
+        for (size_t group_id = 0; group_id < group_count; ++group_id) {
+            const std::string tag = "group_" + std::to_string(group_id);
+            groups.push_back(makeGroup(tag, 0, CacheGroupType::FULL));
+            layers.push_back(LayerBase{static_cast<int>(group_id), {tag}});
+            tags.push_back(tag);
+        }
+        config.setTopology(0, std::move(groups), std::move(layers));
+        return std::make_pair(std::move(config), std::move(tags));
+    };
+
+    auto [config_64, tags_64] = make_config(64);
+    FullLayerGroupPolicy policy_64(std::make_shared<CacheConfig>(std::move(config_64)), unusedResolver(), tags_64, {});
+    EXPECT_TRUE(policy_64.init());
+    EXPECT_EQ(policy_64.groups().size(), 64u);
+
+    auto [config_65, tags_65] = make_config(65);
+    FullLayerGroupPolicy policy_65(std::make_shared<CacheConfig>(std::move(config_65)), unusedResolver(), tags_65, {});
+    EXPECT_FALSE(policy_65.init());
 }
 
 }  // namespace

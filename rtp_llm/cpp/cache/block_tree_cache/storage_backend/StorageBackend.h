@@ -5,6 +5,7 @@
 
 #include <condition_variable>
 #include <chrono>
+#include <cstddef>
 #include <cstdint>
 #include <functional>
 #include <memory>
@@ -16,6 +17,7 @@
 #include <vector>
 
 #include "rtp_llm/cpp/cache/BlockInfo.h"
+#include "rtp_llm/cpp/cache/CacheConfig.h"
 #include "rtp_llm/cpp/cache/CacheTopology.h"
 #include "rtp_llm/cpp/cache/KVCacheResource.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/block_pool/DeviceBlockPool.h"
@@ -161,11 +163,13 @@ public:
     virtual void setReclaimer(std::shared_ptr<BlockTreeReclaimer>) {}
 
 
-    using MatchDone      = std::function<void(
+    using MatchDone  = std::function<void(
         size_t matched_blocks_num, std::shared_ptr<StorageBackendMatchMeta> match_meta, bool success)>;
-    using Done           = std::function<void(ErrorInfo error)>;
-    using PoolsByTag     = std::unordered_map<std::string, DeviceBlockPoolPtr>;
-    using BufferResolver = std::function<std::vector<BlockInfo>(int layer_id, const std::string& tag, int block_id)>;
+    using Done       = std::function<void(ErrorInfo error)>;
+    using PoolsByTag = std::unordered_map<std::string, DeviceBlockPoolPtr>;
+    // The resolver receives the ordinal within the owning tag's device pool.
+    using StorageBufferResolver =
+        std::function<std::vector<BlockInfo>(int layer_ordinal, const std::string& tag, int block_id)>;
 
     // An injected executor may be observed by its owner but belongs to only
     // one backend; init rejects binding the same instance a second time.
@@ -182,7 +186,9 @@ public:
 
     // Initialization is single-attempt. A failed start may permanently stop
     // an injected executor; create a fresh backend/executor to retry.
-    bool init(std::shared_ptr<const CacheTopology> topology, PoolsByTag pools_by_tag, BufferResolver buffer_resolver);
+    bool             init(std::shared_ptr<const CacheConfig> cache_config,
+                          PoolsByTag                         pools_by_tag,
+                          StorageBufferResolver              buffer_resolver);
     // Runtime admission only. Disabling must not tear down clients or interrupt
     // a payload batch that rank 0 has already admitted.
     void setRemoteCacheEnabled(bool enabled) noexcept {
@@ -210,9 +216,10 @@ protected:
     using WriteResult     = std::function<void(bool on_worker)>;
     using WriteCompletion = std::function<void(WriteResult)>;
     using WritePinFilter  = std::function<void(const std::vector<size_t>&)>;
-    const CacheTopology&      topology() const;
     const DeviceBlockPoolPtr& devicePool(const std::string& tag) const;
     std::vector<BlockInfo>    convertIndexToBuffer(int layer_id, const std::string& tag, int block_id) const;
+    const CacheConfig&        cacheConfig() const;
+    std::vector<BlockInfo> resolveStorageBuffer(int layer_ordinal, const std::string& tag, int block_id) const;
     // Match queries contain every possible group handle. Derived matchers use
     // this predicate for each candidate prefix; the core applies the same rule
     // before allocating read targets.
@@ -268,10 +275,10 @@ private:
                                       bool                                                     run_inline = false,
                                       std::optional<StorageBackendExecutor::Clock::time_point> io_deadline = std::nullopt);
     void                     taskFinished();
-    std::shared_ptr<const CacheTopology>           topology_;
+    std::shared_ptr<const CacheConfig>             cache_config_;
     std::atomic<bool>                              remote_cache_enabled_{true};
     PoolsByTag                                     pools_by_tag_;
-    BufferResolver                                 buffer_resolver_;
+    StorageBufferResolver                          storage_buffer_resolver_;
     std::shared_ptr<StorageBackendExecutor>        executor_;
     std::shared_ptr<BlockTreeCacheMetricsReporter> stage_metrics_reporter_;
     std::atomic<bool>                              stage_metrics_enabled_{false};

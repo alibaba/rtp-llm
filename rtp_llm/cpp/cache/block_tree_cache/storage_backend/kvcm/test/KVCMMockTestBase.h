@@ -473,10 +473,9 @@ environmentBuffers(const BackendEnvironment& environment, int layer, const std::
 makeMultiGroupBackendEnvironment(const std::string& pool_name, size_t full_group_count, size_t linear_group_count) {
     RTP_LLM_CHECK(full_group_count > 0 && linear_group_count > 0);
     BackendEnvironment result;
-    const size_t       group_count         = full_group_count + linear_group_count;
-    result.cache_config.dtype              = DataType::TYPE_FP16;
-    result.cache_config.layer_num          = static_cast<uint32_t>(group_count);
-    result.cache_config.seq_size_per_block = 8;
+    const size_t       group_count            = full_group_count + linear_group_count;
+    result.cache_config.moduleMetadata(0).dtype     = DataType::TYPE_FP16;
+    result.cache_config.seq_size_per_block    = 8;
 
     std::vector<KVCacheSpecPtr>   specs;
     std::vector<std::vector<int>> layers_by_group;
@@ -496,7 +495,7 @@ makeMultiGroupBackendEnvironment(const std::string& pool_name, size_t full_group
         types.push_back(is_full ? CacheGroupType::FULL : CacheGroupType::LINEAR);
         tags.push_back(tag);
     }
-    result.cache_config.fromGroupedSpecs(specs, layers_by_group, types, tags);
+    result.cache_config.fromGroupedSpecs(0, specs, static_cast<uint32_t>(group_count), layers_by_group, types, tags);
     result.cache_config.finalizeBlockNums(/*baseline_block_num=*/8, RuntimeConfig{});
 
     initializeEnvironmentPools(result, pool_name, 12);
@@ -627,11 +626,11 @@ read(KVCMStorageBackend& backend, StorageRequest request, std::shared_ptr<Storag
 }
 
 [[maybe_unused]] bool initSingleRank(KVCMStorageBackend& backend, const BackendEnvironment& environment) {
-    return backend.init(environment.cache_config.topologyPtr(),
-                        environment.pools_by_tag,
-                        [&](int layer_id, const std::string& tag, int block_id) {
-                            return environmentBuffers(environment, layer_id, tag, block_id);
-                        });
+    auto cache_config = std::make_shared<CacheConfig>(environment.cache_config);
+    auto pools        = environment.pools_by_tag;
+    return backend.init(cache_config, pools, [pools](int layer_ordinal, const std::string& tag, int block_id) {
+        return pools.at(tag)->convertIndexToBuffer(layer_ordinal, block_id);
+    });
 }
 
 }  // namespace

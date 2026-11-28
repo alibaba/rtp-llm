@@ -95,7 +95,8 @@ cc_test(
     args = ["--gtest_filter=-" + cache_store_test_filter],
     deps = exec_ops_test_deps,
     copts = test_copts,
-    tags = ["manual"],
+    exec_properties = {"gpu": "L20_CU13"},
+    tags = ["manual", "L20_CU13"],
 )
 
 # Run focused cache-store coverage in default wildcard test gates while keeping
@@ -177,6 +178,7 @@ cc_test_wrapper(
     # CUDA-only. cache_store_async_writer is deliberately under-linked, so each
     # platform has to supply the provider for its runtime* symbols.
     deps = [
+        "//rtp_llm/cpp/cache/test:cache_config_test_access",
         "//rtp_llm/cpp/cache",
         "//rtp_llm/cpp/cache:cache_config",
         "//rtp_llm/cpp/cache:coordinator_cache_manager",

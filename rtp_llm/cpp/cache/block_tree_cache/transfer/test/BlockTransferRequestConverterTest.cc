@@ -54,6 +54,7 @@ std::vector<GroupSetPtr> makeGroupSets(bool with_host = true, bool with_disk = t
     disk_config->pool_type       = BlockPoolType::DISK;
     disk_config->pool_name       = "converter_disk";
     disk_config->stride_bytes    = 4096;
+    disk_config->payload_bytes   = disk_config->stride_bytes;
     disk_config->disk_size_bytes = 128 * disk_config->stride_bytes;
     auto disk_pool               = std::make_shared<DiskBlockPool>(disk_config);
 
@@ -88,7 +89,7 @@ std::vector<GroupSetPtr> protectedGroupSets() {
     auto groups = makeGroupSets();
     for (const auto& group : groups) {
         group->initialize(group->groupSetId(),
-                          group->topologyPtr(),
+                          group->cacheConfig(),
                           group->groupTags(),
                           block_transfer_engine_test::makeTestBackingLayout(group->payloadBytes(), true));
     }
@@ -397,10 +398,18 @@ TEST(BlockTransferRequestConverterTest, DecodeContinuesPastPartialOverlapToUniqu
     MemoryOperationRequestPB request;
     appendDeviceToHostItem(request, "group1");
     const auto& source  = groupSets()[1];
-    auto        partial = makeTestGroupSet(
-        0, source->topologyPtr(), source->groupTags(), source->devicePools(), source->hostPool(), source->diskPool());
-    auto exact = makeTestGroupSet(
-        1, source->topologyPtr(), {"group1"}, {source->devicePools()[0]}, source->hostPool(), source->diskPool());
+    auto        partial = makeTestGroupSet(0,
+                                    source->cacheConfig()->topologyPtr(),
+                                    source->groupTags(),
+                                    source->devicePools(),
+                                    source->hostPool(),
+                                    source->diskPool());
+    auto        exact   = makeTestGroupSet(1,
+                                  source->cacheConfig()->topologyPtr(),
+                                           {"group1"},
+                                           {source->devicePools()[0]},
+                                  source->hostPool(),
+                                  source->diskPool());
 
     std::vector<TransferDescriptor> descriptors;
     ASSERT_TRUE(BlockTransferRequestConverter::decodeTransfer(request, descriptors, {partial, exact}));
@@ -412,10 +421,18 @@ TEST(BlockTransferRequestConverterTest, DecodeRejectsMultipleExactGroupSetMatche
     MemoryOperationRequestPB request;
     appendDeviceToHostItem(request, "group1");
     const auto& source = groupSets()[1];
-    auto        first  = makeTestGroupSet(
-        0, source->topologyPtr(), {"group1"}, {source->devicePools()[0]}, source->hostPool(), source->diskPool());
-    auto second = makeTestGroupSet(
-        1, source->topologyPtr(), {"group1"}, {source->devicePools()[0]}, source->hostPool(), source->diskPool());
+    auto        first  = makeTestGroupSet(0,
+                                  source->cacheConfig()->topologyPtr(),
+                                          {"group1"},
+                                          {source->devicePools()[0]},
+                                  source->hostPool(),
+                                  source->diskPool());
+    auto        second = makeTestGroupSet(1,
+                                   source->cacheConfig()->topologyPtr(),
+                                          {"group1"},
+                                          {source->devicePools()[0]},
+                                   source->hostPool(),
+                                   source->diskPool());
 
     std::vector<TransferDescriptor> descriptors;
     EXPECT_FALSE(BlockTransferRequestConverter::decodeTransfer(request, descriptors, {first, second}));
@@ -436,8 +453,9 @@ TEST(BlockTransferRequestConverterTest, DecodeRejectsBatchContainingUnknownGroup
 TEST(BlockTransferRequestConverterTest, DecodePreservesOriginalItemIndicesWhenSkippingEmptyGroupSets) {
     auto        groups = makeGroupSets();
     const auto& empty  = groups.back();
-    const auto  stage  = CacheTopology::create(empty->topologyPtr()->groups(), {{0, {"group0", "group5"}}});
-    empty->initialize(empty->groupSetId(), stage, empty->groupTags(), {});
+    const auto  stage  = CacheTopology::create(empty->cacheConfig()->topologyPtr()->groups(), {{0, {"group0", "group5"}}});
+    empty->initialize(
+        empty->groupSetId(), block_transfer_engine_test::makeTestCacheConfig(*stage), empty->groupTags(), {});
     MemoryOperationRequestPB request;
     appendDeviceToHostItem(request, "group6");
     appendDeviceToHostItem(request, "group0");
@@ -539,7 +557,7 @@ TEST(BlockTransferRequestConverterTest, ResolvesReorderedLocalGroupSetAndPoolSlo
 
     const auto&                     source   = groupSets()[2];
     auto                            receiver = makeTestGroupSet(0,
-                                     source->topologyPtr(),
+                                     source->cacheConfig()->topologyPtr(),
                                                                 {"group4", "group3"},
                                                                 {source->devicePools()[1], source->devicePools()[0]},
                                      source->hostPool(),
@@ -647,13 +665,13 @@ TEST(BlockTransferRequestConverterTest, CrcRoutesReorderedGroupSetsAndMembersByT
     auto        sender_groups = protectedGroupSets();
     const auto& source        = sender_groups[2];
     auto        receiver      = makeTestGroupSet(0,
-                                     source->topologyPtr(),
+                                     source->cacheConfig()->topologyPtr(),
                                                  {"group4", "group3"},
                                                  {source->devicePools()[1], source->devicePools()[0]},
                                      source->hostPool(),
                                      source->diskPool());
     receiver->initialize(0,
-                         receiver->topologyPtr(),
+                         receiver->cacheConfig(),
                          receiver->groupTags(),
                          block_transfer_engine_test::makeTestBackingLayout(receiver->payloadBytes(), true));
     const std::vector<TransferDescriptor> inputs{
@@ -721,7 +739,7 @@ TEST(BlockTransferRequestConverterTest, CrcRejectsMalformedSecondItemWithoutPubl
 TEST(BlockTransferRequestConverterTest, MixedGroupLayoutsRoundTripWithLocalCrcConfiguration) {
     auto        groups   = protectedGroupSets();
     const auto& ordinary = groups[2];
-    ordinary->initialize(2, ordinary->topologyPtr(), ordinary->groupTags());
+    ordinary->initialize(2, ordinary->cacheConfig(), ordinary->groupTags());
     const auto               first  = TransferDescriptor::hostToDevice(0, 21, {11});
     const auto               second = TransferDescriptor::hostToDevice(2, 22, {12, 13});
     MemoryOperationRequestPB request;

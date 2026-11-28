@@ -15,6 +15,7 @@
 #include <pybind11/stl.h>
 #include <torch/extension.h>
 
+#include "rtp_llm/cpp/cache/test/CacheConfigTestAccess.h"
 #include "rtp_llm/cpp/cache/CacheConfig.h"
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
 #include "kmonitor/client/MetricType.h"
@@ -218,10 +219,10 @@ struct GroupSpec {
 
 CacheConfig makeCacheConfig(const std::vector<GroupSpec>& groups) {
     CacheConfig config;
-    config.dtype                     = DataType::TYPE_INT8;
-    config.layer_num                 = 1;
+    config.moduleMetadata(0).dtype                     = DataType::TYPE_INT8;
+    config.seq_size_per_block                          = groups.front().tokens_per_block;
     config.seq_size_per_block        = groups.front().tokens_per_block;
-    config.use_opaque_kv_cache_store = true;
+    config.moduleMetadata(0).use_opaque_kv_cache_store = true;
 
     std::vector<GroupBase>   topology_groups;
     std::vector<std::string> layer_tags;
@@ -241,7 +242,7 @@ CacheConfig makeCacheConfig(const std::vector<GroupSpec>& groups) {
     LayerBase layer;
     layer.layer_id   = kLayerId;
     layer.group_tags = std::move(layer_tags);
-    config.setTopology(std::move(topology_groups), {std::move(layer)});
+    config.setTopology(0, std::move(topology_groups), {std::move(layer)});
     return config;
 }
 
@@ -255,7 +256,7 @@ LayoutAndBases makeLayout(const CacheConfig& config) {
     std::map<std::string, uintptr_t>      bases;
     for (const auto& group : config.topology().groups()) {
         if (config.topology().layerIdsForGroup(group.tag).empty()) {
-            layouts.emplace(group.tag, CacheLayerLayout(std::vector<BlockBufferPtrInfo>(config.layer_num)));
+            layouts.emplace(group.tag, CacheLayerLayout(std::vector<BlockBufferPtrInfo>(config.layer_num())));
             continue;
         }
         auto storage =
@@ -613,9 +614,12 @@ Scenario makeCaptureScenario(bool context_parallel, bool publisher_owner, bool f
 
 Scenario makeMtpScenario() {
     auto main_config  = makeCacheConfig({{"main", 4, 16}});
-    auto draft_config = std::make_shared<CacheConfig>(makeCacheConfig({{"draft", 2, 32}}));
-    auto layout       = makeLayout(*draft_config);
-    main_config.mtp_sub_configs.push_back(draft_config);
+    auto draft_config = makeCacheConfig({{"draft", 2, 32}});
+    // Both modules share the cache-key span while retaining their own group geometry.
+    main_config.seq_size_per_block = draft_config.seq_size_per_block;
+    auto layout = makeLayout(draft_config);
+    ::rtp_llm::test::CacheConfigTestAccess::addMtpModule(
+        main_config, draft_config.topologyPtr(0), draft_config.moduleMetadata(0));
     auto     inputs = makeInputs(/*input_lengths=*/{4},
                              /*request_ids=*/{401},
                              /*cache_keys=*/{4101, 4102},
@@ -642,7 +646,7 @@ Scenario makeScenario(const std::string& name) {
         auto full_spec                      = full_group.spec->clone();
         full_spec->kernel_seq_size_per_block = 1;
         full_group.spec                      = std::move(full_spec);
-        config.setTopology(std::move(groups), {LayerBase{kLayerId, {"swa", "full"}}});
+        config.setTopology(0, std::move(groups), {LayerBase{kLayerId, {"swa", "full"}}});
         auto layout = makeLayout(config);
         // Both chunk rows use cyclic execution banks, but only the final
         // SWA row exposes its owned tail blocks to cache-store publication.
@@ -667,13 +671,13 @@ Scenario makeScenario(const std::string& name) {
         auto layout           = makeLayout(config);
         auto inputs           = makeInputs({1, 3, 4},
                                            {501, 502, 503},
-                                           std::vector<int64_t>(24, 0),
-                                           8,
-                                           std::vector<int32_t>(24, 1),
+                                 std::vector<int64_t>(24, 0),
+                                 8,
+                                 std::vector<int32_t>(24, 1),
                                            {"full"},
-                                           8,
-                                           128,
-                                           256);
+                                 8,
+                                 128,
+                                 256);
         inputs.input_lengths  = inputs.input_lengths.cuda();
         inputs.prefix_lengths = pinnedTensor({128, 256, 512}, {3});
         inputs.pd_separation  = false;
@@ -685,12 +689,13 @@ Scenario makeScenario(const std::string& name) {
         || name == "single_model_extra_payload") {
         const bool single_group = name == "single_model_extra_payload";
         auto       main_config  = makeCacheConfig({{"unused", 2, 16}, {"draft", 2, 32}, {"other", 2, 24}});
-        auto       draft_config = std::make_shared<CacheConfig>(makeCacheConfig({{"draft", 2, 32}}));
+        auto       draft_config = makeCacheConfig({{"draft", 2, 32}});
         if (!single_group) {
-            draft_config->setTopology(main_config.topology().groups(), {LayerBase{kLayerId, {"draft"}}});
+            draft_config.setTopology(0, main_config.topology().groups(), {LayerBase{kLayerId, {"draft"}}});
         }
-        auto layout = makeLayout(*draft_config);
-        main_config.mtp_sub_configs.push_back(draft_config);
+        auto layout = makeLayout(draft_config);
+        ::rtp_llm::test::CacheConfigTestAccess::addMtpModule(
+            main_config, draft_config.topologyPtr(0), draft_config.moduleMetadata(0));
         auto inputs = makeInputs(/*input_lengths=*/{4},
                                  /*request_ids=*/{401},
                                  /*cache_keys=*/{4101, 4102},
@@ -765,10 +770,11 @@ Scenario makeScenario(const std::string& name) {
         return scenario;
     }
     if (name == "pp_boundary") {
-        auto scenario                = makeMultiTagScenario();
-        scenario.parallelism.pp_size = 3;
-        scenario.parallelism.pp_rank = 1;
-        const auto rows              = scenario.inputs.combo_tokens.numel();
+        auto scenario                              = makeMultiTagScenario();
+        scenario.parallelism.pp_size               = 3;
+        scenario.parallelism.pp_rank               = 1;
+        scenario.parallelism.pp_stage_layer_counts = {1, 1, 1};
+        const auto rows                            = scenario.inputs.combo_tokens.numel();
         const auto hidden =
             torch::arange(rows, torch::TensorOptions().dtype(torch::kFloat16).device(torch::kCUDA)).reshape({rows, 1});
         scenario.inputs.pp_intermediates = {{"hidden_states", hidden},
@@ -1060,10 +1066,10 @@ py::dict runPyWrappedModelCacheStoreScenario(py::object         py_model,
 
     RTP_LLM_CHECK_WITH_INFO(forward_count > 0, "forward_count must be positive");
 
-    const bool cacheless_warmup = scenario_name == "cacheless_warmup";
-    const auto input_scenario   = cacheless_warmup ? "multi_tag" : scenario_name;
-    auto       scenario         = makeScenario(input_scenario);
-    auto                cache_store = std::make_shared<RecordingCacheStore>();
+    const bool          cacheless_warmup = scenario_name == "cacheless_warmup";
+    const auto          input_scenario   = cacheless_warmup ? "multi_tag" : scenario_name;
+    auto                scenario         = makeScenario(input_scenario);
+    auto                cache_store      = std::make_shared<RecordingCacheStore>();
     FakeMetricsReporter fake_metrics_reporter;
     const auto&         metrics_reporter = fake_metrics_reporter.reporter();
     auto                manager          = std::make_shared<KVCacheManager>(scenario.manager_config,
@@ -1207,9 +1213,7 @@ py::dict runPyWrappedModelCacheStoreScenario(py::object         py_model,
 
 py::dict runDirtyGenerationPrefillCaptureScenario(py::object py_model) {
     static std::once_flag runtime_once;
-    std::call_once(runtime_once, []() {
-        initRuntime(/*device_id=*/0);
-    });
+    std::call_once(runtime_once, []() { initRuntime(/*device_id=*/0); });
 
     bool                          saw_dirty_capture_error = false;
     size_t                        available_before        = 0;
@@ -1279,9 +1283,7 @@ py::dict runGenerationPrefillCaptureScenario(py::object                         
                                              const std::string&                        expected_error_substring,
                                              const std::vector<std::pair<bool, bool>>& forward_flags) {
     static std::once_flag runtime_once;
-    std::call_once(runtime_once, []() {
-        initRuntime(/*device_id=*/0);
-    });
+    std::call_once(runtime_once, []() { initRuntime(/*device_id=*/0); });
 
     auto config  = makeCacheConfig({{"full", 4, 64}});
     auto layout  = makeLayout(config);
@@ -1463,9 +1465,9 @@ runCustomOutput(py::object py_model, py::object handler, torch::Tensor indexes, 
         model.prepareAttentionInputs(inputs);
         model.updateKVCacheKernelBlockId(inputs);
     }
-    const auto outputs            = compact_output ? PyWrappedModelTestPeer::forwardPostLayersLastHidden(
+    const auto outputs      = compact_output ? PyWrappedModelTestPeer::forwardPostLayersLastHidden(
                                               model, torch::ones({2, width}, lm_head->kernel.options()), inputs) :
-                                                     model.forward(inputs);
+                                               model.forward(inputs);
     result["graph_status"]  = generationPrefillCudaGraphStatusString(outputs.generation_prefill_cuda_graph_status);
     result["custom_output"] = outputs.custom_output;
     result["custom_output_error"] = outputs.custom_output_error;

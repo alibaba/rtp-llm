@@ -139,6 +139,41 @@ TEST(PPTopologyValidatorTest, ReorderedTagsAndPartialBackingKeepStage0Order) {
     EXPECT_EQ(result.agreed.block_num_overrides.at("linear"), 30u);
 }
 
+TEST(PPTopologyValidatorTest, DraftAllocatorCountsComeFromPhysicalLastStage) {
+    auto first  = makeFullSnapshot(40);
+    auto middle = makeFullSnapshot(35);
+    auto last   = makeFullSnapshot(30);
+    first.groups.push_back(makeGroupSnapshot("mtp", CacheGroupType::SWA, 0));
+    first.groups.back().is_draft          = true;
+    first.groups.back().has_local_backing = false;
+    middle.groups.push_back(makeGroupSnapshot("mtp", CacheGroupType::SWA, 0));
+    middle.groups.back().is_draft          = true;
+    middle.groups.back().has_local_backing = false;
+    last.groups.push_back(makeGroupSnapshot("mtp", CacheGroupType::SWA, 11));
+    last.groups.back().is_draft = true;
+    last.block_tree.group_sets.push_back({"mtp", 2048});
+    first.block_tree.host_budget_bytes = middle.block_tree.host_budget_bytes =
+        last.block_tree.host_budget_bytes = 32 * 4096;
+
+    const auto payload = first.serialize();
+    EXPECT_EQ(payload.find("full\x1fmtp|1,2|1,1|"), 0u);
+    EXPECT_EQ(last.serialize().find("full\x1fmtp|1,2|1,1|"), 0u);
+    const auto received = StageCacheSnapshot::deserialize(payload);
+    ASSERT_EQ(received.groups.size(), 2u);
+    EXPECT_TRUE(received.groups.front().has_local_backing);
+    ASSERT_FALSE(received.groups.back().has_local_backing);
+    EXPECT_TRUE(received.groups.back().is_draft);
+    const auto agreed = validatePPTopology({received, middle, last});
+    ASSERT_TRUE(agreed.ok) << agreed.error;
+    EXPECT_EQ(agreed.agreed.block_num_overrides.at("full"), 30u);
+    EXPECT_EQ(agreed.agreed.block_num_overrides.at("mtp"), 11u);
+    EXPECT_GT(agreed.agreed.block_tree.host.at(CacheGroupType::SWA), 1u);
+
+    last.groups.pop_back();
+    last.block_tree.group_sets.pop_back();
+    EXPECT_FALSE(validatePPTopology({received, middle, last}).ok);
+}
+
 TEST(PPTopologyValidatorTest, TagUndeclaredOnStage0Fails) {
     StageCacheSnapshot other = makeFullSnapshot(80);
     other.groups[0].tag      = "swa";
@@ -215,10 +250,14 @@ TEST(PPTopologyValidatorTest, PrefixReuseMismatchFails) {
 
 TEST(PPTopologyValidatorTest, CaptureLocalStageBuildsSnapshot) {
     CacheConfig cache_config;
-    auto        spec                = std::make_shared<MHAKVCacheSpec>("default", 4, 2, 1);
-    cache_config.layer_num          = 2;
-    cache_config.seq_size_per_block = 4;
-    cache_config.fromGroupedSpecs({spec}, {{0, 1}}, {CacheGroupType::FULL}, {"default"});
+    auto        spec                   = std::make_shared<MHAKVCacheSpec>("default", 4, 2, 1);
+    cache_config.seq_size_per_block    = 4;
+    cache_config.fromGroupedSpecs(0,
+                                  {spec},
+                                  /*layer_num=*/2,
+                                  {{0, 1}},
+                                  {CacheGroupType::FULL},
+                                  {"default"});
 
     auto snapshot = StageCacheSnapshot::captureLocalStage(cache_config, 42, {{{"default", 4096}}, 1024 * 1024, 0});
     ASSERT_EQ(snapshot.groups.size(), 1u);
@@ -289,11 +328,16 @@ TEST(PPTopologyValidatorTest, SnapshotSerializeRoundTrip) {
     EXPECT_TRUE(empty.block_tree.group_sets.empty());
     EXPECT_DOUBLE_EQ(empty.block_tree.host_swa_block_ratio, 1.0);
 
+    const auto ratio_end   = payload.rfind('|');
+    const auto ratio_begin = payload.rfind('|', ratio_end - 1) + 1;
     for (const auto* invalid : {"0", "-1", "nan", "inf", "0.5trailing"}) {
         auto malformed = payload;
-        malformed.replace(malformed.rfind('|') + 1, std::string::npos, invalid);
+        malformed.replace(ratio_begin, ratio_end - ratio_begin, invalid);
         EXPECT_THROW(StageCacheSnapshot::deserialize(malformed), std::exception);
     }
+
+    // A non-empty snapshot requires a draft flag for every group.
+    EXPECT_THROW(StageCacheSnapshot::deserialize(payload.substr(0, ratio_end + 1)), std::exception);
 
     EXPECT_THROW(StageCacheSnapshot::deserialize(""), std::exception);
     EXPECT_THROW(StageCacheSnapshot::deserialize("a|1|4|4|4|1|0"), std::exception);

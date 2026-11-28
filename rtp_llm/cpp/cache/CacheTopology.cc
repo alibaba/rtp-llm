@@ -92,14 +92,28 @@ size_t CacheTopology::blockSizeBytesForGroup(std::string_view group_tag) const {
     const auto  kv_block_stride_bytes  = cache_group.kvBlockStrideBytes();
     const auto  kv_scale_stride_bytes  = cache_group.kvScaleStrideBytes();
     const auto  layer_count            = layerIdsForGroup(group_tag).size();
+    if (layer_count == 0) {
+        return 0;
+    }
     RTP_LLM_CHECK_WITH_INFO(kv_scale_stride_bytes <= std::numeric_limits<size_t>::max() - kv_block_stride_bytes,
                             "CacheTopology tag=%s stride overflow",
                             cache_group.tag.c_str());
     const auto stride = kv_block_stride_bytes + kv_scale_stride_bytes;
-    RTP_LLM_CHECK_WITH_INFO(layer_count == 0 || stride <= std::numeric_limits<size_t>::max() / layer_count,
+    RTP_LLM_CHECK_WITH_INFO(stride <= std::numeric_limits<size_t>::max() / layer_count,
                             "CacheTopology tag=%s block size overflow",
                             cache_group.tag.c_str());
     return layer_count * stride;
+}
+
+size_t CacheTopology::totalGroupBlockSizeBytes() const {
+    size_t total = 0;
+    for (const auto& group : groups_) {
+        const size_t group_bytes = blockSizeBytesForGroup(group.tag);
+        RTP_LLM_CHECK_WITH_INFO(group_bytes <= std::numeric_limits<size_t>::max() - total,
+                                "CacheTopology total block size overflow");
+        total += group_bytes;
+    }
+    return total;
 }
 
 std::shared_ptr<const CacheTopology> CacheTopology::create(std::vector<GroupBase> groups,
@@ -115,7 +129,6 @@ CacheTopology::CacheTopology(std::vector<GroupBase> groups, std::vector<LayerBas
 
 void CacheTopology::validateAndBuildIndex() {
     RTP_LLM_CHECK_WITH_INFO(!groups_.empty(), "CacheTopology requires at least one cache group");
-    RTP_LLM_CHECK_WITH_INFO(!layers_.empty(), "CacheTopology requires at least one cache layer");
 
     tag_to_group_id_.reserve(groups_.size());
     group_tags_.reserve(groups_.size());

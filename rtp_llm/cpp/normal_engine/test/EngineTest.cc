@@ -7,6 +7,7 @@
 #include <limits>
 
 #define private public
+#include "rtp_llm/cpp/config/StageLayerRange.h"
 #include "rtp_llm/cpp/normal_engine/NormalEngine.h"
 #undef private
 
@@ -92,6 +93,11 @@ std::unique_ptr<ProposeModelEngineInitParams> makeLocalProposalParams(const Engi
     auto modules    = std::make_unique<std::vector<std::unique_ptr<EngineInitParams>>>();
     auto draft      = std::make_unique<EngineInitParams>(params);
     draft->model_id = params.model_id + 1;
+    for (auto& layer_descs : draft->model_config_.kv_cache_spec_descs) {
+        for (auto& desc : layer_descs) {
+            desc.tag = "mtp_" + desc.tag;
+        }
+    }
     if (params.sp_config.type == SP_TYPE_DSPARK) {
         const auto options                  = torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA);
         draft->gpt_weights.dspark_markov_w1 = torch::zeros({params.model_config_.vocab_size, 1}, options);
@@ -164,8 +170,12 @@ struct PPWarmupFactoryGuard {
 TEST_F(NormalEngineTest, testExecutorDecodesCopyRowsUsingPayloadTags) {
     class CopyPayloadProcessor: public NormalBatchStreamProcessor {
     public:
-        CopyPayloadProcessor(const ModelConfig& model, const CacheConfig& config, torch::Tensor mapping):
-            NormalBatchStreamProcessor(model, PDSepConfig{}, ProfilingDebugLoggingConfig{}, config, false),
+        CopyPayloadProcessor(const ModelConfig&   model,
+                             const CacheConfig&   config,
+                             size_t               seq_size_per_block,
+                             torch::Tensor        mapping):
+            NormalBatchStreamProcessor(
+                model, PDSepConfig{}, ProfilingDebugLoggingConfig{}, config, /*module_id=*/0, false),
             mapping_(std::move(mapping)) {}
 
         absl::StatusOr<GptModelInputs>
@@ -200,11 +210,12 @@ TEST_F(NormalEngineTest, testExecutorDecodesCopyRowsUsingPayloadTags) {
     model.attn_config.tokens_per_block        = 2;
     model.attn_config.kernel_tokens_per_block = 2;
     CacheConfig config;
-    config.layer_num          = 2;
-    config.seq_size_per_block = 2;
-    config.dtype              = DataType::TYPE_FP16;
-    config.fromGroupedSpecs({test::makeResolvedMhaSpec(config.dtype, 1, 4, 2, "first"),
-                             test::makeResolvedMhaSpec(config.dtype, 1, 4, 2, "second")},
+    config.seq_size_per_block          = 2;
+    config.moduleMetadata(0).dtype     = DataType::TYPE_FP16;
+    config.fromGroupedSpecs(0,
+                            {test::makeResolvedMhaSpec(config.dtype(), 1, 4, 2, "first"),
+                             test::makeResolvedMhaSpec(config.dtype(), 1, 4, 2, "second")},
+                            /*layer_num=*/2,
                             {{0}, {1}},
                             {CacheGroupType::FULL, CacheGroupType::FULL});
     config.finalizeBlockNums(4, RuntimeConfig{});
@@ -243,7 +254,8 @@ TEST_F(NormalEngineTest, testExecutorDecodesCopyRowsUsingPayloadTags) {
         reached_model = false;
         auto mapping  = invalid_row ? torch::tensor({0, 1, 2, 2, 1, 2}, torch::kInt32).reshape({2, 3}) :
                                       torch::tensor({0, 1, 2}, torch::kInt32).reshape({1, 3});
-        executor.setBatchProcessor(std::make_unique<CopyPayloadProcessor>(model, config, mapping));
+        executor.setBatchProcessor(
+            std::make_unique<CopyPayloadProcessor>(model, config, config.seq_size_per_block, mapping));
         auto query                   = std::make_shared<GenerateInput>();
         query->input_ids             = torch::tensor({1, 2, 3}, torch::kInt32);
         query->generate_config       = std::make_shared<GenerateConfig>();
@@ -251,7 +263,7 @@ TEST_F(NormalEngineTest, testExecutorDecodesCopyRowsUsingPayloadTags) {
         auto stream = std::make_shared<NormalGenerateStream>(query, model, RuntimeConfig{}, ResourceContext{}, nullptr);
         BatchKVCacheResource resource;
         resource.resetBatchSize(1);
-        resource.initGroups(config.topologyPtr());
+        resource.initGroups(config);
         resource.mutableBlockIds(0, "first").assign({1, 2});
         resource.mutableBlockIds(0, "second").assign({1, 2});
         stream->setKVCache(resource);
@@ -458,16 +470,15 @@ TEST_F(NormalEngineTest, testPpStepRejectsBeforeFakePaddingAndDefersRetirementTo
 
             engine->sp_config.type              = type;
             engine->sp_config.gen_num_per_cycle = 3;
-            engine->scheduler_ = std::make_unique<PPScheduler>(
-                engine->runtime_config,
-                engine->model_config_,
-                engine->pd_sep_config,
-                engine->parallelism_config,
-                engine->sp_config,
-                engine->resource_context_.cache_manager);
-            auto  executor = std::make_unique<RecordingExecutor>();
-            auto* recorded = executor.get();
-            engine->executor_ = std::move(executor);
+            engine->scheduler_                  = std::make_unique<PPScheduler>(engine->runtime_config,
+                                                               engine->model_config_,
+                                                               engine->pd_sep_config,
+                                                               engine->parallelism_config,
+                                                               engine->sp_config,
+                                                               engine->resource_context_.cache_manager);
+            auto  executor                      = std::make_unique<RecordingExecutor>();
+            auto* recorded                      = executor.get();
+            engine->executor_                   = std::move(executor);
 
             auto query                             = std::make_shared<GenerateInput>();
             query->request_id                      = 101;
@@ -506,12 +517,12 @@ TEST_F(NormalEngineTest, testPpStepRejectsBeforeFakePaddingAndDefersRetirementTo
             EXPECT_TRUE(rejected->streamCacheResource().isResourceReleased());
             EXPECT_TRUE(engine->scheduler_->empty());
 
-            auto healthy_query                            = std::make_shared<GenerateInput>();
+            auto healthy_query                             = std::make_shared<GenerateInput>();
             healthy_query->request_id                      = 202;
             healthy_query->input_ids                       = torch::tensor({3, 4}, torch::kInt32);
             healthy_query->generate_config                 = std::make_shared<GenerateConfig>();
             healthy_query->generate_config->max_new_tokens = 2;
-            auto healthy                                  = engine->makeStream(healthy_query);
+            auto healthy                                   = engine->makeStream(healthy_query);
             ASSERT_TRUE(engine->scheduler_->enqueue(healthy).ok());
             ASSERT_TRUE(engine->pp_step().ok());
             ASSERT_EQ(recorded->calls.size(), 3u);
@@ -984,7 +995,7 @@ TEST_F(NormalEngineTest, testPpChunkedPrefillWarmupUsesStageCacheAndChunkShapes)
                 EXPECT_TRUE(init.kv_cache_layer_layout.has_value());
                 if (init.cache_manager) {
                     const auto& cache = init.cache_manager->cacheConfig();
-                    EXPECT_EQ(cache.layer_num, 1u);
+                    EXPECT_EQ(cache.layer_num(), 1u);
                     EXPECT_EQ(cache.global_layer_begin, static_cast<uint32_t>(stage));
                     EXPECT_EQ(cache.groupTags(), expected_tags);
                     EXPECT_EQ(cache.layerIdsForGroup(expected_tags[stage]), std::vector<int>{0});
@@ -1047,7 +1058,13 @@ TEST_F(NormalEngineTest, testPpDecodeWarmupUsesStageCacheAndSpeculativeHeadroom)
             std::unique_ptr<ProposeModelEngineInitParams> proposal;
             if (stage == 1 && type != SP_TYPE_NONE) {
                 auto modules = std::make_unique<std::vector<std::unique_ptr<EngineInitParams>>>();
-                modules->push_back(std::make_unique<EngineInitParams>(params));
+                auto draft   = std::make_unique<EngineInitParams>(params);
+                for (auto& layer_descs : draft->model_config_.kv_cache_spec_descs) {
+                    for (auto& desc : layer_descs) {
+                        desc.tag = "mtp_" + desc.tag;
+                    }
+                }
+                modules->push_back(std::move(draft));
                 proposal = std::make_unique<ProposeModelEngineInitParams>(type, 3, std::move(modules));
             }
 
@@ -1058,7 +1075,7 @@ TEST_F(NormalEngineTest, testPpDecodeWarmupUsesStageCacheAndSpeculativeHeadroom)
                 EXPECT_TRUE(init.kv_cache_layer_layout.has_value());
                 if (init.cache_manager) {
                     const auto& cache = init.cache_manager->cacheConfig();
-                    EXPECT_EQ(cache.layer_num, 1u);
+                    EXPECT_EQ(cache.layer_num(), 1u);
                     EXPECT_EQ(cache.global_layer_begin, static_cast<uint32_t>(stage));
                     EXPECT_EQ(cache.groupTags(), expected_tags);
                     EXPECT_EQ(cache.layerIdsForGroup(expected_tags[stage]), std::vector<int>{0});

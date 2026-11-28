@@ -9,6 +9,7 @@
 namespace rtp_llm {
 
 class BlockTreeCache;
+struct CacheConfig;
 struct CacheTopology;
 class DeviceBlockPool;
 class HostBlockPool;
@@ -52,14 +53,14 @@ public:
                                                          bool               buffered_io,
                                                          bool               enable_crc = true);
 
-    // GroupSet builders (share one global CacheTopology across GroupSets so
-    // group ids are unique in the BlockTree). Payload is derived by
-    // GroupSet::initialize from the topology's layer layout.
+    // GroupSet builders (each GroupSet owns its member tags through the shared
+    // fixture CacheConfig). Payload is derived by GroupSet::initialize from the
+    // owning modules' layer layout.
     static std::shared_ptr<GroupSet> createFullGroupSet(std::vector<std::shared_ptr<DeviceBlockPool>> device_pools,
                                                         std::shared_ptr<HostBlockPool>                host_pool,
                                                         std::shared_ptr<DiskBlockPool>                disk_pool,
                                                         size_t                                        group_set_id,
-                                                        std::shared_ptr<const CacheTopology>          topology,
+                                                        std::shared_ptr<const CacheConfig>            cache_config,
                                                         const std::vector<std::string>&               group_tags,
                                                         bool enable_crc = true);
 
@@ -67,21 +68,21 @@ public:
                                                        std::shared_ptr<HostBlockPool>                host_pool,
                                                        std::shared_ptr<DiskBlockPool>                disk_pool,
                                                        size_t                                        group_set_id,
-                                                       std::shared_ptr<const CacheTopology>          topology,
+                                                       std::shared_ptr<const CacheConfig>            cache_config,
                                                        const std::vector<std::string>&               group_tags,
                                                        size_t sliding_window_size,
                                                        size_t tokens_per_block,
                                                        bool   enable_crc = true);
 
-    // Build a shared CacheTopology: one group per entry with a unique tag.
-    // layer_stride_bytes_per_group is the per-layer stride; each group gets
-    // layer_counts_per_group[i] layers (default 1) with globally unique ids.
-    static std::shared_ptr<const CacheTopology>
-    createTopology(const std::vector<std::pair<std::string, rtp_llm::CacheGroupType>>& group_specs,
-                   const std::vector<size_t>&                                          layer_stride_bytes_per_group,
-                   size_t                                                              tokens_per_block,
-                   const std::vector<size_t>&                                          layer_counts_per_group = {},
-                   const std::vector<size_t>&                                          sliding_windows        = {});
+    // Build the fixture's single-module CacheConfig: one group per entry with a
+    // unique tag. layer_stride_bytes_per_group is the per-layer stride; each
+    // group gets layer_counts_per_group[i] layers (default 1) with unique ids.
+    static std::shared_ptr<const CacheConfig>
+    createCacheConfig(const std::vector<std::pair<std::string, rtp_llm::CacheGroupType>>& group_specs,
+                      const std::vector<size_t>&                                          layer_stride_bytes_per_group,
+                      size_t                                                              tokens_per_block,
+                      const std::vector<size_t>&                                          layer_counts_per_group = {},
+                      const std::vector<size_t>&                                          sliding_windows        = {});
 
     // Cache builder. `task_pool_size` sizes the shared store/load/evict async
     // task pool; production configures it separately from request concurrency.

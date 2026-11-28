@@ -1009,8 +1009,8 @@ TEST_F(FIFOSchedulerTest, LinearHistoryAdmissionAllowsLongGenerationWithinPhysic
         const auto [reclaim, tail_only] = flags;
         SCOPED_TRACE(testing::Message() << "reclaim=" << reclaim << " tail=" << tail_only);
         auto config                        = test::makeSimpleHybridMhaCacheConfig(4, 45, 2, DataType::TYPE_FP16);
-        config.reuse_cache_tail_blocks = std::numeric_limits<int>::max();
-        config.enable_linear_cache_reclaim = reclaim;
+        config.moduleMetadata(0).reuse_cache_tail_blocks = std::numeric_limits<int>::max();
+        config.moduleMetadata(0).enable_linear_cache_reclaim = reclaim;
         config.pool_block_weights          = {{"full1", 7}, {"linear", 2}};
         config.finalizeBlockNums(7, RuntimeConfig{});
         auto resources = makeSchedulerResources(config, 2);
@@ -1105,8 +1105,8 @@ TEST_F(FIFOSchedulerTest, PDLinearTailSwitchCombinationsFinishLongRequestsWithin
             SCOPED_TRACE(testing::Message()
                          << "reclaim=" << reclaim << " tail=" << tail_only << " reserve_step=" << reserve_step);
             auto config                        = test::makeSimpleHybridMhaCacheConfig(4, 67, 2, DataType::TYPE_FP16);
-            config.reuse_cache_tail_blocks = std::numeric_limits<int>::max();
-            config.enable_linear_cache_reclaim = reclaim;
+            config.moduleMetadata(0).reuse_cache_tail_blocks     = std::numeric_limits<int>::max();
+            config.moduleMetadata(0).enable_linear_cache_reclaim = reclaim;
             config.pool_block_weights          = {{"full1", 10}, {"linear", 1}};
             // Each MTP stream retains 23 blocks; incremental allocation needs
             // one shared spare before removing the old tail (24 + 23 = 47).
@@ -1232,7 +1232,7 @@ TEST_F(FIFOSchedulerTest, WeightedPoolsWaitForExhaustedPoolAndReadmitAfterCancel
     for (const std::string limiting_tag : {"full1", "linear"}) {
         SCOPED_TRACE(limiting_tag);
         auto config                             = test::makeSimpleHybridMhaCacheConfig(4, 5, 1, DataType::TYPE_FP16);
-        config.reuse_cache_tail_blocks = std::numeric_limits<int>::max();
+        config.moduleMetadata(0).reuse_cache_tail_blocks = std::numeric_limits<int>::max();
         config.pool_block_weights               = {{"full1", 3}, {"linear", 3}};
         config.pool_block_weights[limiting_tag] = 1;
         config.finalizeBlockNums(5, RuntimeConfig{});
@@ -1292,7 +1292,7 @@ TEST_F(FIFOSchedulerTest, WeightedPoolLifecycleAdmissionCannotBorrowAnotherPools
     for (const std::string limiting_tag : {"full1", "linear", ""}) {
         SCOPED_TRACE(limiting_tag.empty() ? "balanced" : limiting_tag);
         auto config               = test::makeSimpleHybridMhaCacheConfig(4, 5, 1, DataType::TYPE_FP16);
-        config.reuse_cache_tail_blocks = std::numeric_limits<int>::max();
+        config.moduleMetadata(0).reuse_cache_tail_blocks = std::numeric_limits<int>::max();
         config.pool_block_weights = {{"full1", 4}, {"linear", 4}};
         if (!limiting_tag.empty()) {
             config.pool_block_weights[limiting_tag] = 1;
@@ -1339,7 +1339,7 @@ TEST_F(FIFOSchedulerTest, WeightedPoolsRemainSubjectToPerPoolReserveOnAdmission)
     for (const std::string limiting_tag : {"full1", "linear"}) {
         SCOPED_TRACE(limiting_tag);
         auto config                             = test::makeSimpleHybridMhaCacheConfig(4, 9, 1, DataType::TYPE_FP16);
-        config.reuse_cache_tail_blocks = std::numeric_limits<int>::max();
+        config.moduleMetadata(0).reuse_cache_tail_blocks = std::numeric_limits<int>::max();
         config.pool_block_weights               = {{"full1", 3}, {"linear", 3}};
         config.pool_block_weights[limiting_tag] = 1;
         config.finalizeBlockNums(9, RuntimeConfig{});
@@ -1382,8 +1382,8 @@ TEST_F(FIFOSchedulerTest, WeightedPoolsRemainSubjectToPerPoolReserveOnAdmission)
 
 TEST_F(FIFOSchedulerTest, LinearHistoryAdmissionStillChargesEntirePrefill) {
     auto config                        = test::makeSimpleLinearCacheConfig(1, 9, 2, DataType::TYPE_FP16);
-    config.reuse_cache_tail_blocks = std::numeric_limits<int>::max();
-    config.enable_linear_cache_reclaim = true;
+    config.moduleMetadata(0).reuse_cache_tail_blocks     = std::numeric_limits<int>::max();
+    config.moduleMetadata(0).enable_linear_cache_reclaim = true;
     auto resources                     = makeSchedulerResources(config, 2);
     ASSERT_TRUE(resources.cache_manager->init());
     resources.resource_context.reuse_cache                               = true;
@@ -1417,8 +1417,8 @@ TEST_F(FIFOSchedulerTest, LinearHistoryAdmissionDrainsCommittedReferencesBeforeC
     for (bool reclaim : {false, true}) {
         SCOPED_TRACE(reclaim);
         auto config                        = test::makeSimpleLinearCacheConfig(1, 9, 2, DataType::TYPE_FP16);
-        config.reuse_cache_tail_blocks = std::numeric_limits<int>::max();
-        config.enable_linear_cache_reclaim = reclaim;
+        config.moduleMetadata(0).reuse_cache_tail_blocks     = std::numeric_limits<int>::max();
+        config.moduleMetadata(0).enable_linear_cache_reclaim = reclaim;
         auto resources                     = makeSchedulerResources(config, 2);
         ASSERT_TRUE(resources.cache_manager->init());
         resources.resource_context.reuse_cache                               = true;
@@ -1473,8 +1473,8 @@ TEST_F(FIFOSchedulerTest, LinearHistoryAdmissionDrainsCommittedReferencesBeforeC
 
 TEST_F(FIFOSchedulerTest, LinearHistoryAdmissionJoinsPendingWorkerWithoutHoldingStreamMutex) {
     auto config                        = test::makeSimpleLinearCacheConfig(1, 9, 2, DataType::TYPE_FP16);
-    config.reuse_cache_tail_blocks = std::numeric_limits<int>::max();
-    config.enable_linear_cache_reclaim = true;
+    config.moduleMetadata(0).reuse_cache_tail_blocks     = std::numeric_limits<int>::max();
+    config.moduleMetadata(0).enable_linear_cache_reclaim = true;
     auto resources                     = makeSchedulerResources(config, 2);
     ASSERT_TRUE(resources.cache_manager->init());
     resources.resource_context.reuse_cache                               = true;
@@ -6625,7 +6625,7 @@ makeChunkCpGroupCacheConfig(size_t group_block_size, bool prefix_reuse, size_t b
     }
     swa.block_num = 64;
     // A 512-token native state block models CP=2 with a 256-token base block.
-    config.setTopology({config.groups().front(), swa}, {{0, {"default", "swa"}}});
+    config.setTopology(0, {config.groups().front(), swa}, {{0, {"default", "swa"}}});
     return config;
 }
 
@@ -6728,10 +6728,10 @@ TEST_F(FIFOSchedulerTest, testChunkedPrefillChecksCyclicGroupBlocks) {
         if (test_case.round_robin) {
             auto groups                     = cache_config.groups();
             groups.back().policy.cp_mapping = CpBlockMappingMode::BLOCK_ROUND_ROBIN;
-            cache_config.setTopology(std::move(groups), cache_config.topology().layers());
-// Full-checkpoint materialization window (pre-#1574 linear_step=1).
+            cache_config.setTopology(0, std::move(groups), cache_config.topology().layers());
+            // Full-checkpoint materialization window (pre-#1574 linear_step=1).
         }
-        cache_config.reuse_cache_tail_blocks = test_case.tail_blocks;
+        cache_config.moduleMetadata(0).reuse_cache_tail_blocks = test_case.tail_blocks;
         ChunkSchedulerTestConfig config;
         config.seq_size_per_block = test_case.block_size;
         config.prefill_chunk_size = test_case.chunk_size;
@@ -6813,7 +6813,7 @@ TEST_F(FIFOSchedulerTest, testChunkedPrefillChecksCacheCompatibility) {
         auto cache_config = test_case.has_linear ?
                                 test::makeSimpleHybridMhaCacheConfig(4, 64, test_case.block_size, DataType::TYPE_FP16) :
                                 test::makeSimpleMhaCacheConfig(1, 64, test_case.block_size, DataType::TYPE_FP16);
-        cache_config.reuse_cache_tail_blocks = test_case.tail_blocks;
+        cache_config.moduleMetadata(0).reuse_cache_tail_blocks = test_case.tail_blocks;
         if (test_case.group_block_size > 0) {
             auto groups = cache_config.groups();
             for (auto& group : groups) {
@@ -6824,7 +6824,7 @@ TEST_F(FIFOSchedulerTest, testChunkedPrefillChecksCacheCompatibility) {
                     group.policy.enable_prefix_reuse                           = test_case.group_reuse;
                 }
             }
-            cache_config.setTopology(std::move(groups), cache_config.topology().layers());
+            cache_config.setTopology(0, std::move(groups), cache_config.topology().layers());
         }
         ChunkSchedulerTestConfig config;
         config.seq_size_per_block = test_case.block_size;

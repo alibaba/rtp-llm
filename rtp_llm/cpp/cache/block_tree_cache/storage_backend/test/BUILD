@@ -8,6 +8,7 @@ cc_test_wrapper(
     srcs = ["StorageBackendTest.cc"],
     copts = copts(),
     deps = [
+        "//rtp_llm/cpp/cache/test:cache_config_test_access",
         "//rtp_llm/cpp/cache/block_tree_cache",
         "//rtp_llm/cpp/cache/block_tree_cache/test:bounded_thread_test_utils",
         "@com_google_googletest//:gtest",

@@ -146,10 +146,11 @@ protected:
         return group;
     }
 
+    // CacheTopology::layerIdsForGroup supplies module-local IDs in pool index order.
     void initializeLayerMapping(const LayerIdsType& layer_ids) {
-        global_layer_to_local_layer.clear();
+        module_local_to_pool_index_.clear();
         for (size_t i = 0; i < layer_ids.size(); ++i) {
-            global_layer_to_local_layer.emplace(layer_ids[i], static_cast<int>(i));
+            module_local_to_pool_index_.emplace(layer_ids[i], static_cast<int>(i));
         }
     }
 
@@ -158,9 +159,9 @@ protected:
     int                group_id_ = -1;
     EvictCallback      evict_callback_;
 
-    std::unordered_map<int, torch::Tensor> global_layer_to_kv_tensors;
-    std::unordered_map<int, torch::Tensor> global_layer_to_kv_scale_tensors;
-    std::unordered_map<int, int>           global_layer_to_local_layer;
+    std::unordered_map<int, torch::Tensor> module_local_kv_tensors_;
+    std::unordered_map<int, torch::Tensor> module_local_kv_scale_tensors_;
+    std::unordered_map<int, int>           module_local_to_pool_index_;
 
 private:
     friend class CoordinatorCacheManager;

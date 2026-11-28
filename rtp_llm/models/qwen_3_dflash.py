@@ -39,6 +39,13 @@ class Qwen3DFlash(QwenV3):
     """Dense mixed-mask Qwen3 DFlash draft model."""
 
     @classmethod
+    def _post_build_model_config(cls, model_config: ModelConfig) -> None:
+        super()._post_build_model_config(model_config)
+        from rtp_llm.models_py.utils.kvcache import declare_draft_cache_tags
+
+        declare_draft_cache_tags(model_config)
+
+    @classmethod
     def _create_config(cls, ckpt_path: str) -> ModelConfig:
         raw = get_config_from_path(ckpt_path)
         if not isinstance(raw, dict):

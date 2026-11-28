@@ -29,7 +29,7 @@ public:
         pb->set_slice_payload_bytes(route.src_slice_payload_bytes);
         pb->set_linear_qkv_segments(route.linear_qkv_segments);
         for (const auto& layer : route.layers) {
-            pb->add_prefill_layer_ids(layer.src_local_id);
+            pb->add_prefill_layer_ids(layer.src_stage_layer_id);
         }
     }
 

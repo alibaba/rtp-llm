@@ -9,8 +9,8 @@ TEST(KVCMMockFullLinearTest, PaceReadAndWriteForwardAllGroupsAndIovsInOneCall) {
         for (auto operation : {REMOTE_OPERATION_READ, REMOTE_OPERATION_WRITE}) {
             SCOPED_TRACE(::testing::Message() << "split_iovs=" << split_iovs << " operation=" << operation);
             auto environment = makeMultiGroupBackendEnvironment("kvcm_pace_direct", 2, 1);
-            auto resolver    = [&](int layer, const std::string& tag, int block) {
-                const auto original = environmentBuffers(environment, layer, tag, block);
+            auto resolver    = [&](int layer_ordinal, const std::string& tag, int block) {
+                const auto original = environment.pools_by_tag.at(tag)->convertIndexToBuffer(layer_ordinal, block);
                 if (!split_iovs) {
                     return original;
                 }
@@ -32,7 +32,7 @@ TEST(KVCMMockFullLinearTest, PaceReadAndWriteForwardAllGroupsAndIovsInOneCall) {
             EXPECT_CALL(*client, initForPools(_, _, _, _)).WillOnce(Return(true));
             EXPECT_CALL(*client, shutdown()).Times(1);
             auto backend = makeBackend(environment, ParallelismConfig{}, client);
-            ASSERT_TRUE(backend->init(environment.cache_config.topologyPtr(), environment.pools_by_tag, resolver));
+            ASSERT_TRUE(backend->init(std::make_shared<CacheConfig>(environment.cache_config), environment.pools_by_tag, resolver));
             // Interleave tags and repeat groups. The split case also leaves the
             // aggregate client's own pool absent from the request.
             const std::vector<std::string> tags =
@@ -53,8 +53,7 @@ TEST(KVCMMockFullLinearTest, PaceReadAndWriteForwardAllGroupsAndIovsInOneCall) {
                 ASSERT_EQ(buffers.size(), tags.size());
                 for (size_t i = 0; i < buffers.size(); ++i) {
                     const auto& tag = tags[i];
-                    const auto  expected =
-                        resolver(environment.cache_config.layerIdsForGroup(tag).front(), tag, environment.block_id);
+                    const auto  expected = resolver(/*layer_ordinal=*/0, tag, environment.block_id);
                     ASSERT_EQ(buffers[i].iovs.size(), expected.size());
                     for (size_t j = 0; j < expected.size(); ++j) {
                         EXPECT_EQ(buffers[i].iovs[j].base, expected[j].addr);
@@ -100,11 +99,7 @@ TEST(KVCMMockFullLinearTest, PaceTransferPreservesFailureTimeoutAndWriteResponse
             EXPECT_CALL(*client, initForPools(_, _, _, _)).WillOnce(Return(true));
             EXPECT_CALL(*client, shutdown()).Times(1);
             auto backend = makeBackend(environment, ParallelismConfig{}, client);
-            ASSERT_TRUE(backend->init(environment.cache_config.topologyPtr(),
-                                      environment.pools_by_tag,
-                                      [&](int layer, const std::string& tag, int block) {
-                                          return environmentBuffers(environment, layer, tag, block);
-                                      }));
+            ASSERT_TRUE(initSingleRank(*backend.backend, environment));
             RemoteOperationRequestPB request;
             request.set_op(operation);
             identifyReadRequest(request);
@@ -149,11 +144,7 @@ TEST(KVCMMockFullLinearTest, MooncakeKeepsTagRoutingAndPublishesUrisOnlyAfterAll
             EXPECT_CALL(*client, initForPools(_, _, _, _)).WillOnce(Return(true));
             EXPECT_CALL(*client, shutdown()).Times(1);
             auto backend = makeBackend(environment, ParallelismConfig{}, client);
-            ASSERT_TRUE(backend->init(environment.cache_config.topologyPtr(),
-                                      environment.pools_by_tag,
-                                      [&](int layer, const std::string& tag, int block) {
-                                          return environmentBuffers(environment, layer, tag, block);
-                                      }));
+            ASSERT_TRUE(initSingleRank(*backend.backend, environment));
             RemoteOperationRequestPB request;
             request.set_op(operation);
             identifyReadRequest(request);
@@ -219,12 +210,13 @@ TEST(KVCMMockFullLinearTest, RegistersFullLinearWriteShapeBeforeSwaBecomesComple
     auto groups      = environment.cache_config.topology().groups();
     for (auto& group : groups) {
         if (group.tag == "linear1") {
+            group.spec = test::makeMhaSpec(group.tag, group.seqSizePerBlock(), DataType::TYPE_FP16, 1, 2);
             group.policy.group_type          = CacheGroupType::SWA;
             group.policy.sliding_window_size = 16;
         }
     }
-    auto topology = CacheTopology::create(std::move(groups), environment.cache_config.topology().layers());
-    kvcm::FullLinearLayerGroupPolicy policy(*topology,
+    environment.cache_config.setTopology(0, std::move(groups), environment.cache_config.topology().layers());
+    kvcm::FullLinearLayerGroupPolicy policy(std::make_shared<CacheConfig>(environment.cache_config),
                                             [](int, const std::string&, int) { return std::vector<BlockInfo>{}; },
                                             {"full0"},
                                             {"linear0", "linear1"});
@@ -331,8 +323,7 @@ void expectTaggedTransfers(MockClientWrapper&                 client,
 
 TEST(KVCMMockFullLinearTest, ReuseDisabledGroupsAreExcludedFromRemoteProtocolAndPayloads) {
     BackendEnvironment environment;
-    environment.cache_config.dtype              = DataType::TYPE_FP16;
-    environment.cache_config.layer_num          = 4;
+    environment.cache_config.moduleMetadata(0).dtype              = DataType::TYPE_FP16;
     environment.cache_config.seq_size_per_block = 8;
     auto disabled_full                          = defaultCacheGroupPolicy(CacheGroupType::FULL);
     disabled_full.enable_prefix_reuse           = false;
@@ -342,10 +333,12 @@ TEST(KVCMMockFullLinearTest, ReuseDisabledGroupsAreExcludedFromRemoteProtocolAnd
     window.enable_prefix_reuse                  = true;
     window.sliding_window_size                  = 16;
     environment.cache_config.fromGroupedSpecs(
+        0,
         {test::makeMhaSpec("full0", 8, DataType::TYPE_FP16, 1, 2),
          test::makeMhaSpec("full1", 8, DataType::TYPE_FP16, 1, 2),
          test::makeMhaSpec("hca_state", 8, DataType::TYPE_FP16, 1, 2),
          test::makeMhaSpec("window0", 8, DataType::TYPE_FP16, 1, 2)},
+        /*layer_num=*/4,
         {{0}, {1}, {2}, {3}},
         {CacheGroupType::FULL, CacheGroupType::FULL, CacheGroupType::SWA, CacheGroupType::SWA},
         {"full0", "full1", "hca_state", "window0"},

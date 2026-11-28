@@ -153,11 +153,15 @@ P2PSchedulerDecodeRead::buildDecodeRankRoutes(const TransferPlan&              p
     try {
         const auto& groups = resource.groupBlockIds();
         groups.validate();
-        if (!config_.topology || groups.size() != config_.topology->groupTags().size()) {
+        if (!config_.topology) {
+            return ErrorInfo(ErrorCode::P2P_CONNECTOR_SCHEDULER_STREAM_RESOURCE_FAILED, "missing Decode topology");
+        }
+        const auto& tags = config_.block_table_tags.empty() ? config_.topology->groupTags() : config_.block_table_tags;
+        if (groups.size() != tags.size()) {
             return ErrorInfo(ErrorCode::P2P_CONNECTOR_SCHEDULER_STREAM_RESOURCE_FAILED,
                              "decode route projection: resource group identity does not match topology");
         }
-        for (const auto& tag : config_.topology->groupTags()) {
+        for (const auto& tag : tags) {
             (void)groups.blockIds(tag);
         }
     } catch (const std::exception& e) {
@@ -187,7 +191,7 @@ P2PSchedulerDecodeRead::buildDecodeRankRoutes(const TransferPlan&              p
                                                          config_.local_full_page_rr);
     for (const auto& route : plan.routes) {
         if (route.dst_rank < 0 || static_cast<size_t>(route.dst_rank) >= worker_num
-            || !layout.hasGroup(route.cache_tag)) {
+            || (route.layers.empty() && !layout.hasGroup(route.cache_tag))) {
             return ErrorInfo(ErrorCode::P2P_CONNECTOR_SCHEDULER_STREAM_RESOURCE_FAILED,
                              "Decode route has no destination worker or shared cache tag=" + route.cache_tag);
         }
@@ -204,25 +208,32 @@ P2PSchedulerDecodeRead::buildDecodeRankRoutes(const TransferPlan&              p
                 // 该 route 在本请求长度 / 窗口下解析为空是预期行为（两侧规则相同故一致判空）。
                 continue;
             }
-            const int cp_size = layout.physicalCpSize(route->cache_tag);
-            // FULL PageRR resolves the logical key against this worker's local table.
-            // Compact state slots remain identical on all Decode ranks.
-            const int worker_cp_rank =
-                layout.effectiveMapping(route->cache_tag) == CpBlockMappingMode::BLOCK_ROUND_ROBIN ?
-                    layout.routeCpRank(static_cast<int>(worker_rank), route->cache_tag) :
-                    0;
             TransferRoutePB pb;
             RouteCodec::encodeForDecode(*route, &pb);
-            const auto append_buffer = [&](const std::shared_ptr<LayerCacheBuffer>& buffer) {
+            const auto append_blocks = [&](uint32_t stage_layer_id, const LayerCacheBuffer::BlockIdMap& blocks) {
                 auto* layer_block = pb.add_layer_blocks();
-                layer_block->set_layer_id(buffer->getLayerId());
-                layer_block->set_cache_tag(buffer->cacheTag());
-                for (const auto& [key, block_id] : buffer->blockIdMap()) {
+                layer_block->set_layer_id(stage_layer_id);
+                layer_block->set_cache_tag(route->cache_tag);
+                for (const auto& [key, block_id] : blocks) {
                     layer_block->add_cache_keys(key);
                     layer_block->add_block_ids(block_id);
                 }
             };
             if (route->layers.empty()) {
+                const int cp_size = layout.physicalCpSize(route->cache_tag);
+                const int worker_cp_rank =
+                    layout.effectiveMapping(route->cache_tag) == CpBlockMappingMode::BLOCK_ROUND_ROBIN ?
+                        layout.routeCpRank(static_cast<int>(worker_rank), route->cache_tag) :
+                        0;
+                const auto   module_it      = config_.module_by_tag.find(route->cache_tag);
+                if (module_it == config_.module_by_tag.end() && !config_.module_by_tag.empty()) {
+                    return ErrorInfo(ErrorCode::P2P_CONNECTOR_SCHEDULER_STREAM_RESOURCE_FAILED,
+                                     "decode route=" + std::to_string(route->route_id)
+                                         + " worker_rank=" + std::to_string(worker_rank) + ": cache_tag="
+                                         + route->cache_tag + " has no owning cache module");
+                }
+                const size_t module_id = module_it == config_.module_by_tag.end() ? 0 : module_it->second;
+
                 auto layer_buffers = LayerCacheBufferUtil::convertTagForRoute(resource,
                                                                               *config_.topology,
                                                                               route->cache_tag,
@@ -230,28 +241,22 @@ P2PSchedulerDecodeRead::buildDecodeRankRoutes(const TransferPlan&              p
                                                                               worker_cp_rank,
                                                                               cp_size,
                                                                               config_.cache_key_tokens_per_block,
-                                                                              config_.decode_transfer_layer_end);
+                                                                              config_.decode_transfer_layer_end,
+                                                                              module_id);
                 if (!layer_buffers.ok()) {
                     return layer_buffers.status();
                 }
                 for (const auto& buffer : layer_buffers.value()) {
-                    append_buffer(buffer);
+                    append_blocks(config_.module_layers.stageOffset(route->cache_tag) + buffer->getLayerId(),
+                                  buffer->blockIdMap());
                 }
             } else {
-                const auto& group = config_.topology->group(route->cache_tag);
+                auto blocks = LayerCacheBufferUtil::projectPipelineRouteBlocks(resource, *route, positions);
+                if (!blocks.ok()) {
+                    return blocks.status();
+                }
                 for (const auto& layer : route->layers) {
-                    auto buffer = LayerCacheBufferUtil::convertLayerTagForRoute(resource,
-                                                                                group,
-                                                                                layer.dst_local_id,
-                                                                                positions,
-                                                                                worker_cp_rank,
-                                                                                cp_size,
-                                                                                config_.cache_key_tokens_per_block,
-                                                                                /*shared_pp_block_table=*/true);
-                    if (!buffer.ok()) {
-                        return buffer.status();
-                    }
-                    append_buffer(buffer.value());
+                    append_blocks(layer.dst_stage_layer_id, blocks.value());
                 }
             }
             if (!pb.layer_blocks().empty()) {

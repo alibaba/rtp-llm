@@ -105,7 +105,7 @@ inline void setGroupBlockLayout(CacheConfig&                    config,
         setGroupLayout(*group, kv_strides[row], scale_strides[row]);
     }
     auto candidate = config;
-    candidate.setTopology(std::move(groups), config.topology().layers());
+    candidate.setTopology(0, std::move(groups), config.topology().layers());
     candidate.setGroupBlockLayout(group_tags, block_nums, kv_strides, scale_strides);
     config = std::move(candidate);
 }

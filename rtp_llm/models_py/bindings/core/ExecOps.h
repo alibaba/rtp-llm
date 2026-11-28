@@ -13,6 +13,7 @@
 #include <exception>
 #include <functional>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -29,6 +30,7 @@ struct PyCacheStoreInputs;
 namespace rtp_llm {
 
 class CacheConfig;
+struct CacheTopology;
 class CacheStore;
 
 using CacheStoreCompletionCallback  = std::function<void(std::exception_ptr)>;
@@ -161,13 +163,17 @@ std::shared_ptr<torch::Event> runtimeCreateEvent();
 
 void runtimeWriteCacheStore(const torch_ext::PyCacheStoreInputs& cache_store_inputs,
                             const torch_ext::LayerKVCache&       layer_kv,
-                            const CacheConfig&                   cache_config,
+                            const CacheTopology&                 cache_topology,
+                            bool                                 use_opaque_kv_cache_store,
+                            size_t                               base_seq_size_per_block,
                             std::shared_ptr<CacheStore>          cache_store,
                             size_t                               cache_model_id,
                             int                                  cp_rank,
                             int                                  cp_size,
                             std::shared_ptr<torch::Event>        pre_created_event,
-                            CacheStoreCompletionRegistrar        register_store_completion = nullptr);
+                            CacheStoreCompletionRegistrar        register_store_completion = nullptr,
+                            std::optional<uint32_t>              cache_key_layer_id        = std::nullopt,
+                            std::optional<bool>                  group_transfer_policy     = std::nullopt);
 
 // ===================================================================
 // Static ops (weight preprocessing)

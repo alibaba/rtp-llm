@@ -993,9 +993,10 @@ MtpBatchStreamProcessor::gatherLinearReplayInputs(const StreamGroups&           
             host.anchor_processed_lengths.data_ptr<int32_t>()[row] = processed;
             host.init_kinds.data_ptr<int32_t>()[row]               = processed == 0 ? 2 : 1;
             if (processed > 0) {
-                for (const int group_id : cache_config.linear_replay.group_ids) {
-                    host.state_read_block_ids.data_ptr<int32_t>()[group_id * batch + row] =
-                        round.initial_block_ids.at(static_cast<size_t>(group_id));
+                for (const auto& tag : cache_config.linear_replay.group_tags) {
+                    const auto group_row = cache_config.topology().groupIdForTag(tag);
+                    host.state_read_block_ids.data_ptr<int32_t>()[group_row * batch + row] =
+                        round.initial_block_ids.at(group_row);
                 }
             }
         }
@@ -1022,19 +1023,26 @@ MtpBatchStreamProcessor::gatherLinearReplayInputs(const StreamGroups&           
     if (block_ids.dim() == 2) {
         block_ids = block_ids.unsqueeze(0);
     }
-    RTP_LLM_CHECK_WITH_INFO(block_ids.dim() == 3 && block_ids.size(0) == groups && block_ids.size(1) == batch,
+    RTP_LLM_CHECK_WITH_INFO(block_ids.dim() == 3
+                                && block_ids.size(0) == static_cast<int64_t>(model_input.kv_cache_group_tags.size())
+                                && block_ids.size(1) == batch,
                             "LINEAR replay requires a grouped [group,batch,block] table");
     const auto active_rows = replay.slot_ids >= 0;
-    for (const int group_id : cache_config.linear_replay.group_ids) {
-        const auto& group = cache_config.groups().at(static_cast<size_t>(group_id));
+    for (const auto& tag : cache_config.linear_replay.group_tags) {
+        const auto& group     = cache_config.group(tag);
+        const auto  group_row = cache_config.topology().groupIdForTag(tag);
         RTP_LLM_CHECK_WITH_INFO(group.policy.group_type == CacheGroupType::LINEAR && group.seqSizePerBlock() > 0,
                                 "LINEAR replay tag=%s has invalid geometry",
                                 group.tag.c_str());
         const auto tail =
             torch::floor_divide(replay.anchor_processed_lengths, static_cast<int64_t>(group.seqSizePerBlock()))
                 .to(torch::kInt64);
-        const auto destination = block_ids.select(0, group_id).gather(1, tail.reshape({batch, 1})).squeeze(1);
-        replay.active_block_ids.select(0, group_id)
+        const auto& tags   = model_input.kv_cache_group_tags;
+        const auto  source = std::find(tags.begin(), tags.end(), group.tag);
+        RTP_LLM_CHECK_WITH_INFO(source != tags.end(), "LINEAR replay missing block-table tag=%s", group.tag.c_str());
+        const auto destination =
+            block_ids.select(0, std::distance(tags.begin(), source)).gather(1, tail.reshape({batch, 1})).squeeze(1);
+        replay.active_block_ids.select(0, group_row)
             .copy_(torch::where(active_rows, destination, torch::full_like(destination, -1)));
     }
     model_input.linear_replay = std::move(replay);
@@ -1071,8 +1079,25 @@ void MtpBatchStreamProcessor::overlayMtpCacheSnapshots(const StreamGroups& strea
             // overlay copies below, without reading their mutable host rows.
             host_holder.hold(physical);
             host_holder.hold(kernel);
-            bucket.physical_tables.push_back(physical);
-            bucket.kernel_tables.push_back(kernel);
+            const auto& tags        = model_input.kv_cache_group_tags;
+            const auto& source_tags = state.next_kv_cache_row_tags;
+            if (tags == source_tags) {
+                bucket.physical_tables.push_back(physical);
+                bucket.kernel_tables.push_back(kernel);
+            } else {
+                RTP_LLM_CHECK_WITH_INFO(tags.size() == source_tags.size(), "MTP cache snapshot tag count mismatch");
+                std::vector<int64_t> rows;
+                rows.reserve(tags.size());
+                for (const auto& tag : tags) {
+                    const auto source = std::find(source_tags.begin(), source_tags.end(), tag);
+                    RTP_LLM_CHECK_WITH_INFO(
+                        source != source_tags.end(), "MTP cache snapshot missing tag=%s", tag.c_str());
+                    rows.push_back(std::distance(source_tags.begin(), source));
+                }
+                auto order = torch::tensor(rows, torch::kInt64).to(physical.device());
+                bucket.physical_tables.push_back(physical.index_select(0, order));
+                bucket.kernel_tables.push_back(kernel.index_select(0, order));
+            }
             bucket.rows.push_back(row);
         }
         row += use_snapshot ? 1 : stream->currentBatchSize();

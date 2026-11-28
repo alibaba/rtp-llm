@@ -276,10 +276,6 @@ class Qwen3DFlashConfigTest(unittest.TestCase):
 
         self.assertEqual(draft_config.data_type, DataType.TYPE_BF16)
         self.assertEqual(draft_config.attn_config.kv_cache_dtype, KvCacheDataType.FP8)
-        # A real target ModelConfig always carries attn_config with the
-        # target's KV dtype and geometry; _setup_dflash_configs validates
-        # the draft/target byte-layout match through it, so the fixture
-        # must mirror that shape.
         target_config = SimpleNamespace(
             num_layers=64,
             hidden_size=5120,
@@ -312,10 +308,6 @@ class Qwen3DFlashConfigTest(unittest.TestCase):
             )
 
         self.assertEqual(draft_config.data_type, DataType.TYPE_BF16)
-        # A real target ModelConfig always carries attn_config with the
-        # target's KV dtype and geometry; _setup_dflash_configs validates
-        # the draft/target byte-layout match through it, so the fixture
-        # must mirror that shape.
         target_config = SimpleNamespace(
             num_layers=64,
             hidden_size=5120,
@@ -338,19 +330,16 @@ class Qwen3DFlashConfigTest(unittest.TestCase):
             sp_dspark_mask_token_id=-1,
             sp_dspark_sample_from_anchor=True,
         )
-        # Real ModelConfigs always carry attn_config with the target's KV
-        # dtype and geometry; _setup_dflash_configs validates the
-        # draft/target byte-layout match through it, so the fixture must
-        # mirror that shape.
         target_config = SimpleNamespace(
             num_layers=64,
             hidden_size=5120,
             vocab_size=248320,
             capture_aux_hidden_layer_ids=None,
             attn_config=SimpleNamespace(
-                kv_cache_dtype=KvCacheDataType.BASE,
-                kv_head_num=8,
-                size_per_head=128,
+                kv_cache_dtype=KvCacheDataType.FP8,
+                kv_head_num=4,
+                size_per_head=64,
+                tokens_per_block=16,
             ),
         )
         draft_config = SimpleNamespace(
@@ -377,6 +366,7 @@ class Qwen3DFlashConfigTest(unittest.TestCase):
                 kv_cache_dtype=KvCacheDataType.FP8,
                 kv_head_num=8,
                 size_per_head=128,
+                tokens_per_block=16,
             ),
             capture_aux_hidden_layer_ids=None,
         )
@@ -390,6 +380,11 @@ class Qwen3DFlashConfigTest(unittest.TestCase):
         )
         self.assertEqual(draft_config.capture_aux_hidden_layer_ids, [1, 16, 31, 46, 61])
         self.assertEqual(draft_config.attn_config.kv_cache_dtype, KvCacheDataType.BASE)
+        self.assertEqual(target_config.attn_config.kv_cache_dtype, KvCacheDataType.FP8)
+
+        draft_config.attn_config.tokens_per_block = 32
+        with self.assertRaisesRegex(ValueError, "cache-key token span"):
+            ModelFactory._setup_dflash_configs(sp_config, target_config, draft_config)
 
     def test_setup_rejects_mask_outside_full_input_vocab(self) -> None:
         sp_config = SimpleNamespace(gen_num_per_cycle=7)
@@ -531,9 +526,15 @@ class Qwen3DFlashConfigTest(unittest.TestCase):
             {"enable_output_vocab_pruning": False, "output_vocab_ids": [1, 2, 3]},
         ):
             with self.subTest(**kwargs):
-                target = SimpleNamespace(model_config=SimpleNamespace(**{**values, **kwargs}))
+                target = SimpleNamespace(
+                    model_config=SimpleNamespace(**{**values, **kwargs})
+                )
                 draft = SimpleNamespace(
-                    **{**values, "enable_output_vocab_pruning": False, "output_vocab_ids": []}
+                    **{
+                        **values,
+                        "enable_output_vocab_pruning": False,
+                        "output_vocab_ids": [],
+                    }
                 )
                 with self.assertRaisesRegex(ValueError, "output vocabulary pruning"):
                     Qwen3DFlash.speculative_weight_alias_names(target, draft)

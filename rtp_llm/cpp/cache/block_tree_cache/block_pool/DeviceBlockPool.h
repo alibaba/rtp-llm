@@ -46,7 +46,7 @@ public:
     ~DeviceBlockPool() override;
 
     // Allocates the backing buffer, builds the per-layout MemoryLayoutStrategy objects and
-    // the global-layer -> (layout, local layer) mapping. Invariants enforced via RTP_LLM_CHECK.
+    // the pool-layer -> (layout, local layer) mapping. Invariants enforced via RTP_LLM_CHECK.
     bool init();
 
     void incRef(BlockIdxType block, DeviceBlockRefType ref_type = DeviceBlockRefType::REQUEST);
@@ -133,8 +133,8 @@ protected:
 private:
     bool hasRequestRefNoLock(BlockIdxType block) const;
     void releaseStorageIoPin(BlockIdxType block, const std::function<void()>& notify) noexcept;
-    // global_layer_id -> {layout_index, local_layer_id}
-    std::pair<int, int> mapGlobalLayerIdToLocal(int global_layer_id) const;
+    // pool_layer_id -> {layout_index, local_layer_id}
+    std::pair<int, int> mapPoolLayerToLocal(int pool_layer_id) const;
     void                checkLayoutValidity(int layout_id) const;
 
     // Helper functions for init()
@@ -147,7 +147,7 @@ private:
     void initializeLayoutStrategies();
 
     // Helper functions for initializeLayoutStrategies()
-    void          processMemoryLayout(size_t layout_idx, const torch::Tensor& full_tensor, size_t& global_layer_begin);
+    void          processMemoryLayout(size_t layout_idx, const torch::Tensor& full_tensor, size_t& pool_layer_offset);
     torch::Tensor createTensor(const torch::Tensor& full_tensor,
                                int64_t              offset,
                                int64_t              size,
@@ -157,7 +157,7 @@ private:
                                            const MemoryLayoutConfig& layout_cfg,
                                            torch::Tensor&            kv_cache_tensor,
                                            torch::Tensor&            kv_scale_tensor);
-    void processLayerTensors(size_t layout_idx, const MemoryLayoutConfig& layout_cfg, size_t& global_layer_begin);
+    void processLayerTensors(size_t layout_idx, const MemoryLayoutConfig& layout_cfg, size_t& pool_layer_offset);
 
     // Helper functions for regUserMr/deregUserMr
     void registerUserMrForBuffer(std::shared_ptr<MemoryUtil> memory_util,
@@ -189,9 +189,9 @@ private:
     std::shared_ptr<CacheStore> cache_store_;
 
     std::vector<std::unique_ptr<MemoryLayoutStrategy>> layout_strategies_;
-    std::vector<std::pair<int, int>>                   global_layer_to_local_;
-    std::vector<torch::Tensor>                         global_layer_kv_tensors_;
-    std::vector<torch::Tensor>                         global_layer_kv_scale_tensors_;
+    std::vector<std::pair<int, int>>                   pool_layer_to_local_;
+    std::vector<torch::Tensor>                         pool_layer_kv_tensors_;
+    std::vector<torch::Tensor>                         pool_layer_kv_scale_tensors_;
 };
 
 }  // namespace rtp_llm

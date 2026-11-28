@@ -18,10 +18,24 @@ namespace rtp_llm {
 
 class NormalBatchStreamProcessor {
 public:
+    // Full-cache-config constructor: the gatherer metadata covers every module's
+    // groups, while model-local scalars come from `module_id`'s module.
     NormalBatchStreamProcessor(const ModelConfig&                 model_config,
                                const PDSepConfig&                 pd_sep_config,
                                const ProfilingDebugLoggingConfig& profiling_debug_logging_config,
                                const CacheConfig&                 cache_config,
+                               size_t                             module_id,
+                               bool                               warm_up,
+                               int                                async_worker_count = 0);
+
+    // Single-module constructor over one module's frozen topology plus the
+    // per-module scalars it cannot derive from the topology alone.
+    NormalBatchStreamProcessor(const ModelConfig&                 model_config,
+                               const PDSepConfig&                 pd_sep_config,
+                               const ProfilingDebugLoggingConfig& profiling_debug_logging_config,
+                               const CacheTopology&              topology,
+                               bool                               use_opaque_kv_cache_store,
+                               size_t                             seq_size_per_block,
                                bool                               warm_up,
                                int                                async_worker_count = 0);
     virtual ~NormalBatchStreamProcessor() = default;
@@ -48,6 +62,13 @@ public:
                                                                      TensorHolder&                   host_holder) const;
 
 protected:
+    NormalBatchStreamProcessor(const ModelConfig&                 model_config,
+                               const PDSepConfig&                 pd_sep_config,
+                               const ProfilingDebugLoggingConfig& profiling_debug_logging_config,
+                               NormalModelInputGathererConfig     model_input_gatherer_config,
+                               bool                               warm_up,
+                               int                                async_worker_count);
+
     SamplerInputs allocateSamplerInputs(const StreamGroups& stream_groups,
                                         size_t              total_batch_size_in,
                                         size_t              total_batch_size_out,

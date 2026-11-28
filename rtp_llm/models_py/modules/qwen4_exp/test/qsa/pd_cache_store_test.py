@@ -98,6 +98,30 @@ class Qwen4PDCacheStoreTest(unittest.TestCase):
             expected = 11 if actual_tag in {x.tag for x in caches[:2]} else 17
             torch.testing.assert_close(snapshot, torch.full_like(snapshot, expected))
 
+    def test_prefixed_draft_side_pools_publish_with_native_tags(self):
+        kv, inputs, caches = self.pools()
+        for cache in caches:
+            cache.tag = "mtp_" + cache.tag
+        for tag, value in inputs.items():
+            value.cache_store_inputs.tag = "mtp_" + tag
+
+        def factory(value, cache):
+            return WriteCacheStoreOp(value.cache_store_writer, value.cache_store_inputs)
+
+        with patch(
+            "rtp_llm.models_py.modules.factory.attention.common.create_write_cache_store_impl",
+            side_effect=factory,
+        ):
+            writers = prepare_side_cache_store_writers(inputs, kv, layer_count=2)
+            self.assertEqual(set(writers), SIDE_TAGS)
+            publish_layer_side_caches(kv, 0, writers)
+            publish_layer_side_caches(kv, 1, writers)
+
+        self.assertCountEqual(
+            [(planned, actual) for planned, actual, _ in self.events],
+            [("mtp_" + tag, "mtp_" + tag) for tag in SIDE_TAGS],
+        )
+
     def test_pdfusion_and_decode_without_publication_are_noops(self):
         kv, inputs, _ = self.pools()
         for value in inputs.values():

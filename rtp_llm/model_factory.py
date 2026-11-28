@@ -178,6 +178,14 @@ class ModelFactory:
             if not is_last_stage(
                 parallelism_config.pp_rank, parallelism_config.pp_size
             ):
+                if parallelism_config.pp_rank == 0:
+                    # The leading scheduler allocates block IDs for the last stage's
+                    # draft pools. Only metadata is needed to construct its allocator.
+                    return ProposeModel(
+                        sp_type,
+                        gen_num_per_circle,
+                        allocation_only_config=propose_model_config,
+                    )
                 return None
 
             load_method = engine_config.load_config.load_method
@@ -684,7 +692,10 @@ class ModelFactory:
         layer_ids = [int(layer_id) for layer_id in layer_ids]
         if not layer_ids or layer_ids != sorted(set(layer_ids)):
             raise ValueError("dflash target layer ids must be unique and ordered")
-        if any(layer_id < 0 or layer_id >= model_config.num_layers for layer_id in layer_ids):
+        if any(
+            layer_id < 0 or layer_id >= model_config.num_layers
+            for layer_id in layer_ids
+        ):
             raise ValueError(
                 f"dflash target layer ids {layer_ids} are invalid for target layers={model_config.num_layers}"
             )
@@ -694,10 +705,15 @@ class ModelFactory:
                 "dflash layer_types count must equal draft num_layers: "
                 f"{len(layer_types)} != {propose_model_config.num_layers}"
             )
-        if any(layer_type not in ("sliding_attention", "full_attention") for layer_type in layer_types):
+        if any(
+            layer_type not in ("sliding_attention", "full_attention")
+            for layer_type in layer_types
+        ):
             raise ValueError(f"unsupported dflash layer types: {layer_types}")
         if "sliding_attention" in layer_types and (window is None or int(window) <= 0):
-            raise ValueError("dflash sliding_attention requires a positive sliding_window")
+            raise ValueError(
+                "dflash sliding_attention requires a positive sliding_window"
+            )
         if native_block_size is None:
             raise ValueError(
                 "sp_type dflash requires checkpoint dflash_native_block_size "
@@ -726,7 +742,9 @@ class ModelFactory:
                 "dflash requires input_vocab_size to match the target shared embedding: "
                 f"{input_vocab} != {target_input_vocab}"
             )
-        config_dtype = str(getattr(propose_model_config, "config_dtype", None) or "").lower()
+        config_dtype = str(
+            getattr(propose_model_config, "config_dtype", None) or ""
+        ).lower()
         effective_dtype = getattr(propose_model_config, "data_type", None)
         # The effective dtype is resolved by init_precision_config from
         # --act_type or the checkpoint dtype, so a checkpoint json without an
@@ -742,7 +760,11 @@ class ModelFactory:
                 "DFlash V1 supports BF16 draft weights and activations only, got "
                 f"config_dtype={config_dtype!r}, data_type={effective_dtype!r}"
             )
-        if getattr(propose_model_config, "quantization", None) not in (None, "", "none"):
+        if getattr(propose_model_config, "quantization", None) not in (
+            None,
+            "",
+            "none",
+        ):
             raise ValueError("DFlash V1 does not support quantized draft weights")
         if getattr(propose_model_config, "quant_config", None) is not None:
             raise ValueError("DFlash V1 does not support a draft quant_config")
@@ -751,33 +773,6 @@ class ModelFactory:
             raise ValueError("DFlash V1 does not support a quantized draft quant_algo")
         if not bool(getattr(propose_model_config, "qk_norm", False)):
             raise ValueError("DFlash V1 requires Qwen3 Q/K RMSNorm and RoPE")
-        # The draft reuses the target's full-attention cache pool through
-        # CacheConfig::mergeMTPModule's default-group alias, which requires a
-        # byte-identical target group (dtype, KV geometry, block token span).
-        # DFlash writer/attention kernels are BF16-only, so an FP8 target
-        # cache can never back the draft, and a geometry/span mismatch would
-        # likewise leave mergeMTPModule without a compatible target group.
-        # Both cases otherwise only fail deep inside engine construction
-        # (RTP_LLM_FAIL in CacheConfig::mergeMTPModule); fail here instead
-        # with an actionable message.
-        if model_config.attn_config.kv_cache_dtype != KvCacheDataType.BASE:
-            raise ValueError(
-                "DFlash V1 requires the target KV cache dtype to be BASE (BF16); "
-                f"got {model_config.attn_config.kv_cache_dtype}. FP8_KV_CACHE on "
-                "the target cannot back a BF16-only DFlash draft"
-            )
-        for geometry_field in ("kv_head_num", "size_per_head"):
-            draft_value = int(
-                getattr(propose_model_config.attn_config, geometry_field)
-            )
-            target_value = int(getattr(model_config.attn_config, geometry_field))
-            if draft_value != target_value:
-                raise ValueError(
-                    f"DFlash draft/target attention geometry mismatch on "
-                    f"{geometry_field}: draft={draft_value}, target={target_value}; "
-                    "the draft's default cache group must alias a byte-identical "
-                    "target group"
-                )
         draft_tokens_per_block = int(
             getattr(propose_model_config.attn_config, "tokens_per_block", 0) or 0
         )
@@ -792,8 +787,7 @@ class ModelFactory:
             raise ValueError(
                 "DFlash draft/target tokens_per_block mismatch: "
                 f"draft={draft_tokens_per_block}, target={target_tokens_per_block}; "
-                "the draft's default cache group must alias a byte-identical "
-                "target group"
+                "main and draft must share the cache-key token span"
             )
         # The draft has its own cache allocation.  Never inherit the target's
         # FP8 cache request into the BF16-only DFlash writer/attention kernels.

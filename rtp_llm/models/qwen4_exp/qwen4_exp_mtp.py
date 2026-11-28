@@ -109,6 +109,13 @@ class Qwen4ExpMTPWeight(Qwen4ExpWeight):
 class Qwen4ExpMTP(Qwen4Exp):
     """Released one-layer draft using the restricted QSA MTP correctness path."""
 
+    @classmethod
+    def _post_build_model_config(cls, model_config: ModelConfig) -> None:
+        super()._post_build_model_config(model_config)
+        from rtp_llm.models_py.utils.kvcache import declare_draft_cache_tags
+
+        declare_draft_cache_tags(model_config)
+
     @staticmethod
     def _configure_precision_recipe(config: ModelConfig) -> None:
         Qwen4Exp._configure_precision_recipe(config)

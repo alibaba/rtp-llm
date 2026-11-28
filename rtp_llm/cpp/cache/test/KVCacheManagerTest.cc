@@ -101,7 +101,7 @@ private:
 
 static CacheConfig makeLinearReplayLifetimeConfig(int block_num) {
     auto config                      = makeSimpleLinearCacheConfig(1, block_num, 4, DataType::TYPE_BF16, 1, 2);
-    config.linear_replay = LinearReplayPlan::create({0}, 1, 2, {1, 2}, {1, 2}, false, DataType::TYPE_BF16, 1);
+    config.linear_replay = LinearReplayPlan::create({"linear"}, 1, 2, {1, 2}, {1, 2}, false, DataType::TYPE_BF16, 1);
     return config;
 }
 
@@ -322,7 +322,7 @@ static void expectDsv4SwaAllocatedBlocks(const CacheConfig&      config,
                                          const std::string&      label,
                                          bool                    enable_reuse_cache = false) {
     const int tail_blocks = enable_reuse_cache && config.group(tag).policy.enable_prefix_reuse ?
-                                config.reuse_cache_tail_blocks :
+                                config.reuse_cache_tail_blocks() :
                                 dsv4ActiveTailBlocks(config, tag);
     const int tail_begin  = std::max(static_cast<int>(blocks.size()) - tail_blocks, 0);
     for (int i = 0; i < static_cast<int>(blocks.size()); ++i) {
@@ -379,7 +379,7 @@ makeProductionDSV4Config(uint32_t full_block_num, uint32_t max_concurrency, uint
 static BatchKVCacheResourcePtr makeDSV4BatchResource(const CacheConfig& config) {
     auto res = std::make_shared<BatchKVCacheResource>();
     res->resetBatchSize(1);
-    res->initGroups(config.topologyPtr());
+    res->initGroups(config);
     return res;
 }
 
@@ -492,7 +492,7 @@ static CacheConfig makeEventPublicationCacheConfig(bool                 reversed
     for (size_t i = 0; i < tags.size(); ++i) {
         auto group                       = config.group("default");
         group.tag                        = tags[i];
-        group.spec                       = makeResolvedMhaSpec(config.dtype, 1, 1, config.seq_size_per_block, tags[i]);
+        group.spec                       = makeResolvedMhaSpec(config.dtype(), 1, 1, config.seq_size_per_block, tags[i]);
         group.policy                     = defaultCacheGroupPolicy(types[i]);
         group.policy.enable_prefix_reuse = tags[i] != "disabled";
         if (tags[i] == "swa") {
@@ -504,7 +504,7 @@ static CacheConfig makeEventPublicationCacheConfig(bool                 reversed
     if (reversed) {
         std::reverse(groups.begin(), groups.end());
     }
-    config.setTopology(std::move(groups), {{0, {"full"}}, {1, {"swa"}}, {2, {"csa_state"}}, {3, {"disabled"}}});
+    config.setTopology(0, std::move(groups), {{0, {"full"}}, {1, {"swa"}}, {2, {"csa_state"}}, {3, {"disabled"}}});
     return config;
 }
 
@@ -538,7 +538,7 @@ TEST_F(KVCacheManagerTest, DisabledEventsWithoutRemoteBackendDoNotCreateControlP
     KVCacheManager manager(config, false, nullptr, KVCacheConfig{});
     auto           full = std::make_shared<FullGroupSet>(
         std::vector<DeviceBlockPoolPtr>{block_tree_cache_test::makeStructuralDevicePool(0)}, nullptr, nullptr);
-    full->initialize(0, config.topologyPtr(), {"default"});
+    full->initialize(0, std::make_shared<const CacheConfig>(config), {"default"});
     manager.block_tree_cache_ = block_tree_cache_test::makeBlockTreeCacheForTest({full});
     auto reporter             = std::make_shared<EventPublicationReporter>();
     manager.initCacheEventPublisher(reporter);
@@ -553,7 +553,7 @@ TEST_F(KVCacheManagerTest, EventControlUpdatesRemoteBackendThroughRegistrationAn
     KVCacheManager manager(config, false, nullptr, makeEventPublicationRuntimeConfig(), {}, runtime);
     auto           full = std::make_shared<FullGroupSet>(
         std::vector<DeviceBlockPoolPtr>{block_tree_cache_test::makeStructuralDevicePool(0)}, nullptr, nullptr);
-    full->initialize(0, config.topologyPtr(), {"default"});
+    full->initialize(0, std::make_shared<const CacheConfig>(config), {"default"});
     manager.block_tree_cache_                   = block_tree_cache_test::makeBlockTreeCacheForTest({full});
     auto backend                                = std::make_shared<EventControlStorageBackend>();
     manager.block_tree_cache_->storage_backend_ = backend;
@@ -605,7 +605,7 @@ TEST_F(KVCacheManagerTest, EventPublisherWiresEligibleGroupsInTopologyOrder) {
                     nullptr)};
             const std::vector<std::string> group_tags{"full", "swa", "csa_state"};
             for (size_t i = 0; i < groups.size(); ++i) {
-                groups[i]->initialize(i, config.topologyPtr(), {group_tags[i]});
+                groups[i]->initialize(i, std::make_shared<const CacheConfig>(config), {group_tags[i]});
             }
             manager.block_tree_cache_ = block_tree_cache_test::makeBlockTreeCacheForTest(std::move(groups));
             const auto cache          = manager.block_tree_cache_;
@@ -661,10 +661,10 @@ TEST_F(KVCacheManagerTest, EventPublisherFiltersHostGroupsWithoutChangingDeviceS
             auto layers          = config.topology().layers();
             auto second_full     = config.group("full");
             second_full.tag      = "second_full";
-            second_full.spec     = makeResolvedMhaSpec(config.dtype, 2, 1, config.seq_size_per_block, second_full.tag);
+            second_full.spec     = makeResolvedMhaSpec(config.dtype(), 2, 1, config.seq_size_per_block, second_full.tag);
             topology_groups.insert(topology_groups.begin() + 2, second_full);
-            layers.push_back(LayerBase{static_cast<int>(config.layer_num++), {second_full.tag}});
-            config.setTopology(std::move(topology_groups), std::move(layers));
+            layers.push_back(LayerBase{static_cast<int>(layers.size()), {second_full.tag}});
+            config.setTopology(0, std::move(topology_groups), std::move(layers));
             RuntimeConfig runtime;
             runtime.model_name = "event_wiring_model";
             KVCacheManager manager(config, false, nullptr, makeEventPublicationRuntimeConfig(), {}, runtime);
@@ -679,8 +679,8 @@ TEST_F(KVCacheManagerTest, EventPublisherFiltersHostGroupsWithoutChangingDeviceS
                 std::vector<DeviceBlockPoolPtr>{block_tree_cache_test::makeStructuralDevicePool(2)},
                 nullptr,
                 nullptr);
-            full->initialize(0, config.topologyPtr(), {"full", "second_full"});
-            swa->initialize(1, config.topologyPtr(), {"swa"});
+            full->initialize(0, std::make_shared<const CacheConfig>(config), {"full", "second_full"});
+            swa->initialize(1, std::make_shared<const CacheConfig>(config), {"swa"});
             manager.block_tree_cache_ = block_tree_cache_test::makeBlockTreeCacheForTest({full, swa});
             const auto cache          = manager.block_tree_cache_;
             ASSERT_NE(cache, nullptr);
@@ -860,10 +860,14 @@ TEST_F(KVCacheManagerTest, WarmupConfigSmoke) {
 TEST_F(KVCacheManagerTest, TaggedAddressLookupIgnoresGroupOrderAndPreservesLayerBlockOrder) {
     for (const bool reversed : {false, true}) {
         auto config      = makeSimpleMhaCacheConfig(2, 5, 2, DataType::TYPE_FP16);
-        auto narrow_spec = makeResolvedMhaSpec(config.dtype, 1, 1, 2, "narrow");
-        auto wide_spec   = makeResolvedMhaSpec(config.dtype, 2, 4, 2, "wide");
-        config.fromGroupedSpecs(
-            {narrow_spec, wide_spec}, {{0}, {1}}, {CacheGroupType::FULL, CacheGroupType::FULL}, {"narrow", "wide"});
+        auto narrow_spec = makeResolvedMhaSpec(config.dtype(), 1, 1, 2, "narrow");
+        auto wide_spec   = makeResolvedMhaSpec(config.dtype(), 2, 4, 2, "wide");
+        config.fromGroupedSpecs(0,
+                                {narrow_spec, wide_spec},
+                                /*layer_num=*/2,
+                                {{0}, {1}},
+                                {CacheGroupType::FULL, CacheGroupType::FULL},
+                                {"narrow", "wide"});
         rtp_llm::test::setGroupBlockLayout(
             config,
             {"narrow", "wide"},
@@ -873,10 +877,11 @@ TEST_F(KVCacheManagerTest, TaggedAddressLookupIgnoresGroupOrderAndPreservesLayer
         if (reversed) {
             auto groups = config.topology().groups();
             std::reverse(groups.begin(), groups.end());
-            config.setTopology(std::move(groups), config.topology().layers());
+            config.setTopology(0, std::move(groups), config.topology().layers());
         }
         KVCacheManager manager(config);
         ASSERT_TRUE(manager.init());
+        BlockAddrInfo (KVCacheManager::*legacy_addr)(int, int) const = &KVCacheManager::convertIndexToAddr;
         for (const auto& tag : {std::string("narrow"), std::string("wide")}) {
             const int     layer_id = tag == "narrow" ? 0 : 1;
             constexpr int block_id = 3;
@@ -884,7 +889,8 @@ TEST_F(KVCacheManagerTest, TaggedAddressLookupIgnoresGroupOrderAndPreservesLayer
             const auto    buffers  = manager.convertIndexToBuffer(layer_id, tag, block_id);
             ASSERT_FALSE(buffers.empty());
             EXPECT_EQ(addr.kv_addr, buffers.front().addr);
-            EXPECT_EQ(addr.kv_addr, manager.convertIndexToAddr(block_id, layer_id).kv_addr);
+            EXPECT_EQ(addr.kv_addr, (manager.*legacy_addr)(block_id, layer_id).kv_addr);
+            EXPECT_EQ(addr.kv_addr, manager.convertIndexToAddr(CacheModuleId::Main, layer_id, block_id).kv_addr);
             EXPECT_EQ(buffers.front().size_bytes, config.group(tag).kvBlockStrideBytes());
             const auto base = manager.convertIndexToAddr(layer_id, tag, 0);
             EXPECT_EQ(static_cast<char*>(addr.kv_addr) - static_cast<char*>(base.kv_addr),
@@ -963,10 +969,14 @@ TEST_F(KVCacheManagerTest, WarmupPreservesCompletedCapacity) {
 
 TEST_F(KVCacheManagerTest, TestBlockWriterChecksSelectedGroupCapacity) {
     auto config = makeSimpleMhaCacheConfig(2, 5, 2, DataType::TYPE_FP16);
-    auto small  = makeResolvedMhaSpec(config.dtype, 1, 1, 2, "small");
-    auto large  = makeResolvedMhaSpec(config.dtype, 1, 1, 2, "large");
-    config.fromGroupedSpecs(
-        {small, large}, {{0}, {1}}, {CacheGroupType::FULL, CacheGroupType::FULL}, {"small", "large"});
+    auto small  = makeResolvedMhaSpec(config.dtype(), 1, 1, 2, "small");
+    auto large  = makeResolvedMhaSpec(config.dtype(), 1, 1, 2, "large");
+    config.fromGroupedSpecs(0,
+                            {small, large},
+                            /*layer_num=*/2,
+                            {{0}, {1}},
+                            {CacheGroupType::FULL, CacheGroupType::FULL},
+                            {"small", "large"});
     config.setGroupBlockLayout(
         {"small", "large"}, {3, 5}, {small->block_size_bytes(), large->block_size_bytes()}, {0, 0});
     KVCacheManager manager(config, /*warmup=*/true);
@@ -983,9 +993,9 @@ TEST_F(KVCacheManagerTest, LayoutWithoutCapacityCannotAllocatePool) {
     auto config              = makeSimpleMhaCacheConfig(1, 4, 2, DataType::TYPE_FP16);
     auto groups              = config.topology().groups();
     groups.front().block_num = 0;
-    ASSERT_NO_THROW(config.setTopology(std::move(groups), config.topology().layers()));
+    ASSERT_NO_THROW(config.setTopology(0, std::move(groups), config.topology().layers()));
     EXPECT_EQ(config.group("default").block_num, 0u);
-    EXPECT_ANY_THROW(DeviceBlockPoolConfigHelper::createConfigForGroup(config, config.group("default")));
+    EXPECT_ANY_THROW(DeviceBlockPoolConfigHelper::createConfigForGroup(config.topology(), config.group("default")));
     EXPECT_ANY_THROW(KVCacheManager(config, /*warmup=*/true));
     EXPECT_ANY_THROW(KVCacheManager(config, /*warmup=*/false));
 }
@@ -1020,9 +1030,10 @@ TEST_F(KVCacheManagerTest, CandidateConfigAllocatesMergedDraftSegmentsWithinBudg
     target.attn_config.size_per_head    = 2;
     target.attn_config.tokens_per_block = 4;
     KVCacheSpecDesc desc;
-    desc.tag                        = "default";
-    target.kv_cache_spec_descs      = {{desc}};
-    auto draft                      = target;
+    desc.tag                   = "default";
+    target.kv_cache_spec_descs = {{desc}};
+    auto draft                 = target;
+    test::declareModuleScopedTags(draft);
     draft.attn_config.size_per_head = 4;
     KVCacheConfig options;
     options.kv_cache_mem_mb = 1;
@@ -1033,37 +1044,33 @@ TEST_F(KVCacheManagerTest, CandidateConfigAllocatesMergedDraftSegmentsWithinBudg
     const auto candidate =
         CacheConfigCreator::computeLocalBlockNum(candidate_config, target, {}, options, {}, std::nullopt, sp);
     EXPECT_EQ(candidate_config.group("default").block_num, 0u);
-    ASSERT_EQ(candidate_config.mtp_sub_configs.size(), 2u);
-    for (const auto& sub : candidate_config.mtp_sub_configs) {
-        EXPECT_EQ(sub->group("default").block_num, 0u);
-    }
+    ASSERT_EQ(candidate_config.moduleCount(), 2u);
+    EXPECT_EQ(candidate_config.topology(1).group("mtp_default").block_num, 0u);
     candidate_config.finalizeBlockNums(candidate, RuntimeConfig{});
-    const auto     child    = candidate_config.mtp_sub_configs[0];
+    const auto     child    = candidate_config.topologyPtr(1);
     const auto     topology = candidate_config.topologyPtr();
     KVCacheManager manager(candidate_config, false, nullptr, options, {}, {}, sp);
     ASSERT_TRUE(manager.init());
     const auto& config = manager.cacheConfig();
     EXPECT_EQ(config.group("default").block_num, candidate);
-    ASSERT_EQ(config.mtp_sub_configs.size(), 2u);
-    ASSERT_EQ(manager.coordinator_manager_->groupBlockPools().size(), 1u);
-    const auto& pool        = manager.coordinator_manager_->groupBlockPools()[0];
-    const auto  pool_config = std::dynamic_pointer_cast<const DeviceBlockPoolConfig>(pool->config_);
-    ASSERT_NE(pool_config, nullptr);
-    ASSERT_EQ(pool_config->memory_layouts.size(), 3u);
-    // FP16 K+V: 4 tokens/block * 2 bytes/element * (2 target + 2*4 draft elements/token).
-    constexpr size_t bytes_per_block = 4 * 2 * 2 * (2 + 2 * 4);
-    constexpr size_t budget_bytes    = 1024 * 1024;
-    EXPECT_EQ(config.group("default").block_num, budget_bytes / bytes_per_block);
-    EXPECT_EQ(pool->getTotalSizeBytes(), static_cast<size_t>(config.group("default").block_num) * bytes_per_block);
-    EXPECT_LE(pool->getTotalSizeBytes(), budget_bytes);
-    EXPECT_GT(pool->getTotalSizeBytes() + bytes_per_block, budget_bytes);
-    for (const auto& sub : config.mtp_sub_configs) {
-        EXPECT_EQ(sub->group("default").block_num, candidate);
-    }
+    ASSERT_EQ(config.moduleCount(), 2u);
+    EXPECT_EQ(config.topology(1).group("mtp_default").block_num, candidate);
+    ASSERT_EQ(manager.coordinator_manager_->groupBlockPools().size(), 2u);
+    const auto&  main_pool  = manager.coordinator_manager_->groupBlockPools()[0];
+    const auto&  mtp_pool   = manager.coordinator_manager_->groupBlockPools()[1];
+    const size_t main_bytes = config.topology(0).blockSizeBytesForGroup("default");
+    const size_t mtp_bytes  = config.topology(1).blockSizeBytesForGroup("mtp_default");
+    ASSERT_GT(main_bytes, 0u);
+    ASSERT_GT(mtp_bytes, 0u);
+    constexpr size_t budget_bytes = 1024 * 1024;
+    EXPECT_EQ(main_pool->getTotalSizeBytes(), static_cast<size_t>(candidate) * main_bytes);
+    EXPECT_EQ(mtp_pool->getTotalSizeBytes(), static_cast<size_t>(candidate) * mtp_bytes);
+    EXPECT_LE(main_pool->getTotalSizeBytes() + mtp_pool->getTotalSizeBytes(), budget_bytes);
+    EXPECT_GT(main_pool->getTotalSizeBytes() + mtp_pool->getTotalSizeBytes() + main_bytes + mtp_bytes, budget_bytes);
     // Manager consumes the completed topology without cloning or changing child capacities.
-    EXPECT_EQ(manager.cacheConfig().mtp_sub_configs[0], child);
+    EXPECT_EQ(manager.cacheConfig().topologyPtr(1), child);
     EXPECT_EQ(manager.cacheConfig().topologyPtr(), topology);
-    EXPECT_EQ(candidate_config.mtp_sub_configs[0]->group("default").block_num, candidate);
+    EXPECT_EQ(candidate_config.topology(1).group("mtp_default").block_num, candidate);
 }
 
 TEST_F(KVCacheManagerTest, UnresolvedNormalConfigCannotBeUsedForWarmup) {
@@ -1230,9 +1237,12 @@ TEST_F(KVCacheManagerTest, DecodeConnectorReportsOnlyLocallyBackedGroupsIncludin
     for (const bool with_draft : {false, true}) {
         SCOPED_TRACE(with_draft);
         auto config = makeSimpleMhaCacheConfig(1, 4, 2, DataType::TYPE_INT8);
-        config.setTopology({config.group("default"), draft.group("linear")}, config.topology().layers());
         if (with_draft) {
-            config.mtp_sub_configs.push_back(config.mergeMTPModule(draft, 0, config.layer_num));
+            ::rtp_llm::test::CacheConfigTestAccess::addMtpModule(config, draft.topologyPtr(0), draft.moduleMetadata(0));
+        } else {
+            // Covers the no-local-backing path: the tag is registered in the
+            // main topology without layer bindings.
+            config.setTopology(0, {config.group("default"), draft.group("linear")}, config.topology().layers());
         }
         config.finalizeBlockNums(4, RuntimeConfig{});
         auto manager = std::make_shared<KVCacheManager>(
@@ -1348,7 +1358,7 @@ TEST_F(KVCacheManagerTest, ConnectorReferenceReleaseWakesAllocationWaiter) {
 
     auto resource = std::make_shared<BatchKVCacheResource>();
     resource->resetBatchSize(1);
-    resource->initGroups(cache_config.topologyPtr());
+    resource->initGroups(cache_config);
     auto tokens = makeDSV4CompleteTokenIds(/*initial_seq_len=*/2, /*max_seq_len=*/4, /*seq_size_per_block=*/2);
 
     MallocInfo malloc_info{resource, tokens};
@@ -1384,7 +1394,7 @@ TEST_F(KVCacheManagerTest, UpdateKVBlockReleaseWakesAllocationWaiter) {
 
     auto resource = std::make_shared<BatchKVCacheResource>();
     resource->resetBatchSize(2);
-    resource->initGroups(cache_config.topologyPtr());
+    resource->initGroups(cache_config);
     auto tokens = makeDSV4CompleteTokenIds(
         /*initial_seq_len=*/2, /*max_seq_len=*/4, /*seq_size_per_block=*/2, /*batch_size=*/2);
 
@@ -1432,8 +1442,12 @@ TEST_F(KVCacheManagerTest, WriteKVBlockUsesTargetLayerSpec) {
     auto config     = makeSimpleMhaCacheConfig(2, 4, 2, DataType::TYPE_INT8);
     auto large_spec = makeResolvedMhaSpec(DataType::TYPE_INT8, 1, 8, 2, "large");
     auto small_spec = makeResolvedMhaSpec(DataType::TYPE_INT8, 1, 4, 2, "small");
-    config.fromGroupedSpecs(
-        {large_spec, small_spec}, {{0}, {1}}, {CacheGroupType::FULL, CacheGroupType::FULL}, {"large", "small"});
+    config.fromGroupedSpecs(0,
+                            {large_spec, small_spec},
+                            /*layer_num=*/2,
+                            {{0}, {1}},
+                            {CacheGroupType::FULL, CacheGroupType::FULL},
+                            {"large", "small"});
     rtp_llm::test::setGroupBlockLayout(config,
                                        {"large", "small"},
                                        {4, 4},
@@ -1456,8 +1470,12 @@ TEST_F(KVCacheManagerTest, WriteKVBlockRejectsMultiGroupLayer) {
     auto config = makeSimpleMhaCacheConfig(1, 4, 2, DataType::TYPE_INT8);
     auto first  = makeResolvedMhaSpec(DataType::TYPE_INT8, 1, 4, 2, "first");
     auto second = makeResolvedMhaSpec(DataType::TYPE_INT8, 1, 4, 2, "second");
-    config.fromGroupedSpecs(
-        {first, second}, {{0}, {0}}, {CacheGroupType::FULL, CacheGroupType::FULL}, {"first", "second"});
+    config.fromGroupedSpecs(0,
+                            {first, second},
+                            /*layer_num=*/1,
+                            {{0}, {0}},
+                            {CacheGroupType::FULL, CacheGroupType::FULL},
+                            {"first", "second"});
     rtp_llm::test::setGroupBlockLayout(config,
                                        {"first", "second"},
                                        {4, 4},
@@ -1775,7 +1793,7 @@ TEST_F(KVCacheManagerTest, DSV4MallocIncrFreeExposesSevenTypedRegions) {
     auto layout = manager->getMainModelGroupedCacheLayerLayout();
     ASSERT_EQ(layout.topology().groups().size(), static_cast<size_t>(kDsv4PoolNum));
     EXPECT_EQ(publishedGroupTags(layout.topology()), kDsv4Tags);
-    EXPECT_EQ(layout.topology().layers().size(), static_cast<size_t>(manager_config.layer_num));
+    EXPECT_EQ(layout.topology().layers().size(), static_cast<size_t>(manager_config.layer_num()));
 
     const int csa_layer = manager_config.layerIdsForGroup("csa_kv")[0];
     const int hca_layer = manager_config.layerIdsForGroup("hca_kv")[0];
@@ -2541,8 +2559,8 @@ static std::shared_ptr<KVCacheManager> makeStageTransferManager(int pp_size) {
     parallelism_config.world_rank        = parallelism_config.pp_rank;
     if (pp_size > 1) {
         const auto peer = makeSimpleLinearCacheConfig(1, 4, 2, DataType::TYPE_INT8);
-        cache_config.setTopology({cache_config.group("default"), peer.group("linear")},
-                                 cache_config.topology().layers());
+        cache_config.setTopology(
+            0, {cache_config.group("default"), peer.group("linear")}, cache_config.topology().layers());
     }
     auto plan = planBlockTreeCacheLayout(cache_config, kv_cache_config);
     plan->block_nums.emplace();

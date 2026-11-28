@@ -174,7 +174,12 @@ bool P2PConnectorDecode::readPerRank(int64_t                                 req
         worker_route.linear_qkv_segments = local.linear_qkv_segments;
 
         for (const auto& layer_block_pb : route_pb.layer_blocks()) {
-            auto layer_id           = layer_block_pb.layer_id();
+            const auto stage_layer = layer_block_pb.layer_id();
+            const auto begin = config_.worker_config.module_layers.stageOffset(layer_block_pb.cache_tag());
+            if (stage_layer < begin) {
+                return reject_read("READ request layer precedes its cache module");
+            }
+            const auto layer_id = stage_layer - begin;
             auto cache_keys         = layer_block_pb.cache_keys();
             auto block_ids          = layer_block_pb.block_ids();
             if (cache_keys.size() != block_ids.size()) {
@@ -211,11 +216,31 @@ bool P2PConnectorDecode::readPerRank(int64_t                                 req
             if (!route_layer_tag_keys.insert(layer_tag_key).second) {
                 return reject_read("READ request contains duplicate layer/tag within one route");
             }
+            // Structural validation above is tag-only; resolve the owning module
+            // last so malformed routes are rejected before touching the converter.
+            // The receiving converter's module table is authoritative for the
+            // buffer identity: buildKeyBlockInfos forwards buffer->moduleId()
+            // into convertIndexToBuffer, and the real converter CHECKs the
+            // owner module there. Derive it from the tag instead of assuming 0.
+            size_t module_id = 0;
+            if (layer_block_converter_) {
+                try {
+                    module_id = layer_block_converter_->moduleOfTag(layer_block_pb.cache_tag());
+                    if (!layer_block_converter_->tagOwnsLayer(layer_block_pb.cache_tag(), layer_id)) {
+                        return reject_read("READ request cache tag=" + layer_block_pb.cache_tag()
+                                           + " does not own module-local layer=" + std::to_string(layer_id));
+                    }
+                } catch (const std::exception& e) {
+                    return reject_read("READ request cache tag=" + layer_block_pb.cache_tag()
+                                       + " is not owned by any cache module: " + e.what());
+                }
+            }
             const std::set<int64_t> distinct_keys(cache_keys.begin(), cache_keys.end());
             if (distinct_keys.size() != static_cast<size_t>(cache_keys.size())) {
                 return reject_read("READ request contains duplicate cache key");
             }
-            auto layer_cache_buffer = std::make_shared<LayerCacheBuffer>(layer_id, layer_block_pb.cache_tag());
+            auto layer_cache_buffer =
+                std::make_shared<LayerCacheBuffer>(layer_id, layer_block_pb.cache_tag(), /*chunk_id=*/0, module_id);
             for (size_t i = 0; i < cache_keys.size(); i++) {
                 layer_cache_buffer->addBlockId(cache_keys[i], block_ids[i]);
             }

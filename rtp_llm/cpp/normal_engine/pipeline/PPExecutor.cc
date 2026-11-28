@@ -861,7 +861,7 @@ void PPExecutor::broadcastPostRejectionInputs(GptModelInputs& draft_input) {
 
 GptModelOutputs PPExecutor::forwardDraftModel(ModelBase& draft_model, GptModelInputs& draft_input) {
     if (cache_manager_) {
-        mtp::applyCacheStrideToModelInput(draft_input, cache_manager_->getMTPModuleCacheConfig(0));
+        mtp::applyCacheStrideToModelInput(draft_input, cache_manager_->getMTPCacheTopology(0));
     }
     if (model_inputs_logger_) {
         model_inputs_logger_->log(draft_input, ModelInputsModelRole::DRAFT, draft_model.model_id_);

@@ -66,6 +66,7 @@ cc_test(
     srcs = ["PPExecutorTest.cc"],
     copts = test_copts,
     deps = [
+        "//rtp_llm/cpp/cache/test:cache_config_test_access",
         "//rtp_llm/cpp/engine_base/grammar:xgrammar_tokenizer_info",
         "//rtp_llm/cpp/engine_base/schedulers:schedulers",
         "//rtp_llm/cpp/testing:device_test_utils",

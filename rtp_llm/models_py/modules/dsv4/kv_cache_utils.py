@@ -27,6 +27,8 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import torch
 
+from rtp_llm.models_py.utils.kvcache import DRAFT_CACHE_TAG_PREFIX, canonical_cache_tag
+
 # ---------------------------------------------------------------------------
 # Canonical cache-group tags. These are the *consumer* side of the tags that
 # ``rtp_llm/models/dsv4_kv_cache.py`` (``CSA_KV_TAG`` ... ``SWA_KV_TAG``) hands
@@ -80,6 +82,27 @@ def group_tags(kv_cache: Optional[Any]) -> List[str]:
     return [str(tag) for tag in tags]
 
 
+def resolve_dsv4_tag(kv_cache: Optional[Any], tag: str) -> str:
+    """Map a canonical DSV4 tag onto the tag the draft module declared.
+
+    Draft modules declare their own cache tags from the model description
+    (``rtp_llm.models_py.utils.kvcache.declare_draft_cache_tags``, called by each
+    draft class), so a draft publishes ``<prefix><tag>``.  The main module
+    publishes the canonical tag unchanged, hence the identity fast path.
+
+    No heuristics: if neither the canonical nor the declared tag is published,
+    the canonical tag is returned and the caller reports the miss.
+    """
+    tag = str(tag)
+    tags = group_tags(kv_cache)
+    if not tags or tag in tags:
+        return tag
+    declared = DRAFT_CACHE_TAG_PREFIX + tag
+    if declared in tags:
+        return declared
+    return tag
+
+
 def as_attention_inputs_by_tag(
     attention_inputs: Any,
     kv_cache: Optional[Any] = None,
@@ -104,7 +127,11 @@ def as_attention_inputs_by_tag(
         if attention_inputs is None:
             return {}
     if isinstance(attention_inputs, Mapping):
-        return {str(tag): value for tag, value in attention_inputs.items()}
+        # The framework keys the mapping by the group's *published* tag
+        # (``mtp_swa_kv`` for a draft module); callers index by canonical tag.
+        return {
+            canonical_cache_tag(tag): value for tag, value in attention_inputs.items()
+        }
     tags = group_tags(kv_cache)
     tag = tags[0] if len(tags) == 1 else DEFAULT_TAG
     return {tag: attention_inputs}

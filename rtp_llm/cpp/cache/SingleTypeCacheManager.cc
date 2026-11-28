@@ -10,7 +10,7 @@ bool SingleTypeCacheManager::init() {
     auto layer_tensors = block_pool_->allLayerCacheBase();
     auto scale_tensors = block_pool_->allLayerScaleCacheBase();
 
-    const auto layer_count = global_layer_to_local_layer.size();
+    const auto layer_count = module_local_to_pool_index_.size();
     RTP_LLM_CHECK_WITH_INFO(layer_tensors.size() >= layer_count,
                             "layer_tensors size (%zu) is less than layer_ids size (%zu)",
                             layer_tensors.size(),
@@ -20,11 +20,11 @@ bool SingleTypeCacheManager::init() {
                             scale_tensors.size(),
                             layer_count);
 
-    for (const auto& [global_layer_id, i] : global_layer_to_local_layer) {
-        global_layer_to_kv_tensors[global_layer_id] = layer_tensors[static_cast<size_t>(i)];
+    for (const auto& [module_local_id, pool_index] : module_local_to_pool_index_) {
+        module_local_kv_tensors_[module_local_id] = layer_tensors[static_cast<size_t>(pool_index)];
 
         if (!scale_tensors.empty()) {
-            global_layer_to_kv_scale_tensors[global_layer_id] = scale_tensors[static_cast<size_t>(i)];
+            module_local_kv_scale_tensors_[module_local_id] = scale_tensors[static_cast<size_t>(pool_index)];
         }
     }
 
@@ -119,33 +119,30 @@ size_t SingleTypeCacheManager::activeTailBlocks() const {
 }
 
 std::unordered_map<int, torch::Tensor> SingleTypeCacheManager::allLayerCacheBase() const {
-    return global_layer_to_kv_tensors;
+    return module_local_kv_tensors_;
 }
 
 std::unordered_map<int, torch::Tensor> SingleTypeCacheManager::allLayerScaleCacheBase() const {
-    return global_layer_to_kv_scale_tensors;
+    return module_local_kv_scale_tensors_;
 }
 
 BlockAddrInfo SingleTypeCacheManager::convertIndexToAddr(int layer_id, int block_id) const {
-    auto it = global_layer_to_local_layer.find(layer_id);
-    RTP_LLM_CHECK_WITH_INFO(it != global_layer_to_local_layer.end(), "invalid layer_id: " + std::to_string(layer_id));
-    int local_layer_id = it->second;
-    return block_pool_->convertIndexToAddr(local_layer_id, block_id);
+    auto it = module_local_to_pool_index_.find(layer_id);
+    RTP_LLM_CHECK_WITH_INFO(it != module_local_to_pool_index_.end(), "invalid layer_id: " + std::to_string(layer_id));
+    return block_pool_->convertIndexToAddr(it->second, block_id);
 }
 
 std::vector<BlockInfo> SingleTypeCacheManager::convertIndexToBuffer(int layer_id, int block_id) const {
-    auto it = global_layer_to_local_layer.find(layer_id);
-    RTP_LLM_CHECK_WITH_INFO(it != global_layer_to_local_layer.end(), "invalid layer_id: " + std::to_string(layer_id));
-    int local_layer_id = it->second;
-    return block_pool_->convertIndexToBuffer(local_layer_id, block_id);
+    auto it = module_local_to_pool_index_.find(layer_id);
+    RTP_LLM_CHECK_WITH_INFO(it != module_local_to_pool_index_.end(), "invalid layer_id: " + std::to_string(layer_id));
+    return block_pool_->convertIndexToBuffer(it->second, block_id);
 }
 
 std::vector<BlockInfo>
 SingleTypeCacheManager::convertIndexToBuffer(int layer_id, int block_id, int partition_count, int partition_id) const {
-    auto it = global_layer_to_local_layer.find(layer_id);
-    RTP_LLM_CHECK_WITH_INFO(it != global_layer_to_local_layer.end(), "invalid layer_id: " + std::to_string(layer_id));
-    int local_layer_id = it->second;
-    return block_pool_->convertIndexToBuffer(local_layer_id, block_id, partition_count, partition_id);
+    auto it = module_local_to_pool_index_.find(layer_id);
+    RTP_LLM_CHECK_WITH_INFO(it != module_local_to_pool_index_.end(), "invalid layer_id: " + std::to_string(layer_id));
+    return block_pool_->convertIndexToBuffer(it->second, block_id, partition_count, partition_id);
 }
 
 void SingleTypeCacheManager::reference(BlockIds& block_ids, const BlockIndicesType& new_block_indices) {

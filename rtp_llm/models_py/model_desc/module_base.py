@@ -1,5 +1,5 @@
 import logging
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
 from typing import Any, Optional
 
 import torch
@@ -10,6 +10,7 @@ from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.device.device_type import DeviceType, get_device_type
 from rtp_llm.model_loader.model_weight_info import ModelWeights
 from rtp_llm.models_py.model_desc.block_map import (
+    canonical_attention_inputs,
     get_attention_inputs_value,
     select_attention_inputs_for_tag,
 )
@@ -19,13 +20,34 @@ from rtp_llm.models_py.model_desc.hidden_state_capture import (
 )
 from rtp_llm.models_py.modules import AttnImplFactory
 from rtp_llm.models_py.modules.factory.attention.attn_factory import AttentionImpl
+from rtp_llm.models_py.utils.kvcache import ModuleLocalKVCache
 from rtp_llm.ops.compute_ops import (
     KVCache,
+    PyAttentionInputs,
     PyModelInitResources,
     PyModelInputs,
     PyModelOutputs,
 )
 from rtp_llm.utils.model_weight import W
+
+
+class ModuleLocalAttentionImpls(Mapping[str, AttentionImpl]):
+    def __init__(self, impls: dict[str, AttentionImpl]) -> None:
+        self._impls = impls
+
+    def __getitem__(self, tag: str) -> AttentionImpl:
+        return self._impls[tag]
+
+    def __iter__(self) -> Iterator[str]:
+        return iter(self._impls)
+
+    def __len__(self) -> int:
+        return len(self._impls)
+
+    def prepare_cuda_graph(self, groups: Mapping[str, PyAttentionInputs]) -> None:
+        local_groups = canonical_attention_inputs(groups)
+        for tag, impl in self._impls.items():
+            impl.prepare_cuda_graph(select_attention_inputs_for_tag(local_groups, tag))
 
 
 class GptModelBase(nn.Module):
@@ -53,7 +75,7 @@ class GptModelBase(nn.Module):
         self.layer_num: int = config.num_layers
         self.vocab_size: int = config.vocab_size
 
-        self.kv_cache: Optional[KVCache] = None
+        self.kv_cache: Optional[KVCache | ModuleLocalKVCache] = None
         self.device_type: DeviceType = get_device_type()
         self._mtp_aux_capture_layer_ids = tuple(
             config.capture_aux_hidden_layer_ids or ()
@@ -133,7 +155,10 @@ class GptModelBase(nn.Module):
         return {"hidden_states": hidden_template}
 
     def initialize(self, init_resource: PyModelInitResources) -> bool:
-        self.kv_cache = init_resource.kv_cache
+        # Module-local tag view: Python addresses pools by canonical names
+        # while the engine keeps the module's published (e.g. ``mtp_``) tags.
+        kv_cache = init_resource.kv_cache
+        self.kv_cache = None if kv_cache is None else ModuleLocalKVCache(kv_cache)
         if self.kv_cache is not None:
             num_layers = self.kv_cache.layer_count
             layer0_caches = (
@@ -157,7 +182,7 @@ class GptModelBase(nn.Module):
         inputs: PyModelInputs,
         is_cuda_graph: bool = False,
         cuda_graph_selection_mode: Optional[str] = None,
-    ) -> AttentionImpl | dict[str, AttentionImpl]:
+    ) -> AttentionImpl | Mapping[str, AttentionImpl]:
         attention_inputs = get_attention_inputs_value(inputs)
         if getattr(self, "_dynamic_decode_enabled", False) and is_cuda_graph:
             from rtp_llm.config.cuda_graph import CudaGraphSelectionMode
@@ -213,7 +238,7 @@ class GptModelBase(nn.Module):
                     for tag in fmha_group_tags
                 )
             )
-            return {
+            impls = {
                 tag: AttnImplFactory.get_fmha_impl(
                     model_config=self.config,
                     parallelism_config=self.parallelism_config,
@@ -229,6 +254,9 @@ class GptModelBase(nn.Module):
                 )
                 for tag, group_inputs in selected_group_inputs
             }
+            if is_cuda_graph and getattr(self.config, "cache_tag_prefix", ""):
+                return ModuleLocalAttentionImpls(impls)
+            return impls
         return AttnImplFactory.get_fmha_impl(
             model_config=self.config,
             parallelism_config=self.parallelism_config,

@@ -1253,7 +1253,7 @@ TEST_F(TransferWorkLoopTest, PerRankRejectsInvalidDescriptorsBeforeAdmission) {
 }
 
 TEST_F(TransferWorkLoopTest, PerRankRejectsNonContiguousGroupsBeforeAdmission) {
-    auto second = makeTestGroupSet(1, group->topologyPtr(), {"group0"}, {}, host, disk);
+    auto second = makeTestGroupSet(1, group->cacheConfig()->topologyPtr(), {"group0"}, {}, host, disk);
     engine      = std::make_shared<PerRankBlockTransferEngine>(
         std::vector<GroupSetPtr>{group, second}, true, 4, 2, 1, 4, nullptr, 0, 1, diskOptions());
     auto task = makeTransferTask({TransferDescriptor::hostToDisk(0, hosts[2], disks[0]),
@@ -2258,7 +2258,7 @@ TEST_F(TransferWorkLoopCrcTest, DirectIoRoundTripPreservesNonzeroPaddingAndCrc) 
     disk = makeDiskPool(384, 16, temp.path, nullptr, "workloop_direct", false, true);
     for (size_t i = 0; i < 8; ++i)
         disks.push_back(poolMalloc(*disk));
-    group = makeTestGroupSet(0, group->topologyPtr(), {"group0"}, {device}, host, disk, true);
+    group = makeTestGroupSet(0, group->cacheConfig()->topologyPtr(), {"group0"}, {device}, host, disk, true);
     initialize(8, 2, 1, 1, 2);
     auto sealed = engine->execute(evict(0));
     ASSERT_TRUE(await(sealed));
@@ -2541,7 +2541,7 @@ TEST_F(TransferWorkLoopTest, IndependentFullAndSwaDiskPoolsShareOneExecutorAcros
     swa_policy.sliding_window_size = 128;
     auto topology = makeTestTopology({makeTestGroupBase(defaultCacheGroupPolicy(CacheGroupType::FULL), {0}, 384),
                                       makeTestGroupBase(swa_policy, {1}, 384)});
-    group->initialize(0, topology, {"group0"}, makeTestBackingLayout(384, false));
+    group->initialize(0, block_transfer_engine_test::makeTestCacheConfig(*topology), {"group0"}, makeTestBackingLayout(384, false));
     auto       swa_disk  = makeDiskPool(384, 16, temp.path, std::make_unique<ControlledDiskIO>(), "swa");
     auto       swa       = makeTestGroupSet(1, topology, {"group1"}, {}, host, swa_disk);
     const auto swa_block = poolMalloc(*swa_disk);
@@ -2568,7 +2568,7 @@ TEST_F(TransferWorkLoopCrcTest, UnifiedStagingQueueAdmitsSwaWhileFullWaiterIsBlo
     swa_policy.sliding_window_size = 128;
     auto topology = makeTestTopology({makeTestGroupBase(defaultCacheGroupPolicy(CacheGroupType::FULL), {0}, 384),
                                       makeTestGroupBase(swa_policy, {1}, 384)});
-    group->initialize(0, topology, {"group0"}, makeTestBackingLayout(384, true));
+    group->initialize(0, block_transfer_engine_test::makeTestCacheConfig(*topology), {"group0"}, makeTestBackingLayout(384, true));
     auto swa = makeTestGroupSet(1, topology, {"group1"}, {device}, host, disk, true);
     engine   = std::make_shared<PerRankBlockTransferEngine>(
         std::vector<GroupSetPtr>{group, swa}, true, 2, 2, 1, 8, nullptr, 0, 1, diskOptions());
@@ -2704,7 +2704,7 @@ TEST_F(TransferWorkLoopCrcTest, DirectionPollScansAllDevicesWithIndependentSlots
     ASSERT_EQ(cudaSetDevice(1), cudaSuccess);
     auto other_device = makeTestDevicePool({{384, 0}}, 4, "workloop_second_device");
     auto other_host   = makeHostPool(384, 4, true);
-    auto other       = makeTestGroupSet(1, group->topologyPtr(), {"group0"}, {other_device}, other_host, nullptr, true);
+    auto other       = makeTestGroupSet(1, group->cacheConfig()->topologyPtr(), {"group0"}, {other_device}, other_host, nullptr, true);
     auto source      = poolMalloc(*other_device);
     auto destination = poolMalloc(*other_host);
     const std::vector<uint8_t> expected(384, 0x65);
@@ -2762,7 +2762,7 @@ TEST_F(TransferWorkLoopCrcTest, StagingClassStridesPreserveConfiguredBatchLimit)
     swa_policy.sliding_window_size = 128;
     auto topology = makeTestTopology({makeTestGroupBase(defaultCacheGroupPolicy(CacheGroupType::FULL), {0}, 384),
                                       makeTestGroupBase(swa_policy, {1}, 384)});
-    group->initialize(0, topology, {"group0"}, makeTestBackingLayout(384, true));
+    group->initialize(0, block_transfer_engine_test::makeTestCacheConfig(*topology), {"group0"}, makeTestBackingLayout(384, true));
     auto config             = std::make_shared<DiskBlockPoolConfig>();
     config->pool_type       = BlockPoolType::DISK;
     config->pool_name       = "swa_larger_stride";
@@ -2855,7 +2855,7 @@ TEST_F(TransferWorkLoopCrcTest, LoadOwnersHavePrivateStagingAndAllOwnersKeepInde
     swa_policy.sliding_window_size = 128;
     auto topology = makeTestTopology({makeTestGroupBase(defaultCacheGroupPolicy(CacheGroupType::FULL), {0}, 384),
                                       makeTestGroupBase(swa_policy, {1}, 384)});
-    group->initialize(0, topology, {"group0"}, makeTestBackingLayout(384, true));
+    group->initialize(0, block_transfer_engine_test::makeTestCacheConfig(*topology), {"group0"}, makeTestBackingLayout(384, true));
     auto config             = std::make_shared<DiskBlockPoolConfig>();
     config->pool_type       = BlockPoolType::DISK;
     config->pool_name       = "multi_loop_swa_stride";
@@ -2966,7 +2966,7 @@ TEST_F(TransferWorkLoopCrcTest, LargerPhysicalDiskStridePreservesConfiguredStagi
     config->disk_size_bytes = 8192 * 17;
     auto wider_disk         = std::make_shared<DiskBlockPool>(config, std::make_unique<ControlledDiskIO>());
     ASSERT_TRUE(wider_disk->init());
-    auto wider_group = makeTestGroupSet(0, group->topologyPtr(), {"group0"}, {device}, host, wider_disk, true);
+    auto wider_group = makeTestGroupSet(0, group->cacheConfig()->topologyPtr(), {"group0"}, {device}, host, wider_disk, true);
     PerRankBlockTransferEngine minimum({wider_group}, true, 2, 2, 1, 8, nullptr, 0, 1);
     EXPECT_EQ(minimum.load_loops_.front()->staging_.pools[0]->capacity(), 2u);
     EXPECT_EQ(minimum.evict_loops_.front()->staging_.pools[0], nullptr);

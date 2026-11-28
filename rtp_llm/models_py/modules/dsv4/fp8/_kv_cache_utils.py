@@ -12,9 +12,24 @@ from rtp_llm.models_py.modules.dsv4.kv_cache_utils import (
     DSV4_PHYSICAL_ROW_TAGS,
 )
 from rtp_llm.models_py.modules.dsv4.kv_cache_utils import group_tags as _group_tags
+from rtp_llm.models_py.modules.dsv4.kv_cache_utils import resolve_dsv4_tag
 
 _PHYSICAL_ROW_TAGS = frozenset(DSV4_PHYSICAL_ROW_TAGS)
 _KERNEL_ROW_TAGS = frozenset(DSV4_KERNEL_ROW_TAGS)
+
+
+def _semantic_tag(tag: Optional[str]) -> Optional[str]:
+    """Canonical DSV4 tag behind a framework group tag.
+
+    MTP modules publish ``mtp_<tag>`` so the tag -> module mapping stays
+    bijective. Row granularity is a property of the tag's semantics, not of the
+    module it belongs to, so classify by the stripped name while still querying
+    the framework with the published one.
+    """
+    if tag is None:
+        return None
+    tag = str(tag)
+    return tag[len("mtp_") :] if tag.startswith("mtp_") else tag
 
 
 def _positive_int(value: Any) -> Optional[int]:
@@ -79,11 +94,14 @@ def require_pool_tokens_per_block(
     (topology group-id order) for callers that only hold a group id.
     """
     resolved_tag = _tag_for_group_or_tag(kv_cache, group=group, tag=tag)
-    if resolved_tag in _PHYSICAL_ROW_TAGS:
+    if resolved_tag is not None:
+        resolved_tag = resolve_dsv4_tag(kv_cache, resolved_tag)
+    semantic_tag = _semantic_tag(resolved_tag)
+    if semantic_tag in _PHYSICAL_ROW_TAGS:
         value = _seq_size_per_block(kv_cache, resolved_tag)
         if value is not None:
             return value
-    if resolved_tag in _KERNEL_ROW_TAGS:
+    if semantic_tag in _KERNEL_ROW_TAGS:
         value = _kernel_seq_size_per_block(kv_cache, resolved_tag)
         if value is not None:
             return value
@@ -104,7 +122,7 @@ def pool_physical_tokens_per_block(kv_cache: Any, tag: Optional[str]) -> int:
     """
     if kv_cache is None or tag is None:
         return 0
-    return _seq_size_per_block(kv_cache, str(tag)) or 0
+    return _seq_size_per_block(kv_cache, resolve_dsv4_tag(kv_cache, str(tag))) or 0
 
 
 class PoolBackedModule(nn.Module):
@@ -171,7 +189,9 @@ class PoolBackedModule(nn.Module):
         self._kv_eb = kv_eb
         self._kv_tokens_per_block = kv_tokens_per_block
         self._kv_owner_tokens_per_block = (
-            kv_owner_tokens_per_block if kv_owner_tokens_per_block > 0 else kv_tokens_per_block
+            kv_owner_tokens_per_block
+            if kv_owner_tokens_per_block > 0
+            else kv_tokens_per_block
         )
 
         if state_pool_view is not None:

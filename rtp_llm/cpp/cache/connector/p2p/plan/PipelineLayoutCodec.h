@@ -116,6 +116,7 @@ inline std::optional<PipelineTransferLayout> decodeP2PPipelineLayout(const std::
         auto& stage            = layout.stages.emplace_back();
         stage.main_layer_begin = metadata.main_layer_begin();
         stage.main_layer_count = metadata.main_layer_count();
+        stage.block_table_tags.assign(metadata.block_table_tags().begin(), metadata.block_table_tags().end());
         stage.worker_indices.assign(metadata.worker_indices().begin(), metadata.worker_indices().end());
         for (const auto& layer : metadata.layers()) {
             stage.layer_tags.emplace_back(layer.tags().begin(), layer.tags().end());

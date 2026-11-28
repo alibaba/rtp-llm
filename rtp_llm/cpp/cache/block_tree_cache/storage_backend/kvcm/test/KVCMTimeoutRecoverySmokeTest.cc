@@ -118,7 +118,7 @@ struct NativeWorker {
             SpeculativeExecutionConfig{}, broadcast, false, nullptr, client);
         manager = std::make_shared<KVCacheManager>(environment.cache_config, false, nullptr, config, parallel);
         auto full = std::make_shared<FullGroupSet>(std::vector<DeviceBlockPoolPtr>{environment.device_pool}, nullptr, nullptr);
-        full->initialize(0, environment.cache_config.topologyPtr(), {"default"});
+        full->initialize(0, std::make_shared<CacheConfig>(environment.cache_config), {"default"});
         BlockTreeCacheConfig cache_config;
         cache_config.enable_remote_cache = true;
         block_tree_cache_test::RecoveryTestOptions recovery;

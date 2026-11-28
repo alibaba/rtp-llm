@@ -97,6 +97,7 @@ TEST(CacheConfigLocalShardingTest, TargetAndDraftShareOneLocalLayout) {
     auto target = makePageRrModelConfig();
     target.use_page_rr_kv_cache = true;
     auto draft = target;
+    declareModuleScopedTags(draft);
     ParallelismConfig par;
     par.role_type                         = RoleType::DECODE;
     par.tp_size                           = 4;
@@ -105,9 +106,9 @@ TEST(CacheConfigLocalShardingTest, TargetAndDraftShareOneLocalLayout) {
     SpeculativeExecutionConfig sp;
     sp.gen_num_per_cycle = 3;
     const auto config = CacheConfigCreator::createConfig(target, par, {}, sp, &draft);
-    ASSERT_EQ(config.mtp_sub_configs.size(), 1u);
+    ASSERT_EQ(config.moduleCount(), 2u);
     EXPECT_TRUE(config.local_kv_cache_sharded);
-    EXPECT_TRUE(config.mtp_sub_configs[0]->local_kv_cache_sharded);
+    EXPECT_EQ(config.topology(1).groupTags(), (std::vector<std::string>{"mtp_full"}));
 
     draft.use_page_rr_kv_cache = false;
     EXPECT_ANY_THROW(CacheConfigCreator::createConfig(target, par, {}, sp, &draft));
@@ -129,7 +130,7 @@ static CompleteTokenIdsPtr makeTokenIds(int batch_size, int seq_len, int block_s
 static BatchKVCacheResourcePtr makeResource(int batch_size, const CacheConfig& config) {
     auto res = std::make_shared<BatchKVCacheResource>();
     res->resetBatchSize(batch_size);
-    res->initGroups(config.topologyPtr());
+    res->initGroups(config);
     return res;
 }
 

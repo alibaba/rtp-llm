@@ -144,7 +144,7 @@ ErrorInfo P2PWorkerDecodeRead::buildRecvTasks(const P2PWorkerRoutePlan&         
 
             // key 由编排层签发的 route_id + plan digest 命名 —— 两侧不做任何独立推导。
             const std::string route_layer_key = P2PKeyUtil::makeRouteLayerKey(unique_key,
-                                                                              config_.global_layer_begin + layer_id,
+                                                                              config_.wireLayerId(route.cache_tag, layer_id),
                                                                               layer_cache_buffer->cacheTag(),
                                                                               route.route_id,
                                                                               worker_plan.plan_digest);

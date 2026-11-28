@@ -1,9 +1,12 @@
 #include <gtest/gtest.h>
 
+#include <map>
 #include <memory>
+#include <set>
 #include <string>
 #include <vector>
 
+#include "rtp_llm/cpp/cache/test/CacheConfigTestAccess.h"
 #include "rtp_llm/cpp/cache/CacheConfig.h"
 #include "rtp_llm/cpp/cache/CacheTopology.h"
 #include "rtp_llm/cpp/cache/MHAKVCacheSpec.h"
@@ -11,6 +14,25 @@
 
 namespace rtp_llm {
 namespace {
+
+// The draft module declares its own module-scoped tags; nothing is inferred.
+std::shared_ptr<const CacheTopology> declareModuleScopedTags(const CacheTopology& topology) {
+    auto groups = topology.groups();
+    auto layers = topology.layers();
+    for (auto& group : groups) {
+        const std::string new_tag = "mtp_" + group.tag;
+        auto              spec    = group.spec->clone();
+        spec->tag                 = new_tag;
+        group.spec                = std::move(spec);
+        group.tag                 = new_tag;
+    }
+    for (auto& layer : layers) {
+        for (auto& tag : layer.group_tags) {
+            tag = "mtp_" + tag;
+        }
+    }
+    return CacheTopology::create(std::move(groups), std::move(layers));
+}
 
 GroupBase makeGroup(std::string tag, CacheGroupType type = CacheGroupType::FULL) {
     auto spec                       = std::make_shared<MHAKVCacheSpec>();
@@ -26,7 +48,7 @@ GroupBase makeGroup(std::string tag, CacheGroupType type = CacheGroupType::FULL)
     return group;
 }
 
-GroupBase makeLayoutGroup(const std::string& tag, int head_dim) {
+KVCacheSpecPtr makeLayoutSpec(const std::string& tag, int head_dim) {
     AttentionConfigs attention;
     attention.kv_head_num   = 1;
     attention.size_per_head = head_dim;
@@ -40,8 +62,12 @@ GroupBase makeLayoutGroup(const std::string& tag, int head_dim) {
     context.parallelism_config      = &parallelism;
     context.seq_size_per_block      = 8;
     context.kernel_tokens_per_block = 2;
-    auto group                      = makeGroup(tag);
-    group.spec                      = MHAKVCacheSpec::build(desc, context);
+    return MHAKVCacheSpec::build(desc, context);
+}
+
+GroupBase makeLayoutGroup(const std::string& tag, int head_dim) {
+    auto group = makeGroup(tag);
+    group.spec = makeLayoutSpec(tag, head_dim);
     return group;
 }
 
@@ -165,25 +191,35 @@ TEST(CacheTopologyTest, GroupOrderIsCanonicalRegardlessOfConstructionOrder) {
     EXPECT_EQ(first->groupForLayer(0, "linear").tag, reversed->groupForLayer(0, "linear").tag);
 }
 
-TEST(CacheTopologyTest, PhysicalGroupResolvesMultipleMtpModuleLayerRanges) {
+TEST(CacheTopologyTest, LinearReplayFollowsTagWhenGroupRowChanges) {
     CacheConfig config;
-    config.layer_num = 1;
-    config.setTopology({makeGroup("full")}, {{0, {"full"}}});
+    EXPECT_TRUE(config.allGroupTags().empty());
+    const auto linear                = makeGroup("linear", CacheGroupType::LINEAR);
+    config.setTopology(0, {linear}, {{0, {"linear"}}});
+    config.linear_replay.group_tags = {"linear"};
+    ASSERT_EQ(config.topology().groupIdForTag("linear"), 0u);
 
-    for (int module = 0; module < 2; ++module) {
-        CacheConfig draft;
-        draft.layer_num = 2;
-        draft.setTopology({makeGroup("full")}, {{0, {"full"}}, {1, {"full"}}});
-        config.mtp_sub_configs.push_back(config.mergeMTPModule(draft, module, config.layer_num));
-    }
+    config.setTopology(0, {linear, makeGroup("full")}, {{0, {"linear", "full"}}});
+    ASSERT_EQ(config.topology().groupIdForTag("linear"), 1u);
+    EXPECT_TRUE(config.isLinearReplayGroup("linear"));
+    EXPECT_FALSE(config.isLegacyLinearGroup("linear"));
+    EXPECT_FALSE(config.isLinearReplayGroup("full"));
+}
 
-    EXPECT_EQ(&config.physicalGroupForLayer(0, "full"), &config.group("full"));
-    for (int module = 0; module < 2; ++module) {
-        const auto& group = config.mtp_sub_configs[module]->group("full");
-        EXPECT_EQ(&config.physicalGroupForLayer(1 + module * 2, "full"), &group);
-        EXPECT_EQ(&config.physicalGroupForLayer(2 + module * 2, "full"), &group);
-    }
-    EXPECT_ANY_THROW((void)config.physicalGroupForLayer(5, "full"));
+TEST(CacheTopologyTest, PhysicalGroupResolvesSingleMtpModuleLayerRange) {
+    CacheConfig config;
+    config.setTopology(0, {makeGroup("full")}, {{0, {"full"}}});
+
+    CacheConfig draft;
+    draft.setTopology(0, {makeGroup("full")}, {{0, {"full"}}, {1, {"full"}}});
+    ::rtp_llm::test::CacheConfigTestAccess::addMtpModule(
+        config, declareModuleScopedTags(draft.topology(0)), draft.moduleMetadata(0));
+
+    EXPECT_EQ(&config.topology(0).groupForLayer(0, "full"), &config.topology(0).group("full"));
+    const auto& mtp_group = config.topology(1).group("mtp_full");
+    EXPECT_EQ(&config.topology(1).groupForLayer(0, "mtp_full"), &mtp_group);
+    EXPECT_EQ(&config.topology(1).groupForLayer(1, "mtp_full"), &mtp_group);
+    EXPECT_ANY_THROW((void)config.topology(1).groupForLayer(2, "mtp_full"));
 }
 
 TEST(CacheTopologyTest, GroupTagsUseCanonicalOrderAndStableStorage) {
@@ -203,8 +239,9 @@ TEST(CacheTopologyTest, GroupedSpecsKeepGeometryPoliciesAndMembershipWithCanonic
     const auto  zeta  = makeLayoutGroup("zeta", 2);
     const auto  alpha = makeLayoutGroup("alpha", 3);
     CacheConfig config;
-    config.layer_num = 2;
-    config.fromGroupedSpecs({zeta.spec->clone(), alpha.spec->clone()},
+    config.fromGroupedSpecs(0,
+                            {zeta.spec->clone(), alpha.spec->clone()},
+                            /*layer_num=*/2,
                             {{1}, {0}},
                             {CacheGroupType::SWA, CacheGroupType::FULL},
                             {"zeta", "alpha"});
@@ -224,8 +261,7 @@ TEST(CacheTopologyTest, TaggedLayoutPreservesOrderAndRetainedTopology) {
     auto        first  = makeLayoutGroup("zeta", 2);
     auto        second = makeLayoutGroup("alpha", 3);
     CacheConfig config;
-    config.layer_num = 1;
-    config.setTopology({first, second}, {{0, {"zeta", "alpha"}}});
+    config.setTopology(0, {first, second}, {{0, {"zeta", "alpha"}}});
     const auto  retained      = config.topologyPtr();
     const auto& retained_tags = retained->groupTags();
     EXPECT_EQ(&config.groupTags(), &retained_tags);
@@ -246,28 +282,27 @@ TEST(CacheTopologyTest, TaggedLayoutPreservesOrderAndRetainedTopology) {
 
 TEST(CacheTopologyTest, TaggedLayoutKeepsMtpPhysicalGeometry) {
     CacheConfig config;
-    config.layer_num = 1;
-    config.setTopology({makeLayoutGroup("full", 2)}, {{0, {"full"}}});
+    config.setTopology(0, {makeLayoutGroup("full", 2)}, {{0, {"full"}}});
     CacheConfig draft;
-    draft.layer_num = 1;
-    draft.setTopology({makeLayoutGroup("full", 5)}, {{0, {"full"}}});
-    const auto child = config.mergeMTPModule(draft, 0, 1);
-    config.mtp_sub_configs.push_back(child);
-    const auto main_stride  = config.group("full").kvBlockStrideBytes();
-    const auto draft_stride = config.physicalGroupForLayer(1, "full").kvBlockStrideBytes();
-    const auto total_bytes  = config.blockSizeBytesForGroup("full");
+    draft.setTopology(0, {makeLayoutGroup("full", 5)}, {{0, {"full"}}});
+    const auto child = declareModuleScopedTags(draft.topology(0));
+    ::rtp_llm::test::CacheConfigTestAccess::addMtpModule(config, child, draft.moduleMetadata(0));
+    const auto main_stride  = config.topology(0).group("full").kvBlockStrideBytes();
+    const auto draft_stride = config.topology(1).group("mtp_full").kvBlockStrideBytes();
+    const auto main_bytes   = config.topology(0).blockSizeBytesForGroup("full");
+    const auto draft_bytes  = config.topology(1).blockSizeBytesForGroup("mtp_full");
     ASSERT_NE(main_stride, draft_stride);
     config.setGroupBlockLayout({"full"}, {23}, {main_stride}, {config.group("full").kvScaleStrideBytes()});
     EXPECT_EQ(config.group("full").block_num, 23u);
-    EXPECT_EQ(config.physicalGroupForLayer(1, "full").kvBlockStrideBytes(), draft_stride);
-    EXPECT_EQ(config.blockSizeBytesForGroup("full"), total_bytes);
-    EXPECT_EQ(config.mtp_sub_configs.front(), child);
+    EXPECT_EQ(config.topology(1).group("mtp_full").kvBlockStrideBytes(), draft_stride);
+    EXPECT_EQ(config.topology(0).blockSizeBytesForGroup("full"), main_bytes);
+    EXPECT_EQ(config.topology(1).blockSizeBytesForGroup("mtp_full"), draft_bytes);
+    EXPECT_EQ(config.topologyPtr(1), child);
 }
 
 TEST(CacheTopologyTest, InvalidTaggedLayoutsNeverPublishPartialUpdates) {
     CacheConfig config;
-    config.layer_num = 1;
-    config.setTopology({makeLayoutGroup("first", 2), makeLayoutGroup("second", 2)}, {{0, {"first", "second"}}});
+    config.setTopology(0, {makeLayoutGroup("first", 2), makeLayoutGroup("second", 2)}, {{0, {"first", "second"}}});
     const auto original = config.topologyPtr();
     const auto kv       = config.group("first").kvBlockStrideBytes();
     const auto scale    = config.group("first").kvScaleStrideBytes();
@@ -299,6 +334,42 @@ TEST(CacheTopologyTest, DerivesReverseMembershipFromLayers) {
     EXPECT_ANY_THROW(CacheTopology::create({makeGroup("full")}, {{0, {"missing"}}}));
     EXPECT_ANY_THROW(CacheTopology::create({makeGroup("full")}, {{0, {"full", "full"}}}));
     EXPECT_ANY_THROW(CacheTopology::create({makeGroup("full"), makeGroup("full")}, {{0, {"full"}}}));
+}
+
+TEST(CacheTopologyTest, PublicationFreezesMutableSpecAlias) {
+    auto    spec  = std::dynamic_pointer_cast<MHAKVCacheSpec>(makeLayoutSpec("full", 2));
+    GroupBase group = makeGroup("full");
+    group.spec      = spec;
+    CacheConfig config;
+    config.setTopology(0, {group}, {{0, {"full"}}});
+    const auto published_stride = config.group("full").kvBlockStrideBytes();
+
+    spec->per_token_k_elems = spec->per_token_k_elems * 3;
+    EXPECT_EQ(config.group("full").kvBlockStrideBytes(), published_stride);
+}
+
+TEST(CacheTopologyTest, CapacityUpdateReusesFrozenSpecPointers) {
+    auto first  = makeLayoutGroup("first", 2);
+    auto second = makeLayoutGroup("second", 3);
+    CacheConfig config;
+    config.setTopology(0, {first, second}, {{0, {"first", "second"}}});
+    const auto before          = config.topologyPtr();
+    const auto first_spec      = before->group("first").spec;
+    const auto second_spec     = before->group("second").spec;
+    const auto first_stride    = config.group("first").kvBlockStrideBytes();
+    const auto second_stride   = config.group("second").kvBlockStrideBytes();
+    const auto first_scale     = config.group("first").kvScaleStrideBytes();
+    const auto second_scale    = config.group("second").kvScaleStrideBytes();
+
+    config.setGroupBlockLayout({"first", "second"}, {21, 22}, {first_stride, second_stride},
+                               {first_scale, second_scale});
+    const auto after = config.topologyPtr();
+    ASSERT_NE(after, before);
+    EXPECT_EQ(after->group("first").spec, first_spec);
+    EXPECT_EQ(after->group("second").spec, second_spec);
+    EXPECT_EQ(after->group("first").block_num, 21u);
+    EXPECT_EQ(after->group("second").block_num, 22u);
+    EXPECT_EQ(before->group("first").block_num, 16u);
 }
 
 }  // namespace

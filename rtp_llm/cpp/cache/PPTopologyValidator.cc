@@ -154,33 +154,40 @@ StageCacheSnapshot StageCacheSnapshot::captureLocalStage(const CacheConfig&     
     /** Tier weights use the first reusable tag of each type in local layer order. */
     std::unordered_set<std::string>                 local_tags;
     std::unordered_map<CacheGroupType, std::string> first_local_tag;
-    for (const auto& layer : config.topology().layers()) {
-        for (const auto& tag : layer.group_tags) {
-            if (!local_tags.insert(tag).second) {
-                continue;
-            }
-            const auto& policy = config.group(tag).policy;
-            if (cacheGroupParticipatesInBlockTree(policy)) {
-                first_local_tag.try_emplace(policy.group_type, tag);
+    for (size_t module_id = 0; module_id < config.moduleCount(); ++module_id) {
+        for (const auto& layer : config.topology(module_id).layers()) {
+            for (const auto& tag : layer.group_tags) {
+                if (!local_tags.insert(tag).second) {
+                    continue;
+                }
+                const auto& policy = config.group(tag).policy;
+                if (cacheGroupParticipatesInBlockTree(policy)) {
+                    first_local_tag.try_emplace(policy.group_type, tag);
+                }
             }
         }
     }
 
     StageCacheSnapshot snapshot;
-    snapshot.groups.reserve(config.topology().groups().size());
-    for (const auto& group : config.topology().groups()) {
-        StageCacheGroupSnapshot captured;
-        captured.tag                       = group.tag;
-        captured.type                      = group.policy.group_type;
-        captured.has_local_backing         = local_tags.count(group.tag) != 0;
-        captured.block_tree_group_member   = cacheGroupParticipatesInBlockTree(group.policy);
-        captured.seq_size_per_block        = group.seqSizePerBlock();
-        captured.kernel_seq_size_per_block = group.kernelSeqSizePerBlock();
-        captured.cache_key_token_stride    = group.cacheKeyTokenStride();
-        captured.block_num                 = captured.has_local_backing ? config.blockNumForGroup(group, local_block_num) : 0;
-        captured.explicit_block_num        = group.policy.explicit_block_num;
-        captured.policy_fingerprint        = group.policy.policyFingerprint();
-        snapshot.groups.push_back(std::move(captured));
+    snapshot.groups.reserve(config.allGroupNums());
+    for (size_t module_id = 0; module_id < config.moduleCount(); ++module_id) {
+        const auto& module_topology = config.topology(module_id);
+        for (const auto& group : module_topology.groups()) {
+            StageCacheGroupSnapshot captured;
+            captured.tag                       = group.tag;
+            captured.type                      = group.policy.group_type;
+            captured.has_local_backing         = local_tags.count(group.tag) != 0;
+            captured.block_tree_group_member   = cacheGroupParticipatesInBlockTree(group.policy);
+            captured.seq_size_per_block        = group.seqSizePerBlock();
+            captured.kernel_seq_size_per_block = group.kernelSeqSizePerBlock();
+            captured.cache_key_token_stride    = group.cacheKeyTokenStride();
+            captured.block_num =
+                captured.has_local_backing ? config.blockNumForGroup(group, local_block_num) : 0;
+            captured.explicit_block_num        = group.policy.explicit_block_num;
+            captured.policy_fingerprint        = group.policy.policyFingerprint();
+            captured.is_draft                  = module_id != 0;
+            snapshot.groups.push_back(std::move(captured));
+        }
     }
     snapshot.block_tree = block_tree_sizing;
     for (auto& group_set : snapshot.block_tree.group_sets) {
@@ -194,6 +201,9 @@ namespace {
 constexpr char kFieldSep = '|';
 constexpr char kTagSep   = '\x1f';
 constexpr char kNumSep   = ',';
+constexpr uint8_t kBlockTreeMember = 1;
+constexpr uint8_t kDraftGroupFlag  = 1;
+constexpr uint8_t kDraftGroupFlagReservedBits = kDraftGroupFlag << 1 | kDraftGroupFlag << 2;
 
 std::vector<std::string> splitFields(const std::string& s, char sep) {
     std::vector<std::string> parts;
@@ -281,19 +291,25 @@ std::string StageCacheSnapshot::serialize() const {
         << joinGroupNums(block_tree.group_sets, [](const auto& group_set) { return group_set.pool_stride; })
         << kFieldSep << joinGroupNums(groups, [](const auto& group) { return group.has_local_backing; }) << kFieldSep
         << block_tree.host_budget_bytes << kFieldSep << block_tree.disk_budget_bytes << kFieldSep
-        << std::setprecision(std::numeric_limits<double>::max_digits10) << block_tree.host_swa_block_ratio;
+        << std::setprecision(std::numeric_limits<double>::max_digits10) << block_tree.host_swa_block_ratio << kFieldSep
+        << joinGroupNums(groups, [](const auto& group) { return group.is_draft ? kDraftGroupFlag : 0; });
     return oss.str();
 }
 
 StageCacheSnapshot StageCacheSnapshot::deserialize(const std::string& payload) {
-    const auto fields = splitFields(payload, kFieldSep);
-    RTP_LLM_CHECK_WITH_INFO(fields.size() == 15, "PP snapshot payload is malformed (field count)");
+    auto fields = splitFields(payload, kFieldSep);
+    // An empty snapshot ends with an empty draft-flags field that getline omits.
+    if (!payload.empty() && payload.back() == kFieldSep) {
+        fields.emplace_back();
+    }
+    RTP_LLM_CHECK_WITH_INFO(fields.size() == 16, "PP snapshot payload is malformed (field count)");
     auto group_tags = splitFields(fields[0], kTagSep);
     if (fields[0].empty()) {
         group_tags.clear();
     }
     const auto group_types                 = parseNums<CacheGroupType>(fields[1], group_tags.size());
-    const auto block_tree_group_membership = parseNums<uint8_t>(fields[2], group_tags.size());
+    const auto group_flags = parseNums<uint8_t>(fields[2], group_tags.size());
+    const auto draft_flags = parseNums<uint8_t>(fields[15], group_tags.size());
     const auto seq_size_per_block          = parseNums<size_t>(fields[3], group_tags.size());
     const auto kernel_seq_size_per_block   = parseNums<size_t>(fields[4], group_tags.size());
     const auto cache_key_token_strides     = parseNums<size_t>(fields[5], group_tags.size());
@@ -308,10 +324,16 @@ StageCacheSnapshot StageCacheSnapshot::deserialize(const std::string& payload) {
                             "PP snapshot policy fingerprint field has %zu entries, expected %zu",
                             policy_fingerprints.size(),
                             group_tags.size());
-    RTP_LLM_CHECK_WITH_INFO(std::all_of(block_tree_group_membership.begin(),
-                                        block_tree_group_membership.end(),
-                                        [](uint8_t value) { return value == 0 || value == 1; }),
-                            "PP snapshot block-tree membership field must contain only 0 or 1");
+    RTP_LLM_CHECK_WITH_INFO(std::all_of(group_flags.begin(),
+                                        group_flags.end(),
+                                        [](uint8_t value) { return value <= kBlockTreeMember; }),
+                            "PP snapshot contains unknown group flags");
+    RTP_LLM_CHECK_WITH_INFO(std::all_of(draft_flags.begin(),
+                                        draft_flags.end(),
+                                        [](uint8_t value) {
+                                            return value <= (kDraftGroupFlag | kDraftGroupFlagReservedBits);
+                                        }),
+                            "PP snapshot contains unknown draft group flags");
 
     StageCacheSnapshot snapshot;
     snapshot.groups.reserve(group_tags.size());
@@ -319,8 +341,9 @@ StageCacheSnapshot StageCacheSnapshot::deserialize(const std::string& payload) {
         StageCacheGroupSnapshot group;
         group.tag                       = std::move(group_tags[i]);
         group.type                      = group_types[i];
-        group.block_tree_group_member   = block_tree_group_membership[i] != 0;
+        group.block_tree_group_member   = group_flags[i] != 0;
         group.has_local_backing         = local_backing_flags[i] != 0;
+        group.is_draft                  = (draft_flags[i] & kDraftGroupFlag) != 0;
         group.seq_size_per_block        = seq_size_per_block[i];
         group.kernel_seq_size_per_block = kernel_seq_size_per_block[i];
         group.cache_key_token_stride    = cache_key_token_strides[i];
@@ -353,6 +376,8 @@ PPValidationResult validatePPTopology(const std::vector<StageCacheSnapshot>& sta
     }
 
     std::unordered_map<std::string, size_t> canonical_index;
+    std::unordered_set<std::string>         draft_allocator_tags;
+    std::unordered_set<std::string>         physical_draft_tags;
     for (size_t s = 0; s < stages.size(); ++s) {
         const auto& stage = stages[s];
         if (s == 0 && stage.groups.empty()) {
@@ -364,6 +389,16 @@ PPValidationResult validatePPTopology(const std::vector<StageCacheSnapshot>& sta
             if (group.tag.empty() || !unique_tags.emplace(group.tag).second) {
                 return fail("stage " + std::to_string(s) + " has an empty or duplicate cache group tag [" + group.tag
                             + "]");
+            }
+            if (stages.size() > 1 && group.is_draft) {
+                if (group.has_local_backing != (s + 1 == stages.size())) {
+                    return fail("draft cache group [" + group.tag + "] has invalid PP ownership");
+                }
+                if (s == 0) {
+                    draft_allocator_tags.insert(group.tag);
+                } else if (group.has_local_backing) {
+                    physical_draft_tags.insert(group.tag);
+                }
             }
             if (group.has_local_backing && group.block_num < 2) {
                 return fail("stage " + std::to_string(s) + " group [" + group.tag
@@ -380,6 +415,9 @@ PPValidationResult validatePPTopology(const std::vector<StageCacheSnapshot>& sta
                 return fail("stage " + std::to_string(s) + " declares logical cache group [" + group.tag
                             + "] that is absent from stage 0 [" + joinTags(stages.front().groups) + "]");
             }
+            if (group.is_draft != (draft_allocator_tags.count(group.tag) != 0)) {
+                return fail("cache group [" + group.tag + "] aliases a different PP module");
+            }
             auto& entry = result.canonical_groups[it->second];
             if (const auto error = validateAndMergeCanonicalGroup(entry, group, s); !error.empty()) {
                 return fail(error);
@@ -395,6 +433,9 @@ PPValidationResult validatePPTopology(const std::vector<StageCacheSnapshot>& sta
         }
     }
 
+    if (draft_allocator_tags != physical_draft_tags) {
+        return fail("Stage 0 draft allocation rows differ from the last stage's physical draft rows");
+    }
     for (const auto& group : result.canonical_groups) {
         if (group.logical_block_num == 0) {
             return fail("cache group [" + group.tag + "] has no PP stage with local backing");

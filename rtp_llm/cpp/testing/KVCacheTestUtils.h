@@ -84,7 +84,7 @@ inline bool writeKVBlockForTest(KVCacheManager&      manager,
                                 const torch::Tensor& k_buffer,
                                 const torch::Tensor& v_buffer) {
     bool all_success = true;
-    for (int layer_id = 0; layer_id < manager.cacheConfig().layer_num; ++layer_id) {
+    for (int layer_id = 0; layer_id < manager.cacheConfig().layer_num(); ++layer_id) {
         all_success = writeKVBlockForTest(manager, block_index, layer_id, k_buffer, v_buffer) && all_success;
     }
     return all_success;

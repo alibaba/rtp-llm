@@ -9,12 +9,12 @@
 
 namespace rtp_llm {
 
-struct CacheConfig;
+struct CacheTopology;
 
 namespace mtp {
 
 /** Scalar strides describe only a single cache group; clear them for other layouts. */
-void applyCacheStrideToModelInput(GptModelInputs& model_input, const CacheConfig& cache_config);
+void applyCacheStrideToModelInput(GptModelInputs& model_input, const CacheTopology& cache_topology);
 
 torch::Tensor makeEngramVerifyWindows(const torch::Tensor& anchor, const torch::Tensor& tokens);
 
