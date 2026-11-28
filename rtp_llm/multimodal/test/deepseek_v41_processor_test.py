@@ -375,6 +375,43 @@ class V41ImageDownloadTimingTest(unittest.TestCase):
             tags={"phase": "worker_queue", "source": "shared"},
         )
 
+    def test_native_download_delivers_while_metrics_reporter_is_blocked(self):
+        from rtp_llm.config.py_config_modules import VitConfig
+        from rtp_llm.multimodal.media_network import MediaNetwork
+
+        reporting = threading.Event()
+        release = threading.Event()
+        config = VitConfig()
+
+        def block_report(*args, **kwargs):
+            reporting.set()
+            release.wait(5)
+
+        with (
+            patch.dict(os.environ, {"MM_VIT_DOWNLOAD_FAST_PATH": "1"}),
+            patch("rtp_llm.multimodal.vit_metrics.VIT_PHASE_METRICS", True),
+            patch("rtp_llm.metrics.kmonitor.report", side_effect=block_report) as report,
+        ):
+            network = MediaNetwork(config)
+            try:
+                first = network.image("http://example.invalid/a", "", 0, 0, None)
+                self.assertTrue(reporting.wait(3))
+                second = network.image("http://example.invalid/b", "", 0, 0, None)
+                ready = threading.Event()
+                second.add_done_callback(lambda _: ready.set())
+                self.assertTrue(ready.wait(2))
+                self.assertEqual(first.result()[1], "timeout")
+                self.assertEqual(second.result()[1], "timeout")
+            finally:
+                release.set()
+                network.close()
+                network.close()
+        source_reports = [
+            call for call in report.call_args_list
+            if call.kwargs.get("tags") == {"source": "load"}
+        ]
+        self.assertEqual(len(source_reports), 2)
+
     def test_configured_image_size_limit_on_python_and_native_downloads(self):
         from functools import partial
         from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer

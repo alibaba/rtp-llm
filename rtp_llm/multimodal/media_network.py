@@ -3,7 +3,9 @@
 import asyncio
 import contextvars
 import hashlib
+import logging
 import os
+import queue
 import threading
 import time
 from concurrent.futures import CancelledError, Future
@@ -113,13 +115,33 @@ class MediaNetwork:
         ranges = config.mm_download_range_config
         if ranges["enable"]:
             policy.range_chunk_bytes = ranges["chunk_size_bytes"]
+        fast_path = os.environ.get("MM_VIT_DOWNLOAD_FAST_PATH") == "1"
+        if fast_path:
+            policy.reserve_response_body = True
         self.pool = native.Network(concurrency, max(0, config.url_cache_item_num), policy)
         self.pending = {}
         self.lock = threading.Lock()
+        self._reports = queue.Queue(maxsize=1024) if fast_path else None
+        self._reporter = None
+        if self._reports is not None:
+            self._reporter = threading.Thread(
+                target=self._report_completions,
+                args=(self._reports,),
+                name="vit-network-metrics",
+                daemon=True,
+            )
         self.thread = threading.Thread(
             target=self._deliver, name="vit-network-results", daemon=True
         )
-        self.thread.start()
+        try:
+            self.thread.start()
+            if self._reporter is not None:
+                self._reporter.start()
+        except Exception:
+            self.pool.close()
+            if self.thread.is_alive():
+                self.thread.join()
+            raise
 
     def submit(self, req):
         with self.lock:
@@ -144,9 +166,25 @@ class MediaNetwork:
             # next() can block for the engine's lifetime after the last image.
             del future, job
 
+    @staticmethod
+    def _report_completions(reports):
+        while (record := reports.get()) is not None:
+            report, fields = record
+            try:
+                report(fields)
+            except Exception:
+                logging.exception("Failed to report native media download")
+            del record, report, fields
+
     def close(self):
         self.pool.close()
         self.thread.join()
+        with self.lock:
+            reports, self._reports = self._reports, None
+            reporter, self._reporter = self._reporter, None
+        if reports is not None:
+            reports.put(None)
+            reporter.join()
 
     def image(self, url, headers_text, max_bytes, deadline, region, *, v41=True):
         from rtp_llm.multimodal.multimodal_util import _get_http_heads
@@ -179,14 +217,11 @@ class MediaNetwork:
         if not via_proxy and not VIT_PHASE_METRICS:
             return future
 
-        def report(done):
-            if done.cancelled():
-                return
+        def report(fields):
             from rtp_llm.metrics import AccMetrics, GaugeMetrics, kmonitor
 
-            result = done.result()
-            status, error, body, hit, retries, counts = result[:6]
-            joined = len(result) > 8 and result[8]
+            status, error, body_size, hit, retries, counts = fields[:6]
+            joined = len(fields) > 8 and fields[8]
             proxy_attempts, fallbacks, connect_retries = counts
             if via_proxy and not hit and not joined:
                 for _ in range(proxy_attempts):
@@ -202,14 +237,14 @@ class MediaNetwork:
                 kmonitor.report(
                     AccMetrics.VIT_URL_SOURCE_QPS_METRIC, tags={"source": source}
                 )
-                if len(result) > 7:
+                if len(fields) > 7:
                     kmonitor.report(
                         GaugeMetrics.VIT_HTTP_PHASE_RT_US_METRIC,
-                        result[7] * 1000,
+                        fields[7] * 1000,
                         tags={"phase": "worker_queue", "source": source},
                     )
-                if len(result) > 9:
-                    for phase, duration_us in zip(_NATIVE_HTTP_PHASES, result[9]):
+                if len(fields) > 9:
+                    for phase, duration_us in zip(_NATIVE_HTTP_PHASES, fields[9]):
                         if duration_us:
                             kmonitor.report(
                                 GaugeMetrics.VIT_HTTP_PHASE_RT_US_METRIC,
@@ -223,9 +258,26 @@ class MediaNetwork:
                 for _ in range(retries):
                     kmonitor.report(AccMetrics.VIT_HTTP_SOURCE_RETRY_QPS_METRIC)
                 if not hit and status == 200 and not error:
-                    kmonitor.report(GaugeMetrics.VIT_HTTP_BODY_BYTES_METRIC, len(body))
+                    kmonitor.report(GaugeMetrics.VIT_HTTP_BODY_BYTES_METRIC, body_size)
 
-        future.add_done_callback(report)
+        def observe(done):
+            if done.cancelled():
+                return
+            result = done.result()
+            # Work for the reporter contains scalars only. Completed image
+            # bytes remain owned by their callers, even if telemetry stalls.
+            fields = result[:2] + (len(result[2]),) + result[3:]
+            if getattr(self, "_reports", None) is not None:
+                with self.lock:
+                    if self._reports is not None:
+                        try:
+                            self._reports.put_nowait((report, fields))
+                            return
+                        except queue.Full:
+                            pass
+            report(fields)
+
+        future.add_done_callback(observe)
         return future
 
     async def service_request(self, method, url, body, headers, timeout_s):
