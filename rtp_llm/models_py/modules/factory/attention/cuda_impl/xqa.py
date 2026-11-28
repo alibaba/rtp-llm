@@ -76,10 +76,7 @@ class XQADecodeImpl(FMHAImplBase):
     ) -> bool:
         if attn_inputs.is_prefill:
             return False
-        # sm_120a consumer Blackwell: the FlashInfer xqa() build here rejects
-        # the nb_sub_seq_per_seq kwarg used in forward(), and XQA has no
-        # sm_120a binding anyway. Gate it off so decode dispatch falls through
-        # to PyFlashinferDecodeImpl (the working sm_120 path).
+        # XQA has no SM120 binding. Let PyFlashinferDecodeImpl handle SM120.
         if is_sm12x():
             return False
         if get_sm()[0] not in [9, 10]:
@@ -137,8 +134,7 @@ def _load_xqa_fn():
 
     from flashinfer.xqa import xqa as fi_xqa
 
-    needs_sf = "k_sf_cache" in inspect.signature(fi_xqa).parameters
-    return fi_xqa, needs_sf
+    return fi_xqa, inspect.signature(fi_xqa).parameters
 
 
 class XQAWrapper:
@@ -165,7 +161,7 @@ class XQAWrapper:
                 f"[XQA] Failed to get GPU compute capability, PDL optimization disabled: {e}"
             )
 
-        self._xqa_fn, self._xqa_needs_sf_cache = _load_xqa_fn()
+        self._xqa_fn, self._xqa_parameters = _load_xqa_fn()
 
         self._batch_size: int = 0
         self._q_len_per_req: int = 0
@@ -343,19 +339,6 @@ class XQAWrapper:
         o_scale = fmha_params.o_scale
         rcp_out_scale = 1.0 / o_scale if o_scale != 1.0 else 1.0
 
-        # Adaptive multi-block: split KV across CTAs to fill SMs at small batch sizes.
-        # Matches TRT-LLM XQA's formula in mha.cu. flashinfer >= 0.6.11 auto-tunes
-        # internally (this becomes a no-op), but older versions (e.g. 0.6.6) respect
-        # this parameter and need it for bs=1 performance.
-        _XQA_TILE_TOKENS = 64
-        nb_sub_seq = max(
-            1,
-            min(
-                self._sm_count // max(1, batch_size * num_kv_heads),
-                (fmha_params.max_seq_len + _XQA_TILE_TOKENS - 1) // _XQA_TILE_TOKENS,
-            ),
-        )
-
         xqa_kwargs = dict(
             q=q_4d,
             k_cache=k_cache,
@@ -371,14 +354,25 @@ class XQAWrapper:
             enable_pdl=self.enable_pdl,
             q_seq_len=q_len_per_req,
             mask=self._spec_mask,
-            nb_sub_seq_per_seq=nb_sub_seq,
-            use_qgmma=True,
             sinks=None,
             q_scale=q_scale,
             kv_scale=kv_scale,
             rcp_out_scale=rcp_out_scale,
         )
-        if self._xqa_needs_sf_cache:
+        # Older wrappers accept a caller-selected KV split to fill the SMs
+        # at small batch sizes. Newer wrappers choose the split internally.
+        if "nb_sub_seq_per_seq" in self._xqa_parameters:
+            tile_tokens = 64
+            xqa_kwargs["nb_sub_seq_per_seq"] = max(
+                1,
+                min(
+                    self._sm_count // max(1, batch_size * num_kv_heads),
+                    (fmha_params.max_seq_len + tile_tokens - 1) // tile_tokens,
+                ),
+            )
+        if "use_qgmma" in self._xqa_parameters:
+            xqa_kwargs["use_qgmma"] = True
+        if "k_sf_cache" in self._xqa_parameters:
             xqa_kwargs["k_sf_cache"] = None
             xqa_kwargs["v_sf_cache"] = None
         self._xqa_fn(**xqa_kwargs)

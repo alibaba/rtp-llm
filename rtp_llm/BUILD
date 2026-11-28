@@ -692,6 +692,14 @@ setuptools_req = select({
     "//conditions:default": ["setuptools==60.5.0"],
 })
 
+# FlashInfer's fabric probe requires the NVML fabric UUID as bytes.
+cuda13_nvml_reqs = ["pynvml==13.0.1", "nvidia-ml-py==13.610.43"]
+nvml_reqs = select({
+    "@//:using_cuda13_x86": cuda13_nvml_reqs,
+    "@//:using_cuda13_arm": cuda13_nvml_reqs,
+    "//conditions:default": ["pynvml"],
+})
+
 whl_reqs = [
     "filelock>=3.20.0",
     "jinja2",
@@ -702,7 +710,6 @@ whl_reqs = [
     "fastapi==0.115.6",
     "uvicorn==0.30.0",
     "dacite",
-    "pynvml",
     "thrift",
     "numpy<2.0a0,>=1.25",
     "psutil",
@@ -747,7 +754,7 @@ whl_reqs = [
     # OTel trace runtime; keep the pinned protobuf compatibility constraint.
     "opentelemetry-sdk==1.44.0",
     "opentelemetry-exporter-otlp-proto-http==1.15.0",
-] + grpcio_tools_req + setuptools_req + whl_deps() + platform_deps() + xft_dep + ml_pin_reqs()
+] + grpcio_tools_req + setuptools_req + nvml_reqs + whl_deps() + platform_deps() + xft_dep + ml_pin_reqs()
 
 # Frontend-only requirement set: the frontend lane is CPU serving (HTTP + gRPC
 # client + tokenizer), so the engine's platform CUDA tree (whl_deps: torch-cuda,

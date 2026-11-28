@@ -1,3 +1,4 @@
+import os
 import sys
 import tempfile
 import unittest
@@ -62,6 +63,30 @@ class FlashinferCacheTest(unittest.TestCase):
             f.write(f"cflags = -isystem {include}\n")
         setup._evict_dangling_flashinfer_ops(self.root)
         self.assertFalse(op.exists())
+
+    def test_patched_wheel_uses_its_own_cached_copy(self):
+        paths = []
+        cache = self.root / "cache"
+        cache.mkdir()
+        for contents in ("original", "patched"):
+            runfiles = self.root / contents
+            site = runfiles / "pip_gpu_cuda13_torch_flashinfer_python" / "site-packages"
+            package = site / "flashinfer"
+            package.mkdir(parents=True)
+            (package / "__init__.py").write_text(contents)
+            metadata = site / "flashinfer_python-0.7.5.dist-info"
+            metadata.mkdir()
+            (metadata / "METADATA").write_text(
+                "Name: flashinfer-python\nVersion: 0.7.5\n"
+            )
+            (metadata / "RECORD").write_text(f"flashinfer/__init__.py,{contents}\n")
+            with patch.dict(os.environ, {"RUNFILES_DIR": str(runfiles)}):
+                cached_site = Path(setup.copy_package_with_lock("flashinfer", cache))
+            self.assertEqual(
+                (cached_site / "flashinfer/__init__.py").read_text(), contents
+            )
+            paths.append(cached_site)
+        self.assertNotEqual(*paths)
 
 
 if __name__ == "__main__":

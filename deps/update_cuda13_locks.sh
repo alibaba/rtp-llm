@@ -43,6 +43,15 @@ case "$platform" in
     *) usage ;;
 esac
 
+# Internal regeneration can include the public wheel mirror and Artlab vendor
+# index alongside the general PyPI indexes.
+if [[ -n "${UV_ADDITIONAL_INDEXES:-}" ]]; then
+    read -r -a additional_indexes <<< "$UV_ADDITIONAL_INDEXES"
+    for index in "${additional_indexes[@]}"; do
+        indexes+=(--index "$index")
+    done
+fi
+
 command=(
     "${UV_BIN:-uv}" --no-config pip compile "$input"
     --overrides "$overrides"

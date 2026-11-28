@@ -6,8 +6,8 @@ plotly==7.1.0
 torch==2.11.0+cu130
 torchvision==0.26.0+cu130
 mysql-connector-python
-flashinfer-python==0.6.9+8c4f4dcf
-flashinfer-cubin==0.6.9+8c4f4dcf
+flashinfer-python[cu13]==0.7.5+57f949b8.cu132
+flashinfer-cubin==0.7.5+57f949b8.cu132
 
 # Self-built wheels against torch 2.11+cu130; SHAs encoded in filename.
 deep-gemm==2.8.1+057ca59
@@ -38,5 +38,4 @@ av==16.1.0
 
 fast-hadamard-transform @ https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/cu129/fast_hadamard_transform-1.0.4.post1-cp310-cp310-linux_aarch64.whl
 
-nvidia-cutlass-dsl==4.5.0
-nvidia-cutlass-dsl-libs-base==4.5.0
+nvidia-cutlass-dsl[cu13]==4.8.1

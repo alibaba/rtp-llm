@@ -425,16 +425,6 @@ class MlaFlashInferDecodeOp(object):
         self.is_sparse = is_sparse
         self.use_cuda_graph = is_cuda_graph
         global g_workspace_buffer
-        self.kv_indices_d = torch.empty(
-            ((max_context_len + self.token_per_block - 1) // self.token_per_block)
-            * max_bs,
-            dtype=torch.int32,
-            device="cuda",
-        )
-        self.qo_indptr_h = torch.arange(0, max_bs + 1, dtype=torch.int32, device="cpu")
-        self.kv_indptr_h = torch.zeros((max_bs + 1,), dtype=torch.int32, device="cpu")
-        self.kv_len_arr_h = torch.ones((max_bs,), dtype=torch.int32, device="cpu")
-
         if g_workspace_buffer is None:
             # Find first layer that has MLA weights (hybrid models may have non-MLA layers)
             device = None
@@ -450,14 +440,27 @@ class MlaFlashInferDecodeOp(object):
                 device=device,
             )
 
+        self.kv_indices_d = torch.empty(
+            ((max_context_len + self.token_per_block - 1) // self.token_per_block)
+            * max_bs,
+            dtype=torch.int32,
+            device=g_workspace_buffer.device,
+        )
+        # FlashInfer copies the CPU plan inputs into persistent CUDA buffers
+        # during graph preparation. Keep them on the workspace's TP rank device.
+        metadata_device = g_workspace_buffer.device if is_cuda_graph else "cpu"
         self.mla_wrapper = BatchMLAPagedAttentionWrapper(
             g_workspace_buffer,
             backend="auto",
             use_cuda_graph=is_cuda_graph,
-            qo_indptr=self.qo_indptr_h,
-            kv_indptr=self.kv_indptr_h,
+            qo_indptr=torch.arange(
+                0, max_bs + 1, dtype=torch.int32, device=metadata_device
+            ),
+            kv_indptr=torch.zeros(
+                max_bs + 1, dtype=torch.int32, device=metadata_device
+            ),
             kv_indices=self.kv_indices_d,
-            kv_len_arr=self.kv_len_arr_h,
+            kv_len_arr=torch.ones(max_bs, dtype=torch.int32, device=metadata_device),
         )
 
     def plan(self, fmha_params: Any):
