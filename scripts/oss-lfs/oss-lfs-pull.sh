@@ -112,6 +112,7 @@ download "rtp_llm/test/smoke/data/model/bert/expect_tp2.pt" "d0388ab4d415f8410cf
 download "rtp_llm/test/smoke/data/model/bert/megatron_bert_expect_1.pt" "2c47607b37d246a89e0be4af3b4e1e389bb1ca870721468a377683749b591be3" & pids+=($!)
 download "rtp_llm/test/smoke/data/model/bert/megatron_bert_expect_2.pt" "f71769c4b5fc7999811c86fcc43dfc64f148e4f51b123024fcf4a265ded69625" & pids+=($!)
 download "rtp_llm/test/smoke/data/model/bert/roberta_expect.pt" "fe410aa5a99ecdd4cc8ad3cd8149bf0df5023460218b50cb7f41292c074ffb08" & pids+=($!)
+download "rtp_llm/test/smoke/data/model/bert/roberta_fp8pb_expect.pt" "70c74f06cd96d80eda3013fe46b3a4ce9093f7eba358c88fd232f3001e30c0ed" & pids+=($!)
 download "rtp_llm/test/smoke/data/model/bert/sparse_roberta_expect_0.pt" "9d1d56992badbb32631cda00a4778e384c03fd6a51ab65da9097f68ff8800f73" & pids+=($!)
 download "rtp_llm/test/smoke/data/model/bert/sparse_roberta_expect_1.pt" "8fe7d940180cd0e993f04a11d292d0fb9322fa3dbd926a2d26e06673248153a9" & pids+=($!)
 download "rtp_llm/test/smoke/data/model/bert/sparse_roberta_expect_2.pt" "e05412706cba0fa8b0e147fa663541e6668aeb6796e2fdb226fca2b3e25c43b4" & pids+=($!)

@@ -236,6 +236,19 @@ class BaseModel(object):
     def support_cuda_graph(self) -> bool:
         return False
 
+    def support_embedding_prefill_graph(self) -> bool:
+        """Whether this model family supports the embedding engine's cache-less
+        prefill graph.
+
+        Distinct from :meth:`support_cuda_graph`: that flag covers the decoder
+        engine's graphs and is True for many LLM families whose attention
+        backends are not instantiable at embedding capture-warmup shapes (for
+        example qwen2-gte, whose flashinfer paged-prefill impl needs a
+        workspace far larger than the default at capture bucket shapes). Only
+        families verified for the embedding prefill graph opt in here.
+        """
+        return False
+
     def _load(self, device: str):
         # set empty weights for attention service
         # record device string for later use (e.g., WeightManager, python model init)

@@ -372,6 +372,42 @@ def get_fmha_impl(
     raise Exception("can not find mha type")
 
 
+def has_cacheless_prefill_cuda_graph_backend(
+    attn_configs: AttentionConfigs, fmha_config: Optional[FMHAConfig] = None
+) -> bool:
+    """Whether a prefill attention backend on this device can run inside the
+    embedding engine's cache-less prefill CUDA graph.
+
+    The cache-less embedding prefill graph runs encoder-only models (no KV
+    cache, no prefix, non-causal), so only a backend family that needs no paged
+    KV cache can be captured. Today that family is
+    ``FlashInferTRTLLMFMHAv2PrefillImpl`` (TRT-LLM FMHA v2 non-paged prefill)
+    alone: every other prefill backend requires a paged KV cache (flashinfer
+    paged, TRT paged, TRT-LLM Gen, FA3), is eager-only (ragged), or restricts
+    itself to generation-prefill graph capture on causal models (Aiter triton
+    PA, PPU full prefill). The predicate therefore delegates to that family's
+    own capability function plus the factory's config-disable filter, instead
+    of enumerating validated devices. Extend it when a new family gains
+    cache-less graph capture (for example a ROCm Aiter non-causal variant --
+    then also restore the two commented hipgraph smoke cases in
+    suites_rocm_oss.bzl).
+    """
+    if get_device_type() != DeviceType.Cuda:
+        return False
+    from rtp_llm.models_py.modules.factory.attention.cuda_impl.trt import (
+        supports_trtllm_fmha_v2,
+    )
+
+    if not supports_trtllm_fmha_v2(attn_configs):
+        return False
+    # Mirror the factory's impl-disable filter so the gate never enables a
+    # backend the factory would filter out (for example when the user turned
+    # the TRT-LLM FMHA v2 prefill family off via fmha_config).
+    if _is_fmha_impl_disabled("FlashInferTRTLLMFMHAv2PrefillImpl", fmha_config):
+        return False
+    return True
+
+
 def _select_attention_impl_key(attn_configs: AttentionConfigs) -> str:
     """Route to the attention implementation family.
 

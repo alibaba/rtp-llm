@@ -938,6 +938,13 @@ void PyWrappedModel::prepareAttentionInputs(const GptModelInputs& inputs, bool s
     // device.  Keep the top-level PyModelInputs field consistent with the
     // nested attention field: CudaGraphRunner validates and copies the
     // top-level tensor during replay preparation.
+    // The BERT embedding inputs must be real, not empty: the replay refresh
+    // (CudaGraphRunner::prepareAttentionInputs) copies combo_position_ids /
+    // combo_tokens_type_ids from these fields into the capture buffers, and its
+    // guard keys off position_encoding.numel(). An empty struct here leaves the
+    // capture buffers holding capture-time zeros for every replay, silently
+    // corrupting BERT-style position/type embeddings.
+    auto  bert_embedding_inputs = buildBertEmbeddingInputs(inputs, attention_inputs_.combo_position_ids);
     auto  py_model_inputs = PyModelInputs({empty,
                                            empty,
                                            attention_inputs_.combo_position_ids,
@@ -945,7 +952,7 @@ void PyWrappedModel::prepareAttentionInputs(const GptModelInputs& inputs, bool s
                                            torch_ext::PyMultimodalInputs(),
                                            attention_inputs_,
                                            attention_inputs_by_tag_,
-                                           torch_ext::BertEmbeddingInputs()});
+                                           bert_embedding_inputs});
     auto* runner          = selectGraphRunner(attention_inputs_);
     auto& state           = selectGraphState(attention_inputs_);
     if (moe_forward_allows_graph_ && enable_cuda_graph_ && runner != nullptr

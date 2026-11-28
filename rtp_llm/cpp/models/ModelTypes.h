@@ -85,6 +85,12 @@ struct GptModelInitParams {
 
     // Warmup wrappers borrow the Python model later used by the real executor.
     bool owns_py_model = true;
+
+    // Cache-less embedding prefill CUDA graph. The embedding executor has no
+    // KV cache and publishes no layer layout; it supplies the minimal
+    // kernel_block_table_width for the graph buffers instead. True only for
+    // the embedding executor's prefill graph role.
+    bool cacheless_prefill_graph = false;
 };
 
 enum GptModelInputIndex : size_t {

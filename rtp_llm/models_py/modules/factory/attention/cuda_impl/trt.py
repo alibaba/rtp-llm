@@ -35,7 +35,7 @@ _g_trtllm_fmha_v2_workspace_pool: list[torch.Tensor] = []
 _g_trtllm_fmha_v2_pool_lock = __import__("threading").Lock()
 
 
-def _supports_trtllm_fmha_v2(attn_configs: AttentionConfigs) -> bool:
+def supports_trtllm_fmha_v2(attn_configs: AttentionConfigs) -> bool:
     if (
         not is_cuda_12_9_or_later()
         or trtllm_fmha_v2_prefill is None
@@ -186,7 +186,7 @@ class TRTLLMFMHAv2PagedPrefillOp:
         cls, attn_configs: AttentionConfigs, attn_inputs: PyAttentionInputs
     ) -> bool:
         page_size = attn_configs.kernel_tokens_per_block
-        return _supports_trtllm_fmha_v2(attn_configs) and (
+        return supports_trtllm_fmha_v2(attn_configs) and (
             page_size > 0 and page_size.bit_count() == 1
         )
 
@@ -313,7 +313,7 @@ class TRTLLMFMHAv2PrefillOp:
             and attn_inputs.prefix_lengths.numel() > 0
             and attn_inputs.prefix_lengths.any().item()
         )
-        return _supports_trtllm_fmha_v2(attn_configs) and not has_prefix
+        return supports_trtllm_fmha_v2(attn_configs) and not has_prefix
 
     def prepare(self, attn_inputs: PyAttentionInputs) -> TRTLLMFMHAv2Params:
         self.attention_type = "mha" if self.head_num == self.kv_head_num else "gqa"

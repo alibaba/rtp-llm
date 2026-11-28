@@ -442,7 +442,10 @@ py_library(
 
 filegroup(
     name = "async_model_files",
-    srcs = glob(["async_decoder_engine/**/*.py"]),
+    srcs = glob(
+        ["async_decoder_engine/**/*.py"],
+        exclude = ["async_decoder_engine/embedding/test/**"],
+    ),
 )
 
 py_library(

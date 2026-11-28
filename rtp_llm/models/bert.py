@@ -49,6 +49,11 @@ class Bert(BaseModel):
     def support_cuda_graph(self) -> bool:
         return True
 
+    def support_embedding_prefill_graph(self) -> bool:
+        # Verified for the embedding engine's cache-less prefill graph: bert
+        # position/type ids are refreshed into the capture buffers at replay.
+        return True
+
     def _create_python_model(self):
         from rtp_llm.models_py.model_desc.bert import BertModel
 
@@ -112,8 +117,12 @@ class Roberta(Bert):
             return RobertaRerankerModule(self.model_config, self.tokenizer)
         return super()._init_custom_module()
 
+    # Roberta shares the BertModel python forward with Bert (identical graph
+    # body); its position/pad offsets are gathered on the host before the
+    # graph-captured region. The embedding prefill CUDA graph runner already
+    # refreshes bert combo_position_ids/combo_tokens_type_ids at replay.
     def support_cuda_graph(self) -> bool:
-        return False
+        return True
 
     @classmethod
     def from_huggingface(cls, config: ModelConfig, config_json: Dict[str, Any]):
