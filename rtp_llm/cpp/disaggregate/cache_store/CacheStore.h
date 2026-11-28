@@ -8,6 +8,10 @@
 
 
 #include <memory>
+#include <cstdint>
+#include <functional>
+#include <utility>
+#include <vector>
 
 namespace rtp_llm {
 
@@ -53,7 +57,23 @@ public:
 
     virtual const std::shared_ptr<MemoryUtil>& getMemoryUtil() const = 0;
 
+    using BlockLeaseProvider = std::function<std::shared_ptr<void>(const std::vector<int32_t>&, const std::string&)>;
+
+    // Configure once during initialization, before publishing or loading blocks.
+    void setBlockLeaseProvider(BlockLeaseProvider provider) {
+        block_lease_provider_ = std::move(provider);
+    }
+
+    std::shared_ptr<void> retainTransferBlocks(const std::vector<int32_t>& blocks, const std::string& tag) const {
+        return block_lease_provider_(blocks, tag);
+    }
+
+    // Called after all pools have been registered, before serving requests.
+    virtual void finishRegistration() {}
     virtual void debugInfo() = 0;
+
+private:
+    BlockLeaseProvider block_lease_provider_;
 };
 
 }  // namespace rtp_llm

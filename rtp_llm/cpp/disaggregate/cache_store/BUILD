@@ -14,7 +14,13 @@ cc_library(
 
 cc_library(
     name = "cache_store_base_impl",
-    deps = [":cache_store_base"],
+    deps = [":cache_store_base"] + select({
+        "@//:using_ascend": [
+            "//rtp_llm/cpp/disaggregate/cache_store/ascend:hixl_memory_util",
+            "//rtp_llm/cpp/disaggregate/cache_store/ascend:hixl_messager",
+        ],
+        "//conditions:default": [],
+    }),
     srcs = ["Impl.cpp"],
     alwayslink = True,
 )

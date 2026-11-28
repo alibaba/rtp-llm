@@ -64,3 +64,10 @@ py_test(
         "//rtp_llm:config",
     ],
 )
+
+py_test(
+    name = "cache_store_config_test",
+    srcs = ["cache_store_config_test.py"],
+    data = ["//:th_transformer_config"],
+    deps = ["//rtp_llm:ops"],
+)

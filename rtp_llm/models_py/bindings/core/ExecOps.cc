@@ -263,7 +263,7 @@ void runtimeWriteCacheStore(const torch_ext::PyCacheStoreInputs& cache_store_inp
 
     auto       kv_cache_data  = static_cast<uint8_t*>(layer_kv.kv_cache_base.data_ptr());
     auto       kv_cache_owner = std::make_shared<torch::Tensor>(layer_kv.kv_cache_base);
-    const bool kv_gpu_mem     = layer_kv.kv_cache_base.is_cuda();
+    const bool kv_gpu_mem     = (layer_kv.kv_cache_base.is_cuda() || layer_kv.kv_cache_base.is_privateuseone());
     const bool has_kv_scale   = layer_kv.kv_scale_base.defined() && layer_kv.kv_scale_base.numel() > 0
                               && kv_scale_stride_bytes > 0 && kv_scale_transfer_bytes > 0;
     uint8_t*                       kv_scale_data = nullptr;
@@ -272,7 +272,8 @@ void runtimeWriteCacheStore(const torch_ext::PyCacheStoreInputs& cache_store_inp
         kv_scale_data  = static_cast<uint8_t*>(layer_kv.kv_scale_base.data_ptr());
         kv_scale_owner = std::make_shared<torch::Tensor>(layer_kv.kv_scale_base);
     }
-    const bool kv_scale_gpu_mem = has_kv_scale && layer_kv.kv_scale_base.is_cuda();
+    const bool kv_scale_gpu_mem =
+        has_kv_scale && (layer_kv.kv_scale_base.is_cuda() || layer_kv.kv_scale_base.is_privateuseone());
 
     const size_t total_batch_size = static_cast<size_t>(param.input_lengths_host.numel());
     RTP_LLM_CHECK_WITH_INFO(param.prefix_lengths_host.numel() == static_cast<int64_t>(context_batch_size),
@@ -366,6 +367,9 @@ void runtimeWriteCacheStore(const torch_ext::PyCacheStoreInputs& cache_store_inp
         const int64_t        request_id     = request_ids[context_index];
         auto                 event          = pre_created_event ? pre_created_event : runtimeCreateEvent();
         auto                 request_blocks = std::make_shared<RequestBlockBuffer>(std::to_string(request_id), event);
+        auto publication_owners = std::make_shared<std::vector<std::shared_ptr<void>>>();
+        publication_owners->push_back(kv_cache_owner);
+        publication_owners->push_back(kv_scale_owner);
         std::vector<int64_t> publication_lease_keys;
         std::vector<int32_t> publication_lease_blocks;
         RTP_LLM_LOG_DEBUG("write cache store, request id is %ld, blocks num is %zu",
@@ -422,7 +426,7 @@ void runtimeWriteCacheStore(const torch_ext::PyCacheStoreInputs& cache_store_inp
             const bool use_opaque_key_prefix = cache_config.use_opaque_kv_cache_store || use_group_cache_transfer_policy
                                                || group.spec->type == KVCacheSpecType::MultiHeadLatentAttention;
             void*                 kv_addr = kv_cache_data + static_cast<size_t>(block_id) * kv_block_stride_bytes;
-            std::shared_ptr<void> kv_block_addr(kv_cache_owner, kv_addr);
+            std::shared_ptr<void> kv_block_addr(publication_owners, kv_addr);
             RTP_LLM_LOG_DEBUG("PD_CACHE_KEY_WRITE_BLOCK key=kv_%s request_id=%ld tag=%s layer=%d cp_rank=%d "
                               "cp_size=%d cp_slice=%d key_index=%d offset_index=%d block_id=%d addr=%p "
                               "physical_stride=%zu len=%zu",
@@ -446,15 +450,15 @@ void runtimeWriteCacheStore(const torch_ext::PyCacheStoreInputs& cache_store_inp
                 RTP_LLM_CHECK_WITH_INFO(kv_block_transfer_bytes % 2 == 0,
                                         "KV transfer bytes must split evenly into K/V");
                 const auto            kv_half = static_cast<uint32_t>(kv_block_transfer_bytes / 2);
-                std::shared_ptr<void> k_block_addr(kv_cache_owner, kv_addr);
-                std::shared_ptr<void> v_block_addr(kv_cache_owner, static_cast<uint8_t*>(kv_addr) + kv_half);
+                std::shared_ptr<void> k_block_addr(publication_owners, kv_addr);
+                std::shared_ptr<void> v_block_addr(publication_owners, static_cast<uint8_t*>(kv_addr) + kv_half);
                 request_blocks->addBlock("k_" + cache_key, k_block_addr, kv_half, kv_gpu_mem, true);
                 request_blocks->addBlock("v_" + cache_key, v_block_addr, kv_half, kv_gpu_mem, true);
             }
 
             if (kv_scale_data) {
                 void* kv_scale_addr = kv_scale_data + static_cast<size_t>(block_id) * kv_scale_stride_bytes;
-                std::shared_ptr<void> kv_scale_block_addr(kv_scale_owner, kv_scale_addr);
+                std::shared_ptr<void> kv_scale_block_addr(publication_owners, kv_scale_addr);
                 if (use_opaque_key_prefix) {
                     request_blocks->addBlock("kv_scale_" + cache_key,
                                              kv_scale_block_addr,
@@ -465,8 +469,8 @@ void runtimeWriteCacheStore(const torch_ext::PyCacheStoreInputs& cache_store_inp
                     RTP_LLM_CHECK_WITH_INFO(kv_scale_transfer_bytes % 2 == 0,
                                             "scale transfer bytes must split evenly into K/V");
                     const auto            sc_half = static_cast<uint32_t>(kv_scale_transfer_bytes / 2);
-                    std::shared_ptr<void> k_scale_block_addr(kv_scale_owner, kv_scale_addr);
-                    std::shared_ptr<void> v_scale_block_addr(kv_scale_owner,
+                    std::shared_ptr<void> k_scale_block_addr(publication_owners, kv_scale_addr);
+                    std::shared_ptr<void> v_scale_block_addr(publication_owners,
                                                              static_cast<uint8_t*>(kv_scale_addr) + sc_half);
                     request_blocks->addBlock(
                         "k_scale_" + cache_key, k_scale_block_addr, sc_half, kv_scale_gpu_mem, true);
@@ -492,6 +496,10 @@ void runtimeWriteCacheStore(const torch_ext::PyCacheStoreInputs& cache_store_inp
         }
 
         if (request_blocks->getBlocksCount() > 0) {
+            if (cache_store->getMemoryUtil()->requiresBlockLease()) {
+                publication_owners->push_back(
+                    cache_store->retainTransferBlocks(publication_lease_blocks, layer_kv.tag));
+            }
             CacheStoreCompletionCallback store_completion;
             if (register_store_completion) {
                 store_completion =

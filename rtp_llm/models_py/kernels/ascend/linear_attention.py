@@ -305,7 +305,7 @@ def chunk_gated_delta_rule_fwd_h(
             "npu_chunk_gated_delta_rule_fwd_h returned an invalid result"
         )
     h, v_new, final_state = result
-    h = h.transpose(1, 2).contiguous()
+    # Keep [B, chunks, HV, DK, DV] for prefix snapshots and attention.
     v_new_out = (
         v_new.transpose(1, 2).contiguous().to(u.dtype) if save_new_value else None
     )
@@ -324,7 +324,8 @@ def chunk_fwd_o(
 ) -> torch.Tensor:
     batch, seqlen = q.shape[:2]
     value_heads = v.shape[-2]
-    effective_chunk_size = min(chunk_size, max(16, _next_power_of_two(seqlen)))
+    # Installed AscendC chunk_fwd_o kernels require chunk sizes 64 or 128.
+    effective_chunk_size = chunk_size
     cu = _canonical_cu_seqlens(cu_seqlens, batch, seqlen)
     chunk_indices = _prepare_chunk_indices(cu, effective_chunk_size)
     g_input = (
@@ -337,7 +338,7 @@ def chunk_fwd_o(
         q=q.transpose(1, 2).contiguous().to(compute_dtype),
         k=k.transpose(1, 2).contiguous().to(compute_dtype),
         v=v.transpose(1, 2).contiguous().to(compute_dtype),
-        h=h.transpose(1, 2).contiguous().to(compute_dtype),
+        h=h.contiguous().to(compute_dtype),
         scale=float(q.shape[-1] ** -0.5 if scale is None else scale),
         g=g_input.transpose(1, 2).contiguous().float(),
         cu_seqlens=cu,
@@ -372,6 +373,8 @@ def chunk_gated_delta_rule(
     if beta.ndim != 3:
         raise ValueError("beta must have shape [B,T,HV]")
     cu_values = _to_int_list(cu_seqlens)
+    # All chunk kernels consume host offsets; reuse one device-to-host copy.
+    cu_seqlens = cu_values
     if cu_values is not None:
         if q.shape[0] != 1:
             raise ValueError("cu_seqlens requires flattened batch size 1")

@@ -400,6 +400,7 @@ struct VitConfig {
 };
 
 struct CacheStoreConfig {
+    std::string cache_store_transport;
     bool    cache_store_rdma_mode         = false;
     int     wrr_available_ratio           = 80;
     int     rank_factor                   = 0;

@@ -53,7 +53,7 @@ bool NormalCacheStore::init(const CacheStoreInitParams& params) {
     // always has metric
     metrics_reporter_ = params.metrics_reporter;
 
-    messager_ = createMessager(memory_util_, request_block_buffer_store_, metrics_reporter_);
+    messager_ = createMessager(params_, memory_util_, request_block_buffer_store_, metrics_reporter_);
     MessagerInitParams messager_init_params;
     messager_init_params.server_port                  = params.listen_port;
     messager_init_params.rdma_server_port             = params.rdma_listen_port;

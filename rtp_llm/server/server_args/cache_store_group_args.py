@@ -7,6 +7,14 @@ def init_cache_store_group_args(parser, cache_store_config):
     ##############################################################################################################
     cache_store_group = parser.add_argument_group("Cache Store")
     cache_store_group.add_argument(
+        "--cache_store_transport",
+        env_name="CACHE_STORE_TRANSPORT",
+        bind_to=(cache_store_config, "cache_store_transport"),
+        type=str,
+        default="",
+        help="CacheStore transport; empty preserves the legacy selection.",
+    )
+    cache_store_group.add_argument(
         "--cache_store_rdma_mode",
         env_name="CACHE_STORE_RDMA_MODE",
         bind_to=(cache_store_config, "cache_store_rdma_mode"),

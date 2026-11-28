@@ -26,6 +26,7 @@ public:
 
 public:
     virtual bool init(MessagerInitParams params) = 0;
+    virtual void finishRegistration() {}
 
     virtual void load(const std::shared_ptr<LoadRequest>&                          request,
                       const std::shared_ptr<CacheStoreClientLoadMetricsCollector>& collector) = 0;
