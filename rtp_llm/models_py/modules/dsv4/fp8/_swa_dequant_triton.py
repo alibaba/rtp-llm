@@ -31,6 +31,24 @@ from rtp_llm.models_py.modules.dsv4.fp8._swa_cp_byte_sliced import (
 )
 
 
+def _acquire_swa_cp_buffer(
+    device: torch.device,
+    slot_key: str,
+    shape: Tuple[int, ...],
+    dtype: torch.dtype = torch.uint8,
+) -> torch.Tensor:
+    from rtp_llm.models_py.distributed import collective_torch
+
+    acq = getattr(collective_torch, "acquire_grow_only_buffer", None)
+    if (
+        acq is not None
+        and torch.distributed.is_initialized()
+        and (device.type != "cuda" or not torch.cuda.is_current_stream_capturing())
+    ):
+        return acq(device, slot_key, shape, dtype=dtype)
+    return torch.empty(shape, dtype=dtype, device=device)
+
+
 @dataclass
 class CPByteSlicedSwaPrefixPending:
     cp_size: int
@@ -400,7 +418,9 @@ def dequantize_and_gather_k_cache(
     num_reqs = int(seq_lens.shape[0])
     has_cu_dst_offsets = cu_dst_offsets is not None
     if has_cu_dst_offsets:
-        assert out.dim() == 2 and out.shape[-1] == HEAD_DIM and out.dtype == torch.bfloat16
+        assert (
+            out.dim() == 2 and out.shape[-1] == HEAD_DIM and out.dtype == torch.bfloat16
+        )
         assert (
             out.stride(1) == 1
         ), f"2D out must have contiguous last dim; got stride={out.stride()}"
@@ -415,7 +435,9 @@ def dequantize_and_gather_k_cache(
             f"dtype={cu_dst_offsets.dtype} num_reqs={num_reqs}"
         )
     else:
-        assert out.dim() == 3 and out.shape[-1] == HEAD_DIM and out.dtype == torch.bfloat16
+        assert (
+            out.dim() == 3 and out.shape[-1] == HEAD_DIM and out.dtype == torch.bfloat16
+        )
     assert (
         k_cache.dim() == 3
         and k_cache.shape[-1] == ENTRY_BYTES
@@ -460,9 +482,7 @@ def dequantize_and_gather_k_cache(
             if int(max_tokens_hint) > 0
             else (int(out.shape[1]) if not has_cu_dst_offsets else int(out.shape[0]))
         )
-        num_workers = _select_dequant_num_workers(
-            num_reqs, max_tokens_hint=tokens_hint
-        )
+        num_workers = _select_dequant_num_workers(num_reqs, max_tokens_hint=tokens_hint)
         grid = (num_reqs, num_workers)
         use_flat_grid = False
         cu_tiles_arg = None
@@ -856,7 +876,9 @@ def dequantize_and_gather_k_cache_slots(
         slot_mapping.dim() == 2
     ), f"slot_mapping must be [num_reqs, max_gather_len], got {slot_mapping.shape}"
     if has_cu_dst_offsets:
-        assert out.dim() == 2 and out.shape[-1] == HEAD_DIM and out.dtype == torch.bfloat16
+        assert (
+            out.dim() == 2 and out.shape[-1] == HEAD_DIM and out.dtype == torch.bfloat16
+        )
         assert (
             out.stride(1) == 1
         ), f"2D out must have contiguous last dim; got stride={out.stride()}"
@@ -868,7 +890,9 @@ def dequantize_and_gather_k_cache_slots(
             and cu_dst_offsets.is_contiguous()
         ), f"cu_dst_offsets contract mismatch: shape={cu_dst_offsets.shape}"
     else:
-        assert out.dim() == 3 and out.shape[-1] == HEAD_DIM and out.dtype == torch.bfloat16
+        assert (
+            out.dim() == 3 and out.shape[-1] == HEAD_DIM and out.dtype == torch.bfloat16
+        )
         assert int(slot_mapping.shape[0]) == int(out.shape[0]), (
             f"slot_mapping batch ({slot_mapping.shape[0]}) must match out batch "
             f"({out.shape[0]})"
@@ -910,7 +934,9 @@ def dequantize_and_gather_k_cache_slots(
     ):
         gather_lens_i32 = gather_lens
     else:
-        gather_lens_i32 = gather_lens.to(device=out.device, dtype=torch.int32).contiguous()
+        gather_lens_i32 = gather_lens.to(
+            device=out.device, dtype=torch.int32
+        ).contiguous()
 
     _launch_dequantize_and_gather_k_slots_unchecked(
         out,
@@ -1402,7 +1428,9 @@ def _dequantize_packed_k_cache_flat_kernel(
     x_groups = tl.reshape(x_float, (TILE_T_FLAT, n_scale_groups, quant_block))
     x_dequant = x_groups * scale[:, :, None]
     x_out = tl.reshape(x_dequant, (TILE_T_FLAT, fp8_dim_pow2)).to(tl.bfloat16)
-    tl.store(out_ptr + output_row_off[:, None] + fp8_cols[None, :], x_out, mask=fp8_mask)
+    tl.store(
+        out_ptr + output_row_off[:, None] + fp8_cols[None, :], x_out, mask=fp8_mask
+    )
 
     bf16_output_offset = fp8_dim
     if bf16_dim == 64:
@@ -2005,7 +2033,11 @@ def _write_ragged_2d_slices_kernel(
     w_valid = w_offs < gl
     dst_base = tl.load(cu_dst_offsets_ptr + b).to(tl.int64) + offset.to(tl.int64)
     d_offs = tl.arange(0, HEAD_D)
-    dst_ptrs = out_ptr + (dst_base + w_offs[:, None]) * out_stride0.to(tl.int64) + d_offs[None, :]
+    dst_ptrs = (
+        out_ptr
+        + (dst_base + w_offs[:, None]) * out_stride0.to(tl.int64)
+        + d_offs[None, :]
+    )
     if HAS_SRC:
         src_ptrs = (
             src_ptr
@@ -2040,8 +2072,22 @@ def _write_ragged_2d_slices(
         and out.dtype == torch.bfloat16
         and int(out.shape[1]) == HEAD_DIM
         and out.stride(1) == 1
-        and (src_3d is None or (src_3d.is_cuda and src_3d.dtype == torch.bfloat16 and src_3d.stride(2) == 1))
-        and (not use_lens or (gather_lens is not None and gather_lens.is_cuda and gather_lens.is_contiguous()))
+        and (
+            src_3d is None
+            or (
+                src_3d.is_cuda
+                and src_3d.dtype == torch.bfloat16
+                and src_3d.stride(2) == 1
+            )
+        )
+        and (
+            not use_lens
+            or (
+                gather_lens is not None
+                and gather_lens.is_cuda
+                and gather_lens.is_contiguous()
+            )
+        )
         and (batch_size > 1 or cu_dst_offsets_cpu is None)
     ):
         _write_ragged_2d_slices_kernel[(batch_size, triton.cdiv(width, TILE_T))](
@@ -2078,7 +2124,7 @@ def _write_ragged_2d_slices(
                 dst.copy_(src_3d[b, :gl, :])
 
 
-def start_dequantize_and_gather_k_cache_slots_cp_byte_sliced(
+def extract_swa_local_slices(
     *,
     k_cache_raw: torch.Tensor,
     slot_mapping: torch.Tensor,
@@ -2088,14 +2134,23 @@ def start_dequantize_and_gather_k_cache_slots_cp_byte_sliced(
     cp_rank: int,
     cp_size: int,
     compaction: CPByteSlicedSlotCompaction,
-    stream: Optional[Any] = None,
-    profile_name: str = "dsv4.cp.all_gather.swa_prefix",
     cu_tiles: Optional[torch.Tensor] = None,
     total_tiles: Optional[int] = None,
     cu_dst_offsets: Optional[torch.Tensor] = None,
     cu_dst_offsets_cpu: Optional[Tuple[int, ...]] = None,
-) -> Optional[CPByteSlicedSwaPrefixPending]:
-    """Launch only the NCCL stage for CP byte-sliced SWA prefix reads."""
+    slot_key: str = "swa_cp.local_slices",
+) -> Optional[
+    Tuple[
+        torch.Tensor,
+        torch.Tensor,
+        Optional[torch.Tensor],
+        Optional[int],
+        int,
+        int,
+        CPByteSlicedSlotCompaction,
+    ]
+]:
+    """Validate and extract compact local SWA byte slices for CP all-gather."""
     assert slot_mapping.dim() == 2
     full_entries_per_block = int(full_entries_per_block)
     cp_size = int(cp_size)
@@ -2123,23 +2178,8 @@ def start_dequantize_and_gather_k_cache_slots_cp_byte_sliced(
         max_gather_len=W,
     )
     unique_blocks = compaction.unique_blocks
-    compact_slots = compaction.compact_slots
     if unique_blocks.numel() == 0:
         return None
-    assert k_cache_raw.is_cuda, "CP byte-sliced async SWA gather requires CUDA"
-    if not torch.distributed.is_initialized():
-        return None
-
-    from rtp_llm.models_py.distributed import collective_torch
-    from rtp_llm.models_py.distributed.collective_torch import Group
-
-    process_group = collective_torch._get_group(Group.TP)
-    world_size = torch.distributed.get_world_size(process_group)
-    if world_size != cp_size:
-        raise RuntimeError(
-            f"CP byte-sliced SWA gather world_size({world_size}) != cp_size({cp_size})"
-        )
-
     device = k_cache_raw.device
     gather_lens_i32 = _device_gather_lens(
         saved_gather_lens,
@@ -2156,29 +2196,152 @@ def start_dequantize_and_gather_k_cache_slots_cp_byte_sliced(
             compaction.gather_lens_cpu,
             device=device,
         )
+    if compaction.contiguous_block_start >= 0 and k_cache_raw.is_contiguous():
+        local_slices = k_cache_raw.narrow(
+            0,
+            compaction.contiguous_block_start,
+            int(unique_blocks.numel()),
+        )
+    else:
+        local_slices = _acquire_swa_cp_buffer(
+            device,
+            slot_key,
+            (int(unique_blocks.numel()), int(k_cache_raw.shape[1])),
+            dtype=k_cache_raw.dtype,
+        )
+        torch.index_select(
+            k_cache_raw,
+            0,
+            unique_blocks.to(device=device),
+            out=local_slices,
+        )
+    return (
+        local_slices,
+        gather_lens_i32,
+        cu_tiles,
+        total_tiles,
+        B,
+        W,
+        compaction,
+    )
+
+
+def build_pre_gathered_swa_pending(
+    *,
+    gathered: torch.Tensor,
+    local_slices: torch.Tensor,
+    compaction: CPByteSlicedSlotCompaction,
+    gather_lens_i32: torch.Tensor,
+    B: int,
+    W: int,
+    offset: int,
+    full_entries_per_block: int,
+    cp_size: int,
+    producer_stream: Any,
+    completion_event: Optional[Any] = None,
+    cu_tiles: Optional[torch.Tensor] = None,
+    total_tiles: Optional[int] = None,
+    cu_dst_offsets: Optional[torch.Tensor] = None,
+    cu_dst_offsets_cpu: Optional[Tuple[int, ...]] = None,
+) -> CPByteSlicedSwaPrefixPending:
+    return CPByteSlicedSwaPrefixPending(
+        cp_size=int(cp_size),
+        B=int(B),
+        W=int(W),
+        offset=int(offset),
+        full_entries_per_block=int(full_entries_per_block),
+        gathered=gathered,
+        unique_blocks=compaction.unique_blocks,
+        compact_slots=compaction.compact_slots,
+        gather_lens=gather_lens_i32,
+        gather_lens_cpu=compaction.gather_lens_cpu,
+        work=None,
+        stream=producer_stream,
+        producer_stream=producer_stream,
+        completion_event=completion_event,
+        local_slices=local_slices,
+        work_waited=True,
+        cu_tiles=cu_tiles,
+        total_tiles=total_tiles,
+        cu_dst_offsets=cu_dst_offsets,
+        cu_dst_offsets_cpu=cu_dst_offsets_cpu,
+    )
+
+
+def start_dequantize_and_gather_k_cache_slots_cp_byte_sliced(
+    *,
+    k_cache_raw: torch.Tensor,
+    slot_mapping: torch.Tensor,
+    gather_lens: Optional[torch.Tensor],
+    offset: int,
+    full_entries_per_block: int,
+    cp_rank: int,
+    cp_size: int,
+    compaction: CPByteSlicedSlotCompaction,
+    stream: Optional[Any] = None,
+    profile_name: str = "dsv4.cp.all_gather.swa_prefix",
+    cu_tiles: Optional[torch.Tensor] = None,
+    total_tiles: Optional[int] = None,
+    cu_dst_offsets: Optional[torch.Tensor] = None,
+    cu_dst_offsets_cpu: Optional[Tuple[int, ...]] = None,
+) -> Optional[CPByteSlicedSwaPrefixPending]:
+    """Launch only the NCCL stage for CP byte-sliced SWA prefix reads."""
+    extracted = extract_swa_local_slices(
+        k_cache_raw=k_cache_raw,
+        slot_mapping=slot_mapping,
+        gather_lens=gather_lens,
+        offset=offset,
+        full_entries_per_block=full_entries_per_block,
+        cp_rank=cp_rank,
+        cp_size=cp_size,
+        compaction=compaction,
+        cu_tiles=cu_tiles,
+        total_tiles=total_tiles,
+        cu_dst_offsets=cu_dst_offsets,
+        cu_dst_offsets_cpu=cu_dst_offsets_cpu,
+        slot_key="swa_cp.async.local_slices",
+    )
+    if extracted is None:
+        return None
+    (
+        local_slices,
+        gather_lens_i32,
+        cu_tiles,
+        total_tiles,
+        B,
+        W,
+        compaction,
+    ) = extracted
+    unique_blocks = compaction.unique_blocks
+    compact_slots = compaction.compact_slots
+    assert k_cache_raw.is_cuda, "CP byte-sliced async SWA gather requires CUDA"
+    if not torch.distributed.is_initialized():
+        return None
+
+    from rtp_llm.models_py.distributed import collective_torch
+    from rtp_llm.models_py.distributed.collective_torch import Group
+
+    process_group = collective_torch._get_group(Group.TP)
+    world_size = torch.distributed.get_world_size(process_group)
+    if world_size != cp_size:
+        raise RuntimeError(
+            f"CP byte-sliced SWA gather world_size({world_size}) != cp_size({cp_size})"
+        )
+
+    device = k_cache_raw.device
     current_stream = torch.cuda.current_stream(device)
     if stream is None:
         raise ValueError("CP byte-sliced SWA async gather requires a stream")
+    gathered = _acquire_swa_cp_buffer(
+        device,
+        "swa_cp.async.gathered",
+        (cp_size * int(unique_blocks.numel()), int(k_cache_raw.shape[1])),
+        dtype=k_cache_raw.dtype,
+    )
     gather_stream = stream
     gather_stream.wait_stream(current_stream)
 
     with torch.cuda.stream(gather_stream):
-        if compaction.contiguous_block_start >= 0 and k_cache_raw.is_contiguous():
-            local_slices = k_cache_raw.narrow(
-                0,
-                compaction.contiguous_block_start,
-                int(unique_blocks.numel()),
-            )
-        else:
-            local_slices = k_cache_raw.index_select(0, unique_blocks).contiguous()
-        gathered = torch.empty(
-            (
-                cp_size * int(unique_blocks.numel()),
-                int(k_cache_raw.shape[1]),
-            ),
-            dtype=k_cache_raw.dtype,
-            device=device,
-        )
         with record_function_range(f"{profile_name}.launch"):
             work = torch.distributed.all_gather_into_tensor(
                 gathered,
@@ -2239,7 +2402,9 @@ def prepare_dequantize_and_gather_k_cache_slots_cp_byte_sliced(
         else pending.cu_dst_offsets_cpu
     )
     if cu_dst_offsets_eff is not None:
-        assert out.dim() == 2 and out.shape[-1] == HEAD_DIM and out.dtype == torch.bfloat16
+        assert (
+            out.dim() == 2 and out.shape[-1] == HEAD_DIM and out.dtype == torch.bfloat16
+        )
         assert out.stride(1) == 1
         assert (
             cu_dst_offsets_eff.dim() == 1
@@ -2249,7 +2414,9 @@ def prepare_dequantize_and_gather_k_cache_slots_cp_byte_sliced(
             and cu_dst_offsets_eff.is_contiguous()
         )
     else:
-        assert out.dim() == 3 and out.shape[-1] == HEAD_DIM and out.dtype == torch.bfloat16
+        assert (
+            out.dim() == 3 and out.shape[-1] == HEAD_DIM and out.dtype == torch.bfloat16
+        )
     device = pending.gathered.device
     if stream is None:
         raise ValueError("CP byte-sliced SWA async prepare requires a stream")
@@ -2262,7 +2429,8 @@ def prepare_dequantize_and_gather_k_cache_slots_cp_byte_sliced(
     pending.out = out
     pending.out_stream = current_stream
     with torch.cuda.stream(assemble_stream):
-        assemble_stream.wait_event(pending.completion_event)
+        if pending.completion_event is not None:
+            assemble_stream.wait_event(pending.completion_event)
         # Fence NCCL on the stream that will read the gathered bytes below.
         with record_function_range("dsv4.cp.all_gather.swa_prefix.wait_host"):
             _wait_swa_prefix_work_once(pending)
@@ -2359,7 +2527,8 @@ def wait_dequantize_and_gather_k_cache_slots_cp_byte_sliced(
         pending.producer_stream.wait_event(pending.ready_event)
     if pending.out_stream != current_stream:
         pending.out_stream.wait_event(pending.ready_event)
-    pending.stream.wait_event(pending.ready_event)
+    if pending.stream is not None:
+        pending.stream.wait_event(pending.ready_event)
     _wait_swa_prefix_work_once(pending)
 
 
@@ -2370,19 +2539,24 @@ def discard_dequantize_and_gather_k_cache_slots_cp_byte_sliced(
         return
     current_stream = torch.cuda.current_stream(pending.gathered.device)
     event = pending.ready_event or pending.completion_event
-    current_stream.wait_event(event)
-    if pending.producer_stream != current_stream:
-        pending.producer_stream.wait_event(event)
-    if pending.out_stream is not None and pending.out_stream != current_stream:
-        pending.out_stream.wait_event(event)
-    if pending.ready_event is not None:
+    if event is not None:
+        current_stream.wait_event(event)
+        if (
+            pending.producer_stream is not None
+            and pending.producer_stream != current_stream
+        ):
+            pending.producer_stream.wait_event(event)
+        if pending.out_stream is not None and pending.out_stream != current_stream:
+            pending.out_stream.wait_event(event)
+    if pending.ready_event is not None and pending.stream is not None:
         pending.stream.wait_event(pending.ready_event)
     _wait_swa_prefix_work_once(pending)
 
 
 def _wait_swa_prefix_work_once(pending: CPByteSlicedSwaPrefixPending) -> None:
     if not pending.work_waited:
-        pending.work.wait()
+        if pending.work is not None:
+            pending.work.wait()
         pending.work_waited = True
 
 
@@ -2441,7 +2615,9 @@ def dequantize_and_gather_k_cache_slots_cp_byte_sliced(
     B = int(slot_mapping.shape[0])
     W = int(slot_mapping.shape[1])
     if has_cu_dst_offsets:
-        assert out.dim() == 2 and out.shape[-1] == HEAD_DIM and out.dtype == torch.bfloat16
+        assert (
+            out.dim() == 2 and out.shape[-1] == HEAD_DIM and out.dtype == torch.bfloat16
+        )
         assert out.stride(1) == 1
         assert (
             cu_dst_offsets.dim() == 1
@@ -2451,7 +2627,9 @@ def dequantize_and_gather_k_cache_slots_cp_byte_sliced(
             and cu_dst_offsets.is_contiguous()
         ), f"cu_dst_offsets contract mismatch: shape={cu_dst_offsets.shape}"
     else:
-        assert out.dim() == 3 and out.shape[-1] == HEAD_DIM and out.dtype == torch.bfloat16
+        assert (
+            out.dim() == 3 and out.shape[-1] == HEAD_DIM and out.dtype == torch.bfloat16
+        )
     full_entries_per_block = int(full_entries_per_block)
     cp_size = int(cp_size)
     cp_rank = int(cp_rank)
@@ -2480,9 +2658,7 @@ def dequantize_and_gather_k_cache_slots_cp_byte_sliced(
             gather_lens_i32 = _device_gather_lens(
                 saved_gather_lens, batch_size=B, max_gather_len=W, device=out.device
             )
-            dummy_gathered = k_cache_raw.new_empty(
-                (cp_size, int(k_cache_raw.shape[1]))
-            )
+            dummy_gathered = k_cache_raw.new_empty((cp_size, int(k_cache_raw.shape[1])))
             _launch_dequantize_and_gather_k_slots_cp_rank_major_unchecked(
                 out,
                 dummy_gathered,
@@ -2517,6 +2693,7 @@ def dequantize_and_gather_k_cache_slots_cp_byte_sliced(
             )
         return
 
+    from rtp_llm.models_py.distributed import collective_torch
     from rtp_llm.models_py.distributed.collective_torch import Group, all_gather
 
     if compaction.contiguous_block_start >= 0 and k_cache_raw.is_contiguous():
@@ -2526,11 +2703,40 @@ def dequantize_and_gather_k_cache_slots_cp_byte_sliced(
             int(unique_blocks.numel()),
         )
     else:
-        local_slices = k_cache_raw.index_select(
-            0, unique_blocks
-        ).contiguous()  # [num_unique_blocks, local_slice_bytes]
-    with record_function_range("dsv4.cp.all_gather.swa_prefix.sync.launch"):
-        gathered = all_gather(local_slices, group=Group.TP)
+        local_slices = _acquire_swa_cp_buffer(
+            k_cache_raw.device,
+            "swa_cp.sync.local_slices",
+            (int(unique_blocks.numel()), int(k_cache_raw.shape[1])),
+            dtype=k_cache_raw.dtype,
+        )
+        torch.index_select(
+            k_cache_raw,
+            0,
+            unique_blocks.to(device=k_cache_raw.device),
+            out=local_slices,
+        )
+    all_gather_into = getattr(collective_torch, "all_gather_into", None)
+    if (
+        all_gather_into is not None
+        and torch.distributed.is_initialized()
+        and (
+            k_cache_raw.device.type != "cuda"
+            or not torch.cuda.is_current_stream_capturing()
+        )
+    ):
+        pg = collective_torch._get_group(Group.TP)
+        world_size = torch.distributed.get_world_size(pg)
+        gathered = _acquire_swa_cp_buffer(
+            k_cache_raw.device,
+            "swa_cp.sync.gathered",
+            (world_size * int(unique_blocks.numel()), int(k_cache_raw.shape[1])),
+            dtype=k_cache_raw.dtype,
+        )
+        with record_function_range("dsv4.cp.all_gather.swa_prefix.sync.launch"):
+            all_gather_into(gathered, local_slices, group=Group.TP)
+    else:
+        with record_function_range("dsv4.cp.all_gather.swa_prefix.sync.launch"):
+            gathered = all_gather(local_slices, group=Group.TP)
     gather_lens_i32 = _device_gather_lens(
         saved_gather_lens,
         batch_size=B,

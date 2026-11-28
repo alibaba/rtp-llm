@@ -31,6 +31,9 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from rtp_llm.config.quant_config import Fp8BlockWiseQuantConfig
+from rtp_llm.models_py.distributed import collective_torch as _collective_torch_mod
+from rtp_llm.models_py.distributed.collective_torch import Group
+from rtp_llm.models_py.modules.dsv4 import cp as _cp_mod
 from rtp_llm.models_py.modules.dsv4._fused_inv_rope_fp8_quant_triton import (
     fused_inv_rope_fp8_quant,
 )
@@ -48,13 +51,21 @@ from rtp_llm.models_py.modules.dsv4.chunk_env import dsv4_chunk_tokens_from_env
 from rtp_llm.models_py.modules.dsv4.cp import (
     _CP_ROLE_MAIN,
     CPContext,
+    allocate_coalesced_unpack_buffers,
     build_cp_full_prefill_positions,
     cp_actual_owned_kv_len,
     cp_actual_owned_kv_lens,
+    cp_all_gather_coalesced,
     cp_all_gather_full_varlen,
     cp_freqs_cis_local,
     cp_padded_local_kv_lens,
+    cp_restore_from_coalesced,
+    discard_cp_all_gather_coalesced,
+    prepare_cp_all_gather_coalesced,
+    start_cp_all_gather_coalesced,
+    wait_cp_all_gather_coalesced,
 )
+from rtp_llm.models_py.modules.dsv4.fp8 import _indexer_cp_assembler as _idx_asm
 from rtp_llm.models_py.modules.dsv4.fp8._cp_attention_merge import merge_lse_output
 from rtp_llm.models_py.modules.dsv4.fp8._cp_attention_shard import (
     build_swa_cp_local_indices,
@@ -67,9 +78,13 @@ from rtp_llm.models_py.modules.dsv4.fp8._fused_qnorm_quant_triton import (
 )
 from rtp_llm.models_py.modules.dsv4.fp8._pool_reader import (
     CompressedKPoolReader,
+    CPShardedPoolReader,
+    CPShardedPoolReadHandle,
     LocalPoolReader,
     make_compressed_k_pool_reader,
 )
+
+_ORIG_CP_ALL_GATHER_FULL_VARLEN = cp_all_gather_full_varlen
 from rtp_llm.models_py.modules.dsv4.fp8._swa_cp_byte_sliced import (
     CPByteSlicedSlotCompaction,
     build_cp_byte_sliced_slot_compaction,
@@ -840,8 +855,9 @@ class PrefillQKV(NamedTuple):
 
     qr: Optional[torch.Tensor]
     q: Optional[torch.Tensor]
-    kv_full: torch.Tensor
+    kv_full: Optional[torch.Tensor]
     qr_quant: Optional[Tuple[torch.Tensor, torch.Tensor]] = None
+    kv_local: Optional[torch.Tensor] = None
 
 
 class AttentionFP8(nn.Module):
@@ -2005,8 +2021,7 @@ class AttentionFP8(nn.Module):
             and type(self.indexer).forward is IndexerFP8.forward
             and type(self.indexer).forward_with_pending_nested
             is IndexerFP8.forward_with_pending_nested
-            and type(self.indexer)._compute_indexer_q
-            is IndexerFP8._compute_indexer_q
+            and type(self.indexer)._compute_indexer_q is IndexerFP8._compute_indexer_q
             and self.indexer.can_use_qr_quant()
             and getattr(self.indexer.wq_b, "K", None) == int(self.q_lora_rank)
         )
@@ -2016,8 +2031,7 @@ class AttentionFP8(nn.Module):
     ) -> bool:
         return (
             "_materialize_prefill_q" not in self.__dict__
-            and type(self)._materialize_prefill_q
-            is AttentionFP8._materialize_prefill_q
+            and type(self)._materialize_prefill_q is AttentionFP8._materialize_prefill_q
             and hasattr(self.wq_b, "forward_quantized")
             and bool(getattr(self.wq_b, "scale_ue8m0", False))
             and getattr(self.wq_b, "K", None) == int(q_proj_2d.shape[-1])
@@ -2689,6 +2703,69 @@ class AttentionFP8(nn.Module):
         with suppress(Exception):
             wait_fn(pending)
 
+    def _cp_can_coalesce_qkv_compressor(
+        self, x: torch.Tensor, common: PrefillMeta
+    ) -> bool:
+        if not self._should_overlap_cp_for_prefill(common):
+            return False
+        if type(common.cp_ctx) is not CPContext:
+            return False
+        if (
+            not x.is_cuda
+            or not getattr(_collective_torch_mod, "_initialized", False)
+            or not torch.distributed.is_initialized()
+            or cp_all_gather_full_varlen is not _ORIG_CP_ALL_GATHER_FULL_VARLEN
+            or _cp_mod.all_gather is not _cp_mod._ORIG_ALL_GATHER
+            or _collective_torch_mod.all_gather is not _cp_mod._ORIG_ALL_GATHER
+        ):
+            return False
+        if (
+            "_ensure_prefill_kv_full" in self.__dict__
+            or type(self)._ensure_prefill_kv_full
+            is not AttentionFP8._ensure_prefill_kv_full
+        ):
+            return False
+        comp = self.compressor
+        if (
+            type(comp) is not CompressorFP8
+            or "start_prefill" in comp.__dict__
+            or "finish_prefill" in comp.__dict__
+            or "_launch" in comp.__dict__
+            or type(comp)._launch is not CompressorFP8._launch
+            or comp._cp_ctx is not common.cp_ctx
+        ):
+            return False
+        if self.compress_ratio == 4:
+            if common.csa_meta is None:
+                return False
+            idx = self.indexer
+            if (
+                type(idx) is not IndexerFP8
+                or "start_prefill_nested_compressor" in idx.__dict__
+                or "forward_with_pending_nested" in idx.__dict__
+                or idx._cp_ctx is not common.cp_ctx
+            ):
+                return False
+            idx_comp = idx.compressor
+            if (
+                type(idx_comp) is not CompressorFP8
+                or "start_prefill" in idx_comp.__dict__
+                or "finish_prefill" in idx_comp.__dict__
+                or "_launch" in idx_comp.__dict__
+                or type(idx_comp)._launch is not CompressorFP8._launch
+                or idx_comp._cp_ctx is not common.cp_ctx
+            ):
+                return False
+            return True
+        if self.compress_ratio == 128:
+            return common.hca_meta is not None
+        return False
+
+    def _cp_can_defer_kv_gather_for_prefill(
+        self, x: torch.Tensor, common: PrefillMeta
+    ) -> bool:
+        return self._cp_can_coalesce_qkv_compressor(x, common)
+
     def _forward_prefill(
         self,
         x: torch.Tensor,
@@ -2885,6 +2962,256 @@ class AttentionFP8(nn.Module):
         layer_label = f"L{int(getattr(self, 'layer_id', 0)):02d}"
         nested_pending = None
         main_pending = None
+        g1_handle = None
+        if self._cp_can_coalesce_qkv_compressor(x, common):
+            from rtp_llm.models_py.modules.dsv4.fp8 import (
+                _swa_dequant_triton as _swa_dq,
+            )
+            from rtp_llm.models_py.modules.dsv4.kv_cache_utils import CSA_KV, SWA_KV
+
+            cp_ctx = common.cp_ctx
+            idx_comp = self.indexer.compressor
+            if (
+                self.indexer._kv_block_table is not None
+                and self.indexer._kv_pool_view is not None
+                and self.indexer._kv_eb > 0
+            ):
+                if idx_comp.freqs_cis is None:
+                    idx_comp.freqs_cis = self.indexer.freqs_cis
+                self.indexer._propagate_pool_to_nested()
+                nested_info = idx_comp.compute_prefill_fused(
+                    x, csa_meta.indexer_meta.sp_int
+                )
+            else:
+                nested_info = None
+            main_info = self.compressor.compute_prefill_fused(x, common.sp_int)
+            if nested_info is not None and main_info is not None:
+                nested_meta = csa_meta.indexer_meta.compressor_meta
+                main_meta = csa_meta.compressor_meta
+                assert nested_meta is not None and main_meta is not None
+                assert int(nested_meta.positions.numel()) == int(cp_ctx.seq_len_full)
+                assert int(main_meta.positions.numel()) == int(cp_ctx.seq_len_full)
+                try:
+                    nested_fused, n_sp, n_bsz, n_seq, n_out_dim = nested_info
+                    main_fused, m_sp, m_bsz, m_seq, m_out_dim = main_info
+                    nested_state_prep = idx_comp.prepare_cp_state_read_payload(
+                        nested_meta,
+                        cp_ctx,
+                        slot_key="compressor.state_read.payload.idx",
+                    )
+                    main_state_prep = self.compressor.prepare_cp_state_read_payload(
+                        main_meta,
+                        cp_ctx,
+                        slot_key="compressor.state_read.payload.main",
+                    )
+                    tensors_g1 = [nested_fused, main_fused]
+                    kv_item_idx = -1
+                    if qkv.kv_full is None:
+                        assert qkv.kv_local is not None
+                        kv_item_idx = len(tensors_g1)
+                        tensors_g1.append(qkv.kv_local)
+                    nested_state_idx = -1
+                    if (
+                        nested_state_prep is not None
+                        and nested_state_prep[0] is not None
+                    ):
+                        nested_state_idx = len(tensors_g1)
+                        tensors_g1.append(nested_state_prep[0])
+                    main_state_idx = -1
+                    if main_state_prep is not None and main_state_prep[0] is not None:
+                        main_state_idx = len(tensors_g1)
+                        tensors_g1.append(main_state_prep[0])
+                    has_state_payload = nested_state_idx >= 0 or main_state_idx >= 0
+                    with record_function_range(
+                        "dsv4.fp8.attn.csa_overlap.start_g1_coalesced"
+                    ):
+                        g1_handle = start_cp_all_gather_coalesced(
+                            tensors_g1,
+                            group=Group.TP,
+                            async_op=True,
+                            stream=cp_stream,
+                            allow_col2d=not has_state_payload,
+                            slot_key="cp.coalesced.g1",
+                            profile_name=f"dsv4.cp.all_gather.{layer_label}.csa_g1",
+                        )
+                    if common.workspace is not None:
+                        with record_function_range(
+                            "dsv4.fp8.attn.csa_overlap.materialize_q"
+                        ):
+                            qkv = self._materialize_prefill_q(qkv, common)
+                    with record_function_range(
+                        "dsv4.fp8.attn.csa_overlap.wait_g1_coalesced"
+                    ):
+                        outs_g1 = wait_cp_all_gather_coalesced(g1_handle)
+                        g1_handle = None
+                    if kv_item_idx >= 0:
+                        kv_full = cp_restore_from_coalesced(
+                            outs_g1[kv_item_idx],
+                            cp_ctx,
+                            (self.head_dim,),
+                            own_prefix_view=True,
+                        )
+                        qkv = qkv._replace(kv_full=kv_full, kv_local=None)
+                    with record_function_range("dsv4.fp8.attn.csa_overlap.swa_write"):
+                        self._prefill_write_swa_fp8_paged(common, qkv.kv_full)
+
+                    nested_state_override = idx_comp.finalize_cp_state_read_cache(
+                        nested_meta,
+                        cp_ctx,
+                        nested_state_prep,
+                        outs_g1[nested_state_idx] if nested_state_idx >= 0 else None,
+                        read_cache_slot_key="compressor.state_read_cache.idx",
+                    )
+                    main_state_override = self.compressor.finalize_cp_state_read_cache(
+                        main_meta,
+                        cp_ctx,
+                        main_state_prep,
+                        outs_g1[main_state_idx] if main_state_idx >= 0 else None,
+                        read_cache_slot_key="compressor.state_read_cache.main",
+                    )
+                    if cp_ctx.unpad_restore_is_prefix:
+                        nested_fused_arg = outs_g1[0][: cp_ctx.seq_len_full]
+                        main_fused_arg = outs_g1[1][: cp_ctx.seq_len_full]
+                        unpad_arg = None
+                    else:
+                        nested_fused_arg = outs_g1[0]
+                        main_fused_arg = outs_g1[1]
+                        unpad_arg = cp_ctx.unpad_restore
+
+                    nested_pending = idx_comp.make_prefill_pending_from_gathered(
+                        fused_flat=nested_fused_arg,
+                        sp=n_sp,
+                        bsz=n_bsz,
+                        seqlen=n_seq,
+                        out_dim=n_out_dim,
+                        meta=nested_meta,
+                        unpad_restore=unpad_arg,
+                        state_read_cache_override=nested_state_override,
+                        profile_label=f"{layer_label}.csa_nested_indexer",
+                    )
+                    main_pending = self.compressor.make_prefill_pending_from_gathered(
+                        fused_flat=main_fused_arg,
+                        sp=m_sp,
+                        bsz=m_bsz,
+                        seqlen=m_seq,
+                        out_dim=m_out_dim,
+                        meta=main_meta,
+                        unpad_restore=unpad_arg,
+                        state_read_cache_override=main_state_override,
+                        profile_label=f"{layer_label}.csa_main",
+                    )
+                    with record_function_range(
+                        "dsv4.fp8.attn.csa_overlap.finish_main_compressor"
+                    ):
+                        self.compressor.finish_prefill(main_pending)
+                    main_pending = None
+
+                    csa_job = None
+                    csa_swa_extracted = None
+                    wm = csa_meta.workspace_meta
+                    async_ws_reads = self._should_async_workspace_reads_for_prefill(
+                        common
+                    )
+                    if wm is not None and not wm.use_cp_raw_q_merge and async_ws_reads:
+                        cmp_local_flat = None
+                        if wm.N > 0 and isinstance(wm.cmp_reader, CPShardedPoolReader):
+                            cmp_pool_3d = self._pool_view_3d_fp8(CSA_KV)
+                            if cmp_pool_3d is not None:
+                                cmp_local_flat = wm.cmp_reader.build_local_flat(
+                                    k_cache=cmp_pool_3d,
+                                    block_table=wm.cmp_bt_int32,
+                                    block_size=wm.cmp_eb,
+                                    gather_lens=None,
+                                    device=x.device,
+                                )
+                        swa_byte_sliced = self._swa_cp_byte_sliced()
+                        swa_pool_raw = (
+                            self._pool_raw_u8(SWA_KV) if swa_byte_sliced else None
+                        )
+                        swa_local_slices = None
+                        if (
+                            common.any_cont
+                            and swa_byte_sliced
+                            and swa_pool_raw is not None
+                            and wm.swa_cache_slot_mapping is not None
+                            and wm.swa_cache_compaction is not None
+                        ):
+                            swa_offset = 0 if wm.cu_swa_offsets is not None else wm.N
+                            csa_swa_extracted = _swa_dq.extract_swa_local_slices(
+                                k_cache_raw=swa_pool_raw,
+                                slot_mapping=wm.swa_cache_slot_mapping,
+                                gather_lens=wm.swa_cache_gather_lens,
+                                offset=swa_offset,
+                                full_entries_per_block=wm.swa_eb,
+                                cp_rank=int(cp_ctx.cp_rank),
+                                cp_size=int(cp_ctx.cp_size),
+                                compaction=wm.swa_cache_compaction,
+                                cu_tiles=wm.swa_cache_cu_tiles,
+                                total_tiles=wm.swa_cache_total_tiles,
+                                cu_dst_offsets=wm.cu_swa_offsets,
+                                cu_dst_offsets_cpu=wm.cu_swa_offsets_cpu,
+                                slot_key="swa_cp.coalesced.local_slices",
+                            )
+                            if csa_swa_extracted is not None:
+                                swa_local_slices = csa_swa_extracted[0]
+                        if cmp_local_flat is not None or swa_local_slices is not None:
+                            csa_job = _idx_asm.CSAKVCoalesceJob(
+                                cmp_local_flat=cmp_local_flat,
+                                swa_local_slices=swa_local_slices,
+                            )
+
+                    with record_function_range("dsv4.fp8.attn.csa_overlap.indexer"):
+                        indexer_post_stream = (
+                            _get_cp_post_gather_stream(x.device) if x.is_cuda else None
+                        )
+                        with _idx_asm.csa_kv_coalesce_scope(csa_job):
+                            if (
+                                qkv.qr_quant is not None
+                                and self._indexer_can_consume_qr_quant()
+                            ):
+                                raw = self.indexer.forward_with_pending_nested(
+                                    x,
+                                    qkv.qr,
+                                    csa_meta.indexer_meta,
+                                    nested_pending,
+                                    before_gather_k=None,
+                                    cp_gather_stream=cp_stream,
+                                    post_gather_stream=indexer_post_stream,
+                                    qr_quant=qkv.qr_quant,
+                                )
+                            else:
+                                raw = self.indexer.forward_with_pending_nested(
+                                    x,
+                                    qkv.qr,
+                                    csa_meta.indexer_meta,
+                                    nested_pending,
+                                    before_gather_k=None,
+                                    cp_gather_stream=cp_stream,
+                                    post_gather_stream=indexer_post_stream,
+                                )
+                        nested_pending = None
+
+                    return self._forward_prefill_compressed(
+                        x,
+                        qkv,
+                        common,
+                        cmp_topk_runtime=raw,
+                        compressor_meta=csa_meta.compressor_meta,
+                        workspace_meta=csa_meta.workspace_meta,
+                        _skip_compressor_write=True,
+                        _pre_gathered_kv_job=csa_job,
+                        _pre_gathered_swa_extracted=csa_swa_extracted,
+                    )
+                except Exception:
+                    discard_cp_all_gather_coalesced(g1_handle)
+                    self._cleanup_pending_prefill_gather(self.compressor, main_pending)
+                    self._cleanup_pending_prefill_gather(idx_comp, nested_pending)
+                    clear_nested = getattr(self.indexer, "_clear_nested_pool", None)
+                    if clear_nested is not None:
+                        with suppress(Exception):
+                            clear_nested()
+                    raise
+
         try:
             with record_function_range(
                 "dsv4.fp8.attn.csa_overlap.start_nested_compressor"
@@ -3032,6 +3359,108 @@ class AttentionFP8(nn.Module):
 
         cp_stream = self._get_cp_gather_stream(x.device)
         layer_label = f"L{int(getattr(self, 'layer_id', 0)):02d}"
+        if self._cp_can_coalesce_qkv_compressor(x, common):
+            cp_ctx = common.cp_ctx
+            main_info = self.compressor.compute_prefill_fused(x, common.sp_int)
+            if main_info is not None:
+                main_meta = common.hca_meta.compressor_meta
+                assert main_meta is not None
+                assert int(main_meta.positions.numel()) == int(cp_ctx.seq_len_full)
+                main_pending = None
+                g1_handle = None
+                try:
+                    main_fused, m_sp, m_bsz, m_seq, m_out_dim = main_info
+                    main_state_prep = self.compressor.prepare_cp_state_read_payload(
+                        main_meta,
+                        cp_ctx,
+                        slot_key="compressor.state_read.payload.main",
+                    )
+                    tensors_g1 = [main_fused]
+                    kv_item_idx = -1
+                    if qkv.kv_full is None:
+                        assert qkv.kv_local is not None
+                        kv_item_idx = len(tensors_g1)
+                        tensors_g1.append(qkv.kv_local)
+                    state_idx = -1
+                    if main_state_prep is not None and main_state_prep[0] is not None:
+                        state_idx = len(tensors_g1)
+                        tensors_g1.append(main_state_prep[0])
+                    with record_function_range(
+                        "dsv4.fp8.attn.hca_overlap.start_g1_coalesced"
+                    ):
+                        g1_handle = start_cp_all_gather_coalesced(
+                            tensors_g1,
+                            group=Group.TP,
+                            async_op=True,
+                            stream=cp_stream,
+                            allow_col2d=state_idx < 0,
+                            slot_key="cp.coalesced.g1",
+                            profile_name=f"dsv4.cp.all_gather.{layer_label}.hca_g1",
+                        )
+                    if common.workspace is not None:
+                        with record_function_range(
+                            "dsv4.fp8.attn.hca_overlap.materialize_q"
+                        ):
+                            qkv = self._materialize_prefill_q(qkv, common)
+                    with record_function_range(
+                        "dsv4.fp8.attn.hca_overlap.wait_g1_coalesced"
+                    ):
+                        outs_g1 = wait_cp_all_gather_coalesced(g1_handle)
+                        g1_handle = None
+                    if kv_item_idx >= 0:
+                        kv_full = cp_restore_from_coalesced(
+                            outs_g1[kv_item_idx],
+                            cp_ctx,
+                            (self.head_dim,),
+                            own_prefix_view=True,
+                        )
+                        qkv = qkv._replace(kv_full=kv_full, kv_local=None)
+                    with record_function_range("dsv4.fp8.attn.hca_overlap.swa_write"):
+                        self._prefill_write_swa_fp8_paged(common, qkv.kv_full)
+
+                    main_state_override = self.compressor.finalize_cp_state_read_cache(
+                        main_meta,
+                        cp_ctx,
+                        main_state_prep,
+                        outs_g1[state_idx] if state_idx >= 0 else None,
+                        read_cache_slot_key="compressor.state_read_cache.main",
+                    )
+                    if cp_ctx.unpad_restore_is_prefix:
+                        main_fused_arg = outs_g1[0][: cp_ctx.seq_len_full]
+                        unpad_arg = None
+                    else:
+                        main_fused_arg = outs_g1[0]
+                        unpad_arg = cp_ctx.unpad_restore
+                    main_pending = self.compressor.make_prefill_pending_from_gathered(
+                        fused_flat=main_fused_arg,
+                        sp=m_sp,
+                        bsz=m_bsz,
+                        seqlen=m_seq,
+                        out_dim=m_out_dim,
+                        meta=main_meta,
+                        unpad_restore=unpad_arg,
+                        state_read_cache_override=main_state_override,
+                        profile_label=f"{layer_label}.hca_main",
+                    )
+                    with record_function_range(
+                        "dsv4.fp8.attn.hca_overlap.finish_compressor"
+                    ):
+                        self.compressor.finish_prefill(main_pending)
+                    main_pending = None
+                    return self._forward_prefill_compressed(
+                        x,
+                        qkv,
+                        common,
+                        cmp_topk_runtime=None,
+                        compressor_meta=common.hca_meta.compressor_meta,
+                        workspace_meta=common.hca_meta.workspace_meta,
+                        _skip_compressor_write=True,
+                    )
+                except Exception:
+                    discard_cp_all_gather_coalesced(g1_handle)
+                    self._cleanup_pending_prefill_gather(self.compressor, main_pending)
+                    raise
+
         q_tokens = int(x.shape[0])
         disjoint_buf: Optional[torch.Tensor] = None
         if common.workspace is not None:
@@ -3059,7 +3488,9 @@ class AttentionFP8(nn.Module):
                 if common.workspace is not None and disjoint_buf is not None
                 else nullcontext()
             ):
-                with record_function_range("dsv4.fp8.attn.hca_overlap.start_compressor"):
+                with record_function_range(
+                    "dsv4.fp8.attn.hca_overlap.start_compressor"
+                ):
                     main_pending = self.compressor.start_prefill(
                         x,
                         common.sp_int,
@@ -3108,6 +3539,8 @@ class AttentionFP8(nn.Module):
         workspace_meta: Optional[WorkspaceMeta],
         *,
         _skip_compressor_write: bool = False,
+        _pre_gathered_kv_job: Optional[Any] = None,
+        _pre_gathered_swa_extracted: Optional[Any] = None,
     ) -> torch.Tensor:
         """Shared CSA/HCA epilogue: write compressed-K via main compressor
         (with hoisted ``compressor_meta``), then run the workspace-path
@@ -3151,9 +3584,22 @@ class AttentionFP8(nn.Module):
                 out = self._attn_fp8_swa_via_kv_full(qkv, common)
         else:
             with record_function_range("dsv4.fp8.attn.compressed.workspace_attn"):
-                out = self._attn_via_workspace(
-                    qkv, common, workspace_meta, cmp_topk_runtime
-                )
+                if _pre_gathered_kv_job is None and _pre_gathered_swa_extracted is None:
+                    out = self._attn_via_workspace(
+                        qkv,
+                        common,
+                        workspace_meta,
+                        cmp_topk_runtime,
+                    )
+                else:
+                    out = self._attn_via_workspace(
+                        qkv,
+                        common,
+                        workspace_meta,
+                        cmp_topk_runtime,
+                        _pre_gathered_kv_job=_pre_gathered_kv_job,
+                        _pre_gathered_swa_extracted=_pre_gathered_swa_extracted,
+                    )
         return out
 
     def _attn_via_workspace(
@@ -3162,6 +3608,9 @@ class AttentionFP8(nn.Module):
         common: PrefillMeta,
         workspace_meta: "WorkspaceMeta",
         cmp_topk_runtime: Optional[torch.Tensor],
+        *,
+        _pre_gathered_kv_job: Optional[Any] = None,
+        _pre_gathered_swa_extracted: Optional[Any] = None,
     ) -> torch.Tensor:
         """vLLM-style workspace path for CSA/HCA prefill (varlen B>=1, non-CP).
 
@@ -3268,6 +3717,7 @@ class AttentionFP8(nn.Module):
         cmp_reader_for_pending = None
         cmp_prepare_for_pending = None
         swa_prefix_pending = None
+        hca_g2_handle = None
         extra_cmp_kwargs: Dict[str, Any] = (
             dict(cu_dst_offsets=wm.cu_cmp_offsets, max_tokens_hint=wm.N)
             if use_ragged
@@ -3275,7 +3725,158 @@ class AttentionFP8(nn.Module):
         )
         swa_offset = 0 if use_ragged else wm.N
         try:
-            if wm.N > 0:
+            if (
+                _pre_gathered_kv_job is not None
+                and _pre_gathered_kv_job.ready_event is not None
+            ):
+                if (
+                    wm.N > 0
+                    and isinstance(wm.cmp_reader, CPShardedPoolReader)
+                    and _pre_gathered_kv_job.gathered_cmp is not None
+                    and _pre_gathered_kv_job.cmp_local_flat is not None
+                ):
+                    cmp_pending = CPShardedPoolReadHandle(
+                        local_flat=_pre_gathered_kv_job.cmp_local_flat,
+                        gathered=_pre_gathered_kv_job.gathered_cmp,
+                        work=None,
+                        completion_event=_pre_gathered_kv_job.ready_event,
+                        stream=_pre_gathered_kv_job.ready_stream,
+                        producer_stream=_pre_gathered_kv_job.producer_stream,
+                        out=workspace,
+                        seq_lens=wm.cmp_seq_lens,
+                        offset=0,
+                        cu_dst_offsets=wm.cu_cmp_offsets if use_ragged else None,
+                        work_waited=True,
+                    )
+                    cmp_reader_for_pending = wm.cmp_reader
+                    cmp_prepare_for_pending = wm.cmp_reader.prepare_fill_async
+                if (
+                    common.any_cont
+                    and swa_byte_sliced
+                    and _pre_gathered_kv_job.gathered_swa is not None
+                    and _pre_gathered_swa_extracted is not None
+                ):
+                    assert common.cp_ctx is not None
+                    (
+                        _swa_ls,
+                        _swa_gl,
+                        _swa_ct,
+                        _swa_tt,
+                        _swa_B,
+                        _swa_W,
+                        _swa_comp,
+                    ) = _pre_gathered_swa_extracted
+                    swa_prefix_pending = _swa_dq.build_pre_gathered_swa_pending(
+                        gathered=_pre_gathered_kv_job.gathered_swa,
+                        local_slices=_swa_ls,
+                        compaction=_swa_comp,
+                        gather_lens_i32=_swa_gl,
+                        B=_swa_B,
+                        W=_swa_W,
+                        offset=swa_offset,
+                        full_entries_per_block=wm.swa_eb,
+                        cp_size=int(common.cp_ctx.cp_size),
+                        producer_stream=_pre_gathered_kv_job.producer_stream,
+                        completion_event=_pre_gathered_kv_job.ready_event,
+                        cu_tiles=_swa_ct,
+                        total_tiles=_swa_tt,
+                        cu_dst_offsets=wm.cu_swa_offsets,
+                        cu_dst_offsets_cpu=wm.cu_swa_offsets_cpu,
+                    )
+            elif (
+                async_workspace_reads
+                and wm.N > 0
+                and isinstance(wm.cmp_reader, CPShardedPoolReader)
+                and common.any_cont
+                and swa_byte_sliced
+                and swa_pool_raw is not None
+                and wm.swa_cache_slot_mapping is not None
+                and wm.swa_cache_compaction is not None
+                and _cp_mod.all_gather is _cp_mod._ORIG_ALL_GATHER
+                and _collective_torch_mod.all_gather is _cp_mod._ORIG_ALL_GATHER
+                and getattr(_collective_torch_mod, "_initialized", False)
+                and torch.distributed.is_initialized()
+                and qkv.q.is_cuda
+                and not torch.cuda.is_current_stream_capturing()
+            ):
+                assert common.cp_ctx is not None
+                _cmp_local_flat = wm.cmp_reader.build_local_flat(
+                    k_cache=cmp_pool_3d,
+                    block_table=wm.cmp_bt_int32,
+                    block_size=wm.cmp_eb,
+                    gather_lens=None,
+                    device=qkv.q.device,
+                )
+                _swa_ext = _swa_dq.extract_swa_local_slices(
+                    k_cache_raw=swa_pool_raw,
+                    slot_mapping=wm.swa_cache_slot_mapping,
+                    gather_lens=wm.swa_cache_gather_lens,
+                    offset=swa_offset,
+                    full_entries_per_block=wm.swa_eb,
+                    cp_rank=int(common.cp_ctx.cp_rank),
+                    cp_size=int(common.cp_ctx.cp_size),
+                    compaction=wm.swa_cache_compaction,
+                    cu_tiles=wm.swa_cache_cu_tiles,
+                    total_tiles=wm.swa_cache_total_tiles,
+                    cu_dst_offsets=wm.cu_swa_offsets,
+                    cu_dst_offsets_cpu=wm.cu_swa_offsets_cpu,
+                    slot_key="swa_cp.coalesced.local_slices",
+                )
+                if _swa_ext is not None:
+                    (
+                        _swa_ls,
+                        _swa_gl,
+                        _swa_ct,
+                        _swa_tt,
+                        _swa_B,
+                        _swa_W,
+                        _swa_comp,
+                    ) = _swa_ext
+                    hca_g2_handle = start_cp_all_gather_coalesced(
+                        [_cmp_local_flat, _swa_ls],
+                        group=Group.TP,
+                        async_op=True,
+                        stream=self._get_cp_gather_stream(qkv.q.device),
+                        allow_col2d=False,
+                        slot_key="cp.coalesced.hca_g2",
+                        profile_name=f"dsv4.cp.all_gather.L{self.layer_id:02d}.hca_g2",
+                    )
+                    _hca_outs = allocate_coalesced_unpack_buffers(hca_g2_handle)
+                    assert _hca_outs is not None
+                    cmp_pending = CPShardedPoolReadHandle(
+                        local_flat=_cmp_local_flat,
+                        gathered=_hca_outs[0],
+                        work=None,
+                        completion_event=hca_g2_handle.completion_event,
+                        stream=hca_g2_handle.stream,
+                        producer_stream=hca_g2_handle.producer_stream,
+                        out=workspace,
+                        seq_lens=wm.cmp_seq_lens,
+                        offset=0,
+                        cu_dst_offsets=wm.cu_cmp_offsets if use_ragged else None,
+                        work_waited=True,
+                    )
+                    cmp_reader_for_pending = wm.cmp_reader
+                    cmp_prepare_for_pending = wm.cmp_reader.prepare_fill_async
+                    swa_prefix_pending = _swa_dq.build_pre_gathered_swa_pending(
+                        gathered=_hca_outs[1],
+                        local_slices=_swa_ls,
+                        compaction=_swa_comp,
+                        gather_lens_i32=_swa_gl,
+                        B=_swa_B,
+                        W=_swa_W,
+                        offset=swa_offset,
+                        full_entries_per_block=wm.swa_eb,
+                        cp_size=int(common.cp_ctx.cp_size),
+                        producer_stream=hca_g2_handle.producer_stream,
+                        completion_event=hca_g2_handle.completion_event,
+                        cu_tiles=_swa_ct,
+                        total_tiles=_swa_tt,
+                        cu_dst_offsets=wm.cu_swa_offsets,
+                        cu_dst_offsets_cpu=wm.cu_swa_offsets_cpu,
+                    )
+
+            if wm.N > 0 and cmp_pending is None:
                 with record_function_range("dsv4.fp8.attn.workspace.gather_cmp"):
                     # Stage 5b: dispatch through the per-iteration reader. For
                     # non-CP / cp_size=1 / unsharded KV-cache this is a thin
@@ -3353,7 +3954,7 @@ class AttentionFP8(nn.Module):
                     if swa_byte_sliced:
                         assert common.cp_ctx is not None
                         assert wm.swa_cache_compaction is not None
-                        if async_workspace_reads:
+                        if async_workspace_reads and swa_prefix_pending is None:
                             with record_function_range(
                                 "dsv4.fp8.attn.workspace.gather_swa_prefix.prefetch_start"
                             ):
@@ -3512,7 +4113,9 @@ class AttentionFP8(nn.Module):
                         req_id_per_token=_flat_1d(common.req_id_per_token),
                         prefix_lengths=_flat_1d(common.prefix_lengths),
                     )
-                    with record_function_range("dsv4.fp8.attn.workspace.combine_topk_cp"):
+                    with record_function_range(
+                        "dsv4.fp8.attn.workspace.combine_topk_cp"
+                    ):
                         combined_indices, combined_lens = combine_topk_swa_indices_cp(
                             **combine_kwargs,
                             flash_mla_indices=True,
@@ -3574,6 +4177,17 @@ class AttentionFP8(nn.Module):
             post_gather_stream = None
             if cmp_pending is not None or swa_prefix_pending is not None:
                 post_gather_stream = _get_cp_post_gather_stream(qkv.q.device)
+            if hca_g2_handle is not None:
+                assert post_gather_stream is not None
+                prepare_cp_all_gather_coalesced(
+                    hca_g2_handle, stream=post_gather_stream
+                )
+                if hca_g2_handle.done_event is not None:
+                    if cmp_pending is not None:
+                        cmp_pending.completion_event = hca_g2_handle.done_event
+                    if swa_prefix_pending is not None:
+                        swa_prefix_pending.completion_event = hca_g2_handle.done_event
+                hca_g2_handle = None
 
             # Only the NCCL stage is pulled ahead. Local restore/dequant/scatter
             # is queued after overlay/combine and must finish before FlashMLA
@@ -3638,6 +4252,8 @@ class AttentionFP8(nn.Module):
                 out=projected_out,
             )
         finally:
+            if hca_g2_handle is not None:
+                discard_cp_all_gather_coalesced(hca_g2_handle)
             if cmp_pending is not None and cmp_reader_for_pending is not None:
                 cmp_reader_for_pending.discard_fill_async(cmp_pending)
             if swa_prefix_pending is not None:
@@ -3984,30 +4600,58 @@ class AttentionFP8(nn.Module):
             qkv.kv_full.to(torch.bfloat16).reshape(-1, D),
         )
 
-        q_full = cp_all_gather_full_varlen(qkv.q, cp_ctx)
-        if wm.dense_cmp_topk is not None:
-            if wm.N > 0:
-                dense = (
-                    torch.arange(wm.N, device=qkv.q.device, dtype=torch.int64)
-                    .view(1, wm.N)
-                    .expand(int(q_full.shape[0]), wm.N)
-                )
-                dense_len = torch.clamp(
-                    (pos_full + 1) // int(self.compress_ratio),
-                    max=wm.N,
-                ).unsqueeze(1)
-                cmp_topk_full = (
-                    torch.where(dense < dense_len, dense, torch.full_like(dense, -1))
-                    .to(torch.int32)
-                    .contiguous()
-                )
-            else:
-                cmp_topk_full = torch.empty(
-                    (int(q_full.shape[0]), 0), device=qkv.q.device, dtype=torch.int32
-                )
-        else:
+        can_coalesce_raw = (
+            cp_all_gather_full_varlen is _ORIG_CP_ALL_GATHER_FULL_VARLEN
+            and _cp_mod.all_gather is _cp_mod._ORIG_ALL_GATHER
+            and _collective_torch_mod.all_gather is _cp_mod._ORIG_ALL_GATHER
+            and getattr(_collective_torch_mod, "_initialized", False)
+            and torch.distributed.is_initialized()
+            and qkv.q.is_cuda
+            and not torch.cuda.is_current_stream_capturing()
+            and type(cp_ctx) is CPContext
+        )
+        if wm.dense_cmp_topk is None and can_coalesce_raw:
             assert cmp_topk_runtime is not None
-            cmp_topk_full = cp_all_gather_full_varlen(cmp_topk_runtime, cp_ctx)
+            q_gathered, topk_gathered = cp_all_gather_coalesced(
+                (qkv.q, cmp_topk_runtime),
+                group=Group.TP,
+                allow_col2d=False,
+                slot_key="cp.coalesced.raw_q",
+                profile_name=f"dsv4.cp.all_gather.L{self.layer_id:02d}.raw_q_topk",
+            )
+            q_full = cp_restore_from_coalesced(q_gathered, cp_ctx, qkv.q.shape[1:])
+            cmp_topk_full = cp_restore_from_coalesced(
+                topk_gathered, cp_ctx, cmp_topk_runtime.shape[1:]
+            )
+        else:
+            q_full = cp_all_gather_full_varlen(qkv.q, cp_ctx)
+            if wm.dense_cmp_topk is not None:
+                if wm.N > 0:
+                    dense = (
+                        torch.arange(wm.N, device=qkv.q.device, dtype=torch.int64)
+                        .view(1, wm.N)
+                        .expand(int(q_full.shape[0]), wm.N)
+                    )
+                    dense_len = torch.clamp(
+                        (pos_full + 1) // int(self.compress_ratio),
+                        max=wm.N,
+                    ).unsqueeze(1)
+                    cmp_topk_full = (
+                        torch.where(
+                            dense < dense_len, dense, torch.full_like(dense, -1)
+                        )
+                        .to(torch.int32)
+                        .contiguous()
+                    )
+                else:
+                    cmp_topk_full = torch.empty(
+                        (int(q_full.shape[0]), 0),
+                        device=qkv.q.device,
+                        dtype=torch.int32,
+                    )
+            else:
+                assert cmp_topk_runtime is not None
+                cmp_topk_full = cp_all_gather_full_varlen(cmp_topk_runtime, cp_ctx)
 
         local_topk = remap_topk_to_cp_local(
             cmp_topk_full,
@@ -4037,18 +4681,36 @@ class AttentionFP8(nn.Module):
             attn_sink=None,
             topk_length=combined_lens,
         )
-        with record_function_range(
-            f"dsv4.cp.all_gather.L{self.layer_id:02d}.workspace_attn.o.launch"
-        ):
-            gathered_o = all_gather(local_o.contiguous(), group=Group.TP).view(
+        if can_coalesce_raw:
+            with record_function_range(
+                f"dsv4.cp.all_gather.L{self.layer_id:02d}.workspace_attn.o_lse.launch"
+            ):
+                gathered_o_flat, gathered_lse_flat = cp_all_gather_coalesced(
+                    (local_o.contiguous(), local_lse.contiguous()),
+                    group=Group.TP,
+                    allow_col2d=True,
+                    slot_key="cp.coalesced.raw_o_lse",
+                    profile_name=f"dsv4.cp.all_gather.L{self.layer_id:02d}.raw_o_lse",
+                )
+            gathered_o = gathered_o_flat.view(
                 cp_ctx.cp_size, int(q_full.shape[0]), self.n_heads, D
             )
-        with record_function_range(
-            f"dsv4.cp.all_gather.L{self.layer_id:02d}.workspace_attn.lse.launch"
-        ):
-            gathered_lse = all_gather(local_lse.contiguous(), group=Group.TP).view(
+            gathered_lse = gathered_lse_flat.view(
                 cp_ctx.cp_size, int(q_full.shape[0]), self.n_heads
             )
+        else:
+            with record_function_range(
+                f"dsv4.cp.all_gather.L{self.layer_id:02d}.workspace_attn.o.launch"
+            ):
+                gathered_o = all_gather(local_o.contiguous(), group=Group.TP).view(
+                    cp_ctx.cp_size, int(q_full.shape[0]), self.n_heads, D
+                )
+            with record_function_range(
+                f"dsv4.cp.all_gather.L{self.layer_id:02d}.workspace_attn.lse.launch"
+            ):
+                gathered_lse = all_gather(local_lse.contiguous(), group=Group.TP).view(
+                    cp_ctx.cp_size, int(q_full.shape[0]), self.n_heads
+                )
         merged_o, merged_lse = merge_lse_output(gathered_o, gathered_lse, dim=0)
         merged_o = self._raw_q_merge_apply_sink(merged_o, merged_lse)
         local_rows = self._cp_local_full_row_indices(common)
@@ -5025,8 +5687,10 @@ class AttentionFP8(nn.Module):
                 )
                 cu_cmp_offsets = cu_offsets_2d[0]
                 cu_swa_offsets = cu_offsets_2d[1]
-                cmp_cu_tiles, cmp_total_tiles = _swa_dq.build_dequant_cu_tiles_from_host(
-                    compressed_lengths, device=device
+                cmp_cu_tiles, cmp_total_tiles = (
+                    _swa_dq.build_dequant_cu_tiles_from_host(
+                        compressed_lengths, device=device
+                    )
                 )
                 (
                     swa_cache_cu_tiles,
@@ -5199,8 +5863,14 @@ class AttentionFP8(nn.Module):
                 if cp_ctx_local.input_lengths_global is not None
                 else input_lengths
             )
-            raw_host_in = getattr(cp_ctx_local, "input_lengths_global_host", None) or host_input_lengths
-            raw_host_pf = getattr(cp_ctx_local, "prefix_lengths_host", None) or host_prefix_lengths
+            raw_host_in = (
+                getattr(cp_ctx_local, "input_lengths_global_host", None)
+                or host_input_lengths
+            )
+            raw_host_pf = (
+                getattr(cp_ctx_local, "prefix_lengths_host", None)
+                or host_prefix_lengths
+            )
             if _force_all_cp_raw_q_merge():
                 if raw_host_in is not None:
                     use_cp_raw_q_merge = sum(int(v) for v in raw_host_in) > 0
@@ -5601,8 +6271,8 @@ class AttentionFP8(nn.Module):
         cu_swa_offsets: Optional[torch.Tensor] = None
         cu_swa_offsets_cpu: Optional[Tuple[int, ...]] = None
         total_ws_rows = 0
-        eff_host_prefixes = (
-            host_prefix_lengths or getattr(cp_ctx, "prefix_lengths_host", None)
+        eff_host_prefixes = host_prefix_lengths or getattr(
+            cp_ctx, "prefix_lengths_host", None
         )
         if (
             eff_host_prefixes is None
@@ -5621,7 +6291,9 @@ class AttentionFP8(nn.Module):
                 and input_lengths.device.type == "cpu"
                 and input_lengths.numel() >= write_B
             ):
-                eff_host_inputs = tuple(int(v) for v in input_lengths[:write_B].tolist())
+                eff_host_inputs = tuple(
+                    int(v) for v in input_lengths[:write_B].tolist()
+                )
         if capturing:
             p_cap = win - 1 if any_cont else 0
             combined_gather_len_max = write_num_tokens + p_cap
@@ -5661,9 +6333,7 @@ class AttentionFP8(nn.Module):
                     device=device,
                 )
             else:
-                cache_tiles = (
-                    cache_gather_lens + _swa_dq.TILE_T - 1
-                ) // _swa_dq.TILE_T
+                cache_tiles = (cache_gather_lens + _swa_dq.TILE_T - 1) // _swa_dq.TILE_T
                 combined_gather_lens_i32 = combined_gather_lens.to(torch.int32)
                 combined_gather_len_max, total_ws_rows, cache_total_tiles = (
                     int(v)
@@ -5888,11 +6558,19 @@ class AttentionFP8(nn.Module):
         qr, qr_quant = compute_qr()
         kv = compute_kv()
         if common.cp_on:
+            kv_flat = kv.reshape(kv.size(0) * kv.size(1), *kv.shape[2:])
+            if self._cp_can_defer_kv_gather_for_prefill(x, common):
+                return PrefillQKV(
+                    qr=qr,
+                    q=None,  # deferred to _materialize_prefill_q
+                    kv_full=None,
+                    qr_quant=qr_quant,
+                    kv_local=kv_flat,
+                )
             with record_function_range("dsv4.fp8.attn.qkv.cp_gather_varlen"):
                 with record_function_range(
                     "dsv4.fp8.attn.swa_kv_full.cp_gather_varlen"
                 ):
-                    kv_flat = kv.reshape(kv.size(0) * kv.size(1), *kv.shape[2:])
                     kv_full_flat = cp_all_gather_full_varlen(
                         kv_flat,
                         common.cp_ctx,
@@ -5937,7 +6615,9 @@ class AttentionFP8(nn.Module):
                     out=q_out.view(seqlen, self.n_heads * self.head_dim),
                 )
             else:
-                assert qkv.qr is not None, "PrefillQKV requires qr when qr_quant is None"
+                assert (
+                    qkv.qr is not None
+                ), "PrefillQKV requires qr when qr_quant is None"
                 qr_3d = qkv.qr.unsqueeze(0)  # [1, T, q_lora_rank]
                 seqlen = int(qr_3d.shape[1])
                 q_out = common.workspace.prefill_q(seqlen)
@@ -5956,8 +6636,27 @@ class AttentionFP8(nn.Module):
     def _ensure_prefill_kv_full(
         self, qkv: PrefillQKV, common: PrefillMeta
     ) -> PrefillQKV:
-        assert qkv.kv_full is not None, "PrefillQKV must carry materialized kv_full"
-        return qkv
+        if qkv.kv_full is not None:
+            return qkv
+        assert (
+            qkv.kv_local is not None
+        ), "PrefillQKV must carry materialized kv_full or deferred kv_local"
+        if common.cp_on:
+            assert common.cp_ctx is not None
+            with record_function_range("dsv4.fp8.attn.qkv.cp_gather_varlen"):
+                with record_function_range(
+                    "dsv4.fp8.attn.swa_kv_full.cp_gather_varlen"
+                ):
+                    kv_full_flat = cp_all_gather_full_varlen(
+                        qkv.kv_local,
+                        common.cp_ctx,
+                        profile_name=(
+                            f"dsv4.cp.all_gather.L{self.layer_id:02d}."
+                            "swa_kv_full.varlen"
+                        ),
+                    )
+            return qkv._replace(kv_full=kv_full_flat, kv_local=None)
+        return qkv._replace(kv_full=qkv.kv_local, kv_local=None)
 
     # ------------------------------------------------------------------
     # FP8 SWA-only fast path: paged write + concat-from-cache

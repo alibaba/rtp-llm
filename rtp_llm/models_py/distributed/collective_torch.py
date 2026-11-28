@@ -5,8 +5,9 @@ import hashlib
 import logging
 import os
 import re
+import threading
 from datetime import timedelta
-from typing import Dict, List, Optional, Union
+from typing import Dict, List, Optional, Tuple, Union
 
 import torch
 import torch.distributed
@@ -37,6 +38,120 @@ _rocm_rccl = None
 _symm_mem = None
 _all_reduce_module = None
 _canonical_p2p = None
+_GROW_ONLY_BUFFER_LOCK = threading.Lock()
+# Maps (dev_key, slot_key) -> [buffer_u8, realloc_gen].
+_GROW_ONLY_BUFFERS: Dict[Tuple[Tuple[str, Optional[int]], str], List[Any]] = {}
+_GROW_ONLY_CLEAR_EPOCH: int = 0
+
+
+def _normalize_buffer_device_key(
+    device: Union[torch.device, str],
+) -> Tuple[torch.device, Tuple[str, Optional[int]]]:
+    dev = device if isinstance(device, torch.device) else torch.device(device)
+    if dev.type == "cuda" and dev.index is None:
+        idx = torch.cuda.current_device()
+        return torch.device("cuda", idx), (dev.type, idx)
+    return dev, (dev.type, dev.index)
+
+
+def acquire_grow_only_u8_holder(
+    device: Union[torch.device, str],
+    slot_key: str,
+    nbytes: int,
+    *,
+    check_capture: bool = True,
+) -> Tuple[torch.Tensor, Optional[List[Any]], int]:
+    """Return ``(slice_u8, holder, gen)`` for zero-overhead plan caching."""
+    nbytes = int(nbytes)
+    if nbytes < 0:
+        raise ValueError(f"negative nbytes={nbytes}")
+    dev, dev_key = _normalize_buffer_device_key(device)
+    if nbytes == 0:
+        return torch.empty(0, device=dev, dtype=torch.uint8), None, 0
+    if (
+        check_capture
+        and dev.type == "cuda"
+        and torch.cuda.is_current_stream_capturing()
+    ):
+        return torch.empty(nbytes, device=dev, dtype=torch.uint8), None, -1
+    cache_key = (dev_key, slot_key)
+    with _GROW_ONLY_BUFFER_LOCK:
+        holder = _GROW_ONLY_BUFFERS.get(cache_key)
+        if holder is None:
+            aligned_cap = (nbytes + 15) & ~15
+            buf = torch.empty(aligned_cap, device=dev, dtype=torch.uint8)
+            holder = [buf, 1]
+            _GROW_ONLY_BUFFERS[cache_key] = holder
+        elif holder[0].numel() < nbytes:
+            aligned_cap = (nbytes + 15) & ~15
+            holder[0] = torch.empty(aligned_cap, device=dev, dtype=torch.uint8)
+            holder[1] += 1
+        return holder[0][:nbytes], holder, int(holder[1])
+
+
+def acquire_grow_only_u8(
+    device: Union[torch.device, str],
+    slot_key: str,
+    nbytes: int,
+    *,
+    check_capture: bool = True,
+) -> torch.Tensor:
+    """Return a 1D ``[nbytes]`` grow-only ``torch.uint8`` view for ``(device, slot_key)``."""
+    slice_u8, _holder, _gen = acquire_grow_only_u8_holder(
+        device, slot_key, nbytes, check_capture=check_capture
+    )
+    return slice_u8
+
+
+def acquire_grow_only_buffer(
+    device: Union[torch.device, str],
+    slot_key: str,
+    shape: Tuple[int, ...] | List[int] | torch.Size,
+    dtype: torch.dtype = torch.uint8,
+    *,
+    check_capture: bool = True,
+) -> torch.Tensor:
+    """Return a contiguous grow-only cached view for ``(device, slot_key)``.
+
+    Backing storage grows monotonically in 16B-aligned ``torch.uint8`` capacity so
+    steady-state CP collectives reuse existing device buffers without invoking
+    per-call ``torch.empty`` allocations.
+    """
+    shape_tuple = tuple(int(dim) for dim in shape)
+    numel = 1
+    for dim in shape_tuple:
+        if dim < 0:
+            raise ValueError(f"negative dimension in shape {shape_tuple}")
+        numel *= dim
+    dev, _dev_key = _normalize_buffer_device_key(device)
+    if numel == 0:
+        return torch.empty(shape_tuple, device=dev, dtype=dtype)
+    if (
+        check_capture
+        and dev.type == "cuda"
+        and torch.cuda.is_current_stream_capturing()
+    ):
+        return torch.empty(shape_tuple, device=dev, dtype=dtype)
+    itemsize = getattr(dtype, "itemsize", None)
+    if itemsize is None:
+        itemsize = torch.empty(0, dtype=dtype).element_size()
+    nbytes = numel * int(itemsize)
+    byte_slice = acquire_grow_only_u8(dev, slot_key, nbytes, check_capture=False)
+    if dtype == torch.uint8:
+        if len(shape_tuple) == 1:
+            return byte_slice
+        return byte_slice.view(shape_tuple)
+    return byte_slice.view(dtype).view(shape_tuple)
+
+
+def clear_grow_only_buffers() -> None:
+    """Release all cached grow-only collective staging buffers."""
+    global _GROW_ONLY_CLEAR_EPOCH
+    with _GROW_ONLY_BUFFER_LOCK:
+        _GROW_ONLY_CLEAR_EPOCH += 1
+        for holder in _GROW_ONLY_BUFFERS.values():
+            holder[1] += 1
+        _GROW_ONLY_BUFFERS.clear()
 
 
 def _get_rocm_rccl():
@@ -862,6 +977,7 @@ def destroy_distributed_environment():
     _parallelism_config = None
     _cpu_tp_broadcaster_base_path = None
     _initialized = False
+    clear_grow_only_buffers()
     gc.collect()
 
 
@@ -1153,6 +1269,11 @@ __all__ = [
     "broadcast",
     "all_reduce",
     "all_gather",
+    "all_gather_into",
+    "acquire_grow_only_buffer",
+    "acquire_grow_only_u8",
+    "acquire_grow_only_u8_holder",
+    "clear_grow_only_buffers",
     "reduce_scatter",
     "barrier",
 ]

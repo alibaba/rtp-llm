@@ -28,8 +28,10 @@ can be unit-tested independently.
 
 from __future__ import annotations
 
+import threading
+from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import Any, Optional
+from typing import Any, Iterator, Optional, Tuple
 
 import torch
 
@@ -43,16 +45,82 @@ except Exception:  # pragma: no cover
     tl = None
     _TRITON_AVAILABLE = False
 
+from rtp_llm.models_py.distributed import collective_torch
 from rtp_llm.models_py.distributed.collective_torch import Group, all_gather
 from rtp_llm.models_py.modules.dsv4._profiler import record_function_range
 from rtp_llm.models_py.modules.dsv4.cp import (
+    CoalescedCPGatherHandle,
     CPContext,
     build_kv_allgather_restore_indices,
     cp_actual_owned_kv_len,
     cp_actual_owned_kv_lens,
     cp_padded_local_kv_len,
     cp_padded_local_kv_lens,
+    discard_cp_all_gather_coalesced,
+    prepare_cp_all_gather_coalesced,
+    start_cp_all_gather_coalesced,
+    wait_cp_all_gather_coalesced,
 )
+
+_ORIG_ALL_GATHER = all_gather
+_CSA_KV_COALESCE_TLS = threading.local()
+
+
+def _acquire_asm_buffer(
+    device: torch.device,
+    slot_key: str,
+    shape: Tuple[int, ...],
+    dtype: torch.dtype = torch.uint8,
+) -> torch.Tensor:
+    acq = getattr(collective_torch, "acquire_grow_only_buffer", None)
+    if (
+        acq is not None
+        and all_gather is _ORIG_ALL_GATHER
+        and torch.distributed.is_initialized()
+        and (device.type != "cuda" or not torch.cuda.is_current_stream_capturing())
+    ):
+        return acq(device, slot_key, shape, dtype=dtype)
+    return torch.empty(shape, dtype=dtype, device=device)
+
+
+@dataclass
+class CSAKVCoalesceJob:
+    """Thread-local carrier coalescing INDEXER_KV with CSA_KV and SWA_KV."""
+
+    cmp_local_flat: Optional[torch.Tensor] = None
+    swa_local_slices: Optional[torch.Tensor] = None
+    gathered_cmp: Optional[torch.Tensor] = None
+    gathered_swa: Optional[torch.Tensor] = None
+    ready_event: Optional[Any] = None
+    ready_stream: Optional[Any] = None
+    producer_stream: Optional[Any] = None
+    active_gather_used: bool = False
+    consumed: bool = False
+
+
+def get_active_csa_kv_coalesce_job() -> Optional[CSAKVCoalesceJob]:
+    stack = getattr(_CSA_KV_COALESCE_TLS, "stack", None)
+    if stack:
+        return stack[-1]
+    return None
+
+
+@contextmanager
+def csa_kv_coalesce_scope(
+    job: Optional[CSAKVCoalesceJob],
+) -> Iterator[Optional[CSAKVCoalesceJob]]:
+    if job is None:
+        yield None
+        return
+    stack = getattr(_CSA_KV_COALESCE_TLS, "stack", None)
+    if stack is None:
+        stack = []
+        _CSA_KV_COALESCE_TLS.stack = stack
+    stack.append(job)
+    try:
+        yield job
+    finally:
+        stack.pop()
 
 
 @dataclass
@@ -93,6 +161,10 @@ class IndexerKCPGatherHandle:
     work_waited: bool = False
     packed_q_cols: Optional[int] = None
     local_packed: Optional[torch.Tensor] = None
+    coalesced_handle: Optional[CoalescedCPGatherHandle] = None
+    coalesced_job: Optional[CSAKVCoalesceJob] = None
+    cmp_item_idx: int = -1
+    swa_item_idx: int = -1
 
 
 def build_indexer_cp_chunk_plan(
@@ -124,9 +196,7 @@ def build_indexer_cp_chunk_plan(
                 owner_bs,
                 cp_ctx.cp_rank,
             )
-            local_lens = torch.full(
-                (1,), total_local, dtype=torch.int64, device=device
-            )
+            local_lens = torch.full((1,), total_local, dtype=torch.int64, device=device)
             actual_lens = torch.full(
                 (1,), total_actual, dtype=torch.int64, device=device
             )
@@ -143,7 +213,9 @@ def build_indexer_cp_chunk_plan(
             actual_lens = actual_lens_cpu.to(device=device, non_blocking=non_blocking)
         per_req = per_req_cpu.to(device=device, non_blocking=non_blocking)
     else:
-        per_req = per_req_total_kv_lens.to(device=device, dtype=torch.int64).contiguous()
+        per_req = per_req_total_kv_lens.to(
+            device=device, dtype=torch.int64
+        ).contiguous()
         if int(per_req.numel()) == 1 and total_kv_len is not None:
             total_local = cp_padded_local_kv_len(
                 int(total_kv_len), cp_ctx.cp_size, owner_bs
@@ -154,9 +226,7 @@ def build_indexer_cp_chunk_plan(
                 owner_bs,
                 cp_ctx.cp_rank,
             )
-            local_lens = torch.full(
-                (1,), total_local, dtype=torch.int64, device=device
-            )
+            local_lens = torch.full((1,), total_local, dtype=torch.int64, device=device)
             actual_lens = torch.full(
                 (1,), total_actual, dtype=torch.int64, device=device
             )
@@ -406,7 +476,9 @@ if _TRITON_AVAILABLE:
         actual_starts = actual_ends - actual_lens
         padded_starts = tl.cumsum(padded_lens, axis=0) - padded_lens
 
-        batch_idx = tl.sum((row_ids[:, None] >= actual_ends[None, :]).to(tl.int32), axis=1)
+        batch_idx = tl.sum(
+            (row_ids[:, None] >= actual_ends[None, :]).to(tl.int32), axis=1
+        )
         eq_mask = batch_idx[:, None] == batch_offsets[None, :]
         actual_start = tl.sum(tl.where(eq_mask, actual_starts[None, :], 0), axis=1)
         padded_start = tl.sum(tl.where(eq_mask, padded_starts[None, :], 0), axis=1)
@@ -484,9 +556,7 @@ if _TRITON_AVAILABLE:
             mask=s_mask,
         )
 
-    @triton.jit(
-        do_not_specialize=["n_rows", "packed_stride", "k_stride", "s_stride"]
-    )
+    @triton.jit(do_not_specialize=["n_rows", "packed_stride", "k_stride", "s_stride"])
     def _restore_packed_indexer_k_kernel(
         gathered_packed_ptr,
         out_k_ptr,
@@ -593,6 +663,8 @@ def _next_power_of_2(n: int) -> int:
 def _pack_indexer_k_payload(
     local_k_quant: torch.Tensor,
     local_k_scale: torch.Tensor,
+    *,
+    slot_key: Optional[str] = None,
 ) -> tuple[torch.Tensor, int, int]:
     """Pack one-byte FP8 K and scale rows into one contiguous uint8 buffer."""
     if local_k_quant.dim() != 2 or local_k_scale.dim() != 2:
@@ -618,11 +690,19 @@ def _pack_indexer_k_payload(
     rows = int(local_q_bytes.shape[0])
     q_cols = int(local_q_bytes.shape[1])
     s_cols = int(local_s_bytes.shape[1])
-    packed = torch.empty(
-        (rows, q_cols + s_cols),
-        dtype=torch.uint8,
-        device=local_k_quant.device,
-    )
+    if slot_key is not None:
+        packed = _acquire_asm_buffer(
+            local_k_quant.device,
+            slot_key,
+            (rows, q_cols + s_cols),
+            dtype=torch.uint8,
+        )
+    else:
+        packed = torch.empty(
+            (rows, q_cols + s_cols),
+            dtype=torch.uint8,
+            device=local_k_quant.device,
+        )
     if rows > 0:
         if _TRITON_AVAILABLE and packed.is_cuda:
             block_m = 16
@@ -672,10 +752,33 @@ def assemble_indexer_k(
     # each assemble issues a single rank-major NCCL AllGather instead of two.
     with record_function_range("dsv4.cp.all_gather.indexer_k.packed.pack"):
         local_packed, q_cols, s_cols = _pack_indexer_k_payload(
-            local_k_quant, local_k_scale
+            local_k_quant,
+            local_k_scale,
+            slot_key="indexer_asm.sync.local_packed",
         )
-    with record_function_range("dsv4.cp.all_gather.indexer_k.packed.launch"):
-        gathered_packed = all_gather(local_packed, group=Group.TP)
+    all_gather_into = getattr(collective_torch, "all_gather_into", None)
+    if (
+        all_gather is _ORIG_ALL_GATHER
+        and all_gather_into is not None
+        and torch.distributed.is_initialized()
+        and (
+            local_packed.device.type != "cuda"
+            or not torch.cuda.is_current_stream_capturing()
+        )
+    ):
+        pg = collective_torch._get_group(Group.TP)
+        world_size = torch.distributed.get_world_size(pg)
+        gathered_packed = _acquire_asm_buffer(
+            local_packed.device,
+            "indexer_asm.sync.gathered_packed",
+            (world_size * int(local_packed.shape[0]), q_cols + s_cols),
+            dtype=torch.uint8,
+        )
+        with record_function_range("dsv4.cp.all_gather.indexer_k.packed.launch"):
+            all_gather_into(gathered_packed, local_packed, group=Group.TP)
+    else:
+        with record_function_range("dsv4.cp.all_gather.indexer_k.packed.launch"):
+            gathered_packed = all_gather(local_packed, group=Group.TP)
     _restore_indexer_k_packed(
         plan, gathered_packed, q_cols, s_cols, out_k_quant, out_k_scale
     )
@@ -707,8 +810,6 @@ def start_assemble_indexer_k_async(
     ):
         return None
 
-    from rtp_llm.models_py.distributed import collective_torch
-
     process_group = collective_torch._get_group(Group.TP)
     world_size = torch.distributed.get_world_size(process_group)
     if world_size != plan.cp_ctx.cp_size:
@@ -718,16 +819,75 @@ def start_assemble_indexer_k_async(
 
     device = local_k_quant.device
     current_stream = torch.cuda.current_stream(device)
+    active_job = get_active_csa_kv_coalesce_job()
+    if (
+        active_job is not None
+        and not active_job.active_gather_used
+        and all_gather is _ORIG_ALL_GATHER
+        and (
+            active_job.cmp_local_flat is not None
+            or active_job.swa_local_slices is not None
+        )
+    ):
+        local_packed, q_cols, s_cols = _pack_indexer_k_payload(
+            local_k_quant,
+            local_k_scale,
+            slot_key="indexer_asm.coalesced.local_packed",
+        )
+        tensors = [local_packed]
+        cmp_item_idx = -1
+        swa_item_idx = -1
+        if active_job.cmp_local_flat is not None:
+            cmp_item_idx = len(tensors)
+            tensors.append(active_job.cmp_local_flat)
+        if active_job.swa_local_slices is not None:
+            swa_item_idx = len(tensors)
+            tensors.append(active_job.swa_local_slices)
+        coalesced_handle = start_cp_all_gather_coalesced(
+            tensors,
+            group=Group.TP,
+            async_op=True,
+            stream=stream,
+            allow_col2d=False,
+            slot_key="cp.coalesced.g2",
+            profile_name="dsv4.cp.all_gather.indexer_k.coalesced",
+        )
+        active_job.active_gather_used = True
+        assert coalesced_handle.completion_event is not None
+        return IndexerKCPGatherHandle(
+            plan=plan,
+            gathered_q=None,
+            gathered_s=None,
+            work_q=None,
+            work_s=None,
+            completion_event=coalesced_handle.completion_event,
+            stream=stream,
+            producer_stream=current_stream,
+            local_k_quant=local_k_quant,
+            local_k_scale=local_k_scale,
+            out_k_quant=out_k_quant,
+            out_k_scale=out_k_scale,
+            packed_q_cols=q_cols,
+            local_packed=local_packed,
+            coalesced_handle=coalesced_handle,
+            coalesced_job=active_job,
+            cmp_item_idx=cmp_item_idx,
+            swa_item_idx=swa_item_idx,
+        )
+
+    local_packed, q_cols, s_cols = _pack_indexer_k_payload(
+        local_k_quant,
+        local_k_scale,
+        slot_key="indexer_asm.async.local_packed",
+    )
+    gathered_packed = _acquire_asm_buffer(
+        device,
+        "indexer_asm.async.gathered_packed",
+        (world_size * int(local_packed.shape[0]), q_cols + s_cols),
+        dtype=torch.uint8,
+    )
     stream.wait_stream(current_stream)
     with torch.cuda.stream(stream):
-        local_packed, q_cols, s_cols = _pack_indexer_k_payload(
-            local_k_quant, local_k_scale
-        )
-        gathered_packed = torch.empty(
-            (world_size * int(local_packed.shape[0]), q_cols + s_cols),
-            dtype=torch.uint8,
-            device=device,
-        )
         with record_function_range("dsv4.cp.all_gather.indexer_k.packed.launch"):
             work_q = torch.distributed.all_gather_into_tensor(
                 gathered_packed,
@@ -770,6 +930,46 @@ def prepare_assemble_indexer_k_async(
         return
     if stream is None:
         raise ValueError("prepare_assemble_indexer_k_async requires an explicit stream")
+    if handle.coalesced_handle is not None:
+        outputs = prepare_cp_all_gather_coalesced(
+            handle.coalesced_handle, stream=stream
+        )
+        handle.work_waited = True
+        handle.gathered_q = outputs[0]
+        if handle.coalesced_job is not None:
+            if handle.cmp_item_idx >= 0:
+                handle.coalesced_job.gathered_cmp = outputs[handle.cmp_item_idx]
+            if handle.swa_item_idx >= 0:
+                handle.coalesced_job.gathered_swa = outputs[handle.swa_item_idx]
+            handle.coalesced_job.ready_stream = stream
+        current_stream = torch.cuda.current_stream(handle.out_k_quant.device)
+        stream.wait_stream(current_stream)
+        with torch.cuda.stream(stream):
+            try:
+                q_cols = (
+                    handle.packed_q_cols
+                    if handle.packed_q_cols is not None
+                    else int(handle.out_k_quant.shape[1])
+                )
+                s_cols = int(handle.out_k_scale.shape[1])
+                _restore_indexer_k_packed(
+                    handle.plan,
+                    handle.gathered_q,
+                    q_cols,
+                    s_cols,
+                    handle.out_k_quant,
+                    handle.out_k_scale,
+                )
+            finally:
+                try:
+                    handle.done_event = torch.cuda.Event()
+                    handle.done_event.record(stream)
+                    if handle.coalesced_job is not None:
+                        handle.coalesced_job.ready_event = handle.done_event
+                except Exception:
+                    stream.synchronize()
+                    raise
+        return
     current_stream = torch.cuda.current_stream(handle.out_k_quant.device)
     # The output buffers are caller-owned and may have just been initialized on
     # the current stream.  Preserve that ordering here instead of relying on
@@ -815,6 +1015,16 @@ def prepare_assemble_indexer_k_async(
 
 
 def wait_assemble_indexer_k_async(handle: IndexerKCPGatherHandle) -> None:
+    if handle.coalesced_handle is not None:
+        if handle.done_event is not None:
+            current_stream = torch.cuda.current_stream(handle.out_k_quant.device)
+            current_stream.wait_event(handle.done_event)
+            if handle.producer_stream != current_stream:
+                handle.producer_stream.wait_event(handle.done_event)
+            handle.stream.wait_event(handle.done_event)
+            return
+        wait_cp_all_gather_coalesced(handle.coalesced_handle)
+        return
     current_stream = torch.cuda.current_stream(handle.out_k_quant.device)
     terminal_event = handle.done_event or handle.completion_event
     current_stream.wait_event(terminal_event)
@@ -826,6 +1036,15 @@ def wait_assemble_indexer_k_async(handle: IndexerKCPGatherHandle) -> None:
 
 
 def discard_assemble_indexer_k_async(handle: IndexerKCPGatherHandle) -> None:
+    if handle.coalesced_handle is not None:
+        discard_cp_all_gather_coalesced(handle.coalesced_handle)
+        if handle.done_event is not None:
+            current_stream = torch.cuda.current_stream(handle.out_k_quant.device)
+            current_stream.wait_event(handle.done_event)
+            if handle.producer_stream != current_stream:
+                handle.producer_stream.wait_event(handle.done_event)
+            handle.stream.wait_event(handle.done_event)
+        return
     wait_assemble_indexer_k_async(handle)
 
 

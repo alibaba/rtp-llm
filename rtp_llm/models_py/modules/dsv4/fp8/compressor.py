@@ -40,8 +40,30 @@ from typing import Any, Dict, Optional, Tuple
 import torch
 import torch.nn as nn
 
+from rtp_llm.models_py.distributed import collective_torch
 from rtp_llm.models_py.distributed.collective_torch import Group, all_gather
 from rtp_llm.models_py.modules.dsv4._profiler import record_function_range
+
+_ORIG_ALL_GATHER = all_gather
+
+
+def _acquire_comp_buffer(
+    device: torch.device,
+    slot_key: str,
+    shape: Tuple[int, ...],
+    dtype: torch.dtype = torch.uint8,
+) -> torch.Tensor:
+    acq = getattr(collective_torch, "acquire_grow_only_buffer", None)
+    if (
+        acq is not None
+        and all_gather is _ORIG_ALL_GATHER
+        and torch.distributed.is_initialized()
+        and (device.type != "cuda" or not torch.cuda.is_current_stream_capturing())
+    ):
+        return acq(device, slot_key, shape, dtype=dtype)
+    return torch.empty(shape, dtype=dtype, device=device)
+
+
 from rtp_llm.ops.compute_ops import rtp_llm_ops
 
 _CUBLAS_GEMM_BF16_BF16_FP32 = getattr(rtp_llm_ops, "cublas_gemm_bf16_bf16_fp32", None)
@@ -279,6 +301,9 @@ def _build_cp_full_state_read_cache(
     state_tokens_per_block: int = 0,
     selection_cache_key: Optional[Any] = None,
     tail_rows: int = 0,
+    read_cache_slot_key: str = "compressor.state_read_cache",
+    gathered_override: Optional[torch.Tensor] = None,
+    selection_override: Optional[_CPStateReadSelection] = None,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """Gather CP-sliced fixed-state blocks into a compact full-ring read cache.
 
@@ -297,8 +322,8 @@ def _build_cp_full_state_read_cache(
 
     local_eb = int(state_cache.shape[1])
     hidden = int(state_cache.shape[2])
-    selection: Optional[_CPStateReadSelection] = None
-    if selection_cache_key is not None:
+    selection: Optional[_CPStateReadSelection] = selection_override
+    if selection is None and selection_cache_key is not None:
         selection = _CP_STATE_READ_SELECTION_CACHE.get(selection_cache_key)
     if selection is None:
         selection = _select_cp_state_read_blocks(
@@ -318,34 +343,42 @@ def _build_cp_full_state_read_cache(
     num_blocks = int(selection.block_ids.numel())
     full_eb = cp_size * local_eb
 
-    read_cache = torch.zeros(
+    read_cache = _acquire_comp_buffer(
+        state_cache.device,
+        read_cache_slot_key,
         (num_blocks + 1, full_eb, hidden),
         dtype=state_cache.dtype,
-        device=state_cache.device,
     )
+    is_tail_mode = 0 < tail_rows <= local_eb and tail_rows < full_eb
+    if num_blocks == 0 or is_tail_mode:
+        read_cache.zero_()
     if num_blocks == 0:
         return read_cache, selection.read_block_table
 
-    if 0 < tail_rows <= local_eb and tail_rows < full_eb:
-        if torch.distributed.is_initialized():
-            from rtp_llm.models_py.distributed import collective_torch
-
+    if is_tail_mode:
+        if gathered_override is not None:
+            read_cache[1:, full_eb - tail_rows :].copy_(
+                gathered_override.reshape(cp_size, num_blocks, tail_rows, hidden)[
+                    cp_size - 1
+                ]
+            )
+            return read_cache, selection.read_block_table
+        if all_gather is _ORIG_ALL_GATHER and torch.distributed.is_initialized():
             pg = collective_torch._get_group(Group.TP)
             ranks = torch.distributed.get_process_group_ranks(pg)
             if len(ranks) == cp_size:
                 owner_global = ranks[cp_size - 1]
+                tail_buf = _acquire_comp_buffer(
+                    state_cache.device,
+                    f"{read_cache_slot_key}.tail_bcast",
+                    (num_blocks, tail_rows, hidden),
+                    dtype=state_cache.dtype,
+                )
                 if torch.distributed.get_rank() == owner_global:
-                    tail_buf = (
+                    tail_buf.copy_(
                         state_cache.index_select(0, selection.block_ids)[
                             :, local_eb - tail_rows :
                         ]
-                        .contiguous()
-                    )
-                else:
-                    tail_buf = torch.empty(
-                        (num_blocks, tail_rows, hidden),
-                        dtype=state_cache.dtype,
-                        device=state_cache.device,
                     )
                 with record_function_range(
                     "dsv4.cp.broadcast.state_read_tail.sync.launch"
@@ -359,17 +392,64 @@ def _build_cp_full_state_read_cache(
             .reshape(num_blocks * tail_rows, hidden)
             .contiguous()
         )
-        with record_function_range("dsv4.cp.all_gather.state_read_tail.sync.launch"):
-            gathered = all_gather(local_tail, group=Group.TP)
+        all_gather_into = getattr(collective_torch, "all_gather_into", None)
+        if (
+            all_gather is _ORIG_ALL_GATHER
+            and all_gather_into is not None
+            and torch.distributed.is_initialized()
+            and not torch.cuda.is_current_stream_capturing()
+        ):
+            gathered = _acquire_comp_buffer(
+                state_cache.device,
+                f"{read_cache_slot_key}.tail_gathered",
+                (cp_size * num_blocks * tail_rows, hidden),
+                dtype=state_cache.dtype,
+            )
+            with record_function_range(
+                "dsv4.cp.all_gather.state_read_tail.sync.launch"
+            ):
+                all_gather_into(gathered, local_tail, group=Group.TP)
+        else:
+            with record_function_range(
+                "dsv4.cp.all_gather.state_read_tail.sync.launch"
+            ):
+                gathered = all_gather(local_tail, group=Group.TP)
         read_cache[1:, full_eb - tail_rows :].copy_(
             gathered.view(cp_size, num_blocks, tail_rows, hidden)[cp_size - 1]
         )
         return read_cache, selection.read_block_table
 
+    if gathered_override is not None:
+        _fill_cp_state_read_cache(
+            read_cache,
+            gathered_override.reshape(cp_size * num_blocks * local_eb, hidden),
+            cp_size,
+            num_blocks,
+            local_eb,
+            hidden,
+        )
+        return read_cache, selection.read_block_table
+
     local_blocks = state_cache.index_select(0, selection.block_ids)
     local_2d = local_blocks.reshape(num_blocks * local_eb, hidden).contiguous()
-    with record_function_range("dsv4.cp.all_gather.state_read_cache.sync.launch"):
-        gathered = all_gather(local_2d, group=Group.TP)
+    all_gather_into = getattr(collective_torch, "all_gather_into", None)
+    if (
+        all_gather is _ORIG_ALL_GATHER
+        and all_gather_into is not None
+        and torch.distributed.is_initialized()
+        and not torch.cuda.is_current_stream_capturing()
+    ):
+        gathered = _acquire_comp_buffer(
+            state_cache.device,
+            f"{read_cache_slot_key}.full_gathered",
+            (cp_size * num_blocks * local_eb, hidden),
+            dtype=state_cache.dtype,
+        )
+        with record_function_range("dsv4.cp.all_gather.state_read_cache.sync.launch"):
+            all_gather_into(gathered, local_2d, group=Group.TP)
+    else:
+        with record_function_range("dsv4.cp.all_gather.state_read_cache.sync.launch"):
+            gathered = all_gather(local_2d, group=Group.TP)
     _fill_cp_state_read_cache(
         read_cache, gathered, cp_size, num_blocks, local_eb, hidden
     )
@@ -462,9 +542,7 @@ def _cache_cp_state_read_selection(
                 token_count=token_count,
                 state_tokens_per_block=state_tokens_per_block,
             )
-            _CP_STATE_READ_SELECTION_CACHE[meta] = _compact_cp_state_read_selection(
-                sel
-            )
+            _CP_STATE_READ_SELECTION_CACHE[meta] = _compact_cp_state_read_selection(sel)
     except TypeError:
         pass
     return meta
@@ -662,9 +740,7 @@ def _build_compacted_slot_indices(
     # Derive collective participation from rank-invariant global coordinates
     # rather than rank-local active_boundary_indices (which can be empty on
     # non-owning CP ranks under sharded KV page-RR ownership).
-    starts = seq_start_per_req.to(
-        device=positions.device, dtype=torch.long
-    ).reshape(-1)
+    starts = seq_start_per_req.to(device=positions.device, dtype=torch.long).reshape(-1)
     if int(starts.numel()) == 1:
         all_starts = starts.expand_as(positions)
     else:
@@ -764,6 +840,7 @@ class _CompressorPending:
     profile_label: Optional[str] = None
     restored_buf: Optional[torch.Tensor] = None
     unpad_restore: Optional[torch.Tensor] = None
+    state_read_cache_override: Optional[Tuple[torch.Tensor, torch.Tensor]] = None
 
 
 class _CompressorNorm(nn.Module):
@@ -1017,8 +1094,7 @@ class CompressorFP8(PoolBackedModule):
                 and self._state_tokens_per_block > self.compress_ratio
                 and full_state_eb > self.compress_ratio
                 and all(
-                    (p % self._state_tokens_per_block) == 0
-                    and (p % full_state_eb) == 0
+                    (p % self._state_tokens_per_block) == 0 and (p % full_state_eb) == 0
                     for p in host_prefixes
                 )
             )
@@ -1227,6 +1303,7 @@ class CompressorFP8(PoolBackedModule):
         seq_start: Optional[int] = None,
         *,
         unpad_restore: Optional[torch.Tensor] = None,
+        state_read_cache_override: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
     ) -> None:
         """Launch the two vLLM kernels (state write + boundary KV write).
 
@@ -1328,7 +1405,11 @@ class CompressorFP8(PoolBackedModule):
                     )
             state_cache_for_read = self._state_pool_3d
             state_block_table_for_read = self._state_block_table
-            if _cp_sliced_state_read_needed(meta, self._cp_ctx, raw_disabled=False):
+            if state_read_cache_override is not None:
+                state_cache_for_read, state_block_table_for_read = (
+                    state_read_cache_override
+                )
+            elif _cp_sliced_state_read_needed(meta, self._cp_ctx, raw_disabled=False):
                 with record_function_range(
                     "dsv4.fp8.compressor.launch.cp_gather_state_read_cache"
                 ):
@@ -1338,8 +1419,7 @@ class CompressorFP8(PoolBackedModule):
                             self._state_block_table,
                             int(self._cp_ctx.cp_size),
                             seq_start_per_req=eff_seq_start_per_req,
-                            token_count=(1 + int(self.overlap))
-                            * self.compress_ratio,
+                            token_count=(1 + int(self.overlap)) * self.compress_ratio,
                             state_tokens_per_block=self._state_tokens_per_block,
                             selection_cache_key=meta,
                             tail_rows=meta.cp_state_tail_rows,
@@ -1383,7 +1463,9 @@ class CompressorFP8(PoolBackedModule):
         )
         state_cache_for_read = self._state_pool_3d
         state_block_table_for_read = self._state_block_table
-        if _cp_sliced_state_read_needed(meta, self._cp_ctx, raw_disabled):
+        if state_read_cache_override is not None:
+            state_cache_for_read, state_block_table_for_read = state_read_cache_override
+        elif _cp_sliced_state_read_needed(meta, self._cp_ctx, raw_disabled):
             with record_function_range(
                 "dsv4.fp8.compressor.launch.cp_gather_state_read_cache"
             ):
@@ -1396,9 +1478,7 @@ class CompressorFP8(PoolBackedModule):
                         token_count=(1 + int(self.overlap)) * self.compress_ratio,
                         state_tokens_per_block=self._state_tokens_per_block,
                         selection_cache_key=meta,
-                        tail_rows=(
-                            0 if raw_disabled else meta.cp_state_tail_rows
-                        ),
+                        tail_rows=(0 if raw_disabled else meta.cp_state_tail_rows),
                     )
                 )
 
@@ -1568,6 +1648,187 @@ class CompressorFP8(PoolBackedModule):
             return cp_wait_gather_raw(handle), handle.cp_ctx.unpad_restore
         return cp_wait_gather_full(handle), None
 
+    def compute_prefill_fused(
+        self,
+        x: torch.Tensor,
+        start_pos,
+    ) -> Optional[Tuple[torch.Tensor, int, int, int, int]]:
+        """Compute local fused KV/score projection for coalesced CP gather."""
+        if x.dim() == 2:
+            bsz = 1
+            seqlen = int(x.size(0))
+        else:
+            bsz, seqlen, _ = x.size()
+        sp = (
+            int(start_pos.item())
+            if isinstance(start_pos, torch.Tensor)
+            else int(start_pos)
+        )
+        if (
+            self._state_pool_3d is None
+            or self._kv_pool_view is None
+            or self._kv_eb <= 0
+        ):
+            return None
+        out_dim = (1 + self.overlap) * self.head_dim
+        with record_function_range("dsv4.fp8.compressor.prefill.fused_linear"):
+            fused_out = _linear_bf16_bf16_fp32(x, self._wkv_wgate_fused)
+            fused_flat = fused_out.reshape(bsz * seqlen, -1)
+        return fused_flat, sp, bsz, seqlen, out_dim
+
+    def prepare_cp_state_read_payload(
+        self,
+        meta: Optional[CompressorMeta],
+        cp_ctx: Optional[CPContext],
+        *,
+        slot_key: str = "compressor.state_read.payload",
+    ) -> Optional[Tuple[Optional[torch.Tensor], int, int, _CPStateReadSelection]]:
+        """Extract local CP state-read payload so it can join Gather #1."""
+        if (
+            meta is None
+            or cp_ctx is None
+            or self._state_pool_3d is None
+            or self._state_block_table is None
+            or int(self._state_block_table.numel()) == 0
+            or not self._state_pool_3d.is_cuda
+            or not (
+                meta.is_batched
+                and meta.seq_start_per_req is not None
+                and meta.cu_seq_per_req is not None
+            )
+            or not _cp_sliced_state_read_needed(meta, cp_ctx, raw_disabled=False)
+        ):
+            return None
+        selection = _CP_STATE_READ_SELECTION_CACHE.get(meta)
+        if selection is None:
+            selection = _select_cp_state_read_blocks(
+                self._state_pool_3d,
+                self._state_block_table,
+                seq_start_per_req=meta.seq_start_per_req,
+                token_count=(1 + int(self.overlap)) * self.compress_ratio,
+                state_tokens_per_block=self._state_tokens_per_block,
+            )
+        if not selection.compacted:
+            selection = _compact_cp_state_read_selection(selection)
+            try:
+                _CP_STATE_READ_SELECTION_CACHE[meta] = selection
+            except TypeError:
+                pass
+        num_blocks = int(selection.block_ids.numel())
+        tail_rows = int(meta.cp_state_tail_rows)
+        if num_blocks == 0:
+            return None, 0, tail_rows, selection
+        local_eb = int(self._state_pool_3d.shape[1])
+        hidden = int(self._state_pool_3d.shape[2])
+        full_eb = int(cp_ctx.cp_size) * local_eb
+        if 0 < tail_rows <= local_eb and tail_rows < full_eb:
+            payload = _acquire_comp_buffer(
+                self._state_pool_3d.device,
+                slot_key,
+                (num_blocks, tail_rows, hidden),
+                dtype=self._state_pool_3d.dtype,
+            )
+            payload.copy_(
+                self._state_pool_3d.index_select(0, selection.block_ids)[
+                    :, local_eb - tail_rows :
+                ]
+            )
+        else:
+            payload = _acquire_comp_buffer(
+                self._state_pool_3d.device,
+                slot_key,
+                (num_blocks, local_eb, hidden),
+                dtype=self._state_pool_3d.dtype,
+            )
+            torch.index_select(
+                self._state_pool_3d,
+                0,
+                selection.block_ids,
+                out=payload,
+            )
+        return payload, num_blocks, tail_rows, selection
+
+    def finalize_cp_state_read_cache(
+        self,
+        meta: Optional[CompressorMeta],
+        cp_ctx: Optional[CPContext],
+        prepared: Optional[
+            Tuple[Optional[torch.Tensor], int, int, _CPStateReadSelection]
+        ],
+        gathered_payload: Optional[torch.Tensor],
+        *,
+        read_cache_slot_key: str = "compressor.state_read_cache",
+    ) -> Optional[Tuple[torch.Tensor, torch.Tensor]]:
+        if (
+            meta is None
+            or cp_ctx is None
+            or self._state_pool_3d is None
+            or self._state_block_table is None
+        ):
+            return None
+        if prepared is None:
+            if (
+                meta.is_batched
+                and meta.seq_start_per_req is not None
+                and meta.cu_seq_per_req is not None
+                and _cp_sliced_state_read_needed(meta, cp_ctx, raw_disabled=False)
+                and int(self._state_block_table.numel()) > 0
+                and self._state_pool_3d.is_cuda
+            ):
+                # Handles num_blocks == 0 without issuing a collective.
+                return _build_cp_full_state_read_cache(
+                    self._state_pool_3d,
+                    self._state_block_table,
+                    int(cp_ctx.cp_size),
+                    seq_start_per_req=meta.seq_start_per_req,
+                    token_count=(1 + int(self.overlap)) * self.compress_ratio,
+                    state_tokens_per_block=self._state_tokens_per_block,
+                    selection_cache_key=meta,
+                    tail_rows=int(meta.cp_state_tail_rows),
+                    read_cache_slot_key=read_cache_slot_key,
+                )
+            return None
+        _payload, _num_blocks, tail_rows, selection = prepared
+        return _build_cp_full_state_read_cache(
+            self._state_pool_3d,
+            self._state_block_table,
+            int(cp_ctx.cp_size),
+            seq_start_per_req=meta.seq_start_per_req,
+            token_count=(1 + int(self.overlap)) * self.compress_ratio,
+            state_tokens_per_block=self._state_tokens_per_block,
+            tail_rows=tail_rows,
+            read_cache_slot_key=read_cache_slot_key,
+            gathered_override=gathered_payload,
+            selection_override=selection,
+        )
+
+    def make_prefill_pending_from_gathered(
+        self,
+        *,
+        fused_flat: torch.Tensor,
+        sp: int,
+        bsz: int,
+        seqlen: int,
+        out_dim: int,
+        meta: Optional[CompressorMeta],
+        unpad_restore: Optional[torch.Tensor],
+        state_read_cache_override: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
+        profile_label: Optional[str] = None,
+    ) -> _CompressorPending:
+        return _CompressorPending(
+            fused_flat=fused_flat,
+            fused_gather_handle=None,
+            sp=sp,
+            bsz=bsz,
+            seqlen=seqlen,
+            meta=meta,
+            out_dim=out_dim,
+            profile_label=profile_label,
+            restored_buf=None,
+            unpad_restore=unpad_restore,
+            state_read_cache_override=state_read_cache_override,
+        )
+
     def _call_launch(
         self,
         kv_flat: torch.Tensor,
@@ -1575,8 +1836,21 @@ class CompressorFP8(PoolBackedModule):
         meta: CompressorMeta,
         seq_start: Optional[int],
         unpad_restore: Optional[torch.Tensor],
+        state_read_cache_override: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
     ) -> None:
-        if unpad_restore is not None:
+        if (
+            state_read_cache_override is not None
+            and type(self)._launch is CompressorFP8._launch
+        ):
+            self._launch(
+                kv_flat,
+                score_flat,
+                meta,
+                seq_start=seq_start,
+                unpad_restore=unpad_restore,
+                state_read_cache_override=state_read_cache_override,
+            )
+        elif unpad_restore is not None:
             self._launch(
                 kv_flat,
                 score_flat,
@@ -1658,7 +1932,12 @@ class CompressorFP8(PoolBackedModule):
         seq_start = None if meta.is_batched else pending.sp
         with record_function_range("dsv4.fp8.compressor.prefill.launch"):
             self._call_launch(
-                kv_flat, score_flat, meta, seq_start, pending.unpad_restore
+                kv_flat,
+                score_flat,
+                meta,
+                seq_start,
+                pending.unpad_restore,
+                pending.state_read_cache_override,
             )
 
     # ----------------------------------------------------------------------

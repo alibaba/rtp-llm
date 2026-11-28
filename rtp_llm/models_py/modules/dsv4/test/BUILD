@@ -240,6 +240,14 @@ dsv4_sm100_py_test(
     deps = _DSV4_TEST_DEPS,
 )
 
+dsv4_py_test(
+    name = "test_cp_coalesce_distributed",
+    args = ["-s"],
+    gpu_count = 2,
+    tags = ["multi_device"],
+    deps = _MODEL_TEST_DEPS,
+)
+
 [
     cuda13_sm100_py_test(
         name = name + "_prefill_perf",

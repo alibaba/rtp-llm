@@ -46,6 +46,29 @@ except Exception:  # pragma: no cover
 
 from rtp_llm.models_py.distributed.collective_torch import Group, all_gather
 from rtp_llm.models_py.modules.dsv4._profiler import record_function_range
+
+_ORIG_ALL_GATHER = all_gather
+
+
+def _acquire_pool_buffer(
+    device: torch.device,
+    slot_key: str,
+    shape: tuple[int, ...],
+    dtype: torch.dtype = torch.uint8,
+) -> torch.Tensor:
+    from rtp_llm.models_py.distributed import collective_torch
+
+    acq = getattr(collective_torch, "acquire_grow_only_buffer", None)
+    if (
+        acq is not None
+        and all_gather is _ORIG_ALL_GATHER
+        and torch.distributed.is_initialized()
+        and (device.type != "cuda" or not torch.cuda.is_current_stream_capturing())
+    ):
+        return acq(device, slot_key, shape, dtype=dtype)
+    return torch.empty(shape, dtype=dtype, device=device)
+
+
 from rtp_llm.models_py.modules.dsv4.cp import (
     CPContext,
     cp_actual_owned_kv_len,
@@ -62,7 +85,6 @@ from rtp_llm.models_py.modules.dsv4.fp8._swa_dequant_triton import (
     try_gather_k_cache_packed_to_flat,
     try_restore_dequantize_scatter_packed_k_cache_flat,
 )
-
 
 if _TRITON_AVAILABLE:
 
@@ -169,14 +191,13 @@ if _TRITON_AVAILABLE:
             dst_base = tl.load(
                 cu_dst_offsets_ptr + safe_batch, mask=valid_batch, other=0
             ).to(tl.int64)
-            out_row_off = (
-                dst_base + offset.to(tl.int64) + in_req
-            ) * out_stride0.to(tl.int64)
-        else:
-            out_row_off = (
-                safe_batch * out_stride0.to(tl.int64)
-                + (offset.to(tl.int64) + in_req) * out_stride1.to(tl.int64)
+            out_row_off = (dst_base + offset.to(tl.int64) + in_req) * out_stride0.to(
+                tl.int64
             )
+        else:
+            out_row_off = safe_batch * out_stride0.to(tl.int64) + (
+                offset.to(tl.int64) + in_req
+            ) * out_stride1.to(tl.int64)
 
         d_cols = tl.arange(0, BLOCK_D)
         tile_mask = valid_batch[:, None] & (d_cols[None, :] < D)
@@ -333,7 +354,10 @@ class CPShardConfig:
             self.max_local_seq_len_padded = max_pad_v
             self.has_local_seq_len_actual = max_act_v > 0
         else:
-            if self.max_local_seq_len_padded == 0 and self.local_seq_lens_padded.numel():
+            if (
+                self.max_local_seq_len_padded == 0
+                and self.local_seq_lens_padded.numel()
+            ):
                 if self.local_seq_lens_padded.numel() == 1:
                     self.max_local_seq_len_padded = int(self.total_local_kv)
                 else:
@@ -405,13 +429,72 @@ class CPShardedPoolReader(CompressedKPoolReader):
         # synchronize() here — at ~60 layers × per-fill it would serialize
         # the prefill pipeline. If the writer ever moves to a side stream,
         # add ``current_stream.wait_event(writer_event)`` instead.
-        with record_function_range("dsv4.cp.all_gather.pool_reader.gather_cmp.launch"):
-            gathered = all_gather(local_flat, group=Group.TP)
+        from rtp_llm.models_py.distributed import collective_torch
+
+        all_gather_into = getattr(collective_torch, "all_gather_into", None)
+        if (
+            all_gather is _ORIG_ALL_GATHER
+            and all_gather_into is not None
+            and torch.distributed.is_initialized()
+            and (device.type != "cuda" or not torch.cuda.is_current_stream_capturing())
+        ):
+            process_group = collective_torch._get_group(Group.TP)
+            world_size = torch.distributed.get_world_size(process_group)
+            gathered = _acquire_pool_buffer(
+                device,
+                "pool_reader.sync.gathered",
+                (world_size * int(local_flat.shape[0]), ENTRY_BYTES),
+                dtype=local_flat.dtype,
+            )
+            with record_function_range(
+                "dsv4.cp.all_gather.pool_reader.gather_cmp.launch"
+            ):
+                all_gather_into(gathered, local_flat, group=Group.TP)
+        else:
+            with record_function_range(
+                "dsv4.cp.all_gather.pool_reader.gather_cmp.launch"
+            ):
+                gathered = all_gather(local_flat, group=Group.TP)
         # gathered shape is rank-major: [cp_size * total_local_kv, 584].
 
         # Step 4: restore to request-concatenated logical order.
         self._restore_dequant_scatter(
             gathered, out, seq_lens, offset, cu_dst_offsets=cu_dst_offsets
+        )
+
+    def build_local_flat(
+        self,
+        *,
+        k_cache: torch.Tensor,
+        block_table: torch.Tensor,
+        block_size: int,
+        gather_lens: Optional[torch.Tensor] = None,
+        device: Optional[torch.device] = None,
+    ) -> torch.Tensor:
+        self._validate_call(block_size=block_size, gather_lens=gather_lens)
+        dev = device if device is not None else k_cache.device
+        return self._build_local_flat(
+            k_cache=k_cache,
+            block_table=block_table,
+            block_size=block_size,
+            device=dev,
+        )
+
+    def restore_dequant_scatter_gathered(
+        self,
+        gathered: torch.Tensor,
+        *,
+        out: torch.Tensor,
+        seq_lens: torch.Tensor,
+        offset: int,
+        cu_dst_offsets: Optional[torch.Tensor] = None,
+    ) -> None:
+        self._restore_dequant_scatter(
+            gathered,
+            out,
+            seq_lens,
+            offset,
+            cu_dst_offsets=cu_dst_offsets,
         )
 
     def start_fill_async(
@@ -463,13 +546,14 @@ class CPShardedPoolReader(CompressedKPoolReader):
             )
 
         current_stream = torch.cuda.current_stream(device)
+        gathered = _acquire_pool_buffer(
+            device,
+            "pool_reader.async.gathered",
+            (world_size * int(local_flat.shape[0]), ENTRY_BYTES),
+            dtype=local_flat.dtype,
+        )
         stream.wait_stream(current_stream)
         with torch.cuda.stream(stream):
-            gathered = torch.empty(
-                (world_size * int(local_flat.shape[0]), ENTRY_BYTES),
-                dtype=local_flat.dtype,
-                device=device,
-            )
             with record_function_range(
                 "dsv4.cp.all_gather.pool_reader.gather_cmp.launch"
             ):
@@ -563,7 +647,8 @@ class CPShardedPoolReader(CompressedKPoolReader):
     @staticmethod
     def _wait_fill_work_once(handle: CPShardedPoolReadHandle) -> None:
         if not handle.work_waited:
-            handle.work.wait()
+            if handle.work is not None:
+                handle.work.wait()
             handle.work_waited = True
 
     def _validate_call(
@@ -610,10 +695,11 @@ class CPShardedPoolReader(CompressedKPoolReader):
         if local_seq_lens_actual.device != device:
             local_seq_lens_actual = local_seq_lens_actual.to(device=device)
         if cp_direct_flat_pack_enabled():
-            local_flat = torch.empty(
+            local_flat = _acquire_pool_buffer(
+                device,
+                "pool_reader.local_flat",
                 (cfg.total_local_kv, ENTRY_BYTES),
                 dtype=torch.uint8,
-                device=device,
             )
             if try_gather_k_cache_packed_to_flat(
                 local_flat,
@@ -725,7 +811,11 @@ def _pack_padded_to_flat(
         and B <= 256
         and 0 < D <= 2048
     ):
-        lens_d = lens if (lens.device == device and lens.is_contiguous()) else lens.to(device=device).contiguous()
+        lens_d = (
+            lens
+            if (lens.device == device and lens.is_contiguous())
+            else lens.to(device=device).contiguous()
+        )
         out = torch.empty((total, D), dtype=padded.dtype, device=device)
         tile_m = 8
         _pack_padded_to_flat_kernel[(triton.cdiv(total, tile_m),)](
@@ -792,7 +882,10 @@ def _scatter_flat_to_workspace(
         and B > 0
         and B <= 256
         and 0 < D <= 2048
-        and ((has_cu and int(out.stride(1)) == 1) or (not has_cu and out.dim() == 3 and int(out.stride(2)) == 1))
+        and (
+            (has_cu and int(out.stride(1)) == 1)
+            or (not has_cu and out.dim() == 3 and int(out.stride(2)) == 1)
+        )
     ):
         seq_lens_d = (
             seq_lens
@@ -908,9 +1001,7 @@ def make_compressed_k_pool_reader(
 
     if batch_size == 1 and total_kv_len is not None:
         total_kv_host = int(total_kv_len)
-        total_local = cp_padded_local_kv_len(
-            total_kv_host, cp_ctx.cp_size, owner_bs
-        )
+        total_local = cp_padded_local_kv_len(total_kv_host, cp_ctx.cp_size, owner_bs)
         max_local = total_local
         actual_local = cp_actual_owned_kv_len(
             total_kv_host,
@@ -919,9 +1010,7 @@ def make_compressed_k_pool_reader(
             cp_ctx.cp_rank,
         )
         has_actual = actual_local > 0
-        local_lens = torch.full(
-            (1,), total_local, dtype=torch.int32, device=device
-        )
+        local_lens = torch.full((1,), total_local, dtype=torch.int32, device=device)
         local_actual_lens = torch.full(
             (1,), actual_local, dtype=torch.int32, device=device
         )
@@ -934,9 +1023,9 @@ def make_compressed_k_pool_reader(
         )
         if total_kv_host <= 0:
             return LocalPoolReader()
-        local_lens = cp_padded_local_kv_lens(
-            per_req_cpu, cp_ctx.cp_size, owner_bs
-        ).to(dtype=torch.int32)
+        local_lens = cp_padded_local_kv_lens(per_req_cpu, cp_ctx.cp_size, owner_bs).to(
+            dtype=torch.int32
+        )
         local_actual_lens = cp_actual_owned_kv_lens(
             per_req_cpu, cp_ctx.cp_size, owner_bs, cp_ctx.cp_rank
         ).to(dtype=torch.int32)

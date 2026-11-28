@@ -28,7 +28,7 @@ single-rank path unchanged.
 """
 
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Optional, Tuple, Union
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Sequence, Tuple, Union
 
 import torch
 
@@ -45,6 +45,54 @@ except ImportError:
 from rtp_llm.models_py.distributed import collective_torch
 from rtp_llm.models_py.distributed.collective_torch import Group, all_gather
 from rtp_llm.models_py.modules.dsv4._profiler import record_function_range
+
+_ORIG_ALL_GATHER = all_gather
+
+
+def _acquire_cp_buffer(
+    device: torch.device,
+    slot_key: str,
+    shape: Tuple[int, ...],
+    dtype: torch.dtype = torch.uint8,
+    *,
+    check_capture: bool = True,
+) -> torch.Tensor:
+    acq = getattr(collective_torch, "acquire_grow_only_buffer", None)
+    if (
+        acq is not None
+        and all_gather is _ORIG_ALL_GATHER
+        and torch.distributed.is_initialized()
+    ):
+        if (
+            not check_capture
+            or device.type != "cuda"
+            or not torch.cuda.is_current_stream_capturing()
+        ):
+            return acq(device, slot_key, shape, dtype=dtype, check_capture=False)
+    return torch.empty(shape, device=device, dtype=dtype)
+
+
+def _acquire_cp_u8_1d(
+    device: torch.device,
+    slot_key: str,
+    nbytes: int,
+    *,
+    check_capture: bool = True,
+) -> torch.Tensor:
+    acq_u8 = getattr(collective_torch, "acquire_grow_only_u8", None)
+    if (
+        acq_u8 is not None
+        and all_gather is _ORIG_ALL_GATHER
+        and torch.distributed.is_initialized()
+    ):
+        if (
+            not check_capture
+            or device.type != "cuda"
+            or not torch.cuda.is_current_stream_capturing()
+        ):
+            return acq_u8(device, slot_key, nbytes, check_capture=False)
+    return torch.empty((nbytes,), device=device, dtype=torch.uint8)
+
 
 if TYPE_CHECKING:
     # PrefillWorkspace lives in its own module; cp.py only CONSUMES the
@@ -768,20 +816,14 @@ def build_cp_context(
                 )
 
                 dev_is_cuda = torch.device(device).type == "cuda"
-                chunks_t = (
-                    chunks_device.to(
-                        device=device,
-                        non_blocking=(dev_is_cuda and chunks_device.device.type == "cpu"),
-                    ).contiguous()
-                )
-                shuffle_t = (
-                    shuffle_indices.to(
-                        device=device,
-                        non_blocking=(
-                            dev_is_cuda and shuffle_indices.device.type == "cpu"
-                        ),
-                    ).contiguous()
-                )
+                chunks_t = chunks_device.to(
+                    device=device,
+                    non_blocking=(dev_is_cuda and chunks_device.device.type == "cpu"),
+                ).contiguous()
+                shuffle_t = shuffle_indices.to(
+                    device=device,
+                    non_blocking=(dev_is_cuda and shuffle_indices.device.type == "cpu"),
+                ).contiguous()
                 fused_metadata = try_build_cp_forward_metadata(
                     input_lengths_global,
                     chunks_t,
@@ -911,9 +953,8 @@ def build_cp_context(
             expected = torch.arange(seq_len_full, dtype=restore_prefix.dtype)
             unpad_restore_is_prefix = bool(torch.equal(restore_prefix.cpu(), expected))
         unpad_restore = restore_prefix.to(torch.long)
-    elif (
-        input_lengths_global_host is not None
-        and len(chunk_lengths) == len(input_lengths_global_host)
+    elif input_lengths_global_host is not None and len(chunk_lengths) == len(
+        input_lengths_global_host
     ):
         # Multi-request CP has padding after each request's real-token prefix,
         # so select [pad_off : pad_off + real_len] per request without triggering
@@ -1131,23 +1172,35 @@ def cp_wait_gather_raw(handle: Any) -> torch.Tensor:
     raise TypeError(f"unsupported raw CP gather handle type: {type(handle)!r}")
 
 
-def _cp_all_gather_into_empty(tensor: torch.Tensor, group: Group) -> torch.Tensor:
+def _cp_all_gather_into_empty(
+    tensor: torch.Tensor,
+    group: Group,
+    *,
+    slot_key: Optional[str] = None,
+) -> torch.Tensor:
     """DSV4-local all-gather with an uninitialized output buffer.
 
     ``torch.distributed.all_gather_into_tensor`` writes every output element.
     The generic ``collective_torch.all_gather`` zero-initializes its output for
     broader safety, but the CP varlen hot path does not need that memset.
     """
-    if not torch.distributed.is_initialized():
+    if (
+        all_gather is not _ORIG_ALL_GATHER
+        or not torch.distributed.is_initialized()
+        or (tensor.device.type == "cuda" and torch.cuda.is_current_stream_capturing())
+    ):
         return all_gather(tensor, group=group)
     process_group = collective_torch._get_group(group)
     world_size = torch.distributed.get_world_size(process_group)
-    gathered = torch.empty(
-        [world_size * tensor.shape[0]] + list(tensor.shape)[1:],
-        device=tensor.device,
-        dtype=tensor.dtype,
-    )
-    torch.distributed.all_gather_into_tensor(gathered, tensor, group=process_group)
+    out_shape = (world_size * int(tensor.shape[0]),) + tuple(tensor.shape[1:])
+    if slot_key is not None:
+        gathered = _acquire_cp_buffer(
+            tensor.device, slot_key, out_shape, dtype=tensor.dtype
+        )
+    else:
+        gathered = torch.empty(out_shape, device=tensor.device, dtype=tensor.dtype)
+    if gathered.numel() > 0:
+        torch.distributed.all_gather_into_tensor(gathered, tensor, group=process_group)
     return gathered
 
 
@@ -1179,10 +1232,959 @@ def cp_all_gather_full_varlen(
     trailing = local_flat.shape[1:]
     local_2d = local_flat.reshape(cp_ctx.chunk_length, -1).contiguous()
     with record_function_range(f"{profile_name}.launch"):
-        gathered = _cp_all_gather_into_empty(local_2d, group=Group.TP)
+        gathered = _cp_all_gather_into_empty(
+            local_2d,
+            group=Group.TP,
+            slot_key=(None if cp_ctx.unpad_restore_is_prefix else "cp.varlen.gathered"),
+        )
     with record_function_range(f"{profile_name}.restore"):
         full = _cp_restore_gathered_full_2d(gathered, cp_ctx)
     return full.view((cp_ctx.seq_len_full,) + trailing)
+
+
+@dataclass(frozen=True)
+class CoalescedTensorSpec:
+    shape: Tuple[int, ...]
+    dtype: torch.dtype
+    rows: int
+    trailing: Tuple[int, ...]
+    elem_bytes: int
+    row_bytes: int
+    col_or_byte_offset: int
+    nbytes: int
+
+
+@dataclass
+class CoalescedCPGatherHandle:
+    layout: str
+    world_size: int
+    device: torch.device
+    specs: Tuple[CoalescedTensorSpec, ...]
+    send_buf: torch.Tensor
+    recv_buf: torch.Tensor
+    work: Any
+    stream: Any
+    producer_stream: Any
+    completion_event: Optional[Any]
+    slot_key: str
+    profile_name: str = _DEFAULT_CP_PROFILE_NAME
+    outputs: Optional[Tuple[torch.Tensor, ...]] = None
+    unpacked_buffers: Optional[Tuple[torch.Tensor, ...]] = None
+    unpack_buf: Optional[torch.Tensor] = None
+    unpack_pairs: Tuple[Tuple[torch.Tensor, torch.Tensor], ...] = ()
+    post_stream: Any = None
+    done_event: Optional[Any] = None
+    work_waited: bool = False
+    unpacked: bool = False
+    is_passthrough: bool = False
+
+
+_PROFILER_ENABLED_FN = getattr(torch.autograd, "_profiler_enabled", None)
+
+
+@dataclass
+class _CoalescedPlan:
+    clear_epoch: int
+    slot_key: str
+    device: torch.device
+    group: Group
+    process_group: Any
+    world_size: int
+    allow_col2d: bool
+    layout: str
+    sig_key: Tuple[Tuple[Tuple[int, ...], torch.dtype], ...]
+    specs: Tuple[CoalescedTensorSpec, ...]
+    send_holder: List[Any]
+    send_gen: int
+    recv_holder: List[Any]
+    recv_gen: int
+    unpack_holder: Optional[List[Any]]
+    unpack_gen: int
+    send_buf: torch.Tensor
+    recv_buf: torch.Tensor
+    send_pairs: Tuple[Tuple[int, torch.Tensor, bool], ...]
+    unpack_pairs: Tuple[Tuple[torch.Tensor, torch.Tensor], ...]
+    outputs: Tuple[torch.Tensor, ...]
+
+
+_COALESCED_LAST_PLAN_BY_SLOT: Dict[Any, _CoalescedPlan] = {}
+_COALESCED_PLAN_CACHE: Dict[Any, _CoalescedPlan] = {}
+_COALESCED_PLAN_CACHE_MAX = 256
+
+
+def _align_up_16(n: int) -> int:
+    return (n + 15) & ~15
+
+
+def _build_coalesced_layout(
+    tensors: Sequence[torch.Tensor],
+    *,
+    allow_col2d: bool = True,
+) -> Tuple[str, Tuple[CoalescedTensorSpec, ...], int, int]:
+    """Plan a 16B-aligned ``col2d`` or ``flat1d`` packed buffer layout."""
+    if not tensors:
+        return "flat1d", (), 0, 0
+
+    can_col2d = allow_col2d and all(
+        t.dim() >= 2 and not t.is_complex() for t in tensors
+    )
+    first_rows = int(tensors[0].shape[0])
+    if can_col2d and first_rows > 0:
+        for t in tensors:
+            if int(t.shape[0]) != first_rows:
+                can_col2d = False
+                break
+            trailing = tuple(int(d) for d in t.shape[1:])
+            trailing_elems = 1
+            for d in trailing:
+                trailing_elems *= d
+            if (trailing_elems * int(t.element_size())) % 16 != 0:
+                can_col2d = False
+                break
+    else:
+        can_col2d = False
+
+    specs: list[CoalescedTensorSpec] = []
+    if can_col2d:
+        col_offset = 0
+        for t in tensors:
+            rows = int(t.shape[0])
+            trailing = tuple(int(d) for d in t.shape[1:])
+            trailing_elems = 1
+            for d in trailing:
+                trailing_elems *= d
+            row_bytes = trailing_elems * int(t.element_size())
+            specs.append(
+                CoalescedTensorSpec(
+                    shape=tuple(int(d) for d in t.shape),
+                    dtype=t.dtype,
+                    rows=rows,
+                    trailing=trailing,
+                    elem_bytes=int(t.element_size()),
+                    row_bytes=row_bytes,
+                    col_or_byte_offset=col_offset,
+                    nbytes=rows * row_bytes,
+                )
+            )
+            col_offset += row_bytes
+        return "col2d", tuple(specs), first_rows, col_offset
+
+    byte_offset = 0
+    for t in tensors:
+        rows = int(t.shape[0])
+        trailing = tuple(int(d) for d in t.shape[1:])
+        trailing_elems = 1
+        for d in trailing:
+            trailing_elems *= d
+        row_bytes = trailing_elems * int(t.element_size())
+        nbytes = rows * row_bytes
+        specs.append(
+            CoalescedTensorSpec(
+                shape=tuple(int(d) for d in t.shape),
+                dtype=t.dtype,
+                rows=rows,
+                trailing=trailing,
+                elem_bytes=int(t.element_size()),
+                row_bytes=row_bytes,
+                col_or_byte_offset=byte_offset,
+                nbytes=nbytes,
+            )
+        )
+        byte_offset += _align_up_16(nbytes)
+    return "flat1d", tuple(specs), 0, byte_offset
+
+
+def _view_2d_u8_slice_as(
+    u8_2d: torch.Tensor,
+    world_size: int,
+    spec: CoalescedTensorSpec,
+) -> torch.Tensor:
+    rows_out = world_size * spec.rows
+    if spec.elem_bytes == 1:
+        typed_2d = u8_2d
+    elif u8_2d.element_size() == 1:
+        typed_2d = u8_2d.view(spec.dtype)
+    else:
+        typed_2d = u8_2d
+    if len(spec.trailing) == 1:
+        return typed_2d
+    if len(spec.trailing) == 0:
+        return typed_2d.reshape(rows_out)
+    return typed_2d.view((rows_out,) + spec.trailing)
+
+
+def _view_flat_u8_slice_as(
+    u8_flat: torch.Tensor,
+    world_size: int,
+    spec: CoalescedTensorSpec,
+) -> torch.Tensor:
+    rows_out = world_size * spec.rows
+    if spec.nbytes == 0:
+        zero_u8 = u8_flat[:0]
+        if spec.dtype.is_complex:
+            float_dtype = torch.float32 if spec.elem_bytes == 8 else torch.float64
+            real_zero = zero_u8.view(float_dtype).view(
+                (rows_out,) + spec.trailing + (2,)
+            )
+            return torch.view_as_complex(real_zero)
+        if spec.dtype == torch.bool:
+            return zero_u8.view(torch.bool).view((rows_out,) + spec.trailing)
+        return zero_u8.view(spec.dtype).view((rows_out,) + spec.trailing)
+    if spec.dtype.is_complex:
+        float_dtype = torch.float32 if spec.elem_bytes == 8 else torch.float64
+        real_view = u8_flat.view(rows_out, spec.row_bytes).view(float_dtype)
+        real_view = real_view.view((rows_out,) + spec.trailing + (2,))
+        return torch.view_as_complex(real_view)
+    if spec.dtype == torch.bool:
+        return u8_flat.view(torch.bool).view((rows_out,) + spec.trailing)
+    if spec.elem_bytes == 1:
+        if len(spec.trailing) == 1:
+            return u8_flat.view(rows_out, spec.row_bytes)
+        if len(spec.trailing) == 0:
+            return u8_flat
+        return u8_flat.view((rows_out,) + spec.trailing)
+    return u8_flat.view(spec.dtype).view((rows_out,) + spec.trailing)
+
+
+def _coalesced_col2d_views(
+    recv_buf: torch.Tensor,
+    world_size: int,
+    specs: Tuple[CoalescedTensorSpec, ...],
+) -> Tuple[torch.Tensor, ...]:
+    views = []
+    for spec in specs:
+        col_slice = recv_buf[
+            :, spec.col_or_byte_offset : spec.col_or_byte_offset + spec.row_bytes
+        ]
+        views.append(_view_2d_u8_slice_as(col_slice, world_size, spec))
+    return tuple(views)
+
+
+def _build_coalesced_plan(
+    tensors_list: Sequence[torch.Tensor],
+    *,
+    device: torch.device,
+    group: Group,
+    allow_col2d: bool,
+    slot_key: str,
+) -> Optional[_CoalescedPlan]:
+    for idx, t in enumerate(tensors_list):
+        if t.device != device:
+            raise ValueError(
+                f"coalesced all_gather tensor[{idx}] device {t.device} != {device}"
+            )
+        if t.dim() < 1:
+            raise ValueError(
+                f"coalesced all_gather requires dim >= 1, got tensor[{idx}].shape={tuple(t.shape)}"
+            )
+    process_group = collective_torch._get_group(group)
+    world_size = torch.distributed.get_world_size(process_group)
+    layout, specs, common_rows, total_size = _build_coalesced_layout(
+        tensors_list, allow_col2d=allow_col2d
+    )
+    if total_size == 0:
+        return None
+    acq_holder = getattr(collective_torch, "acquire_grow_only_u8_holder", None)
+    if acq_holder is None:
+        return None
+    sig_key = tuple((s.shape, s.dtype) for s in specs)
+    clear_epoch = int(getattr(collective_torch, "_GROW_ONLY_CLEAR_EPOCH", 0))
+
+    if layout == "col2d":
+        send_u8, send_holder, send_gen = acq_holder(
+            device, f"{slot_key}.send", common_rows * total_size, check_capture=False
+        )
+        recv_u8, recv_holder, recv_gen = acq_holder(
+            device,
+            f"{slot_key}.recv",
+            world_size * common_rows * total_size,
+            check_capture=False,
+        )
+        if send_holder is None or recv_holder is None:
+            return None
+        send_buf = send_u8.view(common_rows, total_size)
+        recv_buf = recv_u8.view(world_size * common_rows, total_size)
+        send_pairs = []
+        for idx, spec in enumerate(specs):
+            dst_slice = send_buf[
+                :, spec.col_or_byte_offset : spec.col_or_byte_offset + spec.row_bytes
+            ]
+            dst_typed = (
+                dst_slice if spec.elem_bytes == 1 else dst_slice.view(spec.dtype)
+            )
+            if len(spec.trailing) != 1:
+                dst_typed = dst_typed.view(spec.shape)
+            send_pairs.append((idx, dst_typed, False))
+        outputs = _coalesced_col2d_views(recv_buf, world_size, specs)
+        plan = _CoalescedPlan(
+            clear_epoch=clear_epoch,
+            slot_key=slot_key,
+            device=device,
+            group=group,
+            process_group=process_group,
+            world_size=world_size,
+            allow_col2d=allow_col2d,
+            layout=layout,
+            sig_key=sig_key,
+            specs=specs,
+            send_holder=send_holder,
+            send_gen=send_gen,
+            recv_holder=recv_holder,
+            recv_gen=recv_gen,
+            unpack_holder=None,
+            unpack_gen=0,
+            send_buf=send_buf,
+            recv_buf=recv_buf,
+            send_pairs=tuple(send_pairs),
+            unpack_pairs=(),
+            outputs=outputs,
+        )
+    else:
+        send_buf, send_holder, send_gen = acq_holder(
+            device, f"{slot_key}.send", total_size, check_capture=False
+        )
+        recv_u8, recv_holder, recv_gen = acq_holder(
+            device, f"{slot_key}.recv", world_size * total_size, check_capture=False
+        )
+        if send_holder is None or recv_holder is None:
+            return None
+        recv_buf = recv_u8.view(world_size, total_size)
+        send_pairs = []
+        for idx, spec in enumerate(specs):
+            if spec.nbytes == 0:
+                continue
+            slice_u8 = send_buf[
+                spec.col_or_byte_offset : spec.col_or_byte_offset + spec.nbytes
+            ]
+            if spec.dtype.is_complex:
+                float_dtype = torch.float32 if spec.elem_bytes == 8 else torch.float64
+                dst_typed = slice_u8.view(float_dtype).view(spec.shape + (2,))
+                send_pairs.append((idx, dst_typed, True))
+            elif spec.dtype == torch.bool:
+                dst_typed = slice_u8.view(torch.bool).view(spec.shape)
+                send_pairs.append((idx, dst_typed, False))
+            else:
+                dst_typed = (
+                    slice_u8 if spec.elem_bytes == 1 else slice_u8.view(spec.dtype)
+                ).view(spec.shape)
+                send_pairs.append((idx, dst_typed, False))
+
+        if len(specs) == 1 and specs[0].nbytes == total_size:
+            unpack_holder = None
+            unpack_gen = 0
+            unpack_pairs = ()
+            outputs = (_view_flat_u8_slice_as(recv_u8, world_size, specs[0]),)
+        else:
+            total_unpack_bytes = 0
+            item_offsets = []
+            for spec in specs:
+                item_bytes = world_size * spec.nbytes
+                if item_bytes > 0:
+                    item_offsets.append(total_unpack_bytes)
+                    total_unpack_bytes += _align_up_16(item_bytes)
+                else:
+                    item_offsets.append(-1)
+            unpack_u8, unpack_holder, unpack_gen = acq_holder(
+                device, f"{slot_key}.out", total_unpack_bytes, check_capture=False
+            )
+            if unpack_holder is None:
+                return None
+            unpack_pairs_list = []
+            outputs_list = []
+            for spec, uoff in zip(specs, item_offsets):
+                if uoff < 0:
+                    outputs_list.append(
+                        _view_flat_u8_slice_as(unpack_u8[:0], world_size, spec)
+                    )
+                else:
+                    slice_out_u8 = unpack_u8[uoff : uoff + world_size * spec.nbytes]
+                    outputs_list.append(
+                        _view_flat_u8_slice_as(slice_out_u8, world_size, spec)
+                    )
+                    dst_2d = slice_out_u8.view(world_size, spec.nbytes)
+                    src_2d = recv_buf[
+                        :,
+                        spec.col_or_byte_offset : spec.col_or_byte_offset + spec.nbytes,
+                    ]
+                    unpack_pairs_list.append((dst_2d, src_2d))
+            unpack_pairs = tuple(unpack_pairs_list)
+            outputs = tuple(outputs_list)
+
+        plan = _CoalescedPlan(
+            clear_epoch=clear_epoch,
+            slot_key=slot_key,
+            device=device,
+            group=group,
+            process_group=process_group,
+            world_size=world_size,
+            allow_col2d=allow_col2d,
+            layout=layout,
+            sig_key=sig_key,
+            specs=specs,
+            send_holder=send_holder,
+            send_gen=send_gen,
+            recv_holder=recv_holder,
+            recv_gen=recv_gen,
+            unpack_holder=unpack_holder,
+            unpack_gen=unpack_gen,
+            send_buf=send_buf,
+            recv_buf=recv_buf,
+            send_pairs=tuple(send_pairs),
+            unpack_pairs=unpack_pairs,
+            outputs=outputs,
+        )
+
+    dev_key = (device.type, device.index)
+    slot_cache_key = (slot_key, dev_key, allow_col2d, group)
+    full_cache_key = (slot_key, dev_key, allow_col2d, group, sig_key)
+    if len(_COALESCED_PLAN_CACHE) >= _COALESCED_PLAN_CACHE_MAX:
+        _COALESCED_PLAN_CACHE.clear()
+    _COALESCED_LAST_PLAN_BY_SLOT[slot_cache_key] = plan
+    _COALESCED_PLAN_CACHE[full_cache_key] = plan
+    return plan
+
+
+def _get_or_build_coalesced_plan(
+    tensors: Sequence[torch.Tensor],
+    *,
+    device: torch.device,
+    group: Group,
+    allow_col2d: bool,
+    slot_key: str,
+) -> Optional[_CoalescedPlan]:
+    epoch = collective_torch._GROW_ONLY_CLEAR_EPOCH
+    dev_key = (device.type, device.index)
+    slot_cache_key = (slot_key, dev_key, allow_col2d, group)
+    n = len(tensors)
+    plan = _COALESCED_LAST_PLAN_BY_SLOT.get(slot_cache_key)
+    if plan is not None and plan.clear_epoch == epoch and len(plan.sig_key) == n:
+        match = True
+        for t, (s, d) in zip(tensors, plan.sig_key):
+            if t.shape != s or t.dtype != d or t.device != device:
+                match = False
+                break
+        if match:
+            if (
+                plan.send_holder[1] == plan.send_gen
+                and plan.recv_holder[1] == plan.recv_gen
+                and (
+                    plan.unpack_holder is None
+                    or plan.unpack_holder[1] == plan.unpack_gen
+                )
+            ):
+                return plan
+    sig_key = tuple((tuple(t.shape), t.dtype) for t in tensors)
+    full_cache_key = (slot_key, dev_key, allow_col2d, group, sig_key)
+    plan = _COALESCED_PLAN_CACHE.get(full_cache_key)
+    if (
+        plan is not None
+        and plan.clear_epoch == epoch
+        and plan.send_holder[1] == plan.send_gen
+        and plan.recv_holder[1] == plan.recv_gen
+        and (plan.unpack_holder is None or plan.unpack_holder[1] == plan.unpack_gen)
+        and all(t.device == device for t in tensors)
+    ):
+        _COALESCED_LAST_PLAN_BY_SLOT[slot_cache_key] = plan
+        return plan
+    return _build_coalesced_plan(
+        tensors, device=device, group=group, allow_col2d=allow_col2d, slot_key=slot_key
+    )
+
+
+def start_cp_all_gather_coalesced(
+    tensors: Sequence[torch.Tensor],
+    group: Group = Group.TP,
+    *,
+    async_op: bool = True,
+    stream: Optional[Any] = None,
+    allow_col2d: bool = True,
+    slot_key: str = "cp.coalesced",
+    profile_name: Optional[str] = None,
+) -> CoalescedCPGatherHandle:
+    """Pack ``tensors`` into one 16B-aligned grow-only buffer and run one ``all_gather``."""
+    tensors_seq = tensors if isinstance(tensors, (tuple, list)) else tuple(tensors)
+    if not tensors_seq:
+        raise ValueError("start_cp_all_gather_coalesced requires at least one tensor")
+
+    device = tensors_seq[0].device
+    is_cuda = device.type == "cuda"
+    is_capturing = is_cuda and torch.cuda.is_current_stream_capturing()
+    if (
+        all_gather is not _ORIG_ALL_GATHER
+        or not torch.distributed.is_initialized()
+        or is_capturing
+    ):
+        for idx, t in enumerate(tensors_seq):
+            if t.device != device:
+                raise ValueError(
+                    f"coalesced all_gather tensor[{idx}] device {t.device} != {device}"
+                )
+            if t.dim() < 1:
+                raise ValueError(
+                    f"coalesced all_gather requires dim >= 1, got tensor[{idx}].shape={tuple(t.shape)}"
+                )
+        outs = tuple(all_gather(t.contiguous(), group=group) for t in tensors_seq)
+        empty_buf = torch.empty((0,), dtype=torch.uint8, device=device)
+        return CoalescedCPGatherHandle(
+            layout="passthrough",
+            world_size=1,
+            device=device,
+            specs=(),
+            send_buf=empty_buf,
+            recv_buf=empty_buf,
+            work=None,
+            stream=None,
+            producer_stream=None,
+            completion_event=None,
+            slot_key=slot_key,
+            profile_name=profile_name or f"{_DEFAULT_CP_PROFILE_NAME}.coalesced",
+            outputs=outs,
+            work_waited=True,
+            unpacked=True,
+            is_passthrough=True,
+        )
+
+    plan = _get_or_build_coalesced_plan(
+        tensors_seq,
+        device=device,
+        group=group,
+        allow_col2d=allow_col2d,
+        slot_key=slot_key,
+    )
+    prof_on = _PROFILER_ENABLED_FN is not None and _PROFILER_ENABLED_FN()
+    if prof_on and profile_name is None:
+        profile_name = f"{_DEFAULT_CP_PROFILE_NAME}.coalesced"
+
+    if plan is None:
+        for idx, t in enumerate(tensors_seq):
+            if t.device != device:
+                raise ValueError(
+                    f"coalesced all_gather tensor[{idx}] device {t.device} != {device}"
+                )
+            if t.dim() < 1:
+                raise ValueError(
+                    f"coalesced all_gather requires dim >= 1, got tensor[{idx}].shape={tuple(t.shape)}"
+                )
+        process_group = collective_torch._get_group(group)
+        world_size = torch.distributed.get_world_size(process_group)
+        layout, specs, _common_rows, total_size = _build_coalesced_layout(
+            tensors_seq, allow_col2d=allow_col2d
+        )
+        assert total_size == 0
+        empty_buf = torch.empty((0,), dtype=torch.uint8, device=device)
+        outs = tuple(
+            torch.empty(
+                (world_size * spec.rows,) + spec.trailing,
+                dtype=spec.dtype,
+                device=device,
+            )
+            for spec in specs
+        )
+        return CoalescedCPGatherHandle(
+            layout=layout,
+            world_size=world_size,
+            device=device,
+            specs=specs,
+            send_buf=empty_buf,
+            recv_buf=empty_buf,
+            work=None,
+            stream=stream,
+            producer_stream=(torch.cuda.current_stream(device) if is_cuda else None),
+            completion_event=None,
+            slot_key=slot_key,
+            profile_name=profile_name or "",
+            outputs=outs,
+            work_waited=True,
+            unpacked=True,
+        )
+
+    if prof_on:
+        with record_function_range(f"{profile_name}.pack"):
+            for idx, dst, is_complex in plan.send_pairs:
+                src = tensors_seq[idx]
+                if is_complex:
+                    dst.copy_(torch.view_as_real(src))
+                else:
+                    dst.copy_(src)
+    else:
+        for idx, dst, is_complex in plan.send_pairs:
+            src = tensors_seq[idx]
+            if is_complex:
+                dst.copy_(torch.view_as_real(src))
+            else:
+                dst.copy_(src)
+
+    if not async_op or not is_cuda:
+        if prof_on:
+            with record_function_range(f"{profile_name}.launch"):
+                torch.distributed.all_gather_into_tensor(
+                    plan.recv_buf,
+                    plan.send_buf,
+                    group=plan.process_group,
+                    async_op=False,
+                )
+        else:
+            torch.distributed.all_gather_into_tensor(
+                plan.recv_buf,
+                plan.send_buf,
+                group=plan.process_group,
+                async_op=False,
+            )
+        for dst_2d, src_2d in plan.unpack_pairs:
+            dst_2d.copy_(src_2d)
+        return CoalescedCPGatherHandle(
+            layout=plan.layout,
+            world_size=plan.world_size,
+            device=device,
+            specs=plan.specs,
+            send_buf=plan.send_buf,
+            recv_buf=plan.recv_buf,
+            work=None,
+            stream=None,
+            producer_stream=None,
+            completion_event=None,
+            slot_key=slot_key,
+            profile_name=profile_name or "",
+            outputs=plan.outputs,
+            unpack_pairs=plan.unpack_pairs,
+            work_waited=True,
+            unpacked=True,
+        )
+
+    current_stream = torch.cuda.current_stream(device)
+    gather_stream = stream if stream is not None else current_stream
+    if gather_stream != current_stream:
+        gather_stream.wait_stream(current_stream)
+    work = None
+    try:
+        with torch.cuda.stream(gather_stream):
+            if prof_on:
+                with record_function_range(f"{profile_name}.launch"):
+                    work = torch.distributed.all_gather_into_tensor(
+                        plan.recv_buf,
+                        plan.send_buf,
+                        group=plan.process_group,
+                        async_op=True,
+                    )
+            else:
+                work = torch.distributed.all_gather_into_tensor(
+                    plan.recv_buf,
+                    plan.send_buf,
+                    group=plan.process_group,
+                    async_op=True,
+                )
+            completion_event = torch.cuda.Event()
+            completion_event.record(gather_stream)
+    except Exception:
+        if work is not None:
+            work.wait()
+            if gather_stream != current_stream:
+                current_stream.wait_stream(gather_stream)
+        raise
+
+    return CoalescedCPGatherHandle(
+        layout=plan.layout,
+        world_size=plan.world_size,
+        device=device,
+        specs=plan.specs,
+        send_buf=plan.send_buf,
+        recv_buf=plan.recv_buf,
+        work=work,
+        stream=gather_stream,
+        producer_stream=current_stream,
+        completion_event=completion_event,
+        slot_key=slot_key,
+        profile_name=profile_name or "",
+        outputs=plan.outputs,
+        unpack_pairs=plan.unpack_pairs,
+        unpacked=(len(plan.unpack_pairs) == 0),
+    )
+
+
+def _wait_coalesced_work_once(handle: CoalescedCPGatherHandle) -> None:
+    if not handle.work_waited:
+        if handle.work is not None:
+            handle.work.wait()
+        handle.work_waited = True
+
+
+def allocate_coalesced_unpack_buffers(
+    handle: CoalescedCPGatherHandle,
+) -> Optional[Tuple[torch.Tensor, ...]]:
+    """Allocate contiguous per-item unpack targets inside one grow-only buffer."""
+    if handle.outputs is not None:
+        return handle.outputs
+    if handle.layout == "col2d":
+        handle.outputs = _coalesced_col2d_views(
+            handle.recv_buf, handle.world_size, handle.specs
+        )
+        return handle.outputs
+    if len(handle.specs) == 1 and handle.specs[0].nbytes == int(
+        handle.recv_buf.shape[1]
+    ):
+        spec = handle.specs[0]
+        handle.outputs = (
+            _view_flat_u8_slice_as(
+                handle.recv_buf.reshape(-1), handle.world_size, spec
+            ),
+        )
+        handle.unpacked = True
+        return handle.outputs
+
+    if handle.unpack_buf is None:
+        total_unpack_bytes = 0
+        item_offsets = []
+        for spec in handle.specs:
+            item_bytes = handle.world_size * spec.nbytes
+            if item_bytes > 0:
+                item_offsets.append(total_unpack_bytes)
+                total_unpack_bytes += _align_up_16(item_bytes)
+            else:
+                item_offsets.append(-1)
+        unpack_buf = _acquire_cp_u8_1d(
+            handle.device,
+            f"{handle.slot_key}.out",
+            total_unpack_bytes,
+            check_capture=False,
+        )
+        pairs = []
+        outputs = []
+        recv_2d = handle.recv_buf
+        for spec, off in zip(handle.specs, item_offsets):
+            if off < 0:
+                outputs.append(
+                    _view_flat_u8_slice_as(unpack_buf[:0], handle.world_size, spec)
+                )
+            else:
+                u8 = unpack_buf[off : off + handle.world_size * spec.nbytes]
+                outputs.append(_view_flat_u8_slice_as(u8, handle.world_size, spec))
+                pairs.append(
+                    (
+                        u8.view(handle.world_size, spec.nbytes),
+                        recv_2d[
+                            :,
+                            spec.col_or_byte_offset : spec.col_or_byte_offset
+                            + spec.nbytes,
+                        ],
+                    )
+                )
+        handle.unpack_buf = unpack_buf
+        handle.unpack_pairs = tuple(pairs)
+        handle.outputs = tuple(outputs)
+    return handle.outputs
+
+
+def unpack_coalesced_on_stream(
+    handle: CoalescedCPGatherHandle,
+    *,
+    stream: Optional[Any] = None,
+    record_event: bool = False,
+) -> Tuple[torch.Tensor, ...]:
+    """Wait collective work and unpack ``flat1d`` items on ``stream`` (or current)."""
+    if handle.outputs is None:
+        allocate_coalesced_unpack_buffers(handle)
+    assert handle.outputs is not None
+    if handle.is_passthrough:
+        return handle.outputs
+
+    if not handle.work_waited or not handle.unpacked:
+        if stream is not None and handle.device.type == "cuda":
+            if handle.completion_event is not None:
+                stream.wait_event(handle.completion_event)
+        elif handle.device.type == "cuda":
+            current_stream = torch.cuda.current_stream(handle.device)
+            if handle.completion_event is not None and handle.stream != current_stream:
+                current_stream.wait_event(handle.completion_event)
+
+        _wait_coalesced_work_once(handle)
+
+        if not handle.unpacked:
+            for dst_2d, src_2d in handle.unpack_pairs:
+                dst_2d.copy_(src_2d)
+            handle.unpacked = True
+
+    if (
+        record_event
+        and stream is not None
+        and handle.device.type == "cuda"
+        and handle.done_event is None
+    ):
+        handle.post_stream = stream
+        ev = torch.cuda.Event()
+        ev.record(stream)
+        handle.done_event = ev
+    return handle.outputs
+
+
+def prepare_cp_all_gather_coalesced(
+    handle: CoalescedCPGatherHandle,
+    *,
+    stream: Any,
+) -> Tuple[torch.Tensor, ...]:
+    """Schedule NCCL fence + ``flat1d`` unpack on ``stream`` asynchronously."""
+    if handle.done_event is not None and handle.outputs is not None:
+        return handle.outputs
+    allocate_coalesced_unpack_buffers(handle)
+    if handle.is_passthrough or handle.device.type != "cuda":
+        return unpack_coalesced_on_stream(handle, stream=None)
+    current_stream = torch.cuda.current_stream(handle.device)
+    if stream != current_stream:
+        stream.wait_stream(current_stream)
+    with torch.cuda.stream(stream):
+        try:
+            outputs = unpack_coalesced_on_stream(
+                handle, stream=stream, record_event=True
+            )
+        except Exception:
+            stream.synchronize()
+            raise
+    return outputs
+
+
+def wait_cp_all_gather_coalesced(
+    handle: CoalescedCPGatherHandle,
+) -> Tuple[torch.Tensor, ...]:
+    """Wait an async coalesced gather (and optional unpack) on current stream."""
+    if handle.outputs is None:
+        allocate_coalesced_unpack_buffers(handle)
+    if handle.is_passthrough:
+        assert handle.outputs is not None
+        return handle.outputs
+    if (
+        handle.work_waited
+        and handle.unpacked
+        and handle.done_event is None
+        and handle.completion_event is None
+    ):
+        assert handle.outputs is not None
+        return handle.outputs
+    if handle.device.type != "cuda":
+        _wait_coalesced_work_once(handle)
+        return unpack_coalesced_on_stream(handle, stream=None)
+
+    current_stream = torch.cuda.current_stream(handle.device)
+    if handle.done_event is not None:
+        current_stream.wait_event(handle.done_event)
+        if (
+            handle.producer_stream is not None
+            and handle.producer_stream != current_stream
+        ):
+            handle.producer_stream.wait_event(handle.done_event)
+        if handle.stream is not None:
+            handle.stream.wait_event(handle.done_event)
+        _wait_coalesced_work_once(handle)
+        assert handle.outputs is not None
+        return handle.outputs
+
+    return unpack_coalesced_on_stream(handle, stream=None)
+
+
+def discard_cp_all_gather_coalesced(
+    handle: Optional[CoalescedCPGatherHandle],
+) -> None:
+    if handle is None or handle.is_passthrough:
+        return
+    if handle.device.type == "cuda":
+        current_stream = torch.cuda.current_stream(handle.device)
+        ev = handle.done_event or handle.completion_event
+        if ev is not None:
+            current_stream.wait_event(ev)
+            if (
+                handle.producer_stream is not None
+                and handle.producer_stream != current_stream
+            ):
+                handle.producer_stream.wait_event(ev)
+            if handle.stream is not None and handle.done_event is not None:
+                handle.stream.wait_event(handle.done_event)
+    _wait_coalesced_work_once(handle)
+
+
+def cp_all_gather_coalesced(
+    tensors: Sequence[torch.Tensor],
+    group: Group = Group.TP,
+    *,
+    allow_col2d: bool = True,
+    slot_key: str = "cp.coalesced",
+    profile_name: Optional[str] = None,
+) -> Tuple[torch.Tensor, ...]:
+    """Synchronous coalesced CP ``all_gather`` returning zero-copy/contiguous views."""
+    tensors_seq = tensors if isinstance(tensors, (tuple, list)) else tuple(tensors)
+    if tensors_seq:
+        device = tensors_seq[0].device
+        is_cuda = device.type == "cuda"
+        if (
+            all_gather is _ORIG_ALL_GATHER
+            and torch.distributed.is_initialized()
+            and not (is_cuda and torch.cuda.is_current_stream_capturing())
+        ):
+            plan = _get_or_build_coalesced_plan(
+                tensors_seq,
+                device=device,
+                group=group,
+                allow_col2d=allow_col2d,
+                slot_key=slot_key,
+            )
+            if plan is not None:
+                prof_on = _PROFILER_ENABLED_FN is not None and _PROFILER_ENABLED_FN()
+                if prof_on:
+                    pname = profile_name or f"{_DEFAULT_CP_PROFILE_NAME}.coalesced"
+                    with record_function_range(f"{pname}.pack"):
+                        for idx, dst, is_complex in plan.send_pairs:
+                            src = tensors_seq[idx]
+                            if is_complex:
+                                dst.copy_(torch.view_as_real(src))
+                            else:
+                                dst.copy_(src)
+                    with record_function_range(f"{pname}.launch"):
+                        torch.distributed.all_gather_into_tensor(
+                            plan.recv_buf,
+                            plan.send_buf,
+                            group=plan.process_group,
+                            async_op=False,
+                        )
+                else:
+                    for idx, dst, is_complex in plan.send_pairs:
+                        src = tensors_seq[idx]
+                        if is_complex:
+                            dst.copy_(torch.view_as_real(src))
+                        else:
+                            dst.copy_(src)
+                    torch.distributed.all_gather_into_tensor(
+                        plan.recv_buf,
+                        plan.send_buf,
+                        group=plan.process_group,
+                        async_op=False,
+                    )
+                for dst_2d, src_2d in plan.unpack_pairs:
+                    dst_2d.copy_(src_2d)
+                return plan.outputs
+    handle = start_cp_all_gather_coalesced(
+        tensors_seq,
+        group=group,
+        async_op=False,
+        allow_col2d=allow_col2d,
+        slot_key=slot_key,
+        profile_name=profile_name,
+    )
+    return wait_cp_all_gather_coalesced(handle)
+
+
+def cp_restore_from_coalesced(
+    gathered: torch.Tensor,
+    cp_ctx: CPContext,
+    trailing: Tuple[int, ...],
+    *,
+    own_prefix_view: bool = False,
+) -> torch.Tensor:
+    """Apply ``cp_ctx.unpad_restore`` to a rank-major tensor from coalesced gather."""
+    gathered_2d = gathered.reshape(gathered.size(0), -1)
+    if cp_ctx.unpad_restore_is_prefix:
+        out_2d = gathered_2d[: cp_ctx.seq_len_full]
+        if own_prefix_view:
+            out_2d = out_2d.clone()
+    else:
+        out_2d = _triton_gather_rows_2d(gathered_2d, cp_ctx.unpad_restore)
+    return out_2d.view((cp_ctx.seq_len_full,) + trailing)
 
 
 if _TRITON_AVAILABLE:
@@ -1262,7 +2264,10 @@ def cp_gather_last_by_request(
     B = int(cp_ctx.input_lengths_global.numel())
     H = int(local_2d.size(1))
 
-    local_last = local_2d.new_zeros((B, H))
+    local_last = _acquire_cp_buffer(
+        device, "cp.gather_last.local", (B, H), dtype=local_2d.dtype
+    )
+    local_last.zero_()
     T_local = int(local_2d.size(0))
     if T_local > 0 and B > 0 and H > 0:
         if local_2d.is_cuda and _TRITON_AVAILABLE:
@@ -1309,12 +2314,12 @@ def cp_gather_last_by_request(
                 num_warps=4,
             )
         else:
-            req_ids = cp_ctx.req_id_per_token.to(device=device, dtype=torch.long).reshape(
-                -1
-            )
-            prefixes = cp_ctx.prefix_lengths.to(device=device, dtype=torch.long).reshape(
-                -1
-            )[:B]
+            req_ids = cp_ctx.req_id_per_token.to(
+                device=device, dtype=torch.long
+            ).reshape(-1)
+            prefixes = cp_ctx.prefix_lengths.to(
+                device=device, dtype=torch.long
+            ).reshape(-1)[:B]
             input_lengths = cp_ctx.input_lengths_global.to(
                 device=device, dtype=torch.long
             ).reshape(-1)[:B]
@@ -1336,7 +2341,11 @@ def cp_gather_last_by_request(
     # RTP-LLM CP reuses the TP process group, matching the full hidden gather
     # path above.
     with record_function_range("dsv4.cp.all_gather.last_hidden_by_request.launch"):
-        gathered = all_gather(local_last.contiguous(), group=Group.TP)
+        gathered = _cp_all_gather_into_empty(
+            local_last.contiguous(),
+            group=Group.TP,
+            slot_key="cp.gather_last.gathered",
+        )
     return gathered.view(cp_ctx.cp_size, B, H).sum(dim=0).contiguous()
 
 
