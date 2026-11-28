@@ -456,6 +456,7 @@ cc_test(
     deps = test_deps + [
         ":block_pool_test_helper",
         ":block_tree_cache_allocator_test_helper",
+        "//rtp_llm/cpp/cache:cache_core",
         "//rtp_llm/cpp/cache:kv_cache_transfer_planner",
         "//rtp_llm/cpp/cache/block_tree_cache",
     ],

@@ -131,7 +131,7 @@ def forward_layers(
     attention_inputs: Any = None,
     prepare_hidden_fn: Optional[Any] = None,
     capture_context: Optional[Any] = None,
-) -> torch.Tensor:
+) -> PyModelOutputs:
     """Flat per-layer loop — vLLM-aligned layout.
 
     Shapes:
@@ -139,7 +139,7 @@ def forward_layers(
       * ``positions``   ``[T_total]``    — per-token global absolute position (RoPE)
       * ``cu_seqlens``  ``[B+1]``        — per-request cumulative-token prefix sum
       * ``hidden``      ``[T_total, hc, dim]`` — internal, flat in the token axis
-      * returns         ``[T_total, dim]`` — pre-lm-head, engine applies lm_head
+      * returns         ``PyModelOutputs`` with ``[T_total, dim]`` pre-lm-head hidden
 
     The ``B`` axis is collapsed out of ``input_ids`` / ``hidden`` entirely,
     matching vLLM's ``DeepseekV4`` (``deepseek_v4.py:1310-1317``). Per-request
@@ -485,15 +485,12 @@ def forward_layers(
         # still carry the plain `norm`.
         norm_fn = getattr(v4, "_norm", None) or v4.norm
         h = norm_fn(h)  # [T, dim]
-    # The per-forward ``PrefillWorkspace`` (prefill-Q + optional CP
-    # gather/restore scratch) is a local of this function: it drops here on
-    # return, returning ~16 GiB to the caching allocator so the MTP draft
-    # forward (which runs right after the main model on a near-full card) can
-    # borrow it. No explicit reset needed — the per-layer ``common.workspace``
-    # references were cleared by ``clear_prefill_meta_shared_fp8`` above.
+    # Pack while the local workspace still owns its union allocation, so a
+    # captured output retained asynchronously cannot reuse and pin that block.
+    # Layer metadata references are already cleared; ws drops on return for MTP.
     if capture_context is not None and capture_context.enabled:
-        return capture_context.finalize(h).hidden_states
-    return h  # [T, dim]
+        return capture_context.finalize(h)
+    return PyModelOutputs(h)
 
 
 def forward_prefill(
@@ -628,7 +625,7 @@ def forward_prefill(
         fixed_valid_tokens = v4._mtp_hidden_valid_tokens
         v4._mtp_hidden_buffer = temporary_mtp_buffer
     try:
-        hidden = forward_layers(
+        outputs = forward_layers(
             v4,
             kv_cache,
             input_ids,
@@ -639,11 +636,11 @@ def forward_prefill(
             attention_inputs=attn_inputs,
             prepare_hidden_fn=prepare_hidden_fn,
             capture_context=capture_context,
-        )  # [T_total, dim] or [T_total, (num_capture_layers + 1) * dim]
+        )
     finally:
         if temporary_mtp_buffer is not None:
             v4._mtp_hidden_buffer = fixed_mtp_buffer
             v4._mtp_hidden_valid_tokens = fixed_valid_tokens
     if temporary_mtp_buffer is not None:
-        return PyModelOutputs(hidden, temporary_mtp_buffer)
-    return PyModelOutputs(hidden)
+        outputs.mtp_target_hidden_states = temporary_mtp_buffer
+    return outputs

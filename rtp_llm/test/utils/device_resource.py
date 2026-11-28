@@ -175,6 +175,7 @@ def get_gpu_ids(cuda_info: Optional[Tuple[str, int]] = None):
 get_smoke_gpu_pool = get_gpu_ids
 
 
+_NVIDIA_SMI_TIMEOUT_SECONDS = 60
 _nvidia_smi_path: Optional[str] = None
 _nvidia_smi_resolved = False
 
@@ -277,7 +278,7 @@ class DeviceResource:
                 ],
                 capture_output=True,
                 text=True,
-                timeout=10,
+                timeout=_NVIDIA_SMI_TIMEOUT_SECONDS,
             )
             if result.returncode != 0:
                 logging.warning(
@@ -353,7 +354,7 @@ class DeviceResource:
                 ],
                 capture_output=True,
                 text=True,
-                timeout=10,
+                timeout=_NVIDIA_SMI_TIMEOUT_SECONDS,
             )
             if result.returncode != 0:
                 logging.warning(
@@ -691,7 +692,7 @@ class DeviceResource:
                 ["nvidia-smi", "topo", "-m"],
                 capture_output=True,
                 text=True,
-                timeout=10,
+                timeout=_NVIDIA_SMI_TIMEOUT_SECONDS,
             )
             if result.returncode != 0:
                 return []
@@ -815,7 +816,7 @@ def _log_test_placement() -> None:
                 [smi, "-i", gpus, "--query-gpu=uuid", "--format=csv,noheader"],
                 capture_output=True,
                 text=True,
-                timeout=10,
+                timeout=_NVIDIA_SMI_TIMEOUT_SECONDS,
             )
             if result.returncode == 0:
                 found = [

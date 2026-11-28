@@ -1,4 +1,5 @@
 #include <chrono>
+#include <future>
 #include <iostream>
 #include <limits>
 #include <algorithm>
@@ -95,8 +96,10 @@ protected:
 
     void verifySchedulersPartitionMixedExecutionModes(int  first_max_new_tokens,
                                                       int  second_max_new_tokens,
-                                                      bool with_group_metadata = false);
+                                                      bool with_group_metadata = false,
+                                                      int  capture_request_index = -1);
     void verifyBatchDecodeSchedulerDrainsMixedModeTail(const std::vector<int>& max_new_tokens);
+    void verifyReservedCapturesRetryAfterRunnablePeersFinish(int batch_size);
 
     std::shared_ptr<LoadAsyncContext> setupPendingCacheLoad(const std::shared_ptr<KVCacheManager>& cache_manager) {
         auto coordinator = std::make_shared<LoadContextCoordinator>(
@@ -1532,7 +1535,8 @@ TEST_F(FIFOSchedulerTest, LinearHistoryAdmissionJoinsPendingWorkerWithoutHolding
 
 void FIFOSchedulerTest::verifySchedulersPartitionMixedExecutionModes(int first_max_new_tokens,
                                                                      int second_max_new_tokens,
-                                                                     bool with_group_metadata) {
+                                                                     bool with_group_metadata,
+                                                                     int capture_request_index) {
     ModelConfig model_config;
     model_config.max_seq_len                  = 8192;
     model_config.attn_config.tokens_per_block = 1;
@@ -1546,10 +1550,25 @@ void FIFOSchedulerTest::verifySchedulersPartitionMixedExecutionModes(int first_m
     const auto make_stream = [&](const std::vector<int>& ids,
                                  const ResourceContext&  resource_context,
                                  int                     max_new_tokens) {
-        if (with_group_metadata) {
-            return makeForceBatchStream(ids, 800, 2, model_config, runtime_config, resource_context, max_new_tokens);
+        auto stream_context = resource_context;
+        if (capture_request_index >= 0) {
+            stream_context.role_type = RoleType::PDFUSION;
         }
-        return makeStream(ids, model_config, runtime_config, resource_context, max_new_tokens);
+        auto stream = with_group_metadata ?
+                          makeForceBatchStream(ids, 800, 2, model_config, runtime_config, stream_context, max_new_tokens) :
+                          makeStream(ids, model_config, runtime_config, stream_context, max_new_tokens);
+        if (capture_request_index >= 0) {
+            stream->generateInput()->request_id = ids.front();
+            stream->generateConfig()->reuse_cache = false;
+            const bool required = (ids.front() == 1 ? 0 : 1) == capture_request_index;
+            stream->generateConfig()->capture_hidden_states = required;
+            if (required) {
+                stream->setHiddenStateCaptureReservation(
+                    std::make_shared<HiddenStateCaptureReservation>([]() noexcept {}));
+            }
+            EXPECT_TRUE(stream->isHiddenStateCaptureCandidate());
+        }
+        return stream;
     };
 
     // PDFusion uses the base admission path; FIFO has its own single-pass admission path.
@@ -1569,14 +1588,16 @@ void FIFOSchedulerTest::verifySchedulersPartitionMixedExecutionModes(int first_m
         ASSERT_NO_FATAL_FAILURE(verifyOnlyScheduledStream(scheduler, first));
         ASSERT_EQ(scheduler.waiting_streams_.size(), 1);
         EXPECT_EQ(scheduler.waiting_streams_.front().get(), second.get());
+        if (capture_request_index >= 0) {
+            EXPECT_TRUE((capture_request_index == 0 ? first : second)->hasHiddenStateCaptureReservation());
+        }
 
         first->reportEvent(StreamEvents::GenerateDone);
         ASSERT_NO_FATAL_FAILURE(verifyOnlyScheduledStream(scheduler, second));
     }
 
-    // Exercise FIFOScheduler's ordinary single-pass admission path. With no
-    // running/new stream, the first admitted request sets has_execution_mode
-    // from false to true and the opposite mode must remain queued.
+    // With no running/new stream, the first admitted request defines the batch
+    // compatibility and an incompatible peer must remain queued.
     {
         SCOPED_TRACE("FIFO");
         auto cache_manager = std::make_shared<KVCacheManager>(
@@ -1593,6 +1614,9 @@ void FIFOSchedulerTest::verifySchedulersPartitionMixedExecutionModes(int first_m
         ASSERT_NO_FATAL_FAILURE(verifyOnlyScheduledStream(scheduler, first));
         EXPECT_EQ(scheduler.waitingStreamsSize(), 1);
         EXPECT_FALSE(second->hasEvent(StreamEvents::CanRun));
+        if (capture_request_index >= 0) {
+            EXPECT_TRUE((capture_request_index == 0 ? first : second)->hasHiddenStateCaptureReservation());
+        }
 
         first->reportEvent(StreamEvents::GenerateDone);
         ASSERT_NO_FATAL_FAILURE(verifyOnlyScheduledStream(scheduler, second));
@@ -1613,6 +1637,9 @@ void FIFOSchedulerTest::verifySchedulersPartitionMixedExecutionModes(int first_m
         ASSERT_NO_FATAL_FAILURE(verifyOnlyScheduledStream(scheduler, first));
         ASSERT_EQ(scheduler.waiting_streams_.size(), 1);
         EXPECT_EQ(scheduler.waiting_streams_.front().get(), second.get());
+        if (capture_request_index >= 0) {
+            EXPECT_TRUE((capture_request_index == 0 ? first : second)->hasHiddenStateCaptureReservation());
+        }
 
         first->reportEvent(StreamEvents::GenerateDone);
         ASSERT_NO_FATAL_FAILURE(verifyOnlyScheduledStream(scheduler, second));
@@ -1627,12 +1654,252 @@ TEST_F(FIFOSchedulerTest, testSchedulersPartitionPositiveZeroInQueueOrder) {
     verifySchedulersPartitionMixedExecutionModes(/*first_max_new_tokens=*/1, /*second_max_new_tokens=*/0);
 }
 
+TEST_F(FIFOSchedulerTest, testSchedulersPartitionMixedCaptureAdmissionInQueueOrder) {
+    for (int capture_request_index : {0, 1}) {
+        SCOPED_TRACE(capture_request_index);
+        ASSERT_NO_FATAL_FAILURE(verifySchedulersPartitionMixedExecutionModes(
+            0, 0, /*with_group_metadata=*/false, capture_request_index));
+    }
+}
+
+TEST_F(FIFOSchedulerTest, testCancelledAnchorPreservesSelectedCaptureMode) {
+    auto resources = makeReadinessResources(32, 1, RoleType::PDFUSION, 3);
+    ASSERT_TRUE(resources.cache_manager->init());
+    auto              pd_sep_config = makePDFusionPDSepConfig();
+    ParallelismConfig parallelism_config;
+    FIFOScheduler scheduler(resources.runtime_config, resources.model_config, pd_sep_config, parallelism_config,
+                            resources.cache_manager);
+    const auto make_prefill = [&](int id) {
+        auto stream = makeStream({id}, resources.model_config, resources.runtime_config,
+                                 resources.resource_context, /*max_new_tokens=*/0);
+        stream->generateInput()->request_id = id;
+        stream->generateConfig()->reuse_cache = false;
+        return stream;
+    };
+    auto a = make_prefill(1);
+    auto b = make_prefill(2);
+    auto c = make_prefill(3);
+    for (const auto& stream : {a, b}) {
+        stream->setHiddenStateCaptureReservation(std::make_shared<HiddenStateCaptureReservation>([]() noexcept {}));
+    }
+    ASSERT_FALSE(c->hasHiddenStateCaptureReservation());
+    ASSERT_TRUE(enqueueIndividually(scheduler, {a, b}));
+    auto selected = scheduler.schedule();
+    ASSERT_TRUE(selected.ok());
+    ASSERT_EQ(selected->streams, (std::list<GenerateStreamPtr>{a, b}));
+
+    // Place RPC cancellation between selecting B and comparing the next candidate against the anchor.
+    a->reportError(ErrorCode::CANCELLED, "RPC cancelled");
+    ASSERT_TRUE(a->hasError());
+    ASSERT_TRUE(a->hasHiddenStateCaptureReservation());
+    EXPECT_TRUE(areStreamsBatchCompatible(a, b));
+    EXPECT_FALSE(areStreamsBatchCompatible(a, c));
+    EXPECT_FALSE(areStreamsBatchCompatible(b, c));
+
+    ASSERT_TRUE(scheduler.enqueue(c).ok());
+    b->reportEvent(StreamEvents::GenerateDone);
+    ASSERT_NO_FATAL_FAILURE(verifyOnlyScheduledStream(scheduler, c));
+}
+
+TEST_F(FIFOSchedulerTest, testCancelledQueuedCapturesReturnBehindGroupBarrier) {
+    auto [cache_manager, resource_context, model_config, runtime_config] =
+        makeReadinessResources(32, 1, RoleType::PDFUSION, 4);
+    ASSERT_TRUE(cache_manager->init());
+    int cancellations = 0;
+    FIFOScheduler scheduler(runtime_config, model_config, makePDFusionPDSepConfig(), ParallelismConfig{}, cache_manager);
+    const auto make_capture = [&](int id) {
+        auto stream = makeStream({id}, model_config, runtime_config, resource_context, /*max_new_tokens=*/0);
+        stream->generateInput()->request_id = id;
+        stream->generateConfig()->reuse_cache = false;
+        stream->setHiddenStateCaptureReservation(
+            std::make_shared<HiddenStateCaptureReservation>([&cancellations]() noexcept { ++cancellations; }));
+        return stream;
+    };
+    auto running = makeStream({1}, model_config, runtime_config, resource_context, /*max_new_tokens=*/16);
+    ASSERT_TRUE(scheduler.enqueue(running).ok());
+    ASSERT_NO_FATAL_FAILURE(verifyOnlyScheduledStream(scheduler, running));
+
+    auto first_group = make_capture(2);
+    auto cancelled_member = make_capture(3);
+    auto live_member = make_capture(4);
+    auto cancelled_single = make_capture(5);
+    auto expired_single = make_capture(7);
+    auto compatible_single = makeStream({6}, model_config, runtime_config, resource_context);
+    ASSERT_EQ(scheduler.enqueueGroup({first_group}).first, std::vector<bool>({true}));
+    ASSERT_EQ(scheduler.enqueueGroup({cancelled_member, live_member}).first, std::vector<bool>({true, true}));
+    ASSERT_TRUE(enqueueIndividually(scheduler, {cancelled_single, compatible_single, expired_single}));
+    ASSERT_NO_FATAL_FAILURE(verifyOnlyScheduledStream(scheduler, running));
+    ASSERT_EQ(cancellations, 0);
+
+    cancelled_single->reportError(ErrorCode::CANCELLED, "RPC cancelled");
+    cancelled_member->reportError(ErrorCode::CANCELLED, "RPC cancelled");
+    expireStream(expired_single);
+    ASSERT_FALSE(expired_single->hasError());
+    ASSERT_NO_FATAL_FAILURE(verifyOnlyScheduledStream(scheduler, running));
+    EXPECT_EQ(cancellations, 3);
+    EXPECT_EQ(expired_single->statusInfo().code(), ErrorCode::GENERATE_TIMEOUT);
+    EXPECT_FALSE(expired_single->hasHiddenStateCaptureReservation());
+    EXPECT_FALSE(cancelled_single->hasHiddenStateCaptureReservation());
+    EXPECT_FALSE(cancelled_member->hasHiddenStateCaptureReservation());
+    EXPECT_TRUE(first_group->hasHiddenStateCaptureReservation());
+    EXPECT_TRUE(live_member->hasHiddenStateCaptureReservation());
+    EXPECT_FALSE(compatible_single->hasEvent(StreamEvents::CanRun));
+    EXPECT_FALSE(live_member->hasEvent(StreamEvents::CanRun));
+
+    running->reportEvent(StreamEvents::GenerateDone);
+    ASSERT_NO_FATAL_FAILURE(verifyOnlyScheduledStream(scheduler, first_group));
+    EXPECT_EQ(cancellations, 3);
+}
+
 TEST_F(FIFOSchedulerTest, testSchedulersPartitionSameGroupMetadataInQueueOrder) {
     for (int first_max_new_tokens : {0, 1}) {
         SCOPED_TRACE(first_max_new_tokens);
         // Ordinary enqueue carries metadata, not the atomic enqueueGroup contract.
         ASSERT_NO_FATAL_FAILURE(verifySchedulersPartitionMixedExecutionModes(
             first_max_new_tokens, 1 - first_max_new_tokens, /*with_group_metadata=*/true));
+    }
+}
+
+TEST_F(FIFOSchedulerTest, testCaptureAdmissionGroupsPreserveOrderAndBatching) {
+    struct TestCase {
+        const char* name;
+        bool ratio;
+        bool fallback_batch;
+        bool fallback_inited;
+        bool admit_bare;
+    };
+    const TestCase cases[] = {
+        {"group", false, false, false, false},
+        {"batch-limit-fallback", false, true, false, false},
+        {"inited-limit-fallback", false, false, true, false},
+        {"admitted-bare-fifo", false, false, false, true},
+        {"admitted-bare-ratio", true, false, false, true},
+    };
+    for (const auto& test_case : cases) {
+        for (bool strict_first : {true, false}) {
+            SCOPED_TRACE(test_case.name);
+            SCOPED_TRACE(strict_first);
+            auto resources = makeReadinessResources(32, 1, RoleType::PDFUSION, 4);
+            ASSERT_TRUE(resources.cache_manager->init());
+            if (test_case.fallback_batch) {
+                resources.runtime_config.max_generate_batch_size = 2;
+            }
+            if (test_case.fallback_inited) {
+                resources.runtime_config.fifo_scheduler_config.max_inited_kv_cache_streams = 2;
+            }
+            auto pd_sep_config = makePDFusionPDSepConfig();
+            ParallelismConfig parallelism_config;
+            std::unique_ptr<SchedulerBase> scheduler;
+            if (test_case.ratio) {
+                scheduler = std::make_unique<PDFusionRatioScheduler>(resources.runtime_config, resources.model_config,
+                    pd_sep_config, parallelism_config, resources.cache_manager);
+            } else {
+                scheduler = std::make_unique<FIFOScheduler>(resources.runtime_config, resources.model_config,
+                    pd_sep_config, parallelism_config, resources.cache_manager);
+            }
+            const auto make_stream = [&](int id, bool strict) {
+                auto stream = makeStream({id, id + 1}, resources.model_config, resources.runtime_config,
+                                         resources.resource_context, /*max_new_tokens=*/0);
+                stream->generateInput()->request_id = id;
+                stream->generateConfig()->reuse_cache = false;
+                stream->generateConfig()->capture_hidden_states = strict;
+                if (strict || test_case.admit_bare) {
+                    stream->setHiddenStateCaptureReservation(
+                        std::make_shared<HiddenStateCaptureReservation>([]() noexcept {}));
+                }
+                EXPECT_TRUE(stream->isHiddenStateCaptureCandidate());
+                return stream;
+            };
+            std::vector<GenerateStreamPtr> streams{make_stream(1, strict_first), make_stream(3, !strict_first)};
+            const bool fallback = test_case.fallback_batch || test_case.fallback_inited;
+            if (fallback) {
+                // A three-item group falls back at limit two, which still permits a bad mixed batch.
+                streams.push_back(make_stream(5, strict_first));
+            }
+            const auto enqueued = scheduler->enqueueGroup(streams);
+            EXPECT_EQ(enqueued.first, std::vector<bool>(streams.size(), true));
+            EXPECT_EQ(enqueued.second, streams);
+            auto first = scheduler->schedule();
+            ASSERT_TRUE(first.ok());
+            std::vector<GenerateStreamPtr> expected{streams[0]};
+            if (test_case.admit_bare) {
+                expected.push_back(streams[1]);
+            } else if (fallback) {
+                expected.push_back(streams[2]);
+            }
+            EXPECT_EQ(std::vector<GenerateStreamPtr>(first->streams.begin(), first->streams.end()), expected);
+            for (const auto& stream : streams) {
+                EXPECT_FALSE(stream->hasError());
+                EXPECT_EQ(stream->hasHiddenStateCaptureReservation(),
+                          stream->generateConfig()->capture_hidden_states || test_case.admit_bare);
+            }
+            for (const auto& stream : first->streams) {
+                stream->reportEvent(StreamEvents::GenerateDone);
+            }
+            if (!test_case.admit_bare) {
+                ASSERT_NO_FATAL_FAILURE(verifyOnlyScheduledStream(*scheduler, streams[1]));
+            }
+        }
+    }
+}
+
+TEST_F(FIFOSchedulerTest, testCaptureAdmissionSurvivesAsyncReadmission) {
+    for (int path : {0, 1, 2}) {  // FIFO ordinary, ratio ordinary, FIFO explicit group.
+        for (bool strict_first : {true, false}) {
+            SCOPED_TRACE(path);
+            SCOPED_TRACE(strict_first);
+            auto resources = makeReadinessResources(32, 1, RoleType::PDFUSION, 4);
+            ASSERT_TRUE(resources.cache_manager->init());
+            auto context = setupPendingCacheLoad(resources.cache_manager);
+            auto pd_sep_config = makePDFusionPDSepConfig();
+            ParallelismConfig parallelism_config;
+            std::unique_ptr<SchedulerBase> scheduler;
+            if (path == 1) {
+                scheduler = std::make_unique<PDFusionRatioScheduler>(resources.runtime_config, resources.model_config,
+                    pd_sep_config, parallelism_config, resources.cache_manager);
+            } else {
+                scheduler = std::make_unique<FIFOScheduler>(resources.runtime_config, resources.model_config,
+                    pd_sep_config, parallelism_config, resources.cache_manager);
+            }
+            auto loaded = makeStream({1, 2}, resources.model_config, resources.runtime_config,
+                                     resources.resource_context, /*max_new_tokens=*/0);
+            auto peer = makeStream({3, 4}, resources.model_config, resources.runtime_config,
+                                   resources.resource_context, /*max_new_tokens=*/0);
+            loaded->generateInput()->request_id = 1;
+            peer->generateInput()->request_id = 2;
+            auto required = strict_first ? loaded : peer;
+            required->generateConfig()->reuse_cache = false;
+            required->generateConfig()->capture_hidden_states = true;
+            required->setHiddenStateCaptureReservation(
+                std::make_shared<HiddenStateCaptureReservation>([]() noexcept {}));
+            ASSERT_TRUE(required->isHiddenStateCaptureCandidate());
+            if (path == 2) {
+                ASSERT_EQ(scheduler->enqueueGroup({loaded, peer}).first, (std::vector<bool>{true, true}));
+            } else {
+                ASSERT_TRUE(scheduler->enqueue(loaded).ok());
+            }
+            auto pending = scheduler->schedule();
+            ASSERT_TRUE(pending.ok());
+            ASSERT_TRUE(pending->streams.empty());
+            ASSERT_EQ(loaded->getStatus(), StreamState::LOADING_CACHE);
+            ASSERT_GT(loaded->curBlocksNum(), 0);
+            if (path != 2) {
+                ASSERT_TRUE(scheduler->enqueue(peer).ok());
+            }
+            ASSERT_TRUE(context->settle(true));
+            // Ordinary completion rejoins WAITING behind the peer; a prepared
+            // explicit group retains its boundary ahead of its residual peer.
+            auto first = path == 2 ? loaded : peer;
+            auto second = path == 2 ? peer : loaded;
+            ASSERT_NO_FATAL_FAILURE(verifyOnlyScheduledStream(*scheduler, first));
+            EXPECT_TRUE(required->hasHiddenStateCaptureReservation());
+            EXPECT_FALSE(loaded->hasError());
+            EXPECT_FALSE(peer->hasError());
+            EXPECT_EQ(loaded->streamCacheResource().allocator_load_context_, nullptr);
+            first->reportEvent(StreamEvents::GenerateDone);
+            ASSERT_NO_FATAL_FAILURE(verifyOnlyScheduledStream(*scheduler, second));
+            EXPECT_FALSE(second->hasError());
+        }
     }
 }
 
@@ -1747,6 +2014,372 @@ TEST_F(FIFOSchedulerTest, testBatchDecodeSchedulerKeepsHomogeneousPositiveTailBe
     EXPECT_TRUE(gated_tail->streams.empty());
     EXPECT_EQ(scheduler.onflightStreams(), 1);
     EXPECT_FALSE(tail->hasEvent(StreamEvents::CanRun));
+}
+
+void FIFOSchedulerTest::verifyReservedCapturesRetryAfterRunnablePeersFinish(int batch_size) {
+    auto [cache_manager, resource_context, model_config, runtime_config] =
+        makeBatchDecodeResources(makeMhaCacheConfig(1, 6, 1, 4, 1, rtp_llm::DataType::TYPE_FP16));
+    ASSERT_TRUE(cache_manager->init());
+    ASSERT_EQ(cache_manager->freeBlocksNum(), 5);
+    resource_context.role_type = RoleType::PREFILL;
+    runtime_config.batch_decode_scheduler_config.batch_decode_scheduler_batch_size = batch_size;
+    // A synchronous allocation would expire immediately; single-step retries must survive it.
+    BatchDecodeScheduler scheduler(runtime_config, cache_manager, nullptr, 0, std::chrono::milliseconds(0));
+
+    auto first = makeStream({1, 2, 3, 4}, model_config, runtime_config, resource_context, /*max_new_tokens=*/0);
+    auto retry = makeStream({5, 6, 7}, model_config, runtime_config, resource_context, /*max_new_tokens=*/0);
+    auto small = makeStream({8}, model_config, runtime_config, resource_context, /*max_new_tokens=*/0);
+    for (const auto& stream : {first, retry, small}) {
+        stream->generateConfig()->capture_hidden_states = true;
+        stream->generateConfig()->reuse_cache = false;
+        stream->setHiddenStateCaptureReservation(std::make_shared<HiddenStateCaptureReservation>([]() noexcept {}));
+        ASSERT_TRUE(scheduler.enqueue(stream).ok());
+    }
+    // Bound the old in-lock retry loop: it would time out this stream instead of returning it to WAITING.
+    retry->resetBeginTime(autil::TimeUtility::currentTimeInMicroSeconds());
+    retry->generateConfig()->timeout_ms = 2000;
+    auto batch = scheduler.schedule();
+    ASSERT_TRUE(batch.ok());
+    ASSERT_EQ(batch->streams.size(), 2);
+    EXPECT_EQ(batch->streams.front(), first);
+    EXPECT_EQ(batch->streams.back(), small);
+    ASSERT_EQ(retry->getStatus(), StreamState::WAITING);
+    EXPECT_FALSE(retry->hasEvent(StreamEvents::CanRun));
+    EXPECT_TRUE(retry->hasHiddenStateCaptureReservation());
+    EXPECT_EQ(retry->curBlocksNum(), 0);
+    EXPECT_GT(retry->streamCacheResource().mallocFailedTimes(), 0);
+    EXPECT_EQ(cache_manager->freeBlocksNum(), 0);
+
+    first->reportEvent(StreamEvents::GenerateDone);
+    small->reportEvent(StreamEvents::GenerateDone);
+    ASSERT_NO_FATAL_FAILURE(verifyOnlyScheduledStream(scheduler, retry));
+    EXPECT_EQ(retry->getStatus(), StreamState::RUNNING);
+    EXPECT_TRUE(retry->canExecuteReservedHiddenStateCapture());
+}
+
+TEST_F(FIFOSchedulerTest, testUnderfilledReservedCapturesRetryAfterRunnablePeersFinish) {
+    verifyReservedCapturesRetryAfterRunnablePeersFinish(/*batch_size=*/4);
+}
+
+TEST_F(FIFOSchedulerTest, testFullReservedCapturesRetryAfterRunnablePeersFinish) {
+    verifyReservedCapturesRetryAfterRunnablePeersFinish(/*batch_size=*/3);
+}
+
+TEST_F(FIFOSchedulerTest, testBatchDecodeMixedCaptureTailRetriesOnlyOriginalBarePeers) {
+    auto resources = makeBatchDecodeResources(makeMhaCacheConfig(1, 4, 1, 4, 1, rtp_llm::DataType::TYPE_FP16));
+    ASSERT_TRUE(resources.cache_manager->init());
+    ASSERT_EQ(resources.cache_manager->freeBlocksNum(), 3);
+    resources.resource_context.role_type = RoleType::PREFILL;
+    resources.runtime_config.batch_decode_scheduler_config.batch_decode_scheduler_batch_size = 3;
+    BatchDecodeScheduler scheduler(resources.runtime_config, resources.cache_manager, nullptr);
+    const auto prefill = [&](const std::vector<int>& ids) {
+        auto stream = makeStream(ids, resources.model_config, resources.runtime_config, resources.resource_context,
+                                 /*max_new_tokens=*/0);
+        stream->generateInput()->request_id = ids.front();
+        return stream;
+    };
+    auto capture = prefill({1});
+    capture->generateConfig()->capture_hidden_states = true;
+    capture->generateConfig()->reuse_cache = false;
+    capture->setHiddenStateCaptureReservation(std::make_shared<HiddenStateCaptureReservation>([]() noexcept {}));
+    ASSERT_TRUE(capture->canExecuteReservedHiddenStateCapture());
+    auto first = prefill({2, 3});
+    auto retry = prefill({4, 5});
+    auto extra = prefill({6});
+    auto late  = prefill({7});
+    // B=3: main would take capture, first and retry, but not the fourth zero.
+    ASSERT_TRUE(enqueueIndividually(scheduler, {capture, first, retry, extra}));
+    ASSERT_NO_FATAL_FAILURE(verifyOnlyScheduledStream(scheduler, capture));
+    capture->reportEvent(StreamEvents::GenerateDone);
+
+    // Bound the regression: a synchronous retry cannot obtain two blocks until first executes.
+    retry->generateConfig()->timeout_ms = 10000;
+    retry->resetBeginTime(autil::TimeUtility::currentTimeInMicroSeconds());
+    ASSERT_NO_FATAL_FAILURE(verifyOnlyScheduledStream(scheduler, first));
+    ASSERT_EQ(retry->getStatus(), StreamState::WAITING);
+    ASSERT_GT(retry->streamCacheResource().mallocFailedTimes(), 0);
+    ASSERT_FALSE(retry->hasError());
+
+    // Late fits alongside retry, but was not in the capture-split batch.
+    ASSERT_TRUE(scheduler.enqueue(late).ok());
+    first->reportEvent(StreamEvents::GenerateDone);
+    ASSERT_NO_FATAL_FAILURE(verifyOnlyScheduledStream(scheduler, retry));
+    retry->reportEvent(StreamEvents::GenerateDone);
+    auto gated = scheduler.schedule();
+    ASSERT_TRUE(gated.ok());
+    EXPECT_TRUE(gated->streams.empty());
+    EXPECT_EQ(extra->getStatus(), StreamState::WAITING);
+    EXPECT_EQ(late->getStatus(), StreamState::WAITING);
+    EXPECT_EQ(scheduler.onflightStreams(), 2);
+}
+
+TEST_F(FIFOSchedulerTest, testBatchDecodeZeroCaptureSplitDoesNotDrainThirdPositive) {
+    auto [cache_manager, resource_context, model_config, runtime_config] =
+        makeBatchDecodeResources(makeMhaCacheConfig(1, 16, 1, 4, 1, rtp_llm::DataType::TYPE_FP16));
+    ASSERT_TRUE(cache_manager->init());
+    resource_context.role_type = RoleType::PDFUSION;
+    BatchDecodeScheduler scheduler(runtime_config, cache_manager, nullptr);
+    auto capture = makeStream({1}, model_config, runtime_config, resource_context, /*max_new_tokens=*/0);
+    capture->generateConfig()->capture_hidden_states = true;
+    capture->generateConfig()->reuse_cache = false;
+    capture->setHiddenStateCaptureReservation(std::make_shared<HiddenStateCaptureReservation>([]() noexcept {}));
+    ASSERT_TRUE(capture->canExecuteReservedHiddenStateCapture());
+    auto zero = makeStream({2}, model_config, runtime_config, resource_context, /*max_new_tokens=*/0);
+    auto p1 = makeStream({3}, model_config, runtime_config, resource_context);
+    auto p2 = makeStream({4}, model_config, runtime_config, resource_context);
+    auto p3 = makeStream({5}, model_config, runtime_config, resource_context);
+    ASSERT_TRUE(enqueueIndividually(scheduler, {capture, zero, p1, p2, p3}));
+
+    ASSERT_NO_FATAL_FAILURE(verifyOnlyScheduledStream(scheduler, capture));
+    capture->reportEvent(StreamEvents::GenerateDone);
+    ASSERT_NO_FATAL_FAILURE(verifyOnlyScheduledStream(scheduler, zero));
+    zero->reportEvent(StreamEvents::GenerateDone);
+    auto positives = scheduler.schedule();
+    ASSERT_TRUE(positives.ok());
+    ASSERT_EQ(positives->streams, (std::list<GenerateStreamPtr>{p1, p2}));
+    p1->reportEvent(StreamEvents::GenerateDone);
+    p2->reportEvent(StreamEvents::GenerateDone);
+    auto gated = scheduler.schedule();
+    ASSERT_TRUE(gated.ok());
+    EXPECT_TRUE(gated->streams.empty());
+    EXPECT_EQ(p3->getStatus(), StreamState::WAITING);
+    EXPECT_EQ(scheduler.onflightStreams(), 1);
+}
+
+TEST_F(FIFOSchedulerTest, testBatchDecodePositiveCaptureWaitsForPendingPeerLoad) {
+    for (bool decode : {true, false}) {
+        SCOPED_TRACE(decode ? "batch decode" : "batch prefill");
+        auto [cache_manager, resource_context, model_config, runtime_config] =
+            makeReadinessResources(16, 1, RoleType::PDFUSION, 2);
+        ASSERT_TRUE(cache_manager->init());
+        runtime_config.batch_decode_scheduler_config.batch_decode_scheduler_batch_size = 2;
+        int cancellations = 0;
+        BatchDecodeScheduler scheduler(runtime_config, cache_manager, nullptr);
+        if (!decode) {
+            scheduler.updateSchedulerInfo(R"({"batch_size":2,"mode":"prefill"})");
+        }
+        auto context = setupPendingCacheLoad(cache_manager);
+        auto loading = makeStream({1, 2}, model_config, runtime_config, resource_context);
+        auto ready   = makeStream({3, 4}, model_config, runtime_config, resource_context);
+        loading->generateInput()->request_id = 1;
+        ready->generateInput()->request_id = 2;
+        ready->generateConfig()->capture_hidden_states = true;
+        ready->generateConfig()->reuse_cache = false;
+        ready->setHiddenStateCaptureReservation(
+            std::make_shared<HiddenStateCaptureReservation>([&cancellations]() noexcept { ++cancellations; }));
+        ASSERT_TRUE(ready->canExecuteReservedHiddenStateCapture());
+        ASSERT_FALSE(ready->generateConfig()->requiresHiddenStateCaptureAdmission());
+        ASSERT_TRUE(enqueueIndividually(scheduler, {loading, ready}));
+        loading->generateConfig()->timeout_ms = 10000;
+        loading->resetBeginTime(autil::TimeUtility::currentTimeInMicroSeconds());
+        auto dispatch = std::async(std::launch::async, [&scheduler] { return scheduler.schedule(); });
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+        while (loading->getStatus() != StreamState::LOADING_CACHE && std::chrono::steady_clock::now() < deadline) {
+            if (dispatch.wait_for(std::chrono::milliseconds(1)) == std::future_status::ready) {
+                break;
+            }
+        }
+        EXPECT_EQ(loading->getStatus(), StreamState::LOADING_CACHE);
+        EXPECT_EQ(dispatch.wait_for(std::chrono::milliseconds(20)), std::future_status::timeout);
+        EXPECT_TRUE(ready->hasHiddenStateCaptureReservation());
+        EXPECT_TRUE(context->settle(true));
+        auto batch = dispatch.get();
+        ASSERT_TRUE(batch.ok());
+        EXPECT_EQ(batch->streams, (std::list<GenerateStreamPtr>{loading, ready}));
+        EXPECT_EQ(ready->isContextStream(), !decode);
+        EXPECT_EQ(ready->hasHiddenStateCaptureReservation(), !decode);
+        EXPECT_EQ(cancellations, decode ? 1 : 0);
+        ready->cancelHiddenStateCapture();
+        EXPECT_EQ(cancellations, 1);
+    }
+}
+
+TEST_F(FIFOSchedulerTest, testBatchDecodeAllocationTimeoutCancelsPositiveCapture) {
+    auto [cache_manager, resource_context, model_config, runtime_config] =
+        makeBatchDecodeResources(makeMhaCacheConfig(1, 6, 1, 4, 1, rtp_llm::DataType::TYPE_FP16));
+    ASSERT_TRUE(cache_manager->init());
+    resource_context.role_type = RoleType::PREFILL;
+    int cancellations = 0;
+    BatchDecodeScheduler scheduler(runtime_config, cache_manager, nullptr, 0, std::chrono::milliseconds(0));
+    scheduler.updateSchedulerInfo(R"({"batch_size":2,"mode":"prefill"})");
+    auto holder = makeStream({1, 2, 3}, model_config, runtime_config, resource_context, /*max_new_tokens=*/0);
+    holder->reportEvent(StreamEvents::CanRun);
+    ASSERT_EQ(holder->moveToNext(), StreamState::RUNNING);
+    ASSERT_EQ(cache_manager->freeBlocksNum(), 2);
+    auto ready = makeStream({7}, model_config, runtime_config, resource_context, /*max_new_tokens=*/1);
+    auto blocked = makeStream({4, 5, 6}, model_config, runtime_config, resource_context, /*max_new_tokens=*/1);
+    blocked->generateConfig()->capture_hidden_states = true;
+    blocked->generateConfig()->reuse_cache = false;
+    blocked->setHiddenStateCaptureReservation(
+        std::make_shared<HiddenStateCaptureReservation>([&cancellations, ready]() noexcept {
+            ++cancellations;
+            EXPECT_EQ(ready->getStatus(), StreamState::WAITING);
+            EXPECT_FALSE(ready->hasEvent(StreamEvents::CanRun));
+        }));
+    ASSERT_TRUE(blocked->canExecuteReservedHiddenStateCapture());
+    ASSERT_TRUE(enqueueIndividually(scheduler, {blocked, ready}));
+    blocked->generateConfig()->timeout_ms = 2000;  // Watchdog for an unbounded allocation loop.
+    blocked->resetBeginTime(autil::TimeUtility::currentTimeInMicroSeconds());
+
+    ASSERT_NO_FATAL_FAILURE(verifyOnlyScheduledStream(scheduler, ready));
+    EXPECT_EQ(blocked->getStatus(), StreamState::FINISHED);
+    EXPECT_EQ(blocked->statusInfo().code(), ErrorCode::MALLOC_FAILED);
+    EXPECT_NE(blocked->statusInfo().ToString().find("0 ms wait limit"), std::string::npos);
+    EXPECT_FALSE(blocked->hasHiddenStateCaptureReservation());
+    EXPECT_EQ(cancellations, 1);
+    EXPECT_EQ(scheduler.onflightStreams(), 1);
+}
+
+TEST_F(FIFOSchedulerTest, testBatchDecodeLoneReservedCaptureBacksOffWhileExternalKVIsHeld) {
+    auto [cache_manager, resource_context, model_config, runtime_config] =
+        makeBatchDecodeResources(makeMhaCacheConfig(1, 4, 1, 4, 1, rtp_llm::DataType::TYPE_FP16));
+    ASSERT_TRUE(cache_manager->init());
+    resource_context.role_type = RoleType::PREFILL;
+    BatchDecodeScheduler scheduler(runtime_config, cache_manager, nullptr);
+    auto holder = makeStream({1, 2, 3}, model_config, runtime_config, resource_context, /*max_new_tokens=*/0);
+    holder->reportEvent(StreamEvents::CanRun);
+    ASSERT_EQ(holder->moveToNext(), StreamState::RUNNING);
+    ASSERT_EQ(cache_manager->freeBlocksNum(), 0);
+
+    auto retry = makeStream({4}, model_config, runtime_config, resource_context, /*max_new_tokens=*/0);
+    retry->generateConfig()->reuse_cache = false;
+    retry->generateConfig()->capture_hidden_states = true;
+    retry->setHiddenStateCaptureReservation(std::make_shared<HiddenStateCaptureReservation>([]() noexcept {}));
+    ASSERT_TRUE(scheduler.enqueue(retry).ok());
+    retry->generateConfig()->timeout_ms = 10000;  // Watchdog only; cancellation ends the request.
+    retry->resetBeginTime(autil::TimeUtility::currentTimeInMicroSeconds());
+    // Drive the empty executor loop without sleeping. Bound work, not the latency of any call.
+    constexpr int max_attempts = 128;
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(50);
+    int dispatches = 0;
+    do {
+        auto result = scheduler.schedule();
+        ASSERT_TRUE(result.ok());
+        ASSERT_TRUE(result->streams.empty());
+        ASSERT_LE(++dispatches, max_attempts) << "busy empty dispatches";
+    } while (std::chrono::steady_clock::now() < deadline);
+    ASSERT_GT(retry->streamCacheResource().mallocFailedTimes(), 0);
+    EXPECT_LE(retry->streamCacheResource().mallocFailedTimes(), max_attempts);
+    ASSERT_EQ(retry->getStatus(), StreamState::WAITING);
+    ASSERT_TRUE(retry->hasHiddenStateCaptureReservation());
+
+    retry->reportError(ErrorCode::CANCELLED, "cancelled during KV retry");
+    auto cancelled = scheduler.schedule();
+    ASSERT_TRUE(cancelled.ok());
+    EXPECT_TRUE(cancelled->streams.empty());
+    EXPECT_EQ(retry->getStatus(), StreamState::FINISHED);
+    EXPECT_EQ(retry->statusInfo().code(), ErrorCode::CANCELLED);
+    EXPECT_FALSE(retry->hasHiddenStateCaptureReservation());
+    EXPECT_EQ(scheduler.onflightStreams(), 0);
+    holder->reportEvent(StreamEvents::GenerateDone);
+    ASSERT_EQ(holder->moveToNext(), StreamState::FINISHED);
+    EXPECT_EQ(cache_manager->freeBlocksNum(), 3);
+}
+
+TEST_F(FIFOSchedulerTest, testBatchDecodeReservedCaptureExpiresWhileExternalKVIsHeld) {
+    using namespace std::chrono_literals;
+    for (int batch_size : {2, 1}) {
+        SCOPED_TRACE(batch_size == 2 ? "strict_only" : "full batch continuation");
+        auto [cache_manager, resource_context, model_config, runtime_config] =
+            makeBatchDecodeResources(makeMhaCacheConfig(1, 4, 1, 4, 1, rtp_llm::DataType::TYPE_FP16));
+        ASSERT_TRUE(cache_manager->init());
+        resource_context.role_type = RoleType::PREFILL;
+        runtime_config.batch_decode_scheduler_config.batch_decode_scheduler_batch_size = batch_size;
+        auto now = std::chrono::steady_clock::time_point{};
+        int quota_returns = 0;
+        BatchDecodeScheduler scheduler(runtime_config, cache_manager, nullptr, 0, 20ms, [&now] { return now; });
+        auto holder = makeStream({1}, model_config, runtime_config, resource_context, /*max_new_tokens=*/0);
+        holder->reportEvent(StreamEvents::CanRun);
+        ASSERT_EQ(holder->moveToNext(), StreamState::RUNNING);
+        ASSERT_EQ(cache_manager->freeBlocksNum(), 2);
+
+        auto blocked = makeStream({2, 3, 4}, model_config, runtime_config, resource_context, /*max_new_tokens=*/0);
+        blocked->generateConfig()->capture_hidden_states = true;
+        blocked->generateConfig()->reuse_cache = false;
+        blocked->setHiddenStateCaptureReservation(
+            std::make_shared<HiddenStateCaptureReservation>([&quota_returns]() noexcept { ++quota_returns; }));
+        ASSERT_TRUE(blocked->canExecuteReservedHiddenStateCapture());
+        ASSERT_LE(blocked->getTimeoutMs(), 0);
+        ASSERT_TRUE(scheduler.enqueue(blocked).ok());
+        const auto start = now;
+        for (auto elapsed : {0ms, 19ms}) {
+            now = start + elapsed;
+            auto pending = scheduler.schedule();
+            ASSERT_TRUE(pending.ok());
+            ASSERT_TRUE(pending->streams.empty());
+            ASSERT_EQ(blocked->getStatus(), StreamState::WAITING);
+            ASSERT_GT(blocked->streamCacheResource().mallocFailedTimes(), 0);
+            ASSERT_TRUE(blocked->hasHiddenStateCaptureReservation());
+            EXPECT_EQ(quota_returns, 0);
+        }
+        now = start + 20ms;
+        auto expired = scheduler.schedule();
+        ASSERT_TRUE(expired.ok());
+        ASSERT_TRUE(expired->streams.empty());
+        ASSERT_EQ(blocked->getStatus(), StreamState::FINISHED);
+        EXPECT_EQ(blocked->statusInfo().code(), ErrorCode::MALLOC_FAILED);
+        EXPECT_FALSE(blocked->hasHiddenStateCaptureReservation());
+        EXPECT_EQ(quota_returns, 1);
+        EXPECT_EQ(scheduler.onflightStreams(), 0);
+
+        // A fresh batch fits without releasing the holder or retrying the expired capture.
+        std::list<GenerateStreamPtr> peers;
+        for (int i = 0; i < batch_size; ++i) {
+            peers.push_back(makeStream({5 + i}, model_config, runtime_config, resource_context, /*max_new_tokens=*/0));
+            ASSERT_TRUE(scheduler.enqueue(peers.back()).ok());
+        }
+        auto next = scheduler.schedule();
+        ASSERT_TRUE(next.ok());
+        EXPECT_EQ(next->streams, peers);
+        EXPECT_EQ(quota_returns, 1);
+    }
+}
+
+TEST_F(FIFOSchedulerTest, testBatchDecodeSchedulerReleasesCancelledReservationBelowBatchSize) {
+    auto [cache_manager, resource_context, model_config, runtime_config] =
+        makeBatchDecodeResources(makeMhaCacheConfig(1, 16, 1, 4, 1, rtp_llm::DataType::TYPE_FP16));
+    ASSERT_TRUE(cache_manager->init());
+    resource_context.role_type = RoleType::PDFUSION;
+    runtime_config.batch_decode_scheduler_config.batch_decode_scheduler_batch_size = 3;
+    BatchDecodeScheduler scheduler(runtime_config, cache_manager, nullptr);
+    auto stream = makeStream({1, 2}, model_config, runtime_config, resource_context, /*max_new_tokens=*/0);
+    auto peer = makeStream({3, 4}, model_config, runtime_config, resource_context, /*max_new_tokens=*/0);
+    stream->setHiddenStateCaptureReservation(std::make_shared<HiddenStateCaptureReservation>([]() noexcept {}));
+    ASSERT_TRUE(stream->canExecuteReservedHiddenStateCapture());
+    ASSERT_FALSE(stream->generateConfig()->requiresHiddenStateCaptureAdmission());
+
+    std::promise<void> started;
+    auto dispatch = std::async(std::launch::async, [&] {
+        started.set_value();
+        return scheduler.schedule();
+    });
+    started.get_future().wait();
+    const auto pending_window = std::chrono::milliseconds(100);
+    EXPECT_EQ(dispatch.wait_for(pending_window), std::future_status::timeout);
+    EXPECT_EQ(scheduler.enqueueGroup({peer, stream}).first, (std::vector<bool>{true, true}));
+    EXPECT_EQ(dispatch.wait_for(pending_window), std::future_status::timeout);
+    EXPECT_EQ(stream->getStatus(), StreamState::WAITING);
+    EXPECT_TRUE(stream->hasHiddenStateCaptureReservation());
+    stream->reportError(ErrorCode::CANCELLED, "cancelled during underfilled batch wait");
+
+    const auto status = dispatch.wait_for(std::chrono::seconds(3));
+    if (status != std::future_status::ready) {
+        // Cleanup only: cancellation made the predicate true even if schedule is still in its long wait.
+        std::lock_guard<std::mutex> lock(scheduler.lock_);
+        scheduler.cond_.notify_all();
+    }
+    auto result = dispatch.get();
+    ASSERT_EQ(status, std::future_status::ready) << "reservation was not reaped without another enqueue";
+    ASSERT_TRUE(result.ok());
+    EXPECT_TRUE(result->streams.empty());
+    EXPECT_EQ(stream->getStatus(), StreamState::FINISHED);
+    EXPECT_EQ(stream->statusInfo().code(), ErrorCode::CANCELLED);
+    EXPECT_FALSE(stream->hasEvent(StreamEvents::CanRun));
+    EXPECT_FALSE(stream->hasHiddenStateCaptureReservation());
+    EXPECT_EQ(scheduler.onflightStreams(), 1);
+    EXPECT_EQ(peer->getStatus(), StreamState::WAITING);
+    EXPECT_FALSE(peer->hasEvent(StreamEvents::CanRun));
+    EXPECT_FALSE(peer->hasError());
 }
 
 TEST_F(FIFOSchedulerTest, testBatchDecodeSchedulerKeepsBatchGateAfterReapingError) {
@@ -1902,6 +2535,30 @@ TEST_F(FIFOSchedulerTest, testBatchDecodeSchedulerDrainsMixedTailAfterReapingErr
         EXPECT_FALSE(scheduler.draining_mixed_modes_);
         EXPECT_EQ(scheduler.onflightStreams(), 1);
     }
+}
+
+TEST_F(FIFOSchedulerTest, testBatchDecodeSchedulerRestoresBatchGateAfterEntireMixedTailIsReaped) {
+    auto [cache_manager, resource_context, model_config, runtime_config] =
+        makeBatchDecodeResources(test::makeSimpleMhaCacheConfig(1, 16, 1, rtp_llm::DataType::TYPE_FP16, 1, 4));
+    ASSERT_TRUE(cache_manager->init());
+    BatchDecodeScheduler scheduler(runtime_config, cache_manager, nullptr);
+    auto prefill = makeStream({1, 2}, model_config, runtime_config, resource_context, /*max_new_tokens=*/0);
+    auto tail    = makeStream({3, 4}, model_config, runtime_config, resource_context, /*max_new_tokens=*/1);
+    ASSERT_TRUE(enqueueIndividually(scheduler, {prefill, tail}));
+    ASSERT_NO_FATAL_FAILURE(verifyOnlyScheduledStream(scheduler, prefill));
+    ASSERT_TRUE(scheduler.draining_mixed_modes_);
+
+    prefill->reportEvent(StreamEvents::GenerateDone);
+    tail->reportError(ErrorCode::CANCELLED, "cancelled before tail admission");
+    auto reaped = scheduler.schedule();
+    ASSERT_TRUE(reaped.ok());
+    ASSERT_TRUE(reaped->streams.empty());
+    ASSERT_EQ(tail->getStatus(), StreamState::FINISHED);
+
+    // Enqueue before another schedule() can observe the empty queue.
+    auto late = makeStream({5, 6}, model_config, runtime_config, resource_context, /*max_new_tokens=*/1);
+    ASSERT_TRUE(scheduler.enqueue(late).ok());
+    EXPECT_FALSE(scheduler.waitingBatchReady());
 }
 
 TEST_F(FIFOSchedulerTest, testBatchDecodeSchedulerSchedulesNonzeroBatch) {

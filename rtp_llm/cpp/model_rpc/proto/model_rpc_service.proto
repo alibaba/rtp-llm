@@ -171,6 +171,12 @@ message GenerateConfigPB {
     google.protobuf.Int32Value logits_index = 78;
     uint32 top_logprobs = 79;
     bool return_logprobs = 80;
+    // Prompt capture requires reuse_cache=false. Effective max_new_tokens == 0 with capture=true
+    // requires admission and this forward's synchronous capture success;
+    // transient admission rejection precedes any reservation/publication.
+    // Success does not guarantee publication completion; consumers must confirm ready.
+    // Bare zero-token prefill and positive-token capture remain best-effort (fail-open).
+    bool capture_hidden_states = 81;
 }
 
 message MMPreprocessConfigPB {
@@ -459,6 +465,8 @@ enum ErrorCodePB {
     // Stable protobuf wire IDs; internal ErrorCode uses explicit conversion.
     INVALID_PARAMS = 26;
     EXECUTION_EXCEPTION = 27;
+    // Transient strict capture admission rejection; no reservation/publication is possible.
+    HIDDEN_STATE_CAPTURE_BACKPRESSURE = 28;
     EXCEEDS_KV_CACHE_MAX_LEN = 607;
     MM_LONG_PROMPT_ERROR = 901;
     MM_WRONG_FORMAT_ERROR = 902;

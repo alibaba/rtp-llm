@@ -11,6 +11,9 @@
 #include "rtp_llm/cpp/model_rpc/PDRequestUtils.h"
 #include "rtp_llm/cpp/normal_engine/NormalGenerateStream.h"
 #include "rtp_llm/cpp/model_rpc/RpcErrorCode.h"
+#include "autil/Scope.h"
+#include "rtp_llm/cpp/model_rpc/QueryConverter.h"
+#include "rtp_llm/cpp/normal_engine/test/MockEngine.h"
 
 namespace rtp_llm {
 
@@ -356,6 +359,139 @@ bool waitForRegistryEvent(Predicate predicate) {
         std::this_thread::sleep_for(std::chrono::milliseconds(2));
     }
     return predicate();
+}
+
+class PrefillBatchCaptureTest: public DeviceTestBase {
+protected:
+    class OneSlotModel: public MockModel {
+    public:
+        using MockModel::MockModel;
+        HiddenStateCaptureAdmissionResult tryReserveHiddenStateCapture(int64_t id, int64_t) override {
+            requests.push_back(id);
+            if (auto held = slot.lock(); held && held->active()) {
+                return {ErrorCode::HIDDEN_STATE_CAPTURE_BACKPRESSURE, "capture slot occupied"};
+            }
+            auto token = std::make_shared<HiddenStateCaptureReservation>([]() noexcept {});
+            slot = token;
+            return HiddenStateCaptureAdmissionResult{std::move(token)};
+        }
+        std::weak_ptr<HiddenStateCaptureReservation> slot;
+        std::vector<int64_t> requests;
+    };
+
+    class CountingEngine: public NormalEngine {
+    public:
+        using NormalEngine::NormalEngine;
+        GenerateStreamPtr makeStream(const std::shared_ptr<GenerateInput>& input) override {
+            made.push_back(input->request_id);
+            return NormalEngine::makeStream(input);
+        }
+        std::pair<std::vector<bool>, std::vector<GenerateStreamPtr>>
+        enqueueMultiple(const std::vector<std::shared_ptr<GenerateInput>>& inputs) override {
+            auto result = NormalEngine::enqueueMultiple(inputs);
+            for (const auto& stream : result.second) {
+                batch_streams.emplace_back(stream);
+            }
+            return result;
+        }
+        std::vector<int64_t> made;
+        std::vector<std::weak_ptr<GenerateStream>> batch_streams;
+    };
+
+    void SetUp() override {
+        DeviceTestBase::SetUp();
+        CustomConfig config;
+        config.role_type = RoleType::PREFILL;
+        ModelConfig model_config;
+        RuntimeConfig runtime_config;
+        KVCacheConfig cache_config;
+        auto params = createEngineInitParams(config, model_config, runtime_config, cache_config);
+        params.model_config_.hidden_state_capture_layer_ids = {0};
+        auto previous = std::move(NormalExecutor::test_model_factory);
+        autil::ScopeGuard restore([&] { NormalExecutor::test_model_factory = std::move(previous); });
+        NormalExecutor::test_model_factory = [&](const GptModelInitParams&) {
+            auto model = std::make_unique<OneSlotModel>(model_config.vocab_size);
+            model_ = model.get();
+            return model;
+        };
+        engine_ = std::make_shared<CountingEngine>(params, nullptr);
+        ASSERT_NE(model_, nullptr);
+        server_.engine_ = engine_;
+        server_.maga_init_params_.pd_sep_config.role_type = RoleType::PREFILL;
+        server_.meta_ = std::make_shared<RpcServerRuntimeMeta>();
+        server_.cancel_registry_ = std::make_shared<PDCancelRegistry>(server_.meta_);
+    }
+
+    static GenerateInputPB capture(int64_t id) {
+        GenerateInputPB input;
+        input.set_request_id(id);
+        input.add_token_ids(1);
+        auto* config = input.mutable_generate_config();
+        config->set_prefill_only(true);
+        config->set_capture_hidden_states(true);
+        config->set_reuse_cache(false);
+        config->set_num_beams(1);
+        config->set_num_return_sequences(1);
+        config->set_timeout_ms(10000);
+        return input;
+    }
+
+    OneSlotModel* model_ = nullptr;
+    std::shared_ptr<CountingEngine> engine_;
+    PrefillRpcServer server_;
+};
+
+TEST_F(PrefillBatchCaptureTest, BatchGenerateCallPreservesBackpressureAndReleasesRejectedStream) {
+    BatchGenerateInputPB batch;
+    *batch.add_inputs() = capture(301);
+    *batch.add_inputs() = capture(302);
+    BatchGenerateOutputsPB response;
+    ASSERT_TRUE(server_.BatchGenerateCall(nullptr, &batch, &response).ok());
+    EXPECT_EQ(model_->requests, (std::vector<int64_t>{301, 302}));
+    ASSERT_EQ(response.results_size(), 2);
+    ASSERT_TRUE(response.results(0).has_final_output());
+    const auto& output = response.results(0).final_output();
+    EXPECT_EQ(output.request_id(), 301);
+    ASSERT_EQ(output.flatten_output().finished_size(), 1);
+    EXPECT_TRUE(output.flatten_output().finished(0));
+    ASSERT_TRUE(response.results(1).has_error_info());
+    EXPECT_EQ(response.results(1).error_info().error_code(), ErrorCodePB::HIDDEN_STATE_CAPTURE_BACKPRESSURE);
+    EXPECT_EQ(response.results(1).error_info().error_message(), "capture slot occupied");
+
+    ASSERT_EQ(engine_->batch_streams.size(), 2u);
+    const auto& registry = server_.cancel_registry_;
+    const auto handle = registry->find(302);
+    ASSERT_NE(handle, nullptr);
+    EXPECT_TRUE(handle->local_done.load());
+    EXPECT_TRUE(waitForRegistryEvent([&] {
+        std::lock_guard<std::mutex> lock(registry->mutex_);
+        return !handle->stream && engine_->batch_streams[1].expired();
+    }));
+}
+
+TEST_F(PrefillBatchCaptureTest, BatchGenerateCallHonorsEarlyCancelWithoutCreatingStreamOrRequestingQuota) {
+    CancelRequestPB cancel;
+    cancel.set_request_id(302);
+    cancel.set_cancel_error_code(static_cast<int64_t>(ErrorCode::CANCELLED));
+    cancel.set_cancel_error_message("cancel arrived before batch");
+    CancelResponsePB ack;
+    ASSERT_TRUE(server_.Cancel(nullptr, &cancel, &ack).ok());
+    ASSERT_EQ(ack.status(), CANCEL_STATUS_TOMBSTONED);
+
+    const auto holder = capture(301);
+    const auto stream = engine_->makeStream(QueryConverter::transQuery(&holder));
+    ASSERT_TRUE(stream->hasHiddenStateCaptureReservation());
+    BatchGenerateInputPB batch;
+    *batch.add_inputs() = capture(302);
+    BatchGenerateOutputsPB response;
+    ASSERT_TRUE(server_.BatchGenerateCall(nullptr, &batch, &response).ok());
+    ASSERT_EQ(response.results_size(), 1);
+    ASSERT_TRUE(response.results(0).has_error_info());
+    EXPECT_EQ(response.results(0).error_info().error_code(), ErrorCodePB::CANCELLED);
+    EXPECT_EQ(response.results(0).error_info().error_message(), "cancel arrived before batch");
+    EXPECT_EQ(engine_->made, (std::vector<int64_t>{301}));
+    EXPECT_TRUE(engine_->batch_streams.empty());
+    EXPECT_EQ(model_->requests, (std::vector<int64_t>{301}));
 }
 }  // namespace
 

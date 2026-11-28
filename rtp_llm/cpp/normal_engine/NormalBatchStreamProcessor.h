@@ -23,7 +23,8 @@ public:
                                const ProfilingDebugLoggingConfig& profiling_debug_logging_config,
                                const CacheConfig&                 cache_config,
                                bool                               warm_up,
-                               int                                async_worker_count = 0);
+                               int                                async_worker_count = 0,
+                               kmonitor::MetricsReporterPtr        capture_metrics_reporter = nullptr);
     virtual ~NormalBatchStreamProcessor() = default;
 
     StreamGroups::NormalDeviceStates prepareDeviceStateInputs(const std::list<GenerateStreamPtr>& streams) const {

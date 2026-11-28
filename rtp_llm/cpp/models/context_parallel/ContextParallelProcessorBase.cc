@@ -529,20 +529,34 @@ void IContextParallelProcessor::handleInputs(GptModelInputs&                    
 
 size_t IContextParallelProcessor::handleOutputs(torch::Tensor&                            hidden_states,
                                                 const GptModelInputs&                     inputs,
-                                                const torch_ext::PyContextParallelParams& cp_params) {
+                                                const torch_ext::PyContextParallelParams& cp_params,
+                                                LocalOutputStage                          stage) {
 #if !USING_CUDA
     RTP_LLM_FAIL("Context parallel not supported on ROCm");
     return 0;
 #else
     int prefill_cp_size = parallelism_config_.tp_size;
-
-    auto all_hidden_t =
-        torch::empty({hidden_states.size(0) * prefill_cp_size, hidden_states.size(1)}, hidden_states.options());
-    execAllGather({{all_hidden_t}, ParallelMode::TP, {hidden_states}, false});
-
-    int64_t num_valid_tokens = all_hidden_t.size(0);
-    hidden_states            = all_hidden_t;
-    return num_valid_tokens;
+    auto allocate = [&] {
+        return torch::empty({hidden_states.size(0) * prefill_cp_size, hidden_states.size(1)}, hidden_states.options());
+    };
+    if (stage) {
+        std::vector<torch::Tensor> recv;
+        AllGatherParams params{recv, ParallelMode::TP, {}, false};
+        if (!stage([&] {
+                recv.emplace_back(allocate());
+                params.send_buffers.emplace_back(hidden_states.contiguous());
+            })) {
+            hidden_states = torch::Tensor();
+            return 0;
+        }
+        execAllGather(params);  // Communication failures are never capture-only drops.
+        hidden_states = std::move(recv.front());
+    } else {
+        auto all_hidden_t = allocate();
+        execAllGather({{all_hidden_t}, ParallelMode::TP, {hidden_states}, false});
+        hidden_states = std::move(all_hidden_t);
+    }
+    return hidden_states.size(0);
 #endif
 }
 

@@ -1,3 +1,4 @@
+import json
 import unittest
 
 from rtp_llm.config.model_config import ModelConfig, apply_layer_num_override
@@ -5,6 +6,14 @@ from rtp_llm.ops import HiddenStateCaptureDtype
 
 
 class ModelConfigOverrideTest(unittest.TestCase):
+    CAPTURE_LIMIT_DEFAULTS = {
+        "hidden_state_capture_max_inflight_samples": 64,
+        "hidden_state_capture_max_inflight_bytes": 1073741824,
+        "hidden_state_capture_max_inflight_tokens": 131072,
+        "hidden_state_capture_max_pending_batches": 8,
+        "hidden_state_capture_poll_interval_ms": 1000,
+    }
+
     def setUp(self) -> None:
         self.config = ModelConfig()
         self.config.num_layers = 8
@@ -14,6 +23,45 @@ class ModelConfigOverrideTest(unittest.TestCase):
         self.assertEqual(
             self.config.hidden_state_capture_dtype, HiddenStateCaptureDtype.BF16
         )
+
+        for name, default in self.CAPTURE_LIMIT_DEFAULTS.items():
+            with self.subTest(name=name):
+                self.assertEqual(getattr(self.config, name), default)
+                self.assertIn(f"{name}: {default}\n", self.config.to_string())
+
+    def test_capture_limit_overrides_round_trip_and_do_not_enable_capture(self) -> None:
+        for name in self.CAPTURE_LIMIT_DEFAULTS:
+            for value in (1, 17, 2**63 - 1):
+                with self.subTest(name=name, value=value):
+                    self.config.apply_override_args(json.dumps({name: value}))
+                    self.assertEqual(getattr(self.config, name), value)
+                    self.assertIn(f"{name}: {value}\n", self.config.to_string())
+                    self.assertEqual(self.config.hidden_state_capture_layer_ids, [])
+
+    def test_invalid_capture_limits_do_not_partially_update_capture_fields(
+        self,
+    ) -> None:
+        self.config.hidden_state_capture_layer_ids = [7]
+        for name in self.CAPTURE_LIMIT_DEFAULTS:
+            for value in (0, -1, True, False, 1.5, "1", None, [], {}, 2**63):
+                with self.subTest(name=name, value=value):
+                    overrides = dict.fromkeys(self.CAPTURE_LIMIT_DEFAULTS, 17)
+                    overrides.update(
+                        hidden_state_capture_layer_ids=[6, 1, 4],
+                        hidden_state_capture_dtype="fp8_e4m3",
+                    )
+                    overrides[name] = value
+                    with self.assertRaisesRegex(
+                        ValueError, f"^{name} must be a positive int64 integer$"
+                    ):
+                        self.config.apply_override_args(json.dumps(overrides))
+                    self.assertEqual(self.config.hidden_state_capture_layer_ids, [7])
+                    self.assertEqual(
+                        self.config.hidden_state_capture_dtype,
+                        HiddenStateCaptureDtype.BF16,
+                    )
+                    for limit_name, default in self.CAPTURE_LIMIT_DEFAULTS.items():
+                        self.assertEqual(getattr(self.config, limit_name), default)
 
     def test_capture_override_preserves_layer_order(self) -> None:
         self.config.apply_override_args(

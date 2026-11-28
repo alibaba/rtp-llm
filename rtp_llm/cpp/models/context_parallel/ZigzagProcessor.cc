@@ -131,25 +131,28 @@ torch::Tensor ZigZagProcessor::generateQKVPaddingMask(const torch::Tensor& prefi
 
 size_t ZigZagProcessor::handleOutputs(torch::Tensor&                            hidden_states,
                                       const GptModelInputs&                     inputs,
-                                      const torch_ext::PyContextParallelParams& cp_params) {
-#if !USING_CUDA
-    RTP_LLM_FAIL("Context parallel not supported on ROCm");
-    return 0;
-#else
-    int prefill_cp_size = parallelism_config_.tp_size;
-
-    auto all_hidden_t =
-        torch::empty({hidden_states.size(0) * prefill_cp_size, hidden_states.size(1)}, hidden_states.options());
-    execAllGather({{all_hidden_t}, ParallelMode::TP, {hidden_states}, false});
-
-    auto          prefill_qkv_restore_indice = cp_params.prefill_qkv_restore_indice;
-    auto          prefill_qkv_padding_mask   = cp_params.prefill_qkv_padding_mask;
-    torch::Tensor valid_indices              = torch::nonzero(prefill_qkv_padding_mask).squeeze(-1);
-    int64_t       num_valid_tokens           = valid_indices.size(0);
-    torch::Tensor combined_indices           = prefill_qkv_restore_indice.index_select(0, valid_indices);
-    hidden_states                            = all_hidden_t.index_select(0, combined_indices);
-    return num_valid_tokens;
-#endif
+                                      const torch_ext::PyContextParallelParams& cp_params,
+                                      LocalOutputStage                          stage) {
+    auto gathered = hidden_states;
+    IContextParallelProcessor::handleOutputs(gathered, inputs, cp_params, stage);
+    if (!gathered.defined()) {
+        return 0;
+    }
+    const auto restore = [&] {
+        // Release the full receive buffer before the post-restore vote, even on OOM.
+        auto all_hidden       = std::move(gathered);
+        auto valid_indices    = torch::nonzero(cp_params.prefill_qkv_padding_mask).squeeze(-1);
+        auto combined_indices = cp_params.prefill_qkv_restore_indice.index_select(0, valid_indices);
+        hidden_states         = all_hidden.index_select(0, combined_indices);
+    };
+    if (stage) {
+        if (!stage(restore)) {
+            return 0;
+        }
+    } else {
+        restore();
+    }
+    return hidden_states.size(0);
 }
 
 torch::Tensor ZigZagProcessor::computeLocalLastHidden(const torch::Tensor&                      hidden_states,

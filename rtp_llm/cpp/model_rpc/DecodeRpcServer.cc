@@ -586,6 +586,10 @@ grpc::Status DecodeRpcServer::BatchGenerateCall(grpc::ServerContext*        cont
             ctx->setStream(stream);
             output_contexts[response_indices.at(item.request_id())] = ctx.get();
             guard.contexts.push_back(std::move(ctx));
+            if (stream->hasError()) {
+                fail_item(item.request_id(), stream->statusInfo());
+                continue;
+            }
             if (!item.enqueued_by_master()) {
                 auto* input_pb = slot->add_requests()->mutable_input();
                 input_pb->Swap(&prefill_input);
@@ -1008,6 +1012,14 @@ grpc::Status DecodeRpcServer::GenerateStreamCall(grpc::ServerContext*           
         stream->setPrefillPipelineLayout(std::move(peer_info->pipeline_layout));
         generate_context.setStream(stream);
         cancel_registry_->attach(cancel_handle, stream);
+        if (stream->hasError()) {
+            generate_context.recordRpcFailure(stream->statusInfo());
+            if (!request->enqueued_by_master()) {
+                cancel_registry_->finishDownstream(cancel_handle);
+                prefill_cancel_guard.completed = true;
+            }
+            return generate_context.error_status;
+        }
 
         std::shared_ptr<PrefillServerCallerContext> prefill_caller_ctx;
         PrefillContextGuard                         prefill_context_guard;

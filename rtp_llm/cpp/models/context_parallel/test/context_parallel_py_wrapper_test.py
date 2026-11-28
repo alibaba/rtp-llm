@@ -45,6 +45,51 @@ class TestContextParallelProcessor(unittest.TestCase):
             49012,
         ]
 
+    def test_capture_restore_collective_order(self):
+        if torch.version.cuda is None:
+            self.skipTest("prefill CP requires CUDA")
+
+        def unexpected(*args):
+            self.fail("unexpected collective")
+
+        def gather(recv, mode, send, inplace):
+            self.assertEqual((mode, inplace), (0, False))  # TP, explicit send
+            calls.append("gather")
+            if fail_gather:
+                raise RuntimeError("injected collective failure")
+            recv[0].copy_(torch.cat([send[0], send[0] + 10]))
+
+        cp_test.register_comm_ops(unexpected, unexpected, gather, unexpected, unexpected)
+        self.addCleanup(cp_test.clear_comm_ops)
+        args = torch.tensor([[3]]), torch.tensor([1, 0]), torch.tensor([1, 1])
+        fail_gather = False
+        for votes, expected_calls, expected_rows in (
+            (None, ["gather"], 2),  # ordinary CP: no votes
+            ([False], ["vote"], 0),
+            ([True, False], ["vote", "gather", "vote"], 0),
+            ([True, True], ["vote", "gather", "vote"], 2),
+        ):
+            with self.subTest(votes=votes):
+                calls = []
+                decisions = iter(votes or ())
+
+                def vote():
+                    calls.append("vote")
+                    return next(decisions)
+
+                rows, hidden = cp_test.capture_restore(*args, vote if votes is not None else None)
+                self.assertEqual(calls, expected_calls)
+                self.assertEqual(rows, expected_rows)
+                if rows:
+                    self.assertEqual(hidden.tolist(), [[13], [3]])
+
+        fail_gather = True
+        calls = []
+        decisions = iter([True])
+        with self.assertRaisesRegex(RuntimeError, "injected collective failure"):
+            cp_test.capture_restore(*args, vote)
+        self.assertEqual(calls, ["vote", "gather"])
+
     def test_basic_split(self):
         """Test basic load balance split with simple parameters"""
         # Test with 16 tokens, 2 ranks, chunk size 8

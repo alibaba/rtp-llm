@@ -223,6 +223,11 @@ std::string ModelConfig::to_string() const {
     }
     oss << "]\n"
         << "hidden_state_capture_dtype: " << hiddenStateCaptureDtypeToString(hidden_state_capture_dtype) << "\n"
+        << "hidden_state_capture_max_inflight_samples: " << hidden_state_capture_max_inflight_samples << "\n"
+        << "hidden_state_capture_max_inflight_bytes: " << hidden_state_capture_max_inflight_bytes << "\n"
+        << "hidden_state_capture_max_inflight_tokens: " << hidden_state_capture_max_inflight_tokens << "\n"
+        << "hidden_state_capture_max_pending_batches: " << hidden_state_capture_max_pending_batches << "\n"
+        << "hidden_state_capture_poll_interval_ms: " << hidden_state_capture_poll_interval_ms << "\n"
         << "attn_config: {\n"
         << attn_config.DebugAttentionConfigStr() << "\n}\n"
         << "deepseek_rope_mscale: " << deepseek_rope_mscale << "\n"

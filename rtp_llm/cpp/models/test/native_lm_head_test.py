@@ -218,6 +218,22 @@ def _tp_worker(rank, rendezvous):
     def unexpected(*_):
         raise AssertionError("LM head requested an unexpected collective")
 
+    constructing = False
+    startup_allreduce_calls = 0
+
+    def startup_allreduce(buffer, op, mode, dest):
+        nonlocal startup_allreduce_calls
+        if not constructing:
+            unexpected()
+        assert startup_allreduce_calls == 0, "duplicate startup allreduce"
+        assert buffer.device.type == "cpu" and buffer.dtype == torch.int64
+        assert buffer.shape == (2,)
+        assert op == 2 and mode == 0 and dest is None  # MAX, TP
+        # Both fixture ranks disable capture and have no initialization error.
+        assert buffer.tolist() == [0, 0]
+        startup_allreduce_calls += 1
+        return buffer
+
     def gather(recv, mode, send, inplace):
         assert mode == 0 and len(recv) == 1 and not send
         dest = recv[0].view(-1)
@@ -225,7 +241,7 @@ def _tp_worker(rank, rendezvous):
         local = dest[rank * size : (rank + 1) * size].clone()
         dist.all_gather_into_tensor(dest, local)
 
-    _extension.register_comm_ops(unexpected, unexpected, gather, unexpected, unexpected)
+    _extension.register_comm_ops(unexpected, startup_allreduce, gather, unexpected, unexpected)
     try:
         for dtype in (
             torch.bfloat16,
@@ -238,9 +254,15 @@ def _tp_worker(rank, rendezvous):
             shards = [torch.randn(32, 32, device="cuda").to(dtype) for _ in range(2)]
             scales = [torch.tensor([value], device="cuda") for value in (0.02, 0.07)]
             scale = scales[rank] if dtype == torch.float8_e4m3fn else None
-            runner = make_head(
-                shards[rank], scale, tp_size=2, tp_rank=rank, vocab_size=61
-            )
+            startup_allreduce_calls = 0
+            constructing = True
+            try:
+                runner = make_head(
+                    shards[rank], scale, tp_size=2, tp_rank=rank, vocab_size=61
+                )
+            finally:
+                constructing = False
+            assert startup_allreduce_calls == 1, "missing startup allreduce"
             selected = torch.tensor([5, 0, 2], dtype=torch.int64).pin_memory()
             for need_all in (False, True):
                 live = hidden if need_all else hidden[selected.cuda()]

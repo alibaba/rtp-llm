@@ -5,6 +5,7 @@
 #include "rtp_llm/cpp/engine_base/stream/GenerateStream.h"
 #include "rtp_llm/cpp/engine_base/stream/StreamGroups.h"
 #include "rtp_llm/cpp/models/ModelTypes.h"
+#include "rtp_llm/cpp/utils/ServingDeviceHealth.h"
 #include "rtp_llm/cpp/observability/ExecutionRecorder.h"
 #include "rtp_llm/cpp/config/EplbConfig.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
@@ -18,7 +19,14 @@ namespace rtp_llm {
 class Executor {
 public:
     Executor() {};
+    virtual ServingDeviceHealthPtr servingDeviceHealth() const {
+        return nullptr;
+    }
     virtual absl::Status process(const ScheduleOutput& schedule_output, int64_t schedule_time_us = 0) = 0;
+    virtual HiddenStateCaptureAdmissionResult tryReserveHiddenStateCapture(int64_t /*request_id*/,
+                                                                           int64_t /*valid_tokens*/) {
+        return {ErrorCode::EXECUTION_EXCEPTION, "executor does not support hidden-state capture"};
+    }
 
     /** Complete pending work on the engine loop thread before executor teardown. */
     virtual absl::Status finish() {
@@ -31,6 +39,21 @@ public:
     // GenerateStream), so a back-dependency on stream types would close a
     // library cycle. The executor base is the common seam of both consumers.
 protected:
+    static void reportHiddenStateCaptureError(const std::list<GenerateStreamPtr>& streams, const ErrorInfo& error) {
+        if (error.ok()) {
+            return;
+        }
+        // Attribute after model/collective work, without changing packed lanes.
+        // Explicit capture + zero-token requests require admission and this forward's synchronous capture success.
+        // Publication completion is not guaranteed; consumers must confirm ready.
+        for (const auto& stream : streams) {
+            if (stream->generateConfig()->requiresHiddenStateCaptureAdmission() && !stream->hasError()) {
+                stream->cancelHiddenStateCapture();
+                stream->reportError(error.code(), error.ToString());
+            }
+        }
+    }
+
     // Build the RecordedBatch from the gatherer-frozen CPU length snapshot.
     // Returns nullptr unless the recorder is enabled for this batch
     // (inputs.record_execution_id). Throws when the snapshot is missing or

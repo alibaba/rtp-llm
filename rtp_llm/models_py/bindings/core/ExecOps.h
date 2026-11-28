@@ -13,6 +13,7 @@
 #include <exception>
 #include <functional>
 #include <mutex>
+#include <new>
 #include <string>
 #include <vector>
 
@@ -154,6 +155,22 @@ OverallExpertStats execCreateMoeExpertStates(const ExpertStatsParams& params);
 // ===================================================================
 
 std::shared_ptr<torch::Event> runtimeCreateEvent();
+// Null only on host wrapper allocation failure; stream lookup and record still throw.
+std::shared_ptr<torch::Event> runtimeTryCreateEvent();
+
+namespace detail {
+template<typename Allocate, typename Record>
+std::shared_ptr<torch::Event> tryCreateRecordedEvent(Allocate allocate, Record record) {
+    std::shared_ptr<torch::Event> event;
+    try {
+        event = allocate();
+    } catch (const std::bad_alloc&) {
+        return nullptr;
+    }
+    record(*event);
+    return event;
+}
+}  // namespace detail
 
 // ===================================================================
 // CacheStore

@@ -383,6 +383,16 @@ void RtpLLMGrammarMetrics::report(const kmonitor::MetricsTags* tags, RtpLLMGramm
 }
 
 bool RtpLLMHiddenStateCaptureMetrics::init(kmonitor::MetricsGroupManager* manager) {
+    REGISTER_QPS_MUTABLE_METRIC(admission_rejected_qps_metric, "rtp_llm_hidden_state_capture_admission_rejected_qps");
+    REGISTER_QPS_MUTABLE_METRIC(eligibility_skip_qps_metric, "rtp_llm_hidden_state_capture_eligibility_skip_qps");
+    REGISTER_QPS_MUTABLE_METRIC(batch_cancelled_requests_metric, "rtp_llm_hidden_state_capture_batch_cancelled_requests");
+    REGISTER_QPS_MUTABLE_METRIC(skip_capacity_qps_metric, "rtp_llm_hidden_state_capture_skip_capacity_qps");
+    REGISTER_QPS_MUTABLE_METRIC(skip_config_qps_metric, "rtp_llm_hidden_state_capture_skip_config_qps");
+    REGISTER_QPS_MUTABLE_METRIC(skip_unavailable_qps_metric, "rtp_llm_hidden_state_capture_skip_unavailable_qps");
+    REGISTER_GAUGE_MUTABLE_METRIC(quota_samples_metric, "rtp_llm_hidden_state_capture_quota_samples");
+    REGISTER_GAUGE_MUTABLE_METRIC(quota_bytes_metric, "rtp_llm_hidden_state_capture_quota_bytes");
+    REGISTER_GAUGE_MUTABLE_METRIC(quota_tokens_metric, "rtp_llm_hidden_state_capture_quota_tokens");
+    REGISTER_QPS_MUTABLE_METRIC(pending_put_dropped_samples_qps_metric, "rtp_llm_hidden_state_capture_pending_put_dropped_samples_qps");
     REGISTER_QPS_MUTABLE_METRIC(batch_qps_metric, "rtp_llm_hidden_state_capture_batch_qps");
     REGISTER_QPS_MUTABLE_METRIC(publish_success_qps_metric, "rtp_llm_hidden_state_capture_publish_success_qps");
     REGISTER_QPS_MUTABLE_METRIC(failure_qps_metric, "rtp_llm_hidden_state_capture_failure_qps");
@@ -424,6 +434,33 @@ bool RtpLLMHiddenStateCaptureMetrics::init(kmonitor::MetricsGroupManager* manage
 
 void RtpLLMHiddenStateCaptureMetrics::report(const kmonitor::MetricsTags*              tags,
                                              RtpLLMHiddenStateCaptureMetricsCollector* collector) {
+    REPORT_QPS(admission_rejected_qps);
+    REPORT_QPS(eligibility_skip_qps);
+    if (collector->admission_rejected_qps || collector->eligibility_skip_qps) {
+        using Reason = RtpLLMHiddenStateCaptureMetricsCollector::SkipReason;
+        switch (collector->skip_reason) {
+            case Reason::CAPACITY:
+                RTP_REPORT_MUTABLE_QPS(skip_capacity_qps_metric);
+                break;
+            case Reason::CONFIG:
+                RTP_REPORT_MUTABLE_QPS(skip_config_qps_metric);
+                break;
+            case Reason::UNAVAILABLE:
+                RTP_REPORT_MUTABLE_QPS(skip_unavailable_qps_metric);
+                break;
+        }
+    }
+    if (collector->batch_cancelled_requests > 0) {
+        RTP_REPORT_MUTABLE_METRIC(batch_cancelled_requests_metric, collector->batch_cancelled_requests);
+    }
+    if (collector->has_quota) {
+        RTP_REPORT_MUTABLE_METRIC(quota_samples_metric, collector->quota_samples);
+        RTP_REPORT_MUTABLE_METRIC(quota_bytes_metric, collector->quota_bytes);
+        RTP_REPORT_MUTABLE_METRIC(quota_tokens_metric, collector->quota_tokens);
+    }
+    if (collector->pending_put_dropped_samples > 0) {
+        RTP_REPORT_MUTABLE_METRIC(pending_put_dropped_samples_qps_metric, collector->pending_put_dropped_samples);
+    }
     REPORT_QPS(batch_qps);
     REPORT_QPS(publish_success_qps);
     REPORT_QPS(failure_qps);

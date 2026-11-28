@@ -3,6 +3,7 @@
 #include <atomic>
 #include <cstddef>
 #include <list>
+#include <set>
 
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateTypes.h"
@@ -24,6 +25,8 @@ public:
 
     ~FIFOScheduler() override;
 
+    absl::Status enqueue(const GenerateStreamPtr& stream) override;
+
     // Group-aware enqueue: streams enter the dedicated group queues and are
     // co-scheduled at an isolated execution boundary. Falls back to individual
     // FIFO admission when the group exceeds scheduler-wide limits.
@@ -42,6 +45,7 @@ public:
 private:
     using StreamGroup      = std::list<GenerateStreamPtr>;
     using StreamGroupQueue = std::list<StreamGroup>;
+    using CaptureSet       = std::set<GenerateStreamPtr>;
 
     // Which lane owns the currently running execution batch. Group batches are
     // isolated: ordinary streams must not join a group's boundary and vice versa.
@@ -98,6 +102,7 @@ private:
     void admitWaitingStreams(std::list<GenerateStreamPtr>&       waiting_streams,
                              const std::list<GenerateStreamPtr>& already_admitted_streams);
 
+    void retireQueuedCaptures();
     void cancelGroups(StreamGroupQueue& group_queue);
     void evaluateWaitingGroupQueue();
     void evaluateLoadingCacheGroupQueue();
@@ -119,6 +124,9 @@ private:
     // residual members at the queue head.
     StreamGroupQueue waiting_group_queue_;
     StreamGroupQueue loading_cache_group_queue_;
+
+    // Protected by lock_; includes prepared group members until their group is actually dispatched.
+    CaptureSet queued_captures_;
 
     const size_t max_batch_kv_len_ = 0;
     // Soft per-round quota on the tokens that are actually recomputed (prefix-cache hits

@@ -363,14 +363,12 @@ std::unordered_set<GenerateStream*> FIFOSchedulerBase::evaluateWaitingStreams(li
     const size_t inited_kv_streams         = max_inited_kv_cache_streams_ > 0 ? countInitedKVCacheStreams() : 0;
     size_t       admitted_new_init_streams = 0;
 
-    bool has_scheduling_type     = false;
-    bool scheduling_prefill_only = false;
+    GenerateStreamPtr scheduling_stream;
     // Existing streams that will be returned this round define its execution mode. PDFusion prefill
     // rounds exclude held running decodes; new_streams_ remains relevant for state-machine promotions.
     const auto set_scheduling_type = [&](const std::list<GenerateStreamPtr>& streams) {
-        if (!has_scheduling_type && !streams.empty()) {
-            has_scheduling_type     = true;
-            scheduling_prefill_only = isPrefillOnly(streams.front());
+        if (!scheduling_stream && !streams.empty()) {
+            scheduling_stream = streams.front();
         }
     };
     if (include_running_mode) {
@@ -380,8 +378,7 @@ std::unordered_set<GenerateStream*> FIFOSchedulerBase::evaluateWaitingStreams(li
     for (auto it = waiting_streams.begin(); it != waiting_streams.end();) {
         auto& stream = *it;
 
-        const bool prefill_only = isPrefillOnly(stream);
-        if (has_scheduling_type && scheduling_prefill_only != prefill_only) {
+        if (scheduling_stream && !areStreamsBatchCompatible(scheduling_stream, stream)) {
             ++it;
             continue;
         }
@@ -401,9 +398,8 @@ std::unordered_set<GenerateStream*> FIFOSchedulerBase::evaluateWaitingStreams(li
             }
             admitted_streams.push_back(stream);
             admitted_stream_ptrs.insert(stream.get());
-            if (!has_scheduling_type) {
-                has_scheduling_type     = true;
-                scheduling_prefill_only = prefill_only;
+            if (!scheduling_stream) {
+                scheduling_stream = stream;
             }
             if (max_inited_kv_cache_streams_ > 0 && !already_inited_kv) {
                 ++admitted_new_init_streams;

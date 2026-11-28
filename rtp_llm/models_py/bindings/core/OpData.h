@@ -1,4 +1,5 @@
 #pragma once
+#include "rtp_llm/cpp/utils/ErrorCode.h"
 #include "rtp_llm/models_py/bindings/core/Types.h"
 #include "rtp_llm/cpp/models/models_weight/Weights.h"
 #include "rtp_llm/models_py/bindings/core/CommonDefines.h"
@@ -180,6 +181,9 @@ struct GptModelOutputs {
     torch::Tensor custom_output;
     // The dispatcher turns handler failures into per-stream execution errors.
     std::string custom_output_error;
+
+    // Synchronous capture-only failure from this forward, never publisher history.
+    ErrorInfo hidden_state_capture_error;
 
     /** Downstream activations from a non-last target stage. */
     std::map<std::string, torch::Tensor> pp_intermediates;

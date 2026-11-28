@@ -60,6 +60,10 @@ void FIFOScheduler::cancelExtraStreams() {
     cancelGroups(waiting_group_queue_);
     cancelGroups(loading_cache_group_queue_);
     cancelStreams(pending_decode_streams_);
+    for (const auto& stream : queued_captures_) {
+        stream->cancelHiddenStateCapture();
+    }
+    queued_captures_.clear();
 }
 
 int64_t FIFOScheduler::extraOnflightStreams() const {
@@ -78,6 +82,31 @@ void FIFOScheduler::appendExtraRunningTaskList(std::vector<EngineScheduleInfo::T
     appendTaskInfos(task_list, pending_decode_streams_);
 }
 
+absl::Status FIFOScheduler::enqueue(const GenerateStreamPtr& stream) {
+    RTP_LLM_PROFILE_FUNCTION();
+    if (!checkInputLength(stream)) {
+        return absl::InvalidArgumentError("Check input length failed");
+    }
+    auto chunk_status = checkChunkedPrefillRequest(stream);
+    if (!chunk_status.ok()) {
+        return chunk_status;
+    }
+    CaptureSet captures;
+    if (stream->hasHiddenStateCaptureReservation()) {
+        captures.insert(stream);
+    }
+    stream->recordSchedulerEnqueueTime(autil::TimeUtility::currentTimeInMicroSeconds());
+    {
+        std::lock_guard<std::mutex> lock(lock_);
+        waiting_streams_.emplace_back(stream);
+        // Commit the preallocated nodes only after queue insertion (shared_ptr ordering cannot throw).
+        queued_captures_.merge(captures);
+        schedule_trigger_ = true;
+    }
+    cond_.notify_all();
+    return absl::OkStatus();
+}
+
 std::pair<std::vector<bool>, std::vector<GenerateStreamPtr>>
 FIFOScheduler::enqueueGroup(const vector<GenerateStreamPtr>& streams) {
     RTP_LLM_PROFILE_FUNCTION();
@@ -94,11 +123,15 @@ FIFOScheduler::enqueueGroup(const vector<GenerateStreamPtr>& streams) {
     enqueue_successes.reserve(streams.size());
     std::vector<GenerateStreamPtr> valid_streams;
     valid_streams.reserve(streams.size());
+    CaptureSet captures;
     for (const auto& stream : streams) {
         const bool success = checkInputLength(stream) && checkChunkedPrefillRequest(stream).ok();
         enqueue_successes.push_back(success);
         if (success) {
             valid_streams.push_back(stream);
+            if (stream->hasHiddenStateCaptureReservation()) {
+                captures.insert(stream);
+            }
         }
     }
 
@@ -129,6 +162,7 @@ FIFOScheduler::enqueueGroup(const vector<GenerateStreamPtr>& streams) {
         } else {
             waiting_group_queue_.emplace_back(valid_streams.begin(), valid_streams.end());
         }
+        queued_captures_.merge(captures);
         schedule_trigger_ = true;
     }
     cond_.notify_all();
@@ -374,18 +408,16 @@ void FIFOScheduler::admitWaitingStreams(list<GenerateStreamPtr>&       waiting_s
     // queues. group_id/group_size on a stream in waiting_streams are status metadata;
     // they must not delay or isolate ordinary FIFO admission.
 
-    bool       has_execution_mode      = false;
-    bool       scheduling_prefill_only = false;
+    GenerateStreamPtr scheduling_stream;
     const auto capture_execution_mode  = [&](const list<GenerateStreamPtr>& streams) {
-        if (has_execution_mode) {
+        if (scheduling_stream) {
             return;
         }
         const auto it = std::find_if(streams.begin(), streams.end(), [](const auto& stream) {
             return stream && stream->getStatus() == StreamState::RUNNING;
         });
         if (it != streams.end()) {
-            has_execution_mode      = true;
-            scheduling_prefill_only = isPrefillOnly(*it);
+            scheduling_stream = *it;
         }
     };
     capture_execution_mode(running_streams_);
@@ -422,8 +454,7 @@ void FIFOScheduler::admitWaitingStreams(list<GenerateStreamPtr>&       waiting_s
             continue;
         }
 
-        const bool prefill_only = isPrefillOnly(stream);
-        if (has_execution_mode && scheduling_prefill_only != prefill_only) {
+        if (scheduling_stream && !areStreamsBatchCompatible(scheduling_stream, stream)) {
             continue;
         }
 
@@ -470,9 +501,8 @@ void FIFOScheduler::admitWaitingStreams(list<GenerateStreamPtr>&       waiting_s
         }
         if (scheduling_progress) {
             // A failed KV allocation owns no work this round and must not pin its execution mode.
-            if (!has_execution_mode) {
-                has_execution_mode      = true;
-                scheduling_prefill_only = prefill_only;
+            if (!scheduling_stream) {
+                scheduling_stream = stream;
             }
             // Admission limits cover every stream that made progress in this
             // round, including an async cache load. Otherwise multiple pending
@@ -596,6 +626,9 @@ void FIFOScheduler::evaluateWaitingGroupQueue() {
     for (auto it = group.begin(); it != group.end();) {
         auto       current           = it++;
         auto&      stream            = *current;
+        if (!admitted_streams.empty() && !areStreamsBatchCompatible(admitted_streams.front(), stream)) {
+            continue;
+        }
         const bool already_inited_kv = stream->curBlocksNum() > 0;
         if (max_inited_kv_cache_streams_ > 0 && !already_inited_kv
             && inited_kv_streams + newly_inited_kv_streams >= max_inited_kv_cache_streams_) {
@@ -672,6 +705,27 @@ bool FIFOScheduler::partitionChunkContinuations() {
         return true;
     }
     return false;
+}
+
+void FIFOScheduler::retireQueuedCaptures() {
+    if (queued_captures_.empty()) {
+        return;
+    }
+    // Once selected, even a concurrently cancelled row belongs to the forward batch.
+    for (const auto& stream : new_streams_) {
+        queued_captures_.erase(stream);
+    }
+    // A barrier can defer both admission and terminal cleanup indefinitely. Return the token
+    // without advancing the row, dismantling its group, or waiting for the last RPC reference.
+    for (auto it = queued_captures_.begin(); it != queued_captures_.end();) {
+        const auto& stream = *it;
+        if (stream->isFinished() || stream->checkTimeoutAndHasError()) {
+            stream->cancelHiddenStateCapture();
+            it = queued_captures_.erase(it);
+        } else {
+            ++it;
+        }
+    }
 }
 
 absl::StatusOr<ScheduleOutput> FIFOScheduler::schedule() {
@@ -821,6 +875,7 @@ absl::StatusOr<ScheduleOutput> FIFOScheduler::schedule() {
             }
         }
     }
+    retireQueuedCaptures();
     running_streams_.insert(running_streams_.end(), new_streams_.begin(), new_streams_.end());
     new_streams_.clear();
     updateCacheExposedWait();

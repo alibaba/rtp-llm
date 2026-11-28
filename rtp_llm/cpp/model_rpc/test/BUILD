@@ -231,6 +231,8 @@ cc_test(
         "@io_opentelemetry_cpp//exporters/memory:in_memory_span_exporter",
         "//rtp_llm/cpp/cache/connector/p2p:components",
         "//rtp_llm/cpp/cache/connector/p2p/plan:transfer_plan_glue",
+        "//rtp_llm/cpp/normal_engine/test:mock_engine",
+        "@havenask//aios/autil:scope",
     ],
     env = {
         "TEST_USING_DEVICE": "CUDA",

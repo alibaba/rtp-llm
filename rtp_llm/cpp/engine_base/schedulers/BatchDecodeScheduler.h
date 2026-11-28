@@ -6,6 +6,7 @@
 #include "rtp_llm/cpp/engine_base/stream/GenerateStream.h"
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
 #include "rtp_llm/cpp/cache/Types.h"
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <mutex>
@@ -13,6 +14,8 @@
 #include <functional>
 #include <thread>
 #include <list>
+#include <unordered_map>
+#include <unordered_set>
 #include <exception>
 #include <limits>
 
@@ -74,7 +77,7 @@ public:
                 return absl::CancelledError("scheduler stopped");
             }
             stream->recordSchedulerEnqueueTime(autil::TimeUtility::currentTimeInMicroSeconds());
-            waiting_streams_.emplace_back(stream);
+            addStreamToNewState(stream, StreamState::WAITING);
             if (waiting_streams_.size() % 16 == 0) {
                 RTP_LLM_LOG_DEBUG("BatchDecodeScheduler::enqueue: waiting_streams_.size() = %d",
                                   waiting_streams_.size());
@@ -127,7 +130,9 @@ public:
                 }
                 return {std::vector<bool>(streams.size(), false), streams};
             }
-            waiting_streams_.insert(waiting_streams_.end(), stream_enqueued.begin(), stream_enqueued.end());
+            for (const auto& stream : stream_enqueued) {
+                addStreamToNewState(stream, StreamState::WAITING);
+            }
         }
         cond_.notify_all();
         return {std::move(enqueue_successes), streams};
@@ -170,6 +175,9 @@ public:
     void addStreamToNewState(const GenerateStreamPtr& stream, StreamState new_state) {
         switch (new_state) {
             case StreamState::WAITING:
+                if (stream->hasHiddenStateCaptureReservation()) {
+                    waiting_reservations_.insert(stream);
+                }
                 waiting_streams_.push_back(stream);
                 break;
             case StreamState::LOADING_CACHE:
@@ -193,6 +201,10 @@ public:
             auto state     = (*it)->getStatus();
             auto new_state = (*it)->moveToNext();
             if (new_state != state) {
+                if (state == StreamState::LOADING_CACHE && new_state == StreamState::FINISHED) {
+                    capture_batch_.remove(*it);
+                    (*it)->cancelHiddenStateCapture();
+                }
                 addStreamToNewState(*it, new_state);
                 it = streams.erase(it);
             } else {
@@ -201,105 +213,181 @@ public:
         }
     }
 
-    void evaluateWaitingStreams() {
+    static bool isReservedStrictCapture(const GenerateStreamPtr& stream) {
+        return stream->generateConfig()->requiresHiddenStateCaptureAdmission()
+               && stream->canExecuteReservedHiddenStateCapture();
+    }
+
+    bool waitingBatchReady() const {
+        return waiting_streams_.size() >= batch_size_
+               || (!waiting_streams_.empty() && (draining_mixed_modes_ || !capture_batch_.empty()))
+               || std::any_of(waiting_reservations_.begin(), waiting_reservations_.end(), [](const auto& stream) {
+                      return stream->hasError() || isReservedStrictCapture(stream);
+                  });
+    }
+
+    std::chrono::milliseconds evaluateWaitingStreams() {
+        using namespace std::chrono_literals;
         // Finalize errored streams before selecting a batch so they cannot count toward its size.
+        const auto reap = [this](auto it) {
+            (*it)->moveToNext();
+            (*it)->cancelHiddenStateCapture();
+            allocation_retry_deadlines_.erase(it->get());
+            waiting_reservations_.erase(*it);
+            capture_batch_.remove(*it);
+            return waiting_streams_.erase(it);
+        };
         for (auto it = waiting_streams_.begin(); it != waiting_streams_.end();) {
             if (!(*it)->isFinished() && !(*it)->hasError()) {
                 ++it;
                 continue;
             }
-            (*it)->moveToNext();
-            it = waiting_streams_.erase(it);
+            it = reap(it);
         }
 
-        // The outer gate counted entries that may just have been removed. Only an already-draining
-        // mixed-mode tail may bypass the batch-size gate after errors are reaped.
-        if (waiting_streams_.size() < batch_size_ && !draining_mixed_modes_) {
-            return;
-        }
-
-        // Homogeneous queues run exactly batch_size_ streams; a mixed queue may yield a smaller
-        // mode-homogeneous batch and drain its remaining tail in subsequent rounds.
         std::list<GenerateStreamPtr> selected_streams;
-        bool                         has_execution_mode = false;
-        bool                         prefill_only       = false;
-        bool                         has_other_mode     = false;
-        for (const auto& stream : waiting_streams_) {
-            const bool stream_prefill_only = isPrefillOnly(stream);
-            if (!has_execution_mode) {
-                has_execution_mode = true;
-                prefill_only       = stream_prefill_only;
+        selected_streams.swap(capture_batch_);
+        const bool continuing = !selected_streams.empty();
+        const bool strict_only = !continuing && waiting_streams_.size() < batch_size_ && !draining_mixed_modes_;
+        bool has_other_mode = false;
+        if (!continuing) {
+            // Select main's batch before considering capture; only a native zero/positive mix opens the tail gate.
+            for (const auto& stream : waiting_streams_) {
+                if (strict_only && !isReservedStrictCapture(stream)) {
+                    continue;
+                }
+                if (!selected_streams.empty() && isPrefillOnly(selected_streams.front()) != isPrefillOnly(stream)) {
+                    has_other_mode = true;
+                } else if (selected_streams.size() < batch_size_) {
+                    selected_streams.push_back(stream);
+                }
             }
-            if (stream_prefill_only != prefill_only) {
-                has_other_mode = true;
-                continue;
-            }
-            if (selected_streams.size() < batch_size_) {
-                selected_streams.push_back(stream);
-            }
+        }
+        if (selected_streams.empty()) {
+            draining_mixed_modes_ = false;
+            return 0ms;
         }
 
-        if (auto blocked = tryReserveBatchReplaySlots(selected_streams)) {
-            if (stop_requested_.load()) {
-                return;
-            }
-            if (blocked->isFinished() || blocked->hasError()) {
-                blocked->moveToNext();
-                waiting_streams_.remove(blocked);
-            } else {
-                // The wait predicate still sees a full batch. Back off before the next scheduling pass.
-                std::this_thread::sleep_for(std::chrono::milliseconds(1));
-            }
-            return;
-        }
-        // Refresh the drain state after selecting a batch. Later homogeneous arrivals go through the batch-size gate.
-        draining_mixed_modes_ = has_other_mode;
-        for (auto& stream : selected_streams) {
-            if (stop_requested_.load()) {
-                return;
-            }
-            if (scheduler_type_ == SchedulerType::kBatchDecode && !prefill_only
-                && cache_manager_->cacheConfig().linear_replay.enabled()) {
-                // Direct Decode starts from the prompt's final token, with its
-                // already-processed prefix initialized before the first grow.
-                stream->setPerfTest(true);
-                stream->setIsContextStream(false);
-            }
-            stream->reportEvent(StreamEvents::CanRun);
-            // This synchronous benchmark scheduler cannot execute the selected streams to
-            // reclaim KV while admitting the batch. Bound consecutive allocation retries, but
-            // leave actual cache I/O to the stream/request and connector timeout policies.
-            auto allocation_deadline = now_() + allocation_wait_timeout_;
-            while (!stop_requested_.load() && stream->getStatus() != StreamState::FINISHED) {
-                const auto previous_state = stream->getStatus();
-                const auto state          = stream->moveToNext();
-                if (state == StreamState::RUNNING || state == StreamState::FINISHED) {
-                    break;
+        // Only positive-token batches consume replay slots. Capture continuations are prefill-only.
+        const bool replay_batch = !isPrefillOnly(selected_streams.front()) && cache_manager_
+                                  && cache_manager_->cacheConfig().linear_replay.enabled();
+        if (replay_batch) {
+            if (auto blocked = tryReserveBatchReplaySlots(selected_streams)) {
+                if (stop_requested_.load()) {
+                    return 0ms;
                 }
-                if (state == StreamState::LOADING_CACHE || previous_state == StreamState::LOADING_CACHE) {
-                    // Loading may return to WAITING for materialization/reallocation. Give
-                    // that allocation its own budget, independent of time spent doing I/O.
-                    allocation_deadline = now_() + allocation_wait_timeout_;
-                } else if (state == StreamState::WAITING && now_() >= allocation_deadline) {
-                    stream->reportError(ErrorCode::MALLOC_FAILED,
-                                        "BatchDecodeScheduler: KV allocation reached the "
-                                            + std::to_string(allocation_wait_timeout_.count()) + " ms wait limit");
-                    stream->moveToNext();
-                    break;
+                if (blocked->isFinished() || blocked->hasError()) {
+                    reap(std::find(waiting_streams_.begin(), waiting_streams_.end(), blocked));
+                    return 0ms;
                 }
-                std::this_thread::sleep_for(std::chrono::milliseconds(1));
-            }
-            // Keep selected streams in waiting_streams_ for finalizeStop().
-            if (stop_requested_.load()) {
-                return;
+                return 1ms;
             }
         }
+        if (!continuing) {
+            draining_mixed_modes_ = has_other_mode;
+        }
+
+        const auto reserved = [](const auto& stream) { return stream->canExecuteReservedHiddenStateCapture(); };
+        const bool single_step = continuing || strict_only
+                                 || (isPrefillOnly(selected_streams.front()) && !waiting_reservations_.empty()
+                                     && std::any_of(selected_streams.begin(), selected_streams.end(), reserved));
+        if (!single_step) {
+            for (auto& stream : selected_streams) {
+                if (stop_requested_.load()) {
+                    return 0ms;
+                }
+                if (scheduler_type_ == SchedulerType::kBatchDecode && replay_batch) {
+                    // Initialize the processed prefix before the first KV grow in direct decode.
+                    stream->setPerfTest(true);
+                    stream->setIsContextStream(false);
+                }
+                stream->reportEvent(StreamEvents::CanRun);
+                // This synchronous benchmark scheduler cannot execute the selected streams to
+                // reclaim KV while admitting the batch. Bound consecutive allocation retries, but
+                // leave actual cache I/O to the stream/request and connector timeout policies.
+                auto allocation_deadline = now_() + allocation_wait_timeout_;
+                while (!stop_requested_.load() && stream->getStatus() != StreamState::FINISHED) {
+                    const auto previous_state = stream->getStatus();
+                    const auto state          = stream->moveToNext();
+                    if (state == StreamState::RUNNING || state == StreamState::FINISHED) {
+                        break;
+                    }
+                    if (state == StreamState::LOADING_CACHE || previous_state == StreamState::LOADING_CACHE) {
+                        // Loading may return to WAITING for materialization/reallocation. Give
+                        // that allocation its own budget, independent of time spent doing I/O.
+                        allocation_deadline = now_() + allocation_wait_timeout_;
+                    } else if (state == StreamState::WAITING && now_() >= allocation_deadline) {
+                        finishAllocationTimeout(stream);
+                        break;
+                    }
+                    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                }
+                // Return terminal capture quota before another stream's cache wait or a stop exit.
+                if (stream->getStatus() == StreamState::FINISHED) {
+                    stream->cancelHiddenStateCapture();
+                }
+                // Keep selected streams in waiting_streams_ for finalizeStop().
+                if (stop_requested_.load()) {
+                    return 0ms;
+                }
+            }
+        }
+        const bool capture = single_step && reserved(selected_streams.front());
+        std::list<GenerateStreamPtr> deferred;
+        bool retry = false;
         for (const auto& stream : selected_streams) {
-            waiting_streams_.remove(stream);
-            if (stream->getStatus() == StreamState::RUNNING) {
-                running_streams_.push_back(stream);
+            auto state = stream->getStatus();
+            if (single_step) {
+                if (stop_requested_.load()) {
+                    return 0ms;
+                }
+                if (strict_only && !isReservedStrictCapture(stream)) {
+                    continue;
+                }
+                if (reserved(stream) != capture) {
+                    deferred.push_back(stream);
+                    continue;
+                }
+                if (continuing && state == StreamState::LOADING_CACHE) {
+                    capture_batch_.push_back(stream);
+                    continue;
+                }
+                const auto previous_state = state;
+                const auto failed_before  = stream->streamCacheResource().mallocFailedTimes();
+                stream->reportEvent(StreamEvents::CanRun);
+                state = stream->moveToNext();
+                if (previous_state == StreamState::WAITING && state == StreamState::WAITING
+                    && stream->streamCacheResource().mallocFailedTimes() > failed_before) {
+                    // Always yield the first miss so runnable peers can release KV, even with a zero budget.
+                    const auto now = now_();
+                    const auto [it, first_miss] =
+                        allocation_retry_deadlines_.try_emplace(stream.get(), now + allocation_wait_timeout_);
+                    if (!first_miss && now >= it->second && !stop_requested_.load()) {
+                        state = finishAllocationTimeout(stream);
+                    }
+                }
+                if (state == StreamState::WAITING || state == StreamState::LOADING_CACHE) {
+                    stream->clearCanRun();
+                    retry = true;
+                    if (!strict_only) {
+                        capture_batch_.push_back(stream);
+                    }
+                }
+                if (state == StreamState::WAITING) {
+                    continue;
+                }
+                if (state == StreamState::FINISHED) {
+                    stream->cancelHiddenStateCapture();
+                }
             }
+            allocation_retry_deadlines_.erase(stream.get());
+            waiting_streams_.remove(stream);
+            waiting_reservations_.erase(stream);
+            addStreamToNewState(stream, state);
         }
+        // Finish this partition (including any KV-owning loads) before starting its incompatible peers.
+        capture_batch_.splice(capture_batch_.end(), deferred);
+        return retry ? 10ms : 0ms;
     }
 
     void initRunningStreams() {
@@ -313,6 +401,8 @@ public:
                 (*it)->setGenTimeline(false);
             }
             if (scheduler_type_ == SchedulerType::kBatchDecode && !isPrefillOnly(*it)) {
+                // Forced decode bypasses the context gather that would consume this reservation.
+                (*it)->cancelHiddenStateCapture();
                 (*it)->setIsContextStream(false);
                 // for linear attn, incrKVBlock to clear unused linear block
                 (*it)->moveToNext();
@@ -322,10 +412,20 @@ public:
 
     absl::StatusOr<ScheduleOutput> schedule() override {
         std::unique_lock<std::mutex> lock(lock_);
-        cond_.wait_for(lock, std::chrono::seconds(30), [this] {
-            return stop_requested_.load() || waiting_streams_.size() >= batch_size_ || running_streams_.size() > 0
-                   || !loading_cache_streams_.empty() || (draining_mixed_modes_ && !waiting_streams_.empty());
-        });
+        using Clock = std::chrono::steady_clock;
+        const auto deadline = Clock::now() + std::chrono::seconds(30);
+        while (!stop_requested_.load() && running_streams_.empty() && loading_cache_streams_.empty()
+               && !waitingBatchReady()) {
+            const auto now = Clock::now();
+            if (now >= deadline) {
+                break;
+            }
+            // Enqueue can introduce the first reservation during a long wait. Its later RPC error
+            // won't notify cond_, so choose the next wait again after every wakeup.
+            const auto wake = waiting_reservations_.empty() ? deadline :
+                                  std::min(deadline, now + std::chrono::milliseconds(10));
+            cond_.wait_until(lock, wake);
+        }
 
         if (stop_requested_.load()) {
             return ScheduleOutput{{}, {}};
@@ -340,9 +440,9 @@ public:
             draining_mixed_modes_ = false;
         }
 
-        if (running_streams_.empty()
-            && (waiting_streams_.size() >= batch_size_ || (draining_mixed_modes_ && !waiting_streams_.empty()))) {
-            evaluateWaitingStreams();
+        std::chrono::milliseconds retry_delay{0};
+        if (running_streams_.empty() && waitingBatchReady()) {
+            retry_delay = evaluateWaitingStreams();
             if (stop_requested_.load()) {
                 return ScheduleOutput{{}, {}};
             }
@@ -353,6 +453,13 @@ public:
             }
         }
 
+        if (!loading_cache_streams_.empty() && retry_delay.count() == 0) {
+            retry_delay = std::chrono::milliseconds(10);
+        }
+        if (running_streams_.empty() && retry_delay.count() > 0) {
+            // Neither replay-slot nor KV release notifies cond_; keep the retry interruptible by stop.
+            cond_.wait_for(lock, retry_delay, [this] { return stop_requested_.load(); });
+        }
         return ScheduleOutput{running_streams_};
     }
 
@@ -380,9 +487,14 @@ public:
                     stream->reportError(ErrorCode::CANCELLED, "scheduler stopped");
                 }
                 stream->moveToNext();
+                if (allocation_retry_deadlines_.erase(stream.get())) {
+                    stream->cancelHiddenStateCapture();
+                }
             }
             streams->clear();
         }
+        waiting_reservations_.clear();
+        capture_batch_.clear();
         draining_mixed_modes_ = false;
         return absl::OkStatus();
     }
@@ -402,6 +514,13 @@ public:
     }
 
 private:
+    StreamState finishAllocationTimeout(const GenerateStreamPtr& stream) {
+        stream->reportError(ErrorCode::MALLOC_FAILED,
+                            "BatchDecodeScheduler: KV allocation reached the "
+                                + std::to_string(allocation_wait_timeout_.count()) + " ms wait limit");
+        return stream->moveToNext();
+    }
+
     GenerateStreamPtr tryReserveBatchReplaySlots(const std::list<GenerateStreamPtr>& streams) {
         std::vector<StreamCacheResource*> reservations;
         for (const auto& stream : streams) {
@@ -430,6 +549,12 @@ private:
     bool                         reorder_request_;
     uint32_t                     current_step_         = 0;
     bool                         draining_mixed_modes_ = false;
+    // Index reservations at queue entry, not by rescanning ordinary underfilled queues on wakeup.
+    std::unordered_set<GenerateStreamPtr> waiting_reservations_;
+    // Non-owning: only streams still in waiting_streams_ can have an outstanding allocation retry.
+    std::unordered_map<const GenerateStream*, std::chrono::steady_clock::time_point> allocation_retry_deadlines_;
+    // Outstanding members of one normally admitted capture-bearing zero-token batch (at most B).
+    std::list<GenerateStreamPtr> capture_batch_;
 
     std::shared_ptr<KVCacheManager>                              cache_manager_;
     kmonitor::MetricsReporterPtr                                 metrics_reporter_;
