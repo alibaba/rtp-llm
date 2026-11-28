@@ -102,9 +102,23 @@ class MegaCSARuntime:
         self._step += 1
         self._metadata_id = id(metadata)
 
+    _DEVICE_SM_COUNTS: Dict[int, int] = {}
+
     @staticmethod
     def num_hc_splits(m: int, device: torch.device, dim: int = DIM) -> int:
-        num_sms = torch.cuda.get_device_properties(device).multi_processor_count
+        dev = torch.device(device) if not isinstance(device, torch.device) else device
+        if dev.type == "cuda":
+            dev_idx = (
+                int(dev.index) if dev.index is not None else torch.cuda.current_device()
+            )
+            num_sms = MegaCSARuntime._DEVICE_SM_COUNTS.get(dev_idx)
+            if num_sms is None:
+                num_sms = int(
+                    torch.cuda.get_device_properties(dev_idx).multi_processor_count
+                )
+                MegaCSARuntime._DEVICE_SM_COUNTS[dev_idx] = num_sms
+        else:
+            num_sms = torch.cuda.get_device_properties(dev).multi_processor_count
         grid_size = max((m + 63) // 64, 1)
         num_block_k = (HC * dim + 63) // 64
         return max(min(max(num_sms, 1) // grid_size, num_block_k // 4), 1)

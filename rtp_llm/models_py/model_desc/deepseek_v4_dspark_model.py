@@ -481,13 +481,20 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
             pool,
         ):
             if main_x.is_cuda:
+                kv_proj = attn._lin(attn.wkv, main_x)
+                kv_inplace = bool(
+                    kv_proj.is_cuda
+                    and kv_proj.is_contiguous()
+                    and kv_proj.numel() > 0
+                )
                 context_kv = fused_rmsnorm_rope(
-                    attn._lin(attn.wkv, main_x).contiguous(),
+                    kv_proj if kv_inplace else kv_proj.contiguous(),
                     attn.kv_norm,
                     attn.freqs_cis,
                     int(attn.rope_head_dim),
                     eps=float(attn.eps),
                     position_ids=context_positions,
+                    inplace=kv_inplace,
                 )
             else:
                 safe_context_pos = context_positions.to(torch.long).clamp_min(0)
@@ -937,7 +944,16 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
         dim = int(self._v4_args.dim)
 
         head_hidden = self.v4._hc_head_reduce(hidden).reshape(batch_size * gamma, dim)
-        return self.v4.norm(head_hidden)
+        norm = self.v4.norm
+        if (
+            type(norm).__name__ == "RMSNorm"
+            and "forward" not in getattr(norm, "__dict__", {})
+            and head_hidden.is_cuda
+            and head_hidden.is_contiguous()
+            and head_hidden.numel() > 0
+        ):
+            return norm(head_hidden, output=head_hidden)
+        return norm(head_hidden)
 
     def _forward_device(self) -> torch.device:
         if self.v4 is None:

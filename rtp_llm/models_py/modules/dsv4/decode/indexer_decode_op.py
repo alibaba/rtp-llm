@@ -38,19 +38,132 @@ import os
 
 import torch
 
+from rtp_llm.models_py.modules.dsv4.fp8._indexer_score import (
+    deepgemm_supports_block_kv,
+)
 from rtp_llm.models_py.modules.dsv4.indexer_topk import (
     TorchIndexerTopKBackend,
     select_indexer_topk,
-)
-
-from rtp_llm.models_py.modules.dsv4.fp8._indexer_score import (
-    deepgemm_supports_block_kv,
 )
 
 try:
     import deep_gemm
 except Exception:  # pragma: no cover - non-cuda env
     deep_gemm = None  # type: ignore[assignment]
+
+try:
+    from rtp_llm.ops.compute_ops import rtp_llm_ops as _rtp_llm_ops
+
+    _HAS_TOPK_V3 = hasattr(_rtp_llm_ops, "topk_v3")
+except Exception:  # pragma: no cover - CPU/fallback environments
+    _rtp_llm_ops = None  # type: ignore[assignment]
+    _HAS_TOPK_V3 = False
+
+_TOPK_V3_WORKSPACE_CACHE: dict[int, torch.Tensor] = {}
+
+try:
+    import triton
+    import triton.language as tl
+
+    _HAS_TRITON = True
+except ImportError:  # pragma: no cover - non-triton env
+    triton = None  # type: ignore[assignment]
+    tl = None  # type: ignore[assignment]
+    _HAS_TRITON = False
+
+
+if _HAS_TRITON:
+
+    @triton.jit
+    def _indexer_q_quant_fold_kernel(
+        q_ptr,
+        w_ptr,
+        q_fp8_ptr,
+        w_out_ptr,
+        q_stride_b,
+        q_stride_s,
+        q_stride_h,
+        q_stride_d,
+        w_stride_b,
+        w_stride_s,
+        w_stride_h,
+        qf_stride_row,
+        softmax_scale,
+        Q_LEN: tl.constexpr,
+        H: tl.constexpr,
+        D: tl.constexpr,
+        UE8M0: tl.constexpr,
+    ):
+        row_id = tl.program_id(0).to(tl.int64)
+        b = row_id // Q_LEN
+        s = row_id - b * Q_LEN
+        h = tl.program_id(1).to(tl.int64)
+        offs_d = tl.arange(0, D)
+
+        q_base = b * q_stride_b + s * q_stride_s + h * q_stride_h
+        q_vals = tl.load(q_ptr + q_base + offs_d * q_stride_d).to(tl.float32)
+        amax = tl.maximum(tl.max(tl.abs(q_vals), axis=0), 1e-4)
+        scale = amax * (1.0 / 448.0)
+        if UE8M0:
+            bits = scale.to(tl.uint32, bitcast=True)
+            exp_bits = (bits + 0x007FFFFF) & 0x7F800000
+            scale = exp_bits.to(tl.float32, bitcast=True)
+
+        q_scaled = tl.clamp(q_vals / scale, -448.0, 448.0).to(tl.float8e4nv)
+        out_off = (row_id * H + h) * qf_stride_row
+        tl.store(q_fp8_ptr + out_off + offs_d, q_scaled)
+
+        w_val = tl.load(w_ptr + b * w_stride_b + s * w_stride_s + h * w_stride_h).to(
+            tl.float32
+        )
+        tl.store(w_out_ptr + row_id * H + h, w_val * scale * softmax_scale)
+
+    @triton.jit
+    def _indexer_k_quant_pack_kernel(
+        k_ptr,
+        kv_cache_u8_ptr,
+        k_stride_b,
+        k_stride_t,
+        k_stride_d,
+        T_MAX,
+        T_PADDED,
+        OUT_ROW_STRIDE,
+        BLOCK_KV: tl.constexpr,
+        D: tl.constexpr,
+        UE8M0: tl.constexpr,
+    ):
+        b = tl.program_id(0).to(tl.int64)
+        t = tl.program_id(1).to(tl.int64)
+        offs_d = tl.arange(0, D)
+        offs_s = tl.arange(0, 4)
+        blk = t // BLOCK_KV
+        blk_off = t - blk * BLOCK_KV
+        num_blocks_per_req = T_PADDED // BLOCK_KV
+        block_base = kv_cache_u8_ptr + (b * num_blocks_per_req + blk) * (
+            BLOCK_KV * OUT_ROW_STRIDE
+        )
+        k_dst = block_base + blk_off * D + offs_d
+        scale_dst = block_base + BLOCK_KV * D + blk_off * 4 + offs_s
+
+        if t < T_MAX:
+            k_base = b * k_stride_b + t * k_stride_t
+            k_vals = tl.load(k_ptr + k_base + offs_d * k_stride_d).to(tl.float32)
+            amax = tl.maximum(tl.max(tl.abs(k_vals), axis=0), 1e-4)
+            scale = amax * (1.0 / 448.0)
+            if UE8M0:
+                bits = scale.to(tl.uint32, bitcast=True)
+                exp_bits = (bits + 0x007FFFFF) & 0x7F800000
+                scale = exp_bits.to(tl.float32, bitcast=True)
+
+            k_fp8 = tl.clamp(k_vals / scale, -448.0, 448.0).to(tl.float8e4nv)
+            tl.store(k_dst, k_fp8.to(tl.uint8, bitcast=True))
+
+            scale_u32 = scale.to(tl.uint32, bitcast=True)
+            scale_bytes = ((scale_u32 >> (8 * offs_s)) & 0xFF).to(tl.uint8)
+            tl.store(scale_dst, scale_bytes)
+        else:
+            tl.store(k_dst, tl.zeros((D,), dtype=tl.uint8))
+            tl.store(scale_dst, tl.zeros((4,), dtype=tl.uint8))
 
 
 def _fast_path_available(device=None, block_kv=None) -> bool:
@@ -240,16 +353,22 @@ class IndexerDecodeV4Op:
 
         # topk; if K > T_max we still pick top-T_max valid then -1-pad.
         k_eff = min(self.index_topk, T_max)
+        ref_lengths = (
+            compressed_len_per_req.view(B, 1).expand(B, q_len).contiguous().reshape(-1)
+            if q_len > 1
+            else compressed_len_per_req.reshape(-1).contiguous()
+        )
         idxs = TorchIndexerTopKBackend().select(
             score,
             self.index_topk,
-            lengths=compressed_len_per_req.view(B, 1).expand(B, q_len).reshape(-1),
+            lengths=ref_lengths,
         )
         if k_eff < self.index_topk and idxs.shape[-1] != self.index_topk:
-            pad = torch.full((B, q_len, self.index_topk - k_eff), -1, dtype=torch.int32, device=device)
-            idxs = torch.cat([idxs, pad], dim=-1)
-
-        out_buffer.copy_(idxs)
+            n_valid = idxs.shape[-1]
+            out_buffer[..., :n_valid].copy_(idxs)
+            out_buffer[..., n_valid:].fill_(-1)
+        else:
+            out_buffer.copy_(idxs)
         return out_buffer
 
     # ------------------------------------------------------------------
@@ -263,11 +382,6 @@ class IndexerDecodeV4Op:
         compressed_len_per_req: torch.Tensor,
         out_buffer: torch.Tensor,
     ) -> torch.Tensor:
-        # Lazy import — only paid when fast path runs.
-        from rtp_llm.models_py.kernels.cuda.fp8_kernel import (
-            sgl_per_token_group_quant_fp8,
-        )
-
         B, q_len, H, D = q_indexer.shape
         T_max = kv_indexer.shape[1]
         device = q_indexer.device
@@ -275,100 +389,137 @@ class IndexerDecodeV4Op:
         # Pad T_max up to a multiple of block_kv (kernel expects block-aligned KV pool).
         num_blocks_per_req = (T_max + block_kv - 1) // block_kv
         T_padded = num_blocks_per_req * block_kv
-
-        # ---- Quantize Q. Matches V3.2 quant_q_k flow -------------------
-        q_flat = q_indexer.contiguous().view(-1, D)  # [B*q_len*H, D]
-        q_fp8, q_scale = sgl_per_token_group_quant_fp8(
-            q_flat,
-            group_size=self.block_size,
-            eps=1e-4,
-            column_major_scales=True,
-            scale_tma_aligned=True,
-            scale_ue8m0=(self.scale_fmt == "ue8m0"),
-        )
-        q_fp8 = q_fp8.view(B * q_len, H, D)
-
-        # Fold per-token Q scale into ``weights`` (kernel expects scaled weights).
-        if self.scale_fmt == "ue8m0":
-            from rtp_llm.models_py.modules.base.cuda.indexer_op import (
-                _unpack_ue8m0_scale,
-            )
-
-            q_scale = _unpack_ue8m0_scale(q_scale)
-        q_scale = q_scale.view(B * q_len, H, 1)
-        scaled_weights = (
-            weights.contiguous().view(B * q_len, H, 1).float()
-            * q_scale.float()
-            * self.softmax_scale
-        ).view(B * q_len, H)
-
-        # ---- Quantize K and pack into per-block (data || scale) layout -
-        # Pad KV to block-aligned T_padded.
-        if T_padded != T_max:
-            kv_padded = torch.zeros(
-                (B, T_padded, D),
-                dtype=kv_indexer.dtype,
-                device=device,
-            )
-            kv_padded[:, :T_max].copy_(kv_indexer)
-        else:
-            kv_padded = kv_indexer.contiguous()
-
-        k_flat = kv_padded.view(-1, D)  # [B*T_padded, D]
-        k_fp8, k_scale = sgl_per_token_group_quant_fp8(
-            k_flat,
-            group_size=self.block_size,
-            eps=1e-4,
-            column_major_scales=False,
-            scale_tma_aligned=False,
-            scale_ue8m0=(self.scale_fmt == "ue8m0"),
-        )
-        # k_scale is [B*T_padded, D//group_size] either int32 (ue8m0) or fp32.
-        # Pack each token as: [data fp8 (D bytes)] || [scale fp32 per group].
+        num_blocks = B * num_blocks_per_req
         scales_per_token = D // self.block_size  # 1 for D=128, group=128
         head_dim_with_sf = D + scales_per_token * 4  # bytes per token
+        is_ue8m0 = self.scale_fmt == "ue8m0"
 
-        # Build [num_blocks, blocksize, 1, head_dim_with_sf] uint8 cache.
-        num_blocks = B * num_blocks_per_req
-        kv_cache_u8 = torch.zeros(
-            (num_blocks, block_kv, 1, head_dim_with_sf),
-            dtype=torch.uint8,
-            device=device,
-        )
-        # Reshape data: per block of block_kv tokens.
-        k_fp8_blk = (
-            k_fp8.view(B, num_blocks_per_req, block_kv, D)
-            .view(
-                num_blocks,
-                block_kv,
-                D,
+        if (
+            _HAS_TRITON
+            and D == 128
+            and self.block_size == 128
+            and q_indexer.is_cuda
+            and kv_indexer.is_cuda
+        ):
+            q_fp8_in = torch.empty(
+                (B, q_len, H, D), dtype=torch.float8_e4m3fn, device=device
             )
-            .view(torch.uint8)
-        )
-        kv_cache_u8[:, :, 0, :D] = k_fp8_blk
+            scaled_weights = torch.empty(
+                (B * q_len, H), dtype=torch.float32, device=device
+            )
+            if B * q_len > 0 and H > 0:
+                _indexer_q_quant_fold_kernel[(B * q_len, H)](
+                    q_indexer,
+                    weights,
+                    q_fp8_in,
+                    scaled_weights,
+                    q_indexer.stride(0),
+                    q_indexer.stride(1),
+                    q_indexer.stride(2),
+                    q_indexer.stride(3),
+                    weights.stride(0),
+                    weights.stride(1),
+                    weights.stride(2),
+                    D,
+                    float(self.softmax_scale),
+                    Q_LEN=q_len,
+                    H=H,
+                    D=D,
+                    UE8M0=is_ue8m0,
+                    num_warps=4,
+                )
 
-        # Scale: k_scale is shape [B*T_padded, scales_per_token].
-        if self.scale_fmt == "ue8m0":
-            # int32 packed scales -> view as 4 bytes each.
-            k_scale_u8 = k_scale.view(
-                B, num_blocks_per_req, block_kv, scales_per_token
-            ).contiguous()
-            k_scale_u8 = k_scale_u8.view(num_blocks, block_kv, scales_per_token).view(
-                torch.uint8
+            kv_cache_u8 = torch.empty(
+                (num_blocks, block_kv, 1, head_dim_with_sf),
+                dtype=torch.uint8,
+                device=device,
             )
-            # scales_per_token * 4 bytes per token.
-            kv_cache_u8[:, :, 0, D:].copy_(
-                k_scale_u8.view(num_blocks, block_kv, scales_per_token * 4),
-            )
+            if B > 0 and T_padded > 0:
+                _indexer_k_quant_pack_kernel[(B, T_padded)](
+                    kv_indexer,
+                    kv_cache_u8,
+                    kv_indexer.stride(0),
+                    kv_indexer.stride(1),
+                    kv_indexer.stride(2),
+                    T_max,
+                    T_padded,
+                    head_dim_with_sf,
+                    BLOCK_KV=block_kv,
+                    D=D,
+                    UE8M0=is_ue8m0,
+                    num_warps=4,
+                )
         else:
-            k_scale_f32 = k_scale.view(
-                B, num_blocks_per_req, block_kv, scales_per_token
-            ).contiguous()
-            k_scale_u8 = k_scale_f32.view(num_blocks, block_kv, scales_per_token).view(
-                torch.uint8
+            # Fallback for non-128 head/group configurations.
+            from rtp_llm.models_py.kernels.cuda.fp8_kernel import (
+                sgl_per_token_group_quant_fp8,
             )
-            kv_cache_u8[:, :, 0, D:].copy_(
-                k_scale_u8.view(num_blocks, block_kv, scales_per_token * 4),
+
+            q_flat = q_indexer.contiguous().view(-1, D)  # [B*q_len*H, D]
+            q_fp8, q_scale = sgl_per_token_group_quant_fp8(
+                q_flat,
+                group_size=self.block_size,
+                eps=1e-4,
+                column_major_scales=True,
+                scale_tma_aligned=True,
+                scale_ue8m0=is_ue8m0,
+            )
+            q_fp8_in = q_fp8.view(B, q_len, H, D)
+            if is_ue8m0:
+                from rtp_llm.models_py.modules.base.cuda.indexer_op import (
+                    _unpack_ue8m0_scale,
+                )
+
+                q_scale = _unpack_ue8m0_scale(q_scale)
+            q_scale = q_scale.view(B * q_len, H, 1)
+            scaled_weights = (
+                weights.contiguous().view(B * q_len, H, 1).float()
+                * q_scale.float()
+                * self.softmax_scale
+            ).view(B * q_len, H)
+
+            if T_padded != T_max:
+                kv_padded = torch.zeros(
+                    (B, T_padded, D),
+                    dtype=kv_indexer.dtype,
+                    device=device,
+                )
+                kv_padded[:, :T_max].copy_(kv_indexer)
+            else:
+                kv_padded = kv_indexer.contiguous()
+
+            k_flat = kv_padded.view(-1, D)  # [B*T_padded, D]
+            k_fp8, k_scale = sgl_per_token_group_quant_fp8(
+                k_flat,
+                group_size=self.block_size,
+                eps=1e-4,
+                column_major_scales=is_ue8m0,
+                scale_tma_aligned=is_ue8m0,
+                scale_ue8m0=is_ue8m0,
+            )
+            if is_ue8m0:
+                from rtp_llm.models_py.modules.base.cuda.indexer_op import (
+                    _unpack_ue8m0_scale,
+                )
+
+                k_scale = _unpack_ue8m0_scale(k_scale)
+
+            kv_cache_u8 = torch.empty(
+                (num_blocks, block_kv, 1, head_dim_with_sf),
+                dtype=torch.uint8,
+                device=device,
+            )
+            kv_cache_blocks = kv_cache_u8.view(num_blocks, block_kv * head_dim_with_sf)
+            kv_cache_blocks[:, : block_kv * D].copy_(
+                k_fp8.view(num_blocks, block_kv * D).view(torch.uint8)
+            )
+            k_scale_3d = k_scale.view(num_blocks, block_kv, scales_per_token)
+            if not k_scale_3d.is_contiguous() or k_scale_3d.stride(-1) != 1:
+                k_scale_3d = k_scale_3d.clone(memory_format=torch.contiguous_format)
+            kv_cache_blocks[:, block_kv * D :].copy_(
+                k_scale_3d.view(torch.uint8).view(
+                    num_blocks, block_kv * scales_per_token * 4
+                ),
             )
 
         # ---- block_table: one block-row per request, listing its blocks --
@@ -378,36 +529,73 @@ class IndexerDecodeV4Op:
             device=device,
         ).view(B, num_blocks_per_req)
 
-        # ---- kv_lens (per-(B*q_len) sequence; one entry per Q token) ----
+        # ---- context_lens ([B, q_len] int32 expected by DeepGEMM) ------
         # Indexer's "context_lens" are the valid compressed K count per req.
-        kv_lens = compressed_len_per_req.to(torch.int32).contiguous()
+        kv_lens_1d = (
+            compressed_len_per_req
+            if (
+                compressed_len_per_req.dtype == torch.int32
+                and compressed_len_per_req.is_contiguous()
+            )
+            else compressed_len_per_req.to(torch.int32).contiguous()
+        )
+        context_lens = (
+            kv_lens_1d.view(B, 1)
+            if q_len == 1
+            else kv_lens_1d.view(B, 1).expand(B, q_len).contiguous()
+        )
 
         max_seq_len = T_padded
         schedule_meta = deep_gemm.get_paged_mqa_logits_metadata(
-            kv_lens,
+            context_lens,
             block_kv,
             deep_gemm.get_num_sms(),
         )
 
-        # q shape for the kernel is [B, q_len, H, D] fp8.
-        q_fp8_in = q_fp8.view(B, q_len, H, D)
         logits = deep_gemm.fp8_paged_mqa_logits(
             q_fp8_in,
             kv_cache_u8,
             scaled_weights,
-            kv_lens,
+            context_lens,
             block_table,
             schedule_meta,
             max_seq_len,
             clean_logits=False,
         )  # [B*q_len, max_seq_len] fp32
 
-        # ---- TopK + length mask ---------------------------------------
-        logits = logits.view(B, q_len, max_seq_len)
+        # ---- TopK + length mask (in-place into out_buffer when eligible) ----
+        if (
+            _HAS_TOPK_V3
+            and self.index_topk in (512, 1024, 2048)
+            and max_seq_len > 0
+            and logits.is_cuda
+            and out_buffer.is_cuda
+            and out_buffer.is_contiguous()
+        ):
+            dev_idx = (
+                int(device.index)
+                if device.index is not None
+                else torch.cuda.current_device()
+            )
+            ws = _TOPK_V3_WORKSPACE_CACHE.get(dev_idx)
+            if ws is None:
+                ws = torch.empty((1 << 20,), dtype=torch.uint8, device=device)
+                _TOPK_V3_WORKSPACE_CACHE[dev_idx] = ws
+            _rtp_llm_ops.topk_v3(
+                logits,
+                context_lens.reshape(-1),
+                out_buffer.view(B * q_len, self.index_topk),
+                ws,
+                self.index_topk,
+                max_seq_len,
+            )
+            return out_buffer
+
+        logits_3d = logits.view(B, q_len, max_seq_len)
         idxs = select_indexer_topk(
-            logits,
+            logits_3d,
             self.index_topk,
-            lengths=compressed_len_per_req.view(B, 1).expand(B, q_len).reshape(-1),
+            lengths=context_lens.reshape(-1),
         )
 
         out_buffer.copy_(idxs)

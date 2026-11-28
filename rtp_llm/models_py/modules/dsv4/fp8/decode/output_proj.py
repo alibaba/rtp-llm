@@ -66,7 +66,13 @@ def decode_output_proj(
             rope_head_dim=attn.rope_head_dim,
             position_ids=position_ids,
         )
-        o = attn._wo_a_einsum_from_fp8(o_fp8, o_scale, bsz, q_len)
+        o_flat = attn._wo_a_einsum_from_fp8(o_fp8, o_scale, bsz, q_len).flatten(2)
+    elif o.is_cuda and o.numel() == 0 and hasattr(attn, "wo_a_w"):
+        o_flat = torch.empty(
+            (bsz, q_len, int(attn.wo_a_w.shape[0])),
+            dtype=o.dtype,
+            device=o.device,
+        )
     else:
         if position_ids is not None:
             idx = position_ids.reshape(-1)
@@ -86,8 +92,8 @@ def decode_output_proj(
         o = o.reshape(bsz, q_len, attn.n_groups, -1)
         wo_a_bf16 = dequantize_fp8_weight(attn.wo_a_w, attn.wo_a_s).to(o.dtype)
         wo_a = wo_a_bf16.view(attn.n_groups, attn.o_lora_rank, -1)
-        o = torch.einsum("bsgd,grd->bsgr", o, wo_a)
-    out = attn._lin(attn.wo_b, o.flatten(2))
+        o_flat = torch.einsum("bsgd,grd->bsgr", o, wo_a).flatten(2)
+    out = attn._lin(attn.wo_b, o_flat)
     if attn.tp_size > 1:
         from rtp_llm.models_py.distributed.collective_torch import Group, all_reduce
 
