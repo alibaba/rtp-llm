@@ -45,11 +45,24 @@ _POLICY_VENDOR_HASHES = {
     "common/types.cuh": "deafe232c13a5e7ddb3fc7156f4c3d0c15d36f9966fad5f3a5e8b10a36af58ab",
     "layout/gemm.cuh": "24535e829391efcb320b590b6b841ad5258a470999411b0d3f2347ad21410c32",
     "impls/sm100_fp8_gemm_local_policy.cuh": "470da6d88dae81b48bcafc0fc0c79dd197c35721a8ddb077fa557165ffc93f46",
+    "scheduler/gemm.cuh": "f48dfef610affd81d1cae7798bdf602d0e2c3b9aa7cc2c0df0376370eea97ed6",
+}
+
+# The CUDA13 Bazel wheel adds a conditional device entry and a scheduler
+# argument defaulting to blockIdx.x. Our JIT uses the original global entry.
+_BAZEL_POLICY_VENDOR_HASHES = {
+    **_POLICY_VENDOR_HASHES,
+    "impls/sm100_fp8_fp4_gemm_1d1d.cuh": "f8ff27b2c47daf6c48788ef6a1e79366138eb27049b8f3b834a2e4e9af6fbb83",
+    "scheduler/gemm.cuh": "5a93e105650412c3fe71603884954bbd99f1f9cd6a2fdfda049f82947750c1f6",
 }
 
 
 def _policy_abi(include):
-    for policy_abi, hashes in ((False, _VENDOR_HASHES), (True, _POLICY_VENDOR_HASHES)):
+    for policy_abi, hashes in (
+        (False, _VENDOR_HASHES),
+        (True, _POLICY_VENDOR_HASHES),
+        (True, _BAZEL_POLICY_VENDOR_HASHES),
+    ):
         for name, expected in hashes.items():
             header = include / "deep_gemm" / name
             if (
