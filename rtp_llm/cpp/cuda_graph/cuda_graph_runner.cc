@@ -2256,9 +2256,10 @@ void CudaGraphRunner::captureOneGraphInstance(int key, const char* key_type) {
         CudaGraphStreamLife stream_life(capture_stream_);
 #if USING_CUDA
         {
-            // DeepGEMM's bf16_mega_gate caches a per-stream score_barriers tensor
-            // on the first T>0 launch. Initialize it on capture_stream_ BEFORE
-            // graphCaptureBegin if DSV4/mega_gate has been loaded on this process.
+            // DeepGEMM's bf16_mega_gate and mega_mhc cache per-stream barrier
+            // tensors on the first T>0 launch. Initialize them on capture_stream_
+            // BEFORE graphCaptureBegin if DSV4/mega_gate or mega_mhc has been
+            // loaded on this process.
             py::dict sys_modules = py::module_::import("sys").attr("modules");
             const char* mega_gate_mod =
                 "rtp_llm.models_py.modules.factory.fused_moe.utils.fp8_fp4.mega_gate";
@@ -2266,6 +2267,13 @@ void CudaGraphRunner::captureOneGraphInstance(int key, const char* key_type) {
                 py::object mod = sys_modules[mega_gate_mod];
                 if (!mod.is_none() && py::hasattr(mod, "prepare_capture_stream_barrier")) {
                     mod.attr("prepare_capture_stream_barrier")();
+                }
+            }
+            const char* mega_mhc_mod = "rtp_llm.models_py.modules.dsv4.hc.mega_mhc";
+            if (sys_modules.contains(mega_mhc_mod)) {
+                py::object mod = sys_modules[mega_mhc_mod];
+                if (!mod.is_none() && py::hasattr(mod, "prepare_capture_stream")) {
+                    mod.attr("prepare_capture_stream")();
                 }
             }
         }

@@ -128,8 +128,9 @@ std::shared_ptr<arpc::RPCChannelBase> TcpClient::openChannel(const std::string& 
         return nullptr;
     }
 
-    return std::shared_ptr<arpc::RPCChannelBase>(
-        dynamic_cast<arpc::RPCChannelBase*>(rpc_channel_manager_->OpenChannel(spec, false, 1000ul)));
+    static constexpr size_t kTcpClientChannelQueueLimit = 8192ul;
+    return std::shared_ptr<arpc::RPCChannelBase>(dynamic_cast<arpc::RPCChannelBase*>(
+        rpc_channel_manager_->OpenChannel(spec, false, kTcpClientChannelQueueLimit)));
 }
 
 }  // namespace transfer

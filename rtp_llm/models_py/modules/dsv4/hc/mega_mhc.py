@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any, Optional, Tuple
+from typing import Any, NamedTuple, Optional, Tuple
 
 import torch
 
@@ -21,10 +21,21 @@ _MAX_SPLITS = 64
 _HIDDEN_ALIGNMENT = 1024  # kDefaultNumSplits (16) * BLOCK_K (64)
 _MAX_MEGA_MHC_TOKENS = 1 << 20
 
+
+class _MegaMhcSpec(NamedTuple):
+    dim: int
+    hc_mult: int
+    hc_sinkhorn_iters: int
+    norm_eps: float
+    hc_eps: float
+    rmsnorm_eps: float
+
+
 # Tracks CUDA streams (device_index, raw_cuda_stream_ptr) that have executed an
 # eager mega_mhc launch, initializing DeepGEMM's per-stream split barriers
 # before any CUDA graph capture runs on that stream.
 _WARMED_STREAMS: set[Tuple[int, int]] = set()
+_LAST_SPEC_BY_DEVICE: dict[int, _MegaMhcSpec] = {}
 
 
 def _get_mega_mhc() -> Optional[Any]:
@@ -374,6 +385,17 @@ def try_fused_post_pre(
 
     if not torch.cuda.is_current_stream_capturing():
         _WARMED_STREAMS.add(_stream_key(dev))
+    dev_idx = (
+        int(dev.index) if dev.index is not None else int(torch.cuda.current_device())
+    )
+    _LAST_SPEC_BY_DEVICE[dev_idx] = _MegaMhcSpec(
+        dim=dim,
+        hc_mult=int(next_hc.hc_mult),
+        hc_sinkhorn_iters=int(next_hc.hc_sinkhorn_iters),
+        norm_eps=float(next_hc.norm_eps),
+        hc_eps=float(next_hc.hc_eps),
+        rmsnorm_eps=float(norm.variance_epsilon),
+    )
 
     return (
         new_residual_3d.reshape(*leading, _HC_MULT, dim),
@@ -383,13 +405,131 @@ def try_fused_post_pre(
     )
 
 
+def _launch_capture_warmup(
+    mega_mhc_fn: Any,
+    spec: _MegaMhcSpec,
+    device: torch.device,
+) -> None:
+    """Launch a 1-token eager ``deep_gemm.mega_mhc`` call to init stream barriers."""
+    dim = spec.dim
+    hc_mult = spec.hc_mult
+    x = torch.zeros((1, dim), dtype=torch.bfloat16, device=device)
+    residual = torch.zeros((1, hc_mult, dim), dtype=torch.bfloat16, device=device)
+    post_mix = torch.zeros((1, hc_mult, 1), dtype=torch.float32, device=device)
+    comb_mix = torch.zeros((1, hc_mult, hc_mult), dtype=torch.float32, device=device)
+    fn = torch.zeros((_HC_MIX_COUNT, hc_mult * dim), dtype=torch.float32, device=device)
+    mix_scales = torch.ones((3,), dtype=torch.float32, device=device)
+    mix_bases = torch.zeros((_HC_MIX_COUNT,), dtype=torch.float32, device=device)
+    weight = torch.ones((dim,), dtype=torch.bfloat16, device=device)
+    new_residual = torch.empty_like(residual)
+    new_post = torch.empty_like(post_mix)
+    new_comb = torch.empty_like(comb_mix)
+    y_bf16 = torch.empty_like(x)
+    mega_mhc_fn(
+        x,
+        residual,
+        None,
+        post_mix,
+        comb_mix,
+        fn,
+        mix_scales,
+        mix_bases,
+        hc_mult,
+        spec.norm_eps,
+        spec.hc_eps,
+        _HC_POST_SCALE,
+        spec.hc_eps,
+        spec.hc_sinkhorn_iters,
+        weight,
+        spec.rmsnorm_eps,
+        _RMSNORM_SCALE,
+        new_residual,
+        None,
+        new_post,
+        new_comb,
+        y_bf16=y_bf16,
+    )
+
+
+@torch.inference_mode()
+def prepare_capture_stream(
+    device: Optional[Any] = None,
+    *,
+    dim: Optional[int] = None,
+    hc_mult: int = _HC_MULT,
+    hc_sinkhorn_iters: int = 20,
+    norm_eps: float = 1.0e-6,
+    hc_eps: float = 1.0e-6,
+    rmsnorm_eps: float = 1.0e-6,
+) -> bool:
+    """Initialize DeepGEMM's per-stream ``split_barriers`` on current capture stream.
+
+    Called by C++ ``CudaGraphRunner`` immediately after switching to
+    ``capture_stream_`` and before ``graphCaptureBegin``. Returns ``False`` when
+    ``deep_gemm.mega_mhc`` is unavailable, the device is non-SM10x, the current
+    stream is already capturing or already warmed, or no ``mega_mhc`` spec has
+    executed on this device yet (avoiding side effects on unrelated models).
+    """
+    mega_mhc_fn = _get_mega_mhc()
+    if mega_mhc_fn is None:
+        return False
+    if device is None:
+        if not torch.cuda.is_available():
+            return False
+        dev: Optional[torch.device] = torch.device("cuda", torch.cuda.current_device())
+    else:
+        dev = _normalize_cuda_device(device)
+    if dev is None or not _is_sm10x_device(dev):
+        return False
+    if torch.cuda.is_current_stream_capturing():
+        return False
+
+    dev_idx = (
+        int(dev.index) if dev.index is not None else int(torch.cuda.current_device())
+    )
+    key = _stream_key(dev)
+    if key in _WARMED_STREAMS:
+        return False
+
+    if dim is not None:
+        resolved_dim = int(dim)
+        if (
+            resolved_dim <= 0
+            or resolved_dim % _HIDDEN_ALIGNMENT != 0
+            or int(hc_mult) != _HC_MULT
+            or int(hc_sinkhorn_iters) < 1
+        ):
+            return False
+        spec: Optional[_MegaMhcSpec] = _MegaMhcSpec(
+            dim=resolved_dim,
+            hc_mult=int(hc_mult),
+            hc_sinkhorn_iters=int(hc_sinkhorn_iters),
+            norm_eps=float(norm_eps),
+            hc_eps=float(hc_eps),
+            rmsnorm_eps=float(rmsnorm_eps),
+        )
+    else:
+        spec = _LAST_SPEC_BY_DEVICE.get(dev_idx)
+        if spec is None:
+            return False
+
+    with torch.cuda.device(dev_idx):
+        _launch_capture_warmup(mega_mhc_fn, spec, torch.device("cuda", dev_idx))
+        torch.cuda.current_stream(dev_idx).synchronize()
+    _WARMED_STREAMS.add(key)
+    _LAST_SPEC_BY_DEVICE.setdefault(dev_idx, spec)
+    return True
+
+
 __all__ = [
+    "_LAST_SPEC_BY_DEVICE",
     "_WARMED_STREAMS",
     "_get_mega_mhc",
     "_mega_num_splits",
     "can_use_on_current_stream",
     "is_supported",
     "is_unit_pair_supported",
+    "prepare_capture_stream",
     "representative_tokens",
     "try_fused_post_pre",
 ]

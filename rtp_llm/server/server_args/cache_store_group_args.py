@@ -135,7 +135,7 @@ def init_cache_store_group_args(parser, cache_store_config):
         env_name="CACHE_STORE_TCP_ANET_RPC_QUEUE_NUM",
         bind_to=(cache_store_config, "cache_store_tcp_anet_rpc_queue_num"),
         type=int,
-        default=100,
+        default=4096,
         help="P2P TCP 控制面 ANetRPCServer queueNum。",
     )
     cache_store_group.add_argument(
@@ -143,8 +143,8 @@ def init_cache_store_group_args(parser, cache_store_config):
         env_name="CACHE_STORE_TCP_WORKER_QUEUE_SIZE",
         bind_to=(cache_store_config, "cache_store_tcp_worker_queue_size"),
         type=int,
-        default=500,
-        help="P2P TCP/RDMA 控制面 worker 线程池（tcp_server_rpc_threadpool）队列深度，默认 500。",
+        default=4096,
+        help="P2P TCP/RDMA 控制面 worker 线程池（tcp_server_rpc_threadpool）队列深度，默认 4096。",
     )
     cache_store_group.add_argument(
         "--rdma_transfer_worker_thread_count",
@@ -159,8 +159,8 @@ def init_cache_store_group_args(parser, cache_store_config):
         env_name="RDMA_TRANSFER_WORKER_QUEUE_SIZE",
         bind_to=(cache_store_config, "rdma_transfer_worker_queue_size"),
         type=int,
-        default=100,
-        help="RDMA 传输 worker 线程池（RdmaTransferServiceWorker）队列深度，默认 100。",
+        default=4096,
+        help="RDMA 传输 worker 线程池（RdmaTransferServiceWorker）队列深度，默认 4096。",
     )
     cache_store_group.add_argument(
         "--p2p_rdma_enable_h2d_copy",

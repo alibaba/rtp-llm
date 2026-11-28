@@ -358,6 +358,14 @@ public:
     std::shared_ptr<CompleteTokenIds> completeTokenIdsPtr() const {
         return complete_token_ids_;
     }
+    /// Sync newly committed tokens [0, seq_len) into a stream-owned GPU tensor
+    /// and return a [seq_len] device view without re-uploading prior tokens.
+    torch::Tensor syncAndGetTokenHistoryGpu(int64_t              seq_len,
+                                            const torch::Device& device,
+                                            int64_t              min_capacity = 0);
+    void          releaseTokenHistoryGpu();
+    int64_t       cachedTokenHistoryGpuLength() const;
+    int64_t       lastTokenHistoryGpuSyncTokens() const;
     std::vector<int> completeTokenIdsVec(int batch_idx = 0);
     int              currentExecuteTokenSize();
     std::vector<int> currentExecuteTokens(int batch_idx = 0) const;
@@ -1207,6 +1215,12 @@ protected:
     NormalAsyncDeviceState             normal_async_state_;
     uint64_t                           normal_async_epoch_counter_       = 0;
     std::shared_ptr<std::atomic<bool>> grpc_normal_device_state_pending_ = std::make_shared<std::atomic<bool>>(false);
+
+    mutable std::shared_ptr<std::mutex> token_history_gpu_mutex_            = std::make_shared<std::mutex>();
+    torch::Tensor                       token_history_gpu_;
+    int64_t                             token_history_gpu_synced_len_       = 0;
+    int64_t                             last_token_history_gpu_sync_tokens_ = 0;
+    const int32_t*                      token_history_gpu_src_ptr_          = nullptr;
 
     bool return_all_hidden_states_ = false;
 

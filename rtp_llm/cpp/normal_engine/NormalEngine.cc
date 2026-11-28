@@ -1342,12 +1342,14 @@ absl::Status NormalEngine::step() try {
 
     int64_t        tps_schedule_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
     ScheduleOutput schedule_output;
-    auto&          streams = schedule_output.streams;
+    auto&          streams             = schedule_output.streams;
+    bool           had_local_real_work = false;
     if (parallelism_config.tp_rank == 0) {
         {
             RTP_LLM_PROFILE_SCOPE_DYNAMIC("engine.normal.schedule(reserve_step=%d)", reserve_step_);
             CHECK_AND_ASSIGN(schedule_output, scheduler_->schedule());
         }
+        had_local_real_work = !streams.empty();
         if (parallelism_config.dp_size > 1) {
             RTP_LLM_PROFILE_SCOPE("engine.normal.may_add_fake_stream_work");
             mayAddFakeStream(streams);
@@ -1390,7 +1392,21 @@ absl::Status NormalEngine::step() try {
         // Both executors drive profiling from actual model-work callbacks,
         // after TP input synchronization has rejected idle steps.
         RTP_LLM_PROFILE_SCOPE_DYNAMIC("engine.normal.execute(stream_size=%zu)", streams.size());
+        const int64_t exec_begin_us =
+            (parallelism_config.tp_rank == 0 && parallelism_config.dp_size > 1) ?
+                autil::TimeUtility::currentTimeInMicroSeconds() :
+                0;
         status = executor_->process(schedule_output, tps_schedule_time_us);
+        if (parallelism_config.tp_rank == 0 && parallelism_config.dp_size > 1 && status.ok()) {
+            // Active DP/EP peers block fake-only steps inside EP collectives/cudaSyncAndCheck
+            // longer than an all-idle fake step, keeping peers from hitting the 10ms scheduler sleep.
+            static constexpr int64_t kDpPeerActiveStepThresholdUs = 2000;
+            const int64_t            exec_duration_us =
+                autil::TimeUtility::currentTimeInMicroSeconds() - exec_begin_us;
+            const bool any_dp_active =
+                had_local_real_work || (exec_duration_us >= kDpPeerActiveStepThresholdUs);
+            scheduler_->reportDpStepActivity(had_local_real_work, any_dp_active);
+        }
     }
 
     if (!streams.empty()) {

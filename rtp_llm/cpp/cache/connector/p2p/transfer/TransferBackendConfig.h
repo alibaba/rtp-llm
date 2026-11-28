@@ -13,10 +13,10 @@ struct TransferBackendConfig {
     int     rdma_max_block_pairs_per_connection = 0;
     int64_t cache_store_listen_port             = 0;
     int     cache_store_tcp_anet_rpc_thread_num = 3;
-    int     cache_store_tcp_anet_rpc_queue_num  = 100;
-    int     cache_store_tcp_worker_queue_size   = 500;
+    int     cache_store_tcp_anet_rpc_queue_num  = 4096;
+    int     cache_store_tcp_worker_queue_size   = 4096;
     int     rdma_transfer_worker_thread_count   = 16;
-    int     rdma_transfer_worker_queue_size     = 100;
+    int     rdma_transfer_worker_queue_size     = 4096;
     bool    p2p_rdma_enable_h2d_copy            = false;
     int64_t p2p_rdma_staging_total_bytes        = 0;
     // Derived from CacheConfig::block_size_bytes, not exposed as a user configuration.

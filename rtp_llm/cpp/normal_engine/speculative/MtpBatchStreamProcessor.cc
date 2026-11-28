@@ -566,61 +566,143 @@ torch::Tensor columnAsFlat(const torch::Tensor& tensor, int64_t col) {
     return tensor.select(dim, col).reshape({-1});
 }
 
-// DSpark anchor: the stream's newest committed token. Steady streams read the
-// per-round GPU accept state; a fresh stream (first round after PD handoff)
-// falls back to host token ids, where the handoff wrote the first generated
-// token. The SPOutputBuffer is deliberately not consulted: prepareStreams
-// zero-initializes it for dspark streams, so its content is noise here.
-torch::Tensor dsparkNewestToken(const GenerateStreamPtr& stream, const GenerateStream::MtpAsyncDeviceState& state) {
-    const auto& accept_tokens = state.accept_tokens_gpu;
-    const auto& accept_len    = state.accept_len_gpu;
-    if (accept_tokens.defined() && accept_tokens.is_cuda() && accept_len.defined() && accept_len.is_cuda()) {
-        auto idx_t = (accept_len - 1).to(torch::kLong);
-        return accept_tokens.squeeze(0).index_select(/*dim=*/0, idx_t);
-    }
-    if (stream->isFakeStream()) {
-        return torch::zeros({1}, cudaInt32Options());
-    }
-    return stream->completeTokenIds()
-        .index({0, static_cast<int64_t>(stream->seqLength()) - 1})
-        .reshape({1})
-        .to(torch::kInt32);
-}
-
 // Round-head per-stream state: the anchor (newest committed token) and the
 // committed end (committed length - 1). The propose and verify builders read
 // exactly the same stream state, so both consume this one derivation.
 std::pair<torch::Tensor, torch::Tensor>
 dsparkRoundHeadState(const StreamGroups& stream_groups, const GptModelInputs& model_input, TensorHolder& host_holder) {
-    const int64_t              batch_size = static_cast<int64_t>(stream_groups.size());
-    std::vector<torch::Tensor> anchors;
-    std::vector<torch::Tensor> committed_end_parts;
-    anchors.reserve(batch_size);
-    committed_end_parts.reserve(batch_size);
-    // Both arms are per-stream, mirroring the anchors: a fresh stream
-    // (proposal-less PD handoff, no device state yet) has no bookkeeping
-    // worker in flight, so its host sequence length is safe; steady streams
-    // must use the device value, which under stream-async can be ahead of
-    // the host copy. A batch-wide host fallback would shift the steady
-    // streams' geometry backwards whenever one fresh stream joins the batch.
-    torch::Tensor host_seq_lens;
-    int64_t       idx = 0;
+    const int64_t batch_size = static_cast<int64_t>(stream_groups.size());
+    if (batch_size == 0) {
+        return {torch::empty({0}, cudaInt32Options()), torch::empty({0}, cudaInt32Options())};
+    }
+
+    // Both arms are per-stream: a fresh stream (proposal-less PD handoff, no
+    // device state yet) falls back to host tokens/sequence lengths; steady
+    // streams must use the device state (possibly ahead of host under async).
+    // Fast-path steady CUDA streams via batched stack/cat/gather ops instead of
+    // per-stream index_select + sub + cat loops.
+    struct SteadyAnchorEntry {
+        int64_t       stream_idx;
+        torch::Tensor accept_tokens_row;
+        torch::Tensor accept_len_scalar;
+    };
+    std::vector<SteadyAnchorEntry> steady_anchors;
+    std::vector<int64_t>           fallback_anchor_indices;
+    std::vector<int32_t>           fallback_anchor_values;
+    steady_anchors.reserve(batch_size);
+
+    std::vector<int64_t>       steady_seq_indices;
+    std::vector<torch::Tensor> steady_seq_lens;
+    steady_seq_indices.reserve(batch_size);
+    steady_seq_lens.reserve(batch_size);
+
+    int64_t common_accept_width  = -1;
+    bool    uniform_accept_width = true;
+    int64_t idx                  = 0;
     for (const auto& stream : stream_groups.allStreams()) {
-        const auto state = stream->getMtpAsyncDeviceState();
-        anchors.push_back(toCudaInt32(dsparkNewestToken(stream, state), host_holder).reshape({1}));
+        const auto  state         = stream->getMtpAsyncDeviceState();
+        const auto& accept_tokens = state.accept_tokens_gpu;
+        const auto& accept_len    = state.accept_len_gpu;
+        if (accept_tokens.defined() && accept_tokens.is_cuda() && accept_len.defined() && accept_len.is_cuda()) {
+            auto row_tokens = accept_tokens.reshape({-1});
+            if (common_accept_width < 0) {
+                common_accept_width = row_tokens.size(0);
+            } else if (row_tokens.size(0) != common_accept_width) {
+                uniform_accept_width = false;
+            }
+            steady_anchors.push_back({idx, std::move(row_tokens), accept_len.reshape({1})});
+        } else {
+            fallback_anchor_indices.push_back(idx);
+            if (stream->isFakeStream()) {
+                fallback_anchor_values.push_back(0);
+            } else {
+                auto    complete = stream->completeTokenIds();
+                int64_t pos      = static_cast<int64_t>(stream->seqLength()) - 1;
+                int32_t tok      = (complete.scalar_type() == torch::kInt32) ? complete.data_ptr<int32_t>()[pos] :
+                                                                           complete.index({0, pos}).item<int32_t>();
+                fallback_anchor_values.push_back(tok);
+            }
+        }
+
         const auto& next_seq_len = state.next_seq_len_gpu;
         if (next_seq_len.defined() && next_seq_len.is_cuda()) {
-            committed_end_parts.push_back((next_seq_len.reshape({1}) - 1).to(torch::kInt32));
-        } else {
-            if (!host_seq_lens.defined()) {
-                host_seq_lens = toCudaInt32(model_input.sequence_lengths, host_holder);
-            }
-            committed_end_parts.push_back(host_seq_lens.narrow(0, idx, 1));
+            steady_seq_indices.push_back(idx);
+            steady_seq_lens.push_back(next_seq_len.reshape({1}));
         }
         ++idx;
     }
-    auto anchors_cat    = torch::cat(anchors, 0);
-    auto committed_ends = torch::cat(committed_end_parts, 0);
+
+    auto make_cuda_long_indices = [&](const std::vector<int64_t>& indices) {
+        auto t = torch::empty({static_cast<int64_t>(indices.size())}, torch::TensorOptions().dtype(torch::kLong));
+        std::memcpy(t.data_ptr<int64_t>(), indices.data(), indices.size() * sizeof(int64_t));
+        host_holder.hold_host(t);
+        return t.to(torch::kCUDA, /*non_blocking=*/true);
+    };
+
+    torch::Tensor steady_anchor_values;
+    if (!steady_anchors.empty()) {
+        if (uniform_accept_width && common_accept_width > 0) {
+            std::vector<torch::Tensor> token_rows;
+            std::vector<torch::Tensor> len_parts;
+            token_rows.reserve(steady_anchors.size());
+            len_parts.reserve(steady_anchors.size());
+            for (const auto& entry : steady_anchors) {
+                token_rows.push_back(entry.accept_tokens_row);
+                len_parts.push_back(entry.accept_len_scalar);
+            }
+            auto stacked_tokens = torch::stack(token_rows, 0);
+            auto gather_indices = (torch::cat(len_parts, 0) - 1).to(torch::kLong).unsqueeze(1);
+            steady_anchor_values =
+                torch::gather(stacked_tokens, 1, gather_indices).squeeze(1).to(torch::kInt32);
+        } else {
+            std::vector<torch::Tensor> per_row_anchors;
+            per_row_anchors.reserve(steady_anchors.size());
+            for (const auto& entry : steady_anchors) {
+                auto idx_t = (entry.accept_len_scalar - 1).to(torch::kLong);
+                per_row_anchors.push_back(entry.accept_tokens_row.index_select(0, idx_t).to(torch::kInt32));
+            }
+            steady_anchor_values = torch::cat(per_row_anchors, 0);
+        }
+    }
+
+    torch::Tensor fallback_anchor_cuda;
+    if (!fallback_anchor_values.empty()) {
+        auto host_anchors = torch::empty({static_cast<int64_t>(fallback_anchor_values.size())}, torch::kInt32);
+        std::memcpy(host_anchors.data_ptr<int32_t>(),
+                    fallback_anchor_values.data(),
+                    fallback_anchor_values.size() * sizeof(int32_t));
+        host_holder.hold_host(host_anchors);
+        fallback_anchor_cuda = host_anchors.to(torch::kCUDA, /*non_blocking=*/true);
+    }
+
+    torch::Tensor anchors_cat;
+    if (fallback_anchor_values.empty()) {
+        anchors_cat = std::move(steady_anchor_values);
+    } else if (steady_anchors.empty()) {
+        anchors_cat = std::move(fallback_anchor_cuda);
+    } else {
+        anchors_cat = torch::empty({batch_size}, cudaInt32Options());
+        std::vector<int64_t> steady_indices;
+        steady_indices.reserve(steady_anchors.size());
+        for (const auto& entry : steady_anchors) {
+            steady_indices.push_back(entry.stream_idx);
+        }
+        anchors_cat.index_copy_(0, make_cuda_long_indices(steady_indices), steady_anchor_values);
+        anchors_cat.index_copy_(0, make_cuda_long_indices(fallback_anchor_indices), fallback_anchor_cuda);
+    }
+
+    torch::Tensor committed_ends;
+    if (static_cast<int64_t>(steady_seq_lens.size()) == batch_size) {
+        committed_ends = (torch::cat(steady_seq_lens, 0) - 1).to(torch::kInt32);
+    } else {
+        committed_ends = toCudaInt32(model_input.sequence_lengths, host_holder).reshape({batch_size});
+        if (!steady_seq_lens.empty()) {
+            committed_ends   = committed_ends.clone();
+            auto steady_ends = (torch::cat(steady_seq_lens, 0) - 1).to(torch::kInt32);
+            committed_ends.index_copy_(0, make_cuda_long_indices(steady_seq_indices), steady_ends);
+        }
+    }
+
     return {std::move(anchors_cat), std::move(committed_ends)};
 }
 
@@ -691,19 +773,6 @@ void setVerifyPairInputs(GptModelInputs& model_input,
 
 torch::Tensor interleaveTokenPairs(const torch::Tensor& first, const torch::Tensor& second) {
     return torch::stack({first, second}, /*dim=*/1).reshape({-1});
-}
-
-void copyScoreSamplerTokenIds(torch::Tensor&       token_ids,
-                              const torch::Tensor& complete_token_ids,
-                              int64_t              batch_idx,
-                              int64_t              score_len,
-                              int64_t              seq_len) {
-    if (score_len <= 0 || seq_len <= 0) {
-        return;
-    }
-    auto dst = token_ids.narrow(0, batch_idx, score_len).narrow(1, 0, seq_len);
-    auto src = complete_token_ids.narrow(0, 0, 1).narrow(1, 0, seq_len).expand({score_len, seq_len});
-    dst.copy_(src);
 }
 
 const char* missingMtpStateReason(const GenerateStream::MtpAsyncDeviceState& state) {
@@ -1155,29 +1224,8 @@ MtpBatchStreamProcessor::gatherSpecSamplerInput(const StreamGroups&             
     });
 
     SamplerInputs sampler_inputs = allocateSamplerInputs(
-        stream_groups, total_batch_size, total_batch_size, propose_step_, /*allocate_token_history=*/need_token_history);
+        stream_groups, total_batch_size, total_batch_size, propose_step_, /*allocate_token_history=*/false);
     fillSamplerCommonInputs(sampler_inputs, all_streams, true, propose_step_);
-
-    if (need_token_history) {
-        int64_t batch_idx = 0;
-        for (auto& stream : all_streams) {
-            auto complete_token_ids = stream->completeTokenIds();
-            auto seq_len            = static_cast<int64_t>(stream->seqLength());
-
-            copyScoreSamplerTokenIds(
-                sampler_inputs.token_ids, complete_token_ids, batch_idx, static_cast<int64_t>(score_len), seq_len);
-            RTP_LLM_CHECK_WITH_INFO(
-                seq_len + static_cast<int64_t>(propose_step_) <= static_cast<int64_t>(sampler_inputs.step + 1),
-                "MTP verify sampler history exceeds its allocated width: seq_len=%ld gamma=%zu step=%zu",
-                seq_len,
-                propose_step_,
-                sampler_inputs.step);
-            batch_idx += static_cast<int64_t>(score_len);
-            RTP_LLM_LOG_DEBUG("stream [%s], sampler inputs token ids = [%s]",
-                              stream->streamLogTag().c_str(),
-                              tensorDebugStringWithData<int32_t>(sampler_inputs.token_ids).c_str());
-        }
-    }
 
     RTP_LLM_CHECK_WITH_INFO(model_output.logits.dim() == 2
                                 && model_output.logits.size(1) >= static_cast<int64_t>(vocab_size_),
@@ -1202,25 +1250,47 @@ MtpBatchStreamProcessor::gatherSpecSamplerInput(const StreamGroups&             
                             "MTP verify draft tokens must be int32 [B,gamma]");
 
     if (need_token_history) {
-        // The sampler already needs token history on device when penalties/beam are active.
-        // Fill every proposal slot once for all score rows, then let each row's sequence length
-        // expose exactly proposals [0, score_position).
-        auto token_ids_gpu = sampler_inputs.token_ids.to(torch::kCUDA, /*non_blocking=*/true);
-        auto histories     = token_ids_gpu.view({batch_size, rows, static_cast<int64_t>(sampler_inputs.step + 1)});
-        auto proposals     = draft_token_ids.to(torch::kCUDA, /*non_blocking=*/true)
+        // Incrementally sync each stream's newly committed tokens to its resident
+        // GPU history buffer (eliminating 4x redundant CPU copies and full-prefix
+        // HtoD transfers per step), expand across score rows on device, and
+        // scatter the gamma proposals into [seq_len, seq_len + gamma).
+        const auto    device       = model_output.logits.device();
+        const int64_t token_stride = static_cast<int64_t>(sampler_inputs.step + 1);
+        auto          histories =
+            torch::empty({batch_size, rows, token_stride}, torch::TensorOptions().dtype(torch::kInt32).device(device));
+        int64_t stream_idx = 0;
+        for (auto& stream : all_streams) {
+            const int64_t seq_len = static_cast<int64_t>(stream->seqLength());
+            RTP_LLM_CHECK_WITH_INFO(
+                seq_len + gamma <= token_stride,
+                "MTP verify sampler history exceeds its allocated width: seq_len=%ld gamma=%zu step=%zu",
+                seq_len,
+                propose_step_,
+                sampler_inputs.step);
+            if (seq_len > 0) {
+                auto stream_history_gpu = stream->syncAndGetTokenHistoryGpu(seq_len, device);
+                histories.select(0, stream_idx)
+                    .narrow(1, 0, seq_len)
+                    .copy_(stream_history_gpu.unsqueeze(0).expand({rows, seq_len}),
+                           /*non_blocking=*/device.is_cuda());
+            }
+            ++stream_idx;
+        }
+        auto proposals = draft_token_ids.to(device, /*non_blocking=*/device.is_cuda())
                              .contiguous()
                              .view({batch_size, 1, gamma})
                              .expand({batch_size, rows, gamma});
         auto base_lengths = sampler_inputs.sequence_lengths.view({batch_size, rows})
                                 .select(1, 0)
-                                .to(torch::Device(torch::kCUDA), torch::kLong, /*non_blocking=*/true)
+                                .to(device, torch::kLong, /*non_blocking=*/device.is_cuda())
                                 .view({batch_size, 1, 1});
         auto proposal_offsets =
-            torch::arange(gamma, torch::TensorOptions().dtype(torch::kLong).device(torch::Device(torch::kCUDA)))
-                .view({1, 1, gamma});
+            torch::arange(gamma, torch::TensorOptions().dtype(torch::kLong).device(device)).view({1, 1, gamma});
         auto proposal_columns = (base_lengths + proposal_offsets).expand({batch_size, rows, gamma});
         histories.scatter_(2, proposal_columns, proposals);
-        sampler_inputs.token_ids = std::move(token_ids_gpu);
+        sampler_inputs.token_ids = histories.view({static_cast<int64_t>(total_batch_size), token_stride});
+        RTP_LLM_LOG_DEBUG("mtp sampler inputs token ids = [%s]",
+                          tensorDebugStringWithData<int32_t>(sampler_inputs.token_ids.cpu()).c_str());
     } else {
         sampler_inputs.token_ids = torch::empty(
             {static_cast<int64_t>(total_batch_size), 1},

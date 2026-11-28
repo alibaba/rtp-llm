@@ -275,10 +275,82 @@ void GenerateStream::releaseResource() {
     // Return KV blocks only after all workers that captured this stream finish.
     // Earlier release could let a worker write into blocks owned by another stream.
     waitPendingAsyncBookkeeping();
+    releaseTokenHistoryGpu();
     std::lock_guard<std::mutex> lock(*mutex_);
     if (!stream_cache_resource_->isResourceReleased()) {
         stream_cache_resource_->releaseResource();
     }
+}
+
+void GenerateStream::releaseTokenHistoryGpu() {
+    std::lock_guard<std::mutex> lock(*token_history_gpu_mutex_);
+    token_history_gpu_                  = torch::Tensor();
+    token_history_gpu_synced_len_       = 0;
+    last_token_history_gpu_sync_tokens_ = 0;
+    token_history_gpu_src_ptr_          = nullptr;
+}
+
+int64_t GenerateStream::cachedTokenHistoryGpuLength() const {
+    std::lock_guard<std::mutex> lock(*token_history_gpu_mutex_);
+    return token_history_gpu_synced_len_;
+}
+
+int64_t GenerateStream::lastTokenHistoryGpuSyncTokens() const {
+    std::lock_guard<std::mutex> lock(*token_history_gpu_mutex_);
+    return last_token_history_gpu_sync_tokens_;
+}
+
+torch::Tensor GenerateStream::syncAndGetTokenHistoryGpu(int64_t              seq_len,
+                                                        const torch::Device& device,
+                                                        int64_t              min_capacity) {
+    std::lock_guard<std::mutex> lock(*token_history_gpu_mutex_);
+    if (seq_len <= 0) {
+        last_token_history_gpu_sync_tokens_ = 0;
+        if (token_history_gpu_.defined() && token_history_gpu_.device() == device) {
+            return token_history_gpu_.narrow(0, 0, 0);
+        }
+        return torch::empty({0}, torch::TensorOptions().dtype(torch::kInt32).device(device));
+    }
+
+    auto host_tokens = completeTokenIds();
+    RTP_LLM_CHECK_WITH_INFO(host_tokens.defined() && host_tokens.dim() == 2 && host_tokens.size(0) >= 1
+                                && host_tokens.scalar_type() == torch::kInt32 && host_tokens.size(1) >= seq_len,
+                            "invalid completeTokenIds for GPU history sync: seq_len=%ld",
+                            seq_len);
+    const int32_t* host_ptr = host_tokens.data_ptr<int32_t>();
+
+    if (!token_history_gpu_.defined() || token_history_gpu_.device() != device
+        || token_history_gpu_src_ptr_ != host_ptr || seq_len < token_history_gpu_synced_len_) {
+        token_history_gpu_synced_len_ = 0;
+        token_history_gpu_src_ptr_    = host_ptr;
+    }
+
+    const int64_t required_cap = std::max<int64_t>({seq_len, min_capacity, int64_t{256}});
+    const int64_t current_cap  = token_history_gpu_.defined() ? token_history_gpu_.size(0) : 0;
+    if (current_cap < required_cap) {
+        int64_t new_cap = current_cap > 0 ? current_cap : int64_t{256};
+        while (new_cap < required_cap) {
+            new_cap *= 2;
+        }
+        auto new_buf = torch::empty({new_cap}, torch::TensorOptions().dtype(torch::kInt32).device(device));
+        if (token_history_gpu_.defined() && token_history_gpu_synced_len_ > 0) {
+            new_buf.narrow(0, 0, token_history_gpu_synced_len_)
+                .copy_(token_history_gpu_.narrow(0, 0, token_history_gpu_synced_len_),
+                       /*non_blocking=*/device.is_cuda());
+        }
+        token_history_gpu_ = std::move(new_buf);
+    }
+
+    const int64_t delta = seq_len - token_history_gpu_synced_len_;
+    if (delta > 0) {
+        auto host_slice =
+            host_tokens.narrow(0, 0, 1).narrow(1, token_history_gpu_synced_len_, delta).squeeze(0).contiguous();
+        token_history_gpu_.narrow(0, token_history_gpu_synced_len_, delta)
+            .copy_(host_slice, /*non_blocking=*/device.is_cuda());
+        token_history_gpu_synced_len_ = seq_len;
+    }
+    last_token_history_gpu_sync_tokens_ = delta;
+    return token_history_gpu_.narrow(0, 0, seq_len);
 }
 
 void GenerateStream::onLocalCleanupProgress(std::function<void()> callback) {

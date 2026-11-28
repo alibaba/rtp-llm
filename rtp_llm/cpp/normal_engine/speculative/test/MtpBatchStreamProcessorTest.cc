@@ -1,8 +1,11 @@
 #include <cstdlib>
 #include <chrono>
 #include <cstring>
+#include <iostream>
+#include <list>
 #include <memory>
 #include <limits>
+#include <numeric>
 #include <stdexcept>
 #include "torch/all.h"
 #if USING_CUDA
@@ -2709,6 +2712,247 @@ TEST_F(MtpBatchStreamProcessorTest, testPrefillShiftsMultimodalMaskAndPackedLoca
         EXPECT_EQ(input.mm_extra_input->at(0).numel(), 8);
         EXPECT_EQ(input.mm_extra_input->at(1).numel(), 8);
     }
+}
+
+TEST_F(MtpBatchStreamProcessorTest, testBatchedDSparkRoundHeadStateParityAndBench) {
+    constexpr int32_t gamma = 3;
+
+    ModelConfig                 model_config;
+    RuntimeConfig               runtime_config;
+    PDSepConfig                 pd_sep_config;
+    ProfilingDebugLoggingConfig profiling_debug_logging_config;
+    CacheConfig                 cache_config = makeProcessorCacheConfig();
+    SpeculativeExecutionConfig  sp_config;
+    model_config.max_seq_len          = 2048;
+    model_config.vocab_size           = 256;
+    model_config.num_layers           = 1;
+    sp_config.type                    = SP_TYPE_DSPARK;
+    sp_config.gen_num_per_cycle       = gamma;
+    sp_config.sp_dspark_mask_token_id = 255;
+
+    ResourceContext         resource_context;
+    MtpBatchStreamProcessor processor(
+        model_config, pd_sep_config, profiling_debug_logging_config, cache_config, sp_config, false);
+
+    // 1. Mixed steady + fresh + fake stream parity across accept lengths [1..gamma+1].
+    std::list<GenerateStreamPtr> mixed_streams;
+    std::vector<int32_t>         expected_anchors;
+    std::vector<int32_t>           expected_ends;
+    std::vector<int32_t>           host_seq_lens;
+    for (int i = 0; i < 6; ++i) {
+        auto s = createContextStream(model_config, runtime_config, resource_context, {10 + i, 20 + i}, i + 1);
+        s->setIsContextStream(false);
+        if (i == 4) {
+            // Fresh stream (no device state).
+            host_seq_lens.push_back(12);
+            expected_anchors.push_back(20 + i);
+            expected_ends.push_back(12);
+        } else if (i == 5) {
+            s->setIsFakeStream(true);
+            host_seq_lens.push_back(0);
+            expected_anchors.push_back(0);
+            expected_ends.push_back(0);
+        } else {
+            const int32_t                       acc_len = (i % (gamma + 1)) + 1;
+            const int32_t                       seq_len = 50 + i * 7;
+            GenerateStream::MtpAsyncDeviceState st;
+            st.accept_len_gpu = torch::tensor({acc_len}, torch::kInt32).to(torch::kCUDA);
+            st.accept_tokens_gpu =
+                torch::tensor({{100 + i, 200 + i, 300 + i, 400 + i}}, torch::kInt32).to(torch::kCUDA);
+            st.next_seq_len_gpu = torch::tensor({seq_len}, torch::kInt32).to(torch::kCUDA);
+            st.next_position_ids_gpu = torch::tensor({seq_len}, torch::kInt32).to(torch::kCUDA);
+            s->setMtpAsyncDeviceState(std::move(st));
+            host_seq_lens.push_back(1);
+            expected_anchors.push_back((acc_len * 100) + i);
+            expected_ends.push_back(seq_len - 1);
+        }
+        mixed_streams.push_back(s);
+    }
+
+    StreamGroups   mixed_groups(mixed_streams);
+    GptModelInputs mixed_input;
+    mixed_input.sequence_lengths = torch::tensor(host_seq_lens, torch::kInt32);
+    TensorHolder mixed_holder;
+    auto         mixed_state = processor.buildDSparkRoundState(mixed_groups, mixed_input, mixed_holder);
+    EXPECT_EQ(expected_anchors, toVec<int32_t>(mixed_state.anchors));
+    EXPECT_EQ(expected_ends, toVec<int32_t>(mixed_state.committed_ends));
+
+    // 2. B=32 steady decode batch parity and microbenchmark vs scalar loop reference.
+    constexpr int                kBatch = 32;
+    std::list<GenerateStreamPtr> steady_streams;
+    std::vector<int32_t>         expected_steady_anchors;
+    std::vector<int32_t>         expected_steady_ends;
+    for (int i = 0; i < kBatch; ++i) {
+        auto s = createContextStream(model_config, runtime_config, resource_context, {10 + i}, i + 1);
+        s->setIsContextStream(false);
+        const int32_t                       acc_len = (i % (gamma + 1)) + 1;
+        const int32_t                       seq_len = 100 + i;
+        GenerateStream::MtpAsyncDeviceState st;
+        st.accept_len_gpu    = torch::tensor({acc_len}, torch::kInt32).to(torch::kCUDA);
+        st.accept_tokens_gpu = torch::tensor({{100 + i, 200 + i, 300 + i, 400 + i}}, torch::kInt32).to(torch::kCUDA);
+        st.next_seq_len_gpu  = torch::tensor({seq_len}, torch::kInt32).to(torch::kCUDA);
+        st.next_position_ids_gpu = torch::tensor({seq_len}, torch::kInt32).to(torch::kCUDA);
+        s->setMtpAsyncDeviceState(std::move(st));
+        expected_steady_anchors.push_back((acc_len * 100) + i);
+        expected_steady_ends.push_back(seq_len - 1);
+        steady_streams.push_back(s);
+    }
+
+    StreamGroups   steady_groups(steady_streams);
+    GptModelInputs steady_input;
+    steady_input.sequence_lengths = torch::ones({kBatch}, torch::kInt32);
+
+    // Warmup both batched and scalar paths, then verify parity and compare CPU launch latency.
+    {
+        TensorHolder holder;
+        auto         rs = processor.buildDSparkRoundState(steady_groups, steady_input, holder);
+        EXPECT_EQ(expected_steady_anchors, toVec<int32_t>(rs.anchors));
+        EXPECT_EQ(expected_steady_ends, toVec<int32_t>(rs.committed_ends));
+    }
+
+    auto run_scalar_ref = [&]() {
+        TensorHolder               holder;
+        std::vector<torch::Tensor> a_parts;
+        std::vector<torch::Tensor> e_parts;
+        a_parts.reserve(kBatch);
+        e_parts.reserve(kBatch);
+        for (const auto& s : steady_groups.allStreams()) {
+            const auto st   = s->getMtpAsyncDeviceState();
+            auto       idxt = (st.accept_len_gpu - 1).to(torch::kLong);
+            a_parts.push_back(st.accept_tokens_gpu.squeeze(0).index_select(0, idxt).reshape({1}));
+            e_parts.push_back((st.next_seq_len_gpu.reshape({1}) - 1).to(torch::kInt32));
+        }
+        auto a = torch::cat(a_parts, 0);
+        auto e = torch::cat(e_parts, 0);
+        (void)a;
+        (void)e;
+    };
+    run_scalar_ref();
+    torch::cuda::synchronize();
+
+    constexpr int kBenchIters = 100;
+    const double  scalar_us   = benchmarkUs(run_scalar_ref, kBenchIters);
+    const double  batched_us  = benchmarkUs(
+        [&]() {
+            TensorHolder holder;
+            auto         rs = processor.buildDSparkRoundState(steady_groups, steady_input, holder);
+            (void)rs;
+        },
+        kBenchIters);
+    torch::cuda::synchronize();
+    std::cout << "[BENCH] dsparkRoundHeadState B=32: scalar_us=" << scalar_us << " batched_us=" << batched_us
+              << " speedup=" << (batched_us > 0.0 ? scalar_us / batched_us : 0.0) << "x" << std::endl;
+    EXPECT_LT(batched_us, scalar_us);
+}
+
+TEST_F(MtpBatchStreamProcessorTest, testGatherSpecSamplerInputIncrementalGpuHistoryMultiStepAndRelease) {
+    constexpr int32_t gamma = 3;
+
+    ModelConfig                 model_config;
+    RuntimeConfig               runtime_config;
+    PDSepConfig                 pd_sep_config;
+    ProfilingDebugLoggingConfig profiling_debug_logging_config;
+    CacheConfig                 cache_config = makeProcessorCacheConfig();
+    SpeculativeExecutionConfig  sp_config;
+    model_config.max_seq_len    = 2048;
+    model_config.vocab_size     = 1024;
+    model_config.num_layers     = 1;
+    sp_config.type              = SP_TYPE_DSPARK;
+    sp_config.gen_num_per_cycle = gamma;
+
+    ResourceContext resource_context;
+    // Stream 1 starts at len=1; stream 2 starts at len=255 (crosses 256 initial buffer capacity on step 2).
+    std::vector<int> prompt1 = {42};
+    std::vector<int> prompt2(255);
+    std::iota(prompt2.begin(), prompt2.end(), 10);
+
+    auto s1 = createContextStream(model_config, runtime_config, resource_context, prompt1, 1);
+    auto s2 = createContextStream(model_config, runtime_config, resource_context, prompt2, 2);
+    s1->setIsContextStream(false);
+    s2->setIsContextStream(false);
+    s1->setScoreLen(gamma + 1);
+    s2->setScoreLen(gamma + 1);
+    s1->generateConfig()->repetition_penalty = 1.2f;
+    s2->generateConfig()->frequency_penalty  = 0.1f;
+
+    MtpBatchStreamProcessor processor(
+        model_config, pd_sep_config, profiling_debug_logging_config, cache_config, sp_config, false);
+    StreamGroups    groups({s1, s2});
+    GptModelOutputs model_output;
+    model_output.logits =
+        torch::zeros({static_cast<int64_t>(groups.size() * (gamma + 1)), static_cast<int64_t>(model_config.vocab_size)},
+                     torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));
+
+    auto verify_against_cpu_ref = [&](const torch::Tensor& draft_tokens) {
+        auto status = processor.gatherSpecSamplerInput(groups, model_output, {}, draft_tokens);
+        ASSERT_TRUE(status.ok());
+        const auto& si = status.value();
+        ASSERT_TRUE(si.token_ids.is_cuda());
+        auto  got    = si.token_ids.cpu().contiguous();
+        auto  stride = got.size(1);
+        auto* gptr   = got.data_ptr<int32_t>();
+
+        auto                                 draft_cpu = draft_tokens.cpu().contiguous();
+        const int32_t*                       dptr      = draft_cpu.data_ptr<int32_t>();
+        const int64_t                        rows      = gamma + 1;
+        std::vector<int>                     l1        = s1->completeTokenIdsVec(0);
+        std::vector<int>                     l2        = s2->completeTokenIdsVec(0);
+        const std::vector<std::vector<int>*> refs      = {&l1, &l2};
+        for (int64_t b = 0; b < 2; ++b) {
+            const auto& hist = *refs[b];
+            for (int64_t r = 0; r < rows; ++r) {
+                const int64_t row_off = (b * rows + r) * stride;
+                for (size_t c = 0; c < hist.size(); ++c) {
+                    EXPECT_EQ(gptr[row_off + static_cast<int64_t>(c)], hist[c])
+                        << "b=" << b << " r=" << r << " c=" << c;
+                }
+                for (int64_t g = 0; g < gamma; ++g) {
+                    EXPECT_EQ(gptr[row_off + static_cast<int64_t>(hist.size()) + g], dptr[b * gamma + g])
+                        << "b=" << b << " r=" << r << " g=" << g;
+                }
+            }
+        }
+    };
+
+    // Step 1: cold GPU history syncs full initial prompt lengths (1 and 255).
+    auto draft1 = torch::tensor({501, 502, 503, 601, 602, 603}, torch::kInt32).reshape({2, gamma});
+    verify_against_cpu_ref(draft1);
+    EXPECT_EQ(s1->cachedTokenHistoryGpuLength(), 1);
+    EXPECT_EQ(s1->lastTokenHistoryGpuSyncTokens(), 1);
+    EXPECT_EQ(s2->cachedTokenHistoryGpuLength(), 255);
+    EXPECT_EQ(s2->lastTokenHistoryGpuSyncTokens(), 255);
+
+    // Step 2: commit >1 accepted tokens (s1 += 2 -> 3, s2 += 4 -> 259 crosses 256 capacity).
+    int err = 0;
+    ASSERT_TRUE(s1->completeTokenIdsPtr()->update(
+        torch::tensor({{701, 702}}, torch::kInt32), 0, 2, 1, 2048, 1024, false, 1, err));
+    ASSERT_TRUE(s2->completeTokenIdsPtr()->update(
+        torch::tensor({{801, 802, 803, 804}}, torch::kInt32), 0, 4, 255, 2048, 1024, false, 2, err));
+    groups      = StreamGroups({s1, s2});
+    auto draft2 = torch::tensor({511, 512, 513, 611, 612, 613}, torch::kInt32).reshape({2, gamma});
+    verify_against_cpu_ref(draft2);
+    EXPECT_EQ(s1->cachedTokenHistoryGpuLength(), 3);
+    EXPECT_EQ(s1->lastTokenHistoryGpuSyncTokens(), 2);
+    EXPECT_EQ(s2->cachedTokenHistoryGpuLength(), 259);
+    EXPECT_EQ(s2->lastTokenHistoryGpuSyncTokens(), 4);
+
+    // Step 3: zero new committed tokens -> zero HtoD tokens copied.
+    verify_against_cpu_ref(draft2);
+    EXPECT_EQ(s1->lastTokenHistoryGpuSyncTokens(), 0);
+    EXPECT_EQ(s2->lastTokenHistoryGpuSyncTokens(), 0);
+
+    // Step 4: prefix shrink/reset recovers cleanly with exact bit parity.
+    s2->completeTokenIdsPtr()->setSeqLength(250);
+    groups = StreamGroups({s1, s2});
+    verify_against_cpu_ref(draft1);
+    EXPECT_EQ(s2->cachedTokenHistoryGpuLength(), 250);
+    EXPECT_EQ(s2->lastTokenHistoryGpuSyncTokens(), 250);
+
+    // Step 5: stream resource release frees GPU token history cache.
+    s1->releaseResource();
+    s2->releaseResource();
+    EXPECT_EQ(s1->cachedTokenHistoryGpuLength(), 0);
+    EXPECT_EQ(s2->cachedTokenHistoryGpuLength(), 0);
 }
 
 }  // namespace rtp_llm

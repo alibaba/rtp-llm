@@ -344,11 +344,42 @@ void FIFOScheduler::onRunningStream(const GenerateStreamPtr& stream) {
     accountBatchMetrics(stream);
 }
 
+void FIFOScheduler::reportDpStepActivity(bool has_local_real_work, bool any_dp_active) {
+    if (!need_fill_fake_stream_) {
+        return;
+    }
+    std::lock_guard<mutex> lock(lock_);
+    dp_peer_active_ = any_dp_active;
+    if (has_local_real_work || any_dp_active) {
+        dp_consecutive_idle_steps_ = 0;
+        cond_.notify_all();
+    }
+}
+
+bool FIFOScheduler::shouldSkipDpFakeIdleWait() const {
+    return need_fill_fake_stream_
+           && (dp_peer_active_ || dp_consecutive_idle_steps_ < kDpIdleHysteresisSteps);
+}
+
+void FIFOScheduler::recordScheduleEmptyState(bool has_scheduled_work) {
+    if (!need_fill_fake_stream_) {
+        return;
+    }
+    if (has_scheduled_work) {
+        dp_consecutive_idle_steps_ = 0;
+    } else if (dp_consecutive_idle_steps_ < kDpIdleHysteresisSteps) {
+        ++dp_consecutive_idle_steps_;
+    }
+}
+
 bool FIFOScheduler::waitPredicate() {
     // Check streams directly without calling empty() which acquires lock_ (already held by schedule())
     // Pending loads and capacity-blocked waiters are polled by the timed wait below. They are not
     // wakeup events themselves, otherwise a retryable KV shortage spins the scheduler.
-    return stop_ || schedule_trigger_ || !running_streams_.empty() || !pending_decode_streams_.empty();
+    // On DP>1 tp_rank 0, skip the 10ms wait when peers are active or within post-work
+    // hysteresis so fake streams enter EP/DP collectives without stalling active peers.
+    return stop_ || schedule_trigger_ || !running_streams_.empty() || !pending_decode_streams_.empty()
+           || shouldSkipDpFakeIdleWait();
 }
 
 void FIFOScheduler::admitWaitingStreams(list<GenerateStreamPtr>&       waiting_streams,
@@ -842,6 +873,7 @@ absl::StatusOr<ScheduleOutput> FIFOScheduler::schedule() {
     if (prefill_chunk_size_ > 0 && !running_streams_.empty() && running_streams_.front()->isContextStream()) {
         auto prefill_batch = selectPrefillPrefix(running_streams_);
         if (!prefill_batch.empty()) {
+            recordScheduleEmptyState(true);
             reportMetrics();
             last_schedule_time_ = autil::TimeUtility::currentTimeInMilliSeconds();
             return ScheduleOutput{std::move(prefill_batch)};
@@ -852,6 +884,7 @@ absl::StatusOr<ScheduleOutput> FIFOScheduler::schedule() {
         }
     }
 
+    recordScheduleEmptyState(!running_streams_.empty());
     reportMetrics();
     last_schedule_time_ = autil::TimeUtility::currentTimeInMilliSeconds();
     return ScheduleOutput{running_streams_};

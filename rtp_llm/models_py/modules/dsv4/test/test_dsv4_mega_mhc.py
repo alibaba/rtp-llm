@@ -84,12 +84,110 @@ def _make_norm(
 class TestDSV4MegaMHCContract(unittest.TestCase):
     def setUp(self) -> None:
         self._saved_warmed = set(_mega_mhc._WARMED_STREAMS)
+        self._saved_specs = dict(_mega_mhc._LAST_SPEC_BY_DEVICE)
         self.addCleanup(
             lambda: (
                 _mega_mhc._WARMED_STREAMS.clear(),
                 _mega_mhc._WARMED_STREAMS.update(self._saved_warmed),
+                _mega_mhc._LAST_SPEC_BY_DEVICE.clear(),
+                _mega_mhc._LAST_SPEC_BY_DEVICE.update(self._saved_specs),
             )
         )
+
+    def test_prepare_capture_stream_noop_and_warm_contracts(self) -> None:
+        # Safe no-op when mega_mhc kernel is missing, device is CPU, or already capturing.
+        with patch.object(_mega_mhc, "_get_mega_mhc", return_value=None):
+            self.assertFalse(_mega_mhc.prepare_capture_stream(torch.device("cpu")))
+        fake_kernel = unittest.mock.MagicMock()
+        with patch.object(_mega_mhc, "_get_mega_mhc", return_value=fake_kernel):
+            self.assertFalse(_mega_mhc.prepare_capture_stream(torch.device("cpu")))
+            with (
+                patch.object(_mega_mhc, "_is_sm10x_device", return_value=False),
+                patch.object(_mega_mhc.torch.cuda, "is_available", return_value=True),
+                patch.object(_mega_mhc.torch.cuda, "current_device", return_value=0),
+            ):
+                self.assertFalse(
+                    _mega_mhc.prepare_capture_stream(torch.device("cuda:0"))
+                )
+            with (
+                patch.object(_mega_mhc, "_is_sm10x_device", return_value=True),
+                patch.object(
+                    _mega_mhc.torch.cuda,
+                    "is_current_stream_capturing",
+                    return_value=True,
+                ),
+            ):
+                self.assertFalse(
+                    _mega_mhc.prepare_capture_stream(torch.device("cuda:0"))
+                )
+            # Without any recorded spec on the device and without explicit dim, no-ops safely.
+            with (
+                patch.object(_mega_mhc, "_is_sm10x_device", return_value=True),
+                patch.object(
+                    _mega_mhc.torch.cuda,
+                    "is_current_stream_capturing",
+                    return_value=False,
+                ),
+                patch.object(_mega_mhc, "_stream_key", return_value=(0, 9991)),
+            ):
+                self.assertFalse(
+                    _mega_mhc.prepare_capture_stream(torch.device("cuda:0"))
+                )
+
+            # With recorded spec (or explicit dim), warms once, marks stream warmed,
+            # enables can_use_on_current_stream during capture, and dedups repeats.
+            _mega_mhc._LAST_SPEC_BY_DEVICE[0] = _mega_mhc._MegaMhcSpec(
+                dim=4096,
+                hc_mult=4,
+                hc_sinkhorn_iters=20,
+                norm_eps=1.0e-6,
+                hc_eps=1.0e-6,
+                rmsnorm_eps=1.0e-6,
+            )
+            fake_stream = unittest.mock.MagicMock()
+            with (
+                patch.object(_mega_mhc, "_is_sm10x_device", return_value=True),
+                patch.object(
+                    _mega_mhc.torch.cuda,
+                    "is_current_stream_capturing",
+                    return_value=False,
+                ),
+                patch.object(_mega_mhc, "_stream_key", return_value=(0, 9992)),
+                patch.object(
+                    _mega_mhc.torch.cuda,
+                    "device",
+                    return_value=unittest.mock.MagicMock(),
+                ),
+                patch.object(
+                    _mega_mhc.torch.cuda,
+                    "current_stream",
+                    return_value=fake_stream,
+                ),
+                patch.object(_mega_mhc, "_launch_capture_warmup") as mock_launch,
+            ):
+                self.assertTrue(
+                    _mega_mhc.prepare_capture_stream(torch.device("cuda:0"))
+                )
+                mock_launch.assert_called_once()
+                fake_stream.synchronize.assert_called_once()
+                self.assertIn((0, 9992), _mega_mhc._WARMED_STREAMS)
+                # Second call on same warmed stream is a safe no-op.
+                self.assertFalse(
+                    _mega_mhc.prepare_capture_stream(torch.device("cuda:0"))
+                )
+                mock_launch.assert_called_once()
+            with (
+                patch.object(_mega_mhc, "_is_sm10x_device", return_value=True),
+                patch.object(
+                    _mega_mhc.torch.cuda,
+                    "is_current_stream_capturing",
+                    return_value=True,
+                ),
+                patch.object(_mega_mhc, "_stream_key", return_value=(0, 9992)),
+            ):
+                self.assertTrue(
+                    _mega_mhc.can_use_on_current_stream(torch.device("cuda:0"))
+                )
 
     def test_num_splits_and_representative_tokens(self) -> None:
         # DSV4 Flash (dim=4096) on B200/B300 (148 SMs): 4 distinct num_splits buckets.
@@ -501,6 +599,106 @@ class TestDSV4MegaMHCSm103Gpu(unittest.TestCase):
             torch.testing.assert_close(g_norm, ref_norm, atol=3.0e-2, rtol=2.0e-2)
             torch.testing.assert_close(g_post, ref_post, atol=5.0e-3, rtol=5.0e-3)
             torch.testing.assert_close(g_comb, ref_comb, atol=5.0e-3, rtol=5.0e-3)
+
+    def test_gpu_prepare_capture_stream_enables_mega_mhc_without_memsets(self) -> None:
+        import ctypes
+
+        prev = _make_unit(dim=4096, device=self.device, seed=41)
+        nxt = _make_unit(dim=4096, device=self.device, seed=42)
+        norm = _make_norm(dim=4096, device=self.device, seed=43)
+
+        b, s, dim = 4, 1, 4096
+        x_sub = torch.randn((b, s, dim), dtype=torch.bfloat16, device=self.device)
+        residual = torch.randn((b, s, 4, dim), dtype=torch.bfloat16, device=self.device)
+        post = torch.randn((b, s, 4, 1), dtype=torch.float32, device=self.device)
+        comb = torch.randn((b, s, 4, 4), dtype=torch.float32, device=self.device)
+
+        # Record spec on default stream (mirrors CudaGraphRunner warmup before capture).
+        warmup_out = _mega_mhc.try_fused_post_pre(
+            x_sub,
+            residual,
+            post,
+            comb,
+            previous=prev,
+            next_hc=nxt,
+            norm=norm,
+        )
+        self.assertIsNotNone(warmup_out)
+        torch.cuda.synchronize(self.device)
+
+        # Fresh dedicated capture stream: prepare_capture_stream() warms barriers pre-capture.
+        capture_stream = torch.cuda.Stream(device=self.device)
+        with torch.cuda.stream(capture_stream):
+            self.assertTrue(_mega_mhc.prepare_capture_stream(self.device))
+            self.assertFalse(_mega_mhc.prepare_capture_stream(self.device))
+
+            g = torch.cuda.CUDAGraph(keep_graph=True)
+            captured = {}
+            with torch.cuda.graph(g, stream=capture_stream):
+                captured["out"] = _mega_mhc.try_fused_post_pre(
+                    x_sub,
+                    residual,
+                    post,
+                    comb,
+                    previous=prev,
+                    next_hc=nxt,
+                    norm=norm,
+                )
+        self.assertIsNotNone(captured["out"])
+
+        # Audit captured graph nodes: zero memset nodes and at least one kernel node (mega_mhc).
+        cudart = ctypes.CDLL("libcudart.so")
+        cudart.cudaGraphGetNodes.argtypes = [
+            ctypes.c_void_p,
+            ctypes.POINTER(ctypes.c_void_p),
+            ctypes.POINTER(ctypes.c_size_t),
+        ]
+        cudart.cudaGraphNodeGetType.argtypes = [
+            ctypes.c_void_p,
+            ctypes.POINTER(ctypes.c_int),
+        ]
+        raw = ctypes.c_void_p(g.raw_cuda_graph())
+        num_nodes = ctypes.c_size_t(0)
+        self.assertEqual(
+            cudart.cudaGraphGetNodes(raw, None, ctypes.byref(num_nodes)), 0
+        )
+        self.assertGreater(num_nodes.value, 0)
+        nodes = (ctypes.c_void_p * num_nodes.value)()
+        self.assertEqual(
+            cudart.cudaGraphGetNodes(raw, nodes, ctypes.byref(num_nodes)), 0
+        )
+        kernel_count = 0
+        memset_count = 0
+        for idx in range(num_nodes.value):
+            ntype = ctypes.c_int(-1)
+            cudart.cudaGraphNodeGetType(nodes[idx], ctypes.byref(ntype))
+            if ntype.value == 0:
+                kernel_count += 1
+            elif ntype.value == 2:
+                memset_count += 1
+        self.assertGreater(kernel_count, 0)
+        self.assertEqual(memset_count, 0)
+
+        # Replay with fresh data and check numerical parity.
+        new_x = torch.randn_like(x_sub) * 0.75
+        new_res = torch.randn_like(residual) * 0.75
+        new_post = torch.randn_like(post) * 0.1
+        new_comb = torch.randn_like(comb) * 0.1
+        x_sub.copy_(new_x)
+        residual.copy_(new_res)
+        post.copy_(new_post)
+        comb.copy_(new_comb)
+        g.replay()
+        torch.cuda.synchronize(self.device)
+
+        ref_res = prev.post(new_x, new_res.clone(), new_post, new_comb)
+        ref_pre, ref_post, ref_comb = nxt.pre(ref_res)
+        ref_norm = norm(ref_pre.reshape(-1, dim)).reshape(b, s, dim)
+        g_res, g_norm, g_post, g_comb = captured["out"]
+        torch.testing.assert_close(g_res, ref_res, atol=3.0e-2, rtol=2.0e-2)
+        torch.testing.assert_close(g_norm, ref_norm, atol=3.0e-2, rtol=2.0e-2)
+        torch.testing.assert_close(g_post, ref_post, atol=5.0e-3, rtol=5.0e-3)
+        torch.testing.assert_close(g_comb, ref_comb, atol=5.0e-3, rtol=5.0e-3)
 
 
 if __name__ == "__main__":

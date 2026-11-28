@@ -63,6 +63,10 @@ public:
     virtual absl::Status updateSchedulerInfo(const std::string& scheduler_info) {
         return absl::OkStatus();
     }
+    /// Feed back whether the completed engine step saw local or DP-peer real
+    /// work so DP>1 schedulers can enter EP/DP collectives without 10ms stalls
+    /// while peers remain active, yet still sleep 10ms when idle at 0 QPS.
+    virtual void reportDpStepActivity(bool /*has_local_real_work*/, bool /*any_dp_active*/) {}
 };
 
 }  // namespace rtp_llm

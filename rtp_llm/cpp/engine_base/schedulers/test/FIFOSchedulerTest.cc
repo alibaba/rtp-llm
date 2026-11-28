@@ -6900,4 +6900,113 @@ TEST_F(FIFOSchedulerTest, testGlobalChunkBudgetValidatesFanoutReuseAndShortFinal
     ASSERT_EQ(short_stream->currentBatchSize(), 8);
 }
 
+TEST_F(FIFOSchedulerTest, testDpIdleWaitSkipsTenMsBarrierWhenPeersActiveAndSleepsWhenClusterIdle) {
+    CacheConfig                     cache_config  = makeMhaCacheConfig(1, 4, 1, 4, 8, rtp_llm::DataType::TYPE_FP16);
+    std::shared_ptr<KVCacheManager> cache_manager = std::make_shared<KVCacheManager>(cache_config);
+    ASSERT_TRUE(cache_manager->init());
+    ResourceContext resource_context;
+    resource_context.cache_manager = cache_manager;
+
+    ModelConfig model_config;
+    model_config.max_seq_len = 8192;
+    RuntimeConfig runtime_config;
+    runtime_config.max_generate_batch_size                     = 16;
+    runtime_config.fifo_scheduler_config.max_batch_tokens_size = 8192;
+    PDSepConfig       pd_sep_config;
+    ParallelismConfig parallelism_config;
+    parallelism_config.dp_size = 8;
+    parallelism_config.tp_rank = 0;
+
+    FIFOScheduler scheduler(runtime_config, model_config, pd_sep_config, parallelism_config, cache_manager);
+    ASSERT_TRUE(scheduler.need_fill_fake_stream_);
+
+    // 1. Cluster genuinely idle (no recent work, no active peers): schedule() sleeps ~10ms.
+    const auto idle_start  = std::chrono::steady_clock::now();
+    auto       idle_result = scheduler.schedule();
+    const auto idle_ms =
+        std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - idle_start).count();
+    ASSERT_TRUE(idle_result.ok());
+    EXPECT_TRUE(idle_result->streams.empty());
+    EXPECT_GE(idle_ms, 8);
+
+    // 2. When any DP peer is reported active, repeated empty schedules skip the 10ms wait.
+    scheduler.reportDpStepActivity(/*has_local_real_work=*/false, /*any_dp_active=*/true);
+    const auto active_start = std::chrono::steady_clock::now();
+    for (int step = 0; step < 25; ++step) {
+        auto res = scheduler.schedule();
+        ASSERT_TRUE(res.ok());
+        EXPECT_TRUE(res->streams.empty());
+        scheduler.reportDpStepActivity(/*has_local_real_work=*/false, /*any_dp_active=*/true);
+    }
+    const auto active_total_ms =
+        std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - active_start)
+            .count();
+    EXPECT_LT(active_total_ms, 20);
+
+    // 3. After peers become idle and post-work hysteresis drains, scheduler returns to 10ms idle polling.
+    scheduler.reportDpStepActivity(/*has_local_real_work=*/false, /*any_dp_active=*/false);
+    // Once local work runs, hysteresis resets and allows immediate tail steps before sleeping 10ms.
+    std::shared_ptr<GenerateInput> query = make_shared<GenerateInput>();
+    query->input_ids                     = torch::tensor({1}, torch::kInt32);
+    query->generate_config               = makeTestGenerateConfig();
+    auto stream = make_shared<NormalGenerateStream>(query, model_config, runtime_config, resource_context, nullptr);
+    ASSERT_TRUE(scheduler.enqueue(stream).ok());
+    auto work_batch = scheduler.schedule();
+    ASSERT_TRUE(work_batch.ok());
+    ASSERT_EQ(work_batch->streams.size(), 1u);
+    stream->reportEvent(StreamEvents::GenerateDone);
+
+    // Reap done stream; the schedule returns empty and starts hysteresis from 1.
+    auto drain_start = std::chrono::steady_clock::now();
+    for (uint32_t i = 0; i < FIFOScheduler::kDpIdleHysteresisSteps; ++i) {
+        auto res = scheduler.schedule();
+        ASSERT_TRUE(res.ok());
+        EXPECT_TRUE(res->streams.empty());
+    }
+    const auto drain_ms =
+        std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - drain_start).count();
+    EXPECT_LT(drain_ms, 15);
+
+    // Hysteresis exhausted with inactive peers -> 10ms sleep resumes to avoid busy spinning at 0 QPS.
+    const auto final_idle_start = std::chrono::steady_clock::now();
+    auto       final_idle_res   = scheduler.schedule();
+    const auto final_idle_ms =
+        std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - final_idle_start)
+            .count();
+    ASSERT_TRUE(final_idle_res.ok());
+    EXPECT_TRUE(final_idle_res->streams.empty());
+    EXPECT_GE(final_idle_ms, 8);
+}
+
+TEST_F(FIFOSchedulerTest, testDpPeerWakeupInterruptsIdleWaitImmediately) {
+    CacheConfig                     cache_config  = makeMhaCacheConfig(1, 4, 1, 4, 8, rtp_llm::DataType::TYPE_FP16);
+    std::shared_ptr<KVCacheManager> cache_manager = std::make_shared<KVCacheManager>(cache_config);
+    ASSERT_TRUE(cache_manager->init());
+
+    ModelConfig model_config;
+    model_config.max_seq_len = 8192;
+    RuntimeConfig runtime_config;
+    runtime_config.max_generate_batch_size                     = 16;
+    runtime_config.fifo_scheduler_config.max_batch_tokens_size = 8192;
+    PDSepConfig       pd_sep_config;
+    ParallelismConfig parallelism_config;
+    parallelism_config.dp_size = 4;
+    parallelism_config.tp_rank = 0;
+
+    FIFOScheduler scheduler(runtime_config, model_config, pd_sep_config, parallelism_config, cache_manager);
+    auto          res = scheduler.schedule();
+    ASSERT_TRUE(res.ok());
+    EXPECT_TRUE(res->streams.empty());
+
+    // Simulate active peer wakeup while idle sleep could otherwise occur.
+    scheduler.reportDpStepActivity(/*has_local_real_work=*/false, /*any_dp_active=*/true);
+    const auto t0  = std::chrono::steady_clock::now();
+    auto       res2 = scheduler.schedule();
+    const auto elapsed_us =
+        std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - t0).count();
+    ASSERT_TRUE(res2.ok());
+    EXPECT_TRUE(res2->streams.empty());
+    EXPECT_LT(elapsed_us, 5000);
+}
+
 }  // namespace rtp_llm

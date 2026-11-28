@@ -31,6 +31,7 @@ public:
     enqueueGroup(const std::vector<GenerateStreamPtr>& streams) override;
 
     absl::StatusOr<ScheduleOutput> schedule() override;
+    void reportDpStepActivity(bool has_local_real_work, bool any_dp_active) override;
 
 public:
     // for test. Group-aware shadow of the FIFOSchedulerBase helper so that
@@ -89,6 +90,8 @@ private:
     size_t groupQueueStreamsSize(const StreamGroupQueue& group_queue) const;
     void   accountBatchMetrics(const GenerateStreamPtr& new_stream);
     bool   waitPredicate() override;
+    bool   shouldSkipDpFakeIdleWait() const;
+    void   recordScheduleEmptyState(bool has_scheduled_work);
     void   onRunningStream(const GenerateStreamPtr& stream) override;
     // FIFO-specific replacement for FIFOSchedulerBase::evaluateWaitingStreams(): admission and
     // state transition happen in a single pass so that per-round token budgets only account for
@@ -130,6 +133,9 @@ private:
     mutable std::atomic<int64_t> pending_group_fallback_count_ = 0;
     AdmissionLane                active_admission_lane_        = AdmissionLane::NONE;
     bool                         prefer_group_next_            = false;
+    static constexpr uint32_t    kDpIdleHysteresisSteps        = 8;
+    bool                         dp_peer_active_               = false;
+    uint32_t                     dp_consecutive_idle_steps_    = kDpIdleHysteresisSteps;
 
     // TODO @wangyin support different beams run togather
     std::list<GenerateStreamPtr> pending_decode_streams_;
