@@ -228,6 +228,12 @@ public:
     std::optional<int64_t>                   frontend_speculative_proposed_draft_tokens;
 };
 
+enum class CachePrepareResult {
+    DONE,
+    WAIT,
+    LACK_MEM,
+};
+
 enum class StreamState {
     WAITING,
     LOADING_CACHE,  // GPU blocks allocated, waiting for connector H2D copy

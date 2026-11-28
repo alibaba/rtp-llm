@@ -418,6 +418,7 @@ class EplbMode:
     def value(self) -> int:
         ...
 class FIFOSchedulerConfig:
+    async_cache_prepare: bool
     cp_force_single_prefill: bool
     decode_prefill_ratio: str
     max_batch_tokens_size: int
