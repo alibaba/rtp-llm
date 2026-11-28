@@ -129,6 +129,13 @@ def subscribe_deps():
         }),
     )
 
+# Keep the release metadata aligned with both CUDA 13 requirements locks.
+_CUDA13_FLASHINFER_WHEEL_DEPS = [
+    "flashinfer-python[cu13]==0.7.5+57f949b8.cu132",
+    "flashinfer-cubin==0.7.5+57f949b8.cu132",
+    "nvidia-cutlass-dsl[cu13]==4.8.1",
+]
+
 def whl_deps():
     return select({
         "@rtp_llm//:using_ppu": [
@@ -161,8 +168,6 @@ def whl_deps():
             "deep-ep==2.1.0+a56d615",
             "fast-hadamard-transform@https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/whls/fast_hadamard/fast_hadamard_transform-1.1.0-cp310-cp310-linux_x86_64.whl",
             "flash_attn==2.8.3.post1+cu13torch2.11cxx11abitrue.r1",
-            "flashinfer-python==0.6.9+8c4f4dcf",
-            "flashinfer-cubin==0.6.9+8c4f4dcf",
             # Unified rtp_kernel from cuda_extension feat/port-nvfp4-xqa@94fd20eb;
             # NVFP4 mm only (no XQA wrappers).
             "rtp-kernel==0.1.0+94fd20eb.cu132",
@@ -173,10 +178,7 @@ def whl_deps():
             "fastsafetensors==0.3.4.dev20260908+ali.fuseshm.gfb2c381b.aone70048596",
             "tilelang==0.1.15",
             "apache-tvm-ffi==0.1.12",
-            # FlashAttention 3 remains deferred on CUDA13.
-            "nvidia-cutlass-dsl==4.4.2",
-            "nvidia-cutlass-dsl-libs-cu13==4.4.2",
-        ],
+        ] + _CUDA13_FLASHINFER_WHEEL_DEPS,
         "@rtp_llm//:using_cuda13_arm": [
             "torch==2.11.0+cu130",
             "torchvision==0.26.0+cu130",
@@ -185,8 +187,6 @@ def whl_deps():
             "flash-mla==1.0.0+2e5429f",
             "flash-mla-legacy==1.0.0+92fd68b.rtp1",
             "deep-ep==2.1.0+a56d615",
-            "flashinfer-python==0.6.9+8c4f4dcf",
-            "flashinfer-cubin==0.6.9+8c4f4dcf",
             "rtp-kernel==0.1.0+94fd20eb.cu132",
             "fast-safetensors==0.7.4.dev0+torch2.11.0.cu130.aone67401633",
             "fastsafetensors==0.3.4.dev20260908+ali.fuseshm.gfb2c381b.aone70048596",
@@ -194,9 +194,7 @@ def whl_deps():
             "apache-tvm-ffi==0.1.12",
             # FlashAttention wheels remain deferred on CUDA13 ARM.
             "fast-hadamard-transform@https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/cu129/fast_hadamard_transform-1.0.4.post1-cp310-cp310-linux_aarch64.whl",
-            "nvidia-cutlass-dsl==4.5.0",
-            "nvidia-cutlass-dsl-libs-base==4.5.0",
-        ],
+        ] + _CUDA13_FLASHINFER_WHEEL_DEPS,
         "@rtp_llm//:using_cuda12_9_x86": [
             # torch 2.8.0+cu129: the upstream wheel (http.bzl torch_2.8_py310_cuda
             # fetches the same file); the artlab pytorch mirror copy is the

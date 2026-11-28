@@ -33,9 +33,9 @@ class CacheEnvTest(unittest.TestCase):
 
             def package_info(name):
                 return (
-                    ("0.6.9", str(source))
+                    ("0.6.9", str(source), None)
                     if name == "flashinfer_cubin"
-                    else (None, None)
+                    else (None, None, None)
                 )
 
             with mock.patch.object(

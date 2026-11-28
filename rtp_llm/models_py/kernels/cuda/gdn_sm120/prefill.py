@@ -14,7 +14,7 @@ setup_cutlass_import_path()
 @functools.lru_cache(maxsize=1)
 def sm120_dsl_available():
     try:
-        if metadata.version("nvidia-cutlass-dsl") != "4.4.2":
+        if metadata.version("nvidia-cutlass-dsl") not in ("4.4.2", "4.8.1"):
             return False
         from rtp_llm.models_py.utils.cutlass import cuda13_cutlass_is_intact
 

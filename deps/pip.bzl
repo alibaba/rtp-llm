@@ -34,8 +34,7 @@ PIP_INDEX_ENVSUBST = [
 ]
 
 # FlashInfer 0.6.9 plans decode on the CPU; avoid Python scalar-Tensor iteration.
-# Apply directly to the Python wheels used by the CUDA 12.9/13 lines (both
-# the 8c4f4dcf and e87d610f fork builds plus upstream stock).
+# Apply only to the listed FlashInfer 0.6.9 wheels for CUDA 12.9.
 FLASHINFER_069_ANNOTATIONS = {
     "flashinfer-python": package_annotation(
         whl_patches = {
@@ -51,11 +50,19 @@ FLASHINFER_069_ANNOTATIONS = {
     ),
 }
 
-# rules_python omits RECORD by default; retain it for the compiler integrity check.
-CUDA13_ANNOTATIONS = dict(FLASHINFER_069_ANNOTATIONS)
-CUDA13_ANNOTATIONS["nvidia-cutlass-dsl-libs-cu13"] = package_annotation(
-    data = [":dist_info"],
-)
+CUDA13_ANNOTATIONS = {
+    "flashinfer-python": package_annotation(
+        data = [":dist_info"],
+        whl_patches = {
+            "@rtp_llm//patches/flashinfer:0018-mla-staging-cpu.patch": json.encode({
+                "whls": ["flashinfer_python-0.7.5+57f949b8.cu132-py3-none-any.whl"],
+                "patch_strip": 1,
+            }),
+        },
+    ),
+    # rules_python omits RECORD by default; retain it for the compiler integrity check.
+    "nvidia-cutlass-dsl-libs-cu13": package_annotation(data = [":dist_info"]),
+}
 
 def pip_deps():
     pip_parse(
@@ -130,7 +137,7 @@ def pip_deps():
 
     pip_parse(
         name = "pip_cuda13_arm_torch",
-        annotations = FLASHINFER_069_ANNOTATIONS,
+        annotations = CUDA13_ANNOTATIONS,
         requirements_lock = "@rtp_pip_deps//:requirements_lock_cuda13_arm.txt",
         python_interpreter = "/opt/conda310/bin/python3",
         extra_pip_args = PIP_EXTRA_ARGS + PIP_INDEX_ARGS,
