@@ -356,7 +356,7 @@ def bench_prefill_sweep():
     nope_dim = head_dim - rope_dim
     n_groups = 8
     heads_per_group = n_heads // n_groups
-    Mlist = [1, 16, 256, 4096, 11548, 12288, 25410]
+    Mlist = [1, 16, 256, 558, 4096, 11548, 12288, 25410]
 
     from rtp_llm.models_py.modules.dsv4._fused_inv_rope_fp8_quant_triton import (
         _get_cuda_inv_rope_fp8_quant_op,

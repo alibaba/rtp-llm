@@ -33,7 +33,7 @@ from rtp_llm.models_py.modules.dsv4.test.dsv4_kernel_perf_utils import (
 
 ensure_triton_cc()
 
-DEFAULT_MHC_M_SWEEP = [1024, 4096, 12288, 25410, 65536]
+DEFAULT_MHC_M_SWEEP = [64, 128, 256, 512, 558, 1024, 4096, 12288, 25410, 65536]
 FUSED_KERNEL_REGEX = r".*_mhc_pre_big_fuse_rmsnorm_kernel.*"
 
 
@@ -107,7 +107,9 @@ class FusedMhcPreNormPerfTest(unittest.TestCase):
 
         for m in m_list:
             unit, norm, x = _make_inputs(m, dim=dim, hc=hc)
-            if not can_use_fused_mhc_pre_norm(x, unit, norm, quant_ue8m0=True):
+            if not can_use_fused_mhc_pre_norm(
+                x, unit, norm, quant_ue8m0=True, min_tokens=0
+            ):
                 self.skipTest("tf32_hc_prenorm_gemm unavailable")
 
             warmup = 10 if m <= 12288 else 5

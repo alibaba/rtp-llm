@@ -236,7 +236,21 @@ class Dsv4MhcPostTest(unittest.TestCase):
             )
             H = 4
             for D in (4096, 7168):
-                for M in (1, 16, 64, 128, 512, 2048, 4096, 8192, 12288):
+                for M in (
+                    1,
+                    16,
+                    32,
+                    64,
+                    128,
+                    256,
+                    512,
+                    558,
+                    1024,
+                    2048,
+                    4096,
+                    8192,
+                    12288,
+                ):
                     x = (
                         torch.randn(M, D, dtype=torch.bfloat16, device=self.device)
                         * 0.2

@@ -148,7 +148,7 @@ __device__ __forceinline__ void cp_async_wait() {
 }
 
 // 2-stage cp.async.ca 1-CTA-per-token kernel for compile-time D (4096 / 7168),
-// H == 4, FP32 16B-aligned post/comb, M >= 1024.
+// H == 4, FP32 16B-aligned post/comb, M >= 128.
 // Only thread `tid` accesses smem[stage][...][tid], so ZERO __syncthreads() barriers exist.
 template<int64_t D_CONST>
 __global__ void __launch_bounds__(128, 1) dsv4_mhc_post_h4_cpasync_kernel(const __nv_bfloat16* __restrict__ x_ptr,
@@ -612,9 +612,9 @@ void dsv4_mhc_post_fwd(const torch::Tensor& x,
     const bool  post_is_bf16 = (post.scalar_type() == torch::kBFloat16);
     const bool  comb_is_bf16 = (comb.scalar_type() == torch::kBFloat16);
 
-    const bool can_vec8 = (H <= kMaxVecH) && ((D & 7LL) == 0) && is_aligned(x_ptr, 16) && is_aligned(r_ptr, 16)
-                          && is_aligned(o_ptr, 16);
-    const bool can_regpipe = can_vec8 && (H == 4) && (M >= 1024) && !post_is_bf16 && !comb_is_bf16
+    const bool can_vec8 =
+        (H <= kMaxVecH) && ((D & 7LL) == 0) && is_aligned(x_ptr, 16) && is_aligned(r_ptr, 16) && is_aligned(o_ptr, 16);
+    const bool can_regpipe = can_vec8 && (H == 4) && (M >= 128) && !post_is_bf16 && !comb_is_bf16
                              && is_aligned(p_ptr, 16) && is_aligned(c_ptr, 16) && (D == 4096 || D == 7168);
 
     cudaStream_t stream = at::cuda::getCurrentCUDAStream().stream();

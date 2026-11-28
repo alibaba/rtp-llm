@@ -70,9 +70,9 @@ if triton is not None:
             mask=io_mask,
             other=0.0,
         ).to(tl.float32)
-        w = tl.load(w_ptr + offs_d, mask=d_mask, other=0.0).to(tl.float32)
 
         inv = tl.rsqrt(tl.sum(x * x, axis=1) / D + EPS)
+        w = tl.load(w_ptr + offs_d, mask=d_mask, other=0.0).to(tl.float32)
         # Preserve the two-step BF16 activation boundary before FP8 quantization.
         y = (x * inv[:, None] * w[None, :]).to(tl.bfloat16)
         if EMIT_NORM:
@@ -279,9 +279,9 @@ def _select_small_d_launch(rows: int, block_d: int) -> tuple[int, int]:
         return 1, 8 if block_d >= 4096 else (4 if block_d >= 1024 else 2)
     if block_d <= 1024:
         return 1, 1
-    if block_d <= 2048:
+    if block_d <= 4096:
         return 1, 2
-    return 1, 4
+    return 1, 4 if rows <= 384 else 2
 
 
 def _select_chunked_launch(rows: int, chunk_d: int) -> tuple[int, int]:
@@ -529,7 +529,7 @@ def fused_rmsnorm_fp8_ue8m0_quant(
     norm_stride_m = int(flat_norm.stride(0)) if emit_norm else 0
     scale_stride_k = int(out_scale.stride(1))
 
-    small_d_limit = 4096 if rows <= 64 else _SMALL_D_MAX
+    small_d_limit = 8192 if rows <= 768 else (4096 if rows <= 1536 else _SMALL_D_MAX)
     if _chunk_d is None and width <= small_d_limit:
         block_d = max(4 * group_size, triton.next_power_of_2(width))
         block_scale_packs = block_d // (4 * group_size)

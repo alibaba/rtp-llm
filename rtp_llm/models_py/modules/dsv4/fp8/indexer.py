@@ -112,6 +112,7 @@ def _run_prefill_topk(
     compress_ratio: int,
     max_row_len: Optional[int] = None,
     row_indices: Optional[torch.Tensor] = None,
+    lengths: Optional[torch.Tensor] = None,
 ) -> None:
     # ``logits`` is over compressed K tokens. Convert back to input-token
     # length so the policy matches the user-visible visible span per row.
@@ -124,9 +125,13 @@ def _run_prefill_topk(
         and int(topk) in (512, 1024, 2048)
         and estimated_input_tokens <= _FAST_PREFILL_TOPK_MAX_INPUT_TOKENS
     ):
-        lengths = (row_ends - row_starts).contiguous()
+        topk_lengths = (
+            lengths.contiguous()
+            if lengths is not None
+            else (row_ends - row_starts).contiguous()
+        )
         rtp_llm_ops.fast_topk_v2_variable(
-            logits, out, lengths, row_starts.contiguous(), int(topk)
+            logits, out, topk_lengths, row_starts.contiguous(), int(topk)
         )
         return
 
@@ -217,6 +222,7 @@ class _IndexerFP8ScoreChunk(NamedTuple):
     ks_chunk: torch.Tensor
     ke_chunk: torch.Tensor
     row_indices: Optional[torch.Tensor] = None
+    topk_lengths: Optional[torch.Tensor] = None
 
 
 def _plan_score_chunk_ranges(
@@ -421,6 +427,7 @@ def _build_score_chunks(
     host_input_lengths: Optional[tuple[int, ...]] = None,
     host_prefix_lengths: Optional[tuple[int, ...]] = None,
     cp_ctx: Optional[Any] = None,
+    topk_lengths: Optional[torch.Tensor] = None,
 ) -> tuple[_IndexerFP8ScoreChunk, ...]:
     del use_varlen, sp_int
     if M <= 0 or T <= 0:
@@ -467,7 +474,7 @@ def _build_score_chunks(
         for rs, re in ranges:
             ks_c = ks[rs:re]
             ke_c = ke[rs:re]
-            len_c = ke_c - ks_c
+            len_c = topk_lengths[rs:re] if topk_lengths is not None else ke_c - ks_c
             stats_list.append(
                 torch.stack([ks_c.min(), ke_c.max(), len_c.max(), len_c.min()])
             )
@@ -491,6 +498,11 @@ def _build_score_chunks(
                     ks_chunk=ks[rs:re],
                     ke_chunk=ke[rs:re],
                     row_indices=None,
+                    topk_lengths=(
+                        topk_lengths[rs:re].contiguous()
+                        if topk_lengths is not None
+                        else None
+                    ),
                 )
             )
             continue
@@ -514,17 +526,22 @@ def _build_score_chunks(
         else:
             ks_rebased = (ks_c - k_lo).contiguous()
             ke_rebased = (ke_c - k_lo).contiguous()
+        chunk_lengths = (
+            topk_lengths[rs:re].contiguous() if topk_lengths is not None else None
+        )
         row_indices = None
         if (
             max_len > 2 * min_len
             and (re - rs) >= _TOPK_SKEW_MIN_ROWS
             and ks.is_cuda
         ):
+            len_for_sort = (
+                chunk_lengths
+                if chunk_lengths is not None
+                else (ke_rebased - ks_rebased)
+            )
             row_indices = (
-                (ke_rebased - ks_rebased)
-                .argsort(descending=True)
-                .to(torch.int32)
-                .contiguous()
+                len_for_sort.argsort(descending=True).to(torch.int32).contiguous()
             )
         chunks_out.append(
             _IndexerFP8ScoreChunk(
@@ -537,6 +554,7 @@ def _build_score_chunks(
                 ks_chunk=ks_rebased,
                 ke_chunk=ke_rebased,
                 row_indices=row_indices,
+                topk_lengths=chunk_lengths,
             )
         )
     return tuple(chunks_out)
@@ -605,6 +623,7 @@ class _IndexerFP8PrefillMeta(NamedTuple):
     indexer_cp_plan: Optional[Any]
     indexer_cp_local_cu: Optional[torch.Tensor]
     score_chunks: Optional[Tuple[_IndexerFP8ScoreChunk, ...]] = None
+    topk_lengths: Optional[torch.Tensor] = None
 
 
 class IndexerFP8(PoolBackedModule):
@@ -1315,6 +1334,7 @@ class IndexerFP8(PoolBackedModule):
                     .to(torch.int32)
                     .contiguous()
                 )
+                topk_lengths = (ke - ks).contiguous()
                 cu_kv_per_token = cu_kv_per_token_i64.to(torch.int32).contiguous()
 
             # ``freqs_cis_slice`` per-token gather — RoPE angles for ``q``
@@ -1375,6 +1395,7 @@ class IndexerFP8(PoolBackedModule):
                 # clamped to T (compressed K count).
                 ke = ((positions_d + 1) // ratio).clamp_max(T).to(torch.int32)
                 ks = torch.zeros(M, dtype=torch.int32, device=device)
+                topk_lengths = (ke - ks).contiguous()
 
             # K-side block_table — None during warmup (no pool bound).
             if kv_block_table is not None and kv_eb > 0:
@@ -1526,6 +1547,7 @@ class IndexerFP8(PoolBackedModule):
                     host_input_lengths=eff_host_inputs,
                     host_prefix_lengths=eff_host_prefixes,
                     cp_ctx=cp_ctx if cp_active else None,
+                    topk_lengths=topk_lengths,
                 )
 
         return _IndexerFP8PrefillMeta(
@@ -1547,6 +1569,7 @@ class IndexerFP8(PoolBackedModule):
             indexer_cp_plan=indexer_cp_plan,
             indexer_cp_local_cu=indexer_cp_local_cu,
             score_chunks=score_chunks,
+            topk_lengths=topk_lengths,
         )
 
     def _can_async_sharded_k_gather(
@@ -1607,6 +1630,7 @@ class IndexerFP8(PoolBackedModule):
                         self.compress_ratio,
                         max_row_len=chunk.max_row_len,
                         row_indices=chunk.row_indices,
+                        lengths=chunk.topk_lengths,
                     )
                 del logits
             return out_buf.view(out_shape)
@@ -1635,6 +1659,11 @@ class IndexerFP8(PoolBackedModule):
                     out_buf[row_start:row_end],
                     K,
                     self.compress_ratio,
+                    lengths=(
+                        attention_inputs.topk_lengths[row_start:row_end]
+                        if attention_inputs.topk_lengths is not None
+                        else None
+                    ),
                 )
             del logits
         return out_buf.view(out_shape)

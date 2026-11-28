@@ -507,6 +507,102 @@ __global__ void dsv4_fused_rmsnorm_rope_vec_kernel(const ScalarT* __restrict__ x
     }
 }
 
+template<typename ScalarT, typename WeightT, typename PosT, bool HAS_WEIGHT, bool INVERSE, bool HEAD_ON_X>
+__global__ void dsv4_fused_rmsnorm_rope_d512_grouped_kernel(const ScalarT* __restrict__ x_ptr,
+                                                            const WeightT* __restrict__ w_ptr,
+                                                            const float2* __restrict__ freqs_ptr,
+                                                            const PosT* __restrict__ pos_ptr,
+                                                            ScalarT* __restrict__ out_ptr,
+                                                            int64_t freq_stride_n,
+                                                            int64_t max_pos,
+                                                            float   eps) {
+    __shared__ alignas(16) float2 s_freqs[32];
+
+    const int64_t freq_idx  = HEAD_ON_X ? static_cast<int64_t>(blockIdx.y) : static_cast<int64_t>(blockIdx.x);
+    const int64_t head_tile = HEAD_ON_X ? static_cast<int64_t>(blockIdx.x) : static_cast<int64_t>(blockIdx.y);
+    const int64_t tile_base = freq_idx * freq_stride_n + head_tile * 32;
+    const int     warp_id   = threadIdx.x >> 5;
+    const int     lane      = threadIdx.x & 31;
+    const int     col0      = lane * 8;
+    const int     col1      = 256 + lane * 8;
+
+    uint4 u0 = __ldg(reinterpret_cast<const uint4*>(x_ptr + (tile_base + warp_id) * 512 + col0));
+    uint4 u1 = __ldg(reinterpret_cast<const uint4*>(x_ptr + (tile_base + warp_id) * 512 + col1));
+
+    if (threadIdx.x < 32) {
+        const int64_t freq_row = resolve_freq_row(pos_ptr, freq_idx, max_pos);
+        s_freqs[threadIdx.x]   = __ldg(freqs_ptr + freq_row * 32 + threadIdx.x);
+    }
+    __syncthreads();
+
+#pragma unroll
+    for (int it = 0; it < 8; ++it) {
+        const int64_t row     = tile_base + it * 4 + warp_id;
+        uint4         u0_next = make_uint4(0u, 0u, 0u, 0u);
+        uint4         u1_next = make_uint4(0u, 0u, 0u, 0u);
+        if (it < 7) {
+            const ScalarT* x_next = x_ptr + (row + 4) * 512;
+            u0_next               = __ldg(reinterpret_cast<const uint4*>(x_next + col0));
+            u1_next               = __ldg(reinterpret_cast<const uint4*>(x_next + col1));
+        }
+
+        float f0[8], f1[8];
+        Vec8Traits<ScalarT>::unpack_u4(u0, f0);
+        Vec8Traits<ScalarT>::unpack_u4(u1, f1);
+        u0 = u0_next;
+        u1 = u1_next;
+
+        float sum_sq = 0.0f;
+#pragma unroll
+        for (int i = 0; i < 8; ++i) {
+            sum_sq += f0[i] * f0[i] + f1[i] * f1[i];
+        }
+#pragma unroll
+        for (int mask = 16; mask > 0; mask >>= 1) {
+            sum_sq += __shfl_xor_sync(0xffffffffu, sum_sq, mask);
+        }
+        const float inv = rsqrtf(sum_sq * (1.0f / 512.0f) + eps);
+
+        if constexpr (HAS_WEIGHT) {
+            float w0[8], w1[8];
+            load_weight8(w_ptr, col0, w0);
+            load_weight8(w_ptr, col1, w1);
+#pragma unroll
+            for (int i = 0; i < 8; ++i) {
+                f0[i] = f0[i] * inv * w0[i];
+                f1[i] = f1[i] * inv * w1[i];
+            }
+        } else {
+            (void)w_ptr;
+#pragma unroll
+            for (int i = 0; i < 8; ++i) {
+                f0[i] *= inv;
+                f1[i] *= inv;
+            }
+        }
+
+        if (lane >= 24) {
+            const int    pair_base = (lane - 24) * 4;
+            const float4 fq0       = *reinterpret_cast<const float4*>(s_freqs + pair_base);
+            const float4 fq1       = *reinterpret_cast<const float4*>(s_freqs + pair_base + 2);
+            const float2 cs[4]     = {{fq0.x, fq0.y}, {fq0.z, fq0.w}, {fq1.x, fq1.y}, {fq1.z, fq1.w}};
+#pragma unroll
+            for (int p = 0; p < 4; ++p) {
+                const float c = cs[p].x;
+                const float s = INVERSE ? -cs[p].y : cs[p].y;
+                const float e = f1[2 * p];
+                const float o = f1[2 * p + 1];
+                f1[2 * p]     = e * c - o * s;
+                f1[2 * p + 1] = e * s + o * c;
+            }
+        }
+
+        ScalarT* out_row                          = out_ptr + row * 512;
+        *reinterpret_cast<uint4*>(out_row + col0) = Vec8Traits<ScalarT>::pack_u4(f0);
+        *reinterpret_cast<uint4*>(out_row + col1) = Vec8Traits<ScalarT>::pack_u4(f1);
+    }
+}
+
 template<typename ScalarT, typename WeightT, typename PosT, bool HAS_WEIGHT, bool INVERSE>
 void launch_rmsnorm_rope_typed(const ScalarT* x_ptr,
                                const WeightT* w_ptr,
@@ -521,6 +617,22 @@ void launch_rmsnorm_rope_typed(const ScalarT* x_ptr,
                                float          eps,
                                int            sm_count,
                                cudaStream_t   stream) {
+    if (D == 512 && rd == 64 && freq_stride_n >= 32 && (freq_stride_n % 32 == 0) && (N % freq_stride_n == 0)) {
+        const int64_t n_freq     = N / freq_stride_n;
+        const int64_t head_tiles = freq_stride_n / 32;
+        if (n_freq >= 512 && head_tiles <= 65535) {
+            if (n_freq <= 65535) {
+                const dim3 grid(static_cast<unsigned int>(head_tiles), static_cast<unsigned int>(n_freq), 1);
+                dsv4_fused_rmsnorm_rope_d512_grouped_kernel<ScalarT, WeightT, PosT, HAS_WEIGHT, INVERSE, true>
+                    <<<grid, 128, 0, stream>>>(x_ptr, w_ptr, freqs_ptr, pos_ptr, out_ptr, freq_stride_n, max_pos, eps);
+                return;
+            }
+            const dim3 grid(static_cast<unsigned int>(n_freq), static_cast<unsigned int>(head_tiles), 1);
+            dsv4_fused_rmsnorm_rope_d512_grouped_kernel<ScalarT, WeightT, PosT, HAS_WEIGHT, INVERSE, false>
+                <<<grid, 128, 0, stream>>>(x_ptr, w_ptr, freqs_ptr, pos_ptr, out_ptr, freq_stride_n, max_pos, eps);
+            return;
+        }
+    }
     const FastStrideDiv fdiv = make_fast_div(N, freq_stride_n);
     if (D == 512) {
         int block_dim = 128;
@@ -938,26 +1050,46 @@ __global__ void dsv4_fused_inv_rope_fp8_quant_4tok_kernel(const __nv_bfloat16* _
 
     const int warp_id = threadIdx.x >> 5;
     const int lane    = threadIdx.x & 31;
-    __syncthreads();
 
     const __nv_bfloat16* o_g_base   = o_ptr + static_cast<int64_t>(g) * heads_per_group * o_stride_head;
     uint8_t*             fp8_g_base = fp8_ptr + static_cast<int64_t>(g) * fp8_stride_group;
     int32_t*             sf_g_base  = scale_ptr + static_cast<int64_t>(g) * scale_stride_group;
 
+    uint4 u0_cur = make_uint4(0u, 0u, 0u, 0u);
+    uint4 u1_cur = make_uint4(0u, 0u, 0u, 0u);
+    if (warp_id < heads_per_group && m_base < M) {
+        const __nv_bfloat16* o_head0 =
+            o_g_base + m_base * o_stride_token + static_cast<int64_t>(warp_id) * o_stride_head;
+        u0_cur = __ldg(reinterpret_cast<const uint4*>(o_head0 + lane * 8));
+        u1_cur = __ldg(reinterpret_cast<const uint4*>(o_head0 + 256 + lane * 8));
+    }
+    __syncthreads();
+
     for (int h = warp_id; h < heads_per_group; h += 8) {
+        if (h != warp_id && m_base < M) {
+            const __nv_bfloat16* o_head0 = o_g_base + m_base * o_stride_token + static_cast<int64_t>(h) * o_stride_head;
+            u0_cur                       = __ldg(reinterpret_cast<const uint4*>(o_head0 + lane * 8));
+            u1_cur                       = __ldg(reinterpret_cast<const uint4*>(o_head0 + 256 + lane * 8));
+        }
+
         uint32_t packed[4] = {0u, 0u, 0u, 0u};
 #pragma unroll
         for (int tk = 0; tk < 4; ++tk) {
             const int64_t m = m_base + tk;
             if (m < M) {
-                const __nv_bfloat16* o_head =
-                    o_g_base + m * o_stride_token + static_cast<int64_t>(h) * o_stride_head;
-                const uint4 u0 = __ldg(reinterpret_cast<const uint4*>(o_head + lane * 8));
-                const uint4 u1 = __ldg(reinterpret_cast<const uint4*>(o_head + 256 + lane * 8));
+                uint4 u0_next = make_uint4(0u, 0u, 0u, 0u);
+                uint4 u1_next = make_uint4(0u, 0u, 0u, 0u);
+                if (tk < 3 && (m + 1) < M) {
+                    const __nv_bfloat16* o_next =
+                        o_g_base + (m + 1) * o_stride_token + static_cast<int64_t>(h) * o_stride_head;
+                    u0_next = __ldg(reinterpret_cast<const uint4*>(o_next + lane * 8));
+                    u1_next = __ldg(reinterpret_cast<const uint4*>(o_next + 256 + lane * 8));
+                }
+
                 uint8_t* fp8_head = fp8_g_base + m * fp8_stride_token + static_cast<int64_t>(h) * 512;
 
                 float f0[8];
-                Vec8Traits<__nv_bfloat16>::unpack_u4(u0, f0);
+                Vec8Traits<__nv_bfloat16>::unpack_u4(u0_cur, f0);
                 float max0 = fabsf(f0[0]);
 #pragma unroll
                 for (int i = 1; i < 8; ++i) {
@@ -969,7 +1101,11 @@ __global__ void dsv4_fused_inv_rope_fp8_quant_4tok_kernel(const __nv_bfloat16* _
                 *reinterpret_cast<uint2*>(fp8_head + lane * 8) = out0_u2;
 
                 float f1[8];
-                Vec8Traits<__nv_bfloat16>::unpack_u4(u1, f1);
+                Vec8Traits<__nv_bfloat16>::unpack_u4(u1_cur, f1);
+                if (tk < 3) {
+                    u0_cur = u0_next;
+                    u1_cur = u1_next;
+                }
                 if (lane >= 24) {
                     const int    pair_base = (lane - 24) * 4;
                     const float4 fq0       = *reinterpret_cast<const float4*>(s_freqs[tk] + pair_base);

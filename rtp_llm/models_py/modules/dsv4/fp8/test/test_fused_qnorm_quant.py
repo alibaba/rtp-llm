@@ -72,10 +72,15 @@ class FusedQNormQuantTest(unittest.TestCase):
             (1024, 1024),
             (1, 16, 1024),
             (2, 17, 1536),
+            (558, 1536),
             (1, 4096),
             (16, 4096),
             (257, 4096),
+            (558, 4096),
             (1024, 4096),
+            (2048, 4096),
+            (558, 7168),
+            (1024, 7168),
         )
         for shape in shapes:
             with self.subTest(shape=shape):

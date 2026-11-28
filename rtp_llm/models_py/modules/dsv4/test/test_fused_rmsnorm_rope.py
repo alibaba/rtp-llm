@@ -107,7 +107,7 @@ def bench_prefill_sweep():
         f"  [Device] {props.name} SM={props.major}.{props.minor} "
         f"SMs={props.multi_processor_count}"
     )
-    Tlist = [1, 16, 256, 4096, 11548, 12288, 25410]
+    Tlist = [1, 16, 256, 558, 4096, 11548, 12288, 25410]
     rd = 64
     D = 512
 
@@ -131,6 +131,9 @@ def bench_prefill_sweep():
         (64, False, False, True, False, "Q_H64_D512_out_alias"),
         (64, False, False, False, True, "Q_H64_D512_inplace"),
         (64, True, True, False, False, "Q_H64_D512_w_pos"),
+        (128, False, False, True, False, "Q_H128_D512_out_alias"),
+        (128, False, False, False, True, "Q_H128_D512_inplace"),
+        (128, True, True, False, False, "Q_H128_D512_w_pos"),
         (1, True, False, False, False, "KV_H1_D512_w"),
         (1, True, True, False, False, "KV_H1_D512_w_pos"),
     ]:

@@ -26,14 +26,12 @@ _UE8M0_GROUP_SIZE = 128
 # The fused kernel launches one CTA per token row and processes the whole
 # BLOCK_H=4096 row (4 mHC lanes + RMSNorm + optional UE8M0 quant) inside that
 # single CTA. Below this token count the kernel is latency/occupancy bound
-# (decode M_local=3..4 uses 3-4 CTAs out of 148 SMs) and is measurably slower
-# than the unfused TileLang pre + RMSNorm pair (~18.3us vs ~10us per call on
-# the Cluster 2 SM103 decode trace, 46 calls per decode step => ~0.4ms/step
-# regression). Above it the single-pass-over-residual fusion wins on HBM
-# traffic (~25-28% less row traffic than the 3-kernel unfused chain), so
-# daytime chunked prefill (M >= 10K) keeps the fused path. 1024 sits at the
-# measured/measured-modelled crossover with a 16x decode margin.
-_FUSE_MIN_TOKENS = 1024
+# (decode M_local<=128 uses too few CTAs out of 148 SMs and is slower on GPU
+# kernel time than the unfused TileLang pre + RMSNorm pair). At M >= 256
+# (including prefill M=558, -26%..-41% GPU kernel and -35%..-37% E2E on SM103),
+# the single-pass-over-residual fusion wins on both launch count and HBM
+# traffic while keeping decode (M <= 128) on the unfused path.
+_FUSE_MIN_TOKENS = 256
 
 
 @functools.cache

@@ -33,8 +33,8 @@ from rtp_llm.models_py.modules.dsv4.test.dsv4_kernel_perf_utils import (
 
 ensure_triton_cc()
 
-DEFAULT_QNORM_M_SWEEP = [1, 16, 1024, 12288, 25410]
-DEFAULT_QNORM_D_SWEEP = [1024, 4096]
+DEFAULT_QNORM_M_SWEEP = [1, 16, 64, 256, 558, 1024, 2227, 12288, 25410]
+DEFAULT_QNORM_D_SWEEP = [1024, 1536, 4096, 7168]
 
 
 @unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
