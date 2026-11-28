@@ -600,6 +600,7 @@ def _collect_base_files(rootdir: Path) -> List[str]:
         "deps/requirements_cuda13_overrides.txt",
         "conftest.py",
         "internal_source/ci/prepare_venv.py",
+        "internal_source/ci/cuda13_arm_wheels.py",
         "internal_source/ci/prepare_rocm_deps.sh",
         "internal_source/ci/ci_pip_install.sh",
     ):
@@ -640,6 +641,8 @@ def _collect_base_files(rootdir: Path) -> List[str]:
             for path in wheelhouse.glob(pattern)
             if path.is_file()
         )
+    reader_wheels = rootdir / _REMOTE_INPUT_DIR / "cuda13_arm_wheels"
+    files.extend(str(path.relative_to(rootdir)) for path in reader_wheels.glob("*.whl"))
     return files
 
 

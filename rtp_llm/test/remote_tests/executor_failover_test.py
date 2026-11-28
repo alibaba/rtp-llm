@@ -210,6 +210,22 @@ def test_collect_remote_files_includes_tipc_jit_sources(tmp_path):
     assert "rtp_llm/model_loader/tipc/csrc/ipc.h" in files
 
 
+def test_cuda13_arm_reader_wheels_are_sent_with_the_worker_setup(tmp_path):
+    helper = tmp_path / "internal_source/ci/cuda13_arm_wheels.py"
+    helper.parent.mkdir(parents=True)
+    helper.touch()
+    directory = tmp_path / ".pytest_cache/remote_inputs/cuda13_arm_wheels"
+    directory.mkdir(parents=True)
+    wheels = [
+        directory / f"{name}-1.0-cp310-cp310-linux_aarch64.whl"
+        for name in ("fastsafetensors", "fast_safetensors")
+    ]
+    for wheel in wheels:
+        wheel.touch()
+    files = remote_exec_rtp._collect_base_files(tmp_path)
+    assert all(str(path.relative_to(tmp_path)) in files for path in (helper, *wheels))
+
+
 def test_collect_repo_runtime_files_includes_source_contracts(tmp_path):
     source_contracts = {
         "3rdparty/cub_compat.h",
