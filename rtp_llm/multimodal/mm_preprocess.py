@@ -30,7 +30,12 @@ from rtp_llm.multimodal.multimodal_util import (
     url_data_cache_,
     vit_emb_cache_,
 )
-from rtp_llm.multimodal.preprocess_ipc import register_preprocess_storage_reducer
+from rtp_llm.multimodal.preprocess_ipc import (
+    SharedPreprocessSources,
+    read_preprocess_sources,
+    register_preprocess_storage_reducer,
+    shared_preprocess_ipc_enabled,
+)
 from rtp_llm.multimodal.vit_metrics import (
     VitMetricSample,
     collect_vit_preprocess_metrics,
@@ -214,22 +219,31 @@ def _report_result_path(work_item, payload):
             logging.exception("Failed to report CPU preprocessing transport timing")
 
 
+_worker_source_view = None
+
+
 def _worker_initializer(
     vit_config: VitConfig,
     preprocess_params: dict,
     preprocess_func: Callable,
     inspection_args=None,
     url_cache_handle=None,
+    shared_source_buffer=None,
 ) -> None:
     """
     每个工作进程启动时调用的初始化函数。
     接收一次不变的参数，并将其存储在进程的全局变量中。
     """
     global _worker_vit_config, _worker_preprocess_params, _worker_preprocess_func
-    global _worker_inspection
+    global _worker_inspection, _worker_source_view
     # 让工作进程忽略 SIGINT 信号，这样主进程的 Ctrl+C 不会杀死它们
     signal.signal(signal.SIGINT, signal.SIG_IGN)
     register_preprocess_storage_reducer()
+    _worker_source_view = (
+        memoryview(shared_source_buffer).cast("B")
+        if shared_source_buffer is not None
+        else None
+    )
     _worker_vit_config = vit_config
     _worker_preprocess_params = preprocess_params
     _worker_preprocess_func = preprocess_func
@@ -258,8 +272,6 @@ def _worker_process_task(
     if _worker_preprocess_func is None:
         raise RuntimeError("Worker process has not been initialized correctly.")
     params = dict(_worker_preprocess_params)
-    if prepared_sources is not None:
-        params["prepared_sources"] = prepared_sources
     if capture_inspection_sources:
         params.update(capture_inspection_sources=True, deadline=deadline)
     try:
@@ -269,6 +281,10 @@ def _worker_process_task(
             _worker_inspection.started(inspection_task)
         if deadline is not None and time.monotonic() >= deadline:
             raise TimeoutError("ViT request expired before CPU preprocessing")
+        if prepared_sources is not None:
+            params["prepared_sources"] = read_preprocess_sources(
+                prepared_sources, _worker_source_view
+            )
         try:
             payload = _run_preprocess_task(
                 _worker_preprocess_func,
@@ -574,6 +590,16 @@ class MultiprocessPreprocessExecutor(PreprocessExecutor):
         self.preprocess_params = preprocess_params
         self.preprocess_func = preprocess_func
         self.pool: Optional[multiprocessing.pool.Pool] = None
+        self._shared_preprocess_sources = None
+        if shared_preprocess_ipc_enabled():
+            try:
+                self._shared_preprocess_sources = SharedPreprocessSources(mp_context)
+            except (MemoryError, OSError):
+                logging.exception("Shared preprocessing source buffer unavailable")
+        logging.info(
+            "ViT shared preprocessing sources: %s",
+            "enabled" if self._shared_preprocess_sources is not None else "disabled",
+        )
         self._consecutive_timeouts = 0
         self._max_consecutive_timeouts = vit_config.mm_preprocess_max_workers
         # Counts completed tasks so a timeout can tell a stuck pool (no
@@ -610,6 +636,7 @@ class MultiprocessPreprocessExecutor(PreprocessExecutor):
 
     def _create_pool(self) -> None:
         """创建进程池"""
+        arena = getattr(self, "_shared_preprocess_sources", None)
         logging.info(
             f"Creating multiprocessing pool for preprocessing with {self.vit_config.mm_preprocess_max_workers} workers"
         )
@@ -627,6 +654,7 @@ class MultiprocessPreprocessExecutor(PreprocessExecutor):
                     else None
                 ),
                 self._url_cache_handle,
+                arena.buffer if arena is not None else None,
             ),
         )
 
@@ -682,6 +710,9 @@ class MultiprocessPreprocessExecutor(PreprocessExecutor):
 
     def _apply_async(self, work_item: "MMWorkItem", task_id: int) -> Any:
         inspection_task = None
+        arena = getattr(self, "_shared_preprocess_sources", None)
+        prepared_sources = getattr(work_item, "prepared_sources", None)
+        lease = None
         channel = getattr(self, "_inspection_channel", None)
         if channel is not None and work_item.inspection_request is not None:
             deadline = work_item.deadline or (
@@ -694,6 +725,8 @@ class MultiprocessPreprocessExecutor(PreprocessExecutor):
             )
 
         def completed(_result):
+            if arena is not None:
+                arena.release(lease)
             if inspection_task is not None and isinstance(_result, BaseException):
                 channel.finish(
                     inspection_task.task_id,
@@ -710,6 +743,8 @@ class MultiprocessPreprocessExecutor(PreprocessExecutor):
 
         work_item.preprocess_submitted_at = time.monotonic()
         try:
+            if arena is not None:
+                prepared_sources, lease = arena.prepare(prepared_sources)
             return self.pool.apply_async(
                 _worker_process_task,
                 args=(
@@ -719,12 +754,14 @@ class MultiprocessPreprocessExecutor(PreprocessExecutor):
                     inspection_task,
                     work_item.region,
                     vit_media.worker_spec(getattr(work_item, "media_traces", ())),
-                    getattr(work_item, "prepared_sources", None),
+                    prepared_sources,
                 ),
                 callback=completed,
                 error_callback=completed,
             )
         except BaseException as error:
+            if arena is not None:
+                arena.release(lease)
             if inspection_task is not None:
                 channel.finish(inspection_task.task_id, error=error)
             raise
@@ -736,6 +773,7 @@ class MultiprocessPreprocessExecutor(PreprocessExecutor):
         the pool stays in a permanently-unusable state and every subsequent submit fails.
         """
         old = self.pool
+        arena = getattr(self, "_shared_preprocess_sources", None)
         self.pool = None
         if self._inspection_channel is not None:
             self._inspection_channel.fail_all(
@@ -747,7 +785,13 @@ class MultiprocessPreprocessExecutor(PreprocessExecutor):
                 old.terminate()
                 old.join()
         except Exception as e:
+            # An old worker might still read from its buffer. Only reuse it
+            # after shutdown is confirmed.
+            self._shared_preprocess_sources = None
             logging.warning(f"terminate broken pool failed: {e}")
+        else:
+            if arena is not None:
+                arena.reset()
         self._create_pool()
 
     def submit(self, work_item: "MMWorkItem") -> None:
@@ -881,6 +925,7 @@ class MultiprocessPreprocessExecutor(PreprocessExecutor):
         if self._inspection_channel is not None:
             self._inspection_channel.close()
         self.pool = None
+        self._shared_preprocess_sources = None
         logging.info("Preprocessing pool shut down.")
 
 

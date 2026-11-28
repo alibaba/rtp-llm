@@ -7,9 +7,12 @@ from unittest.mock import Mock, patch
 import torch
 
 from rtp_llm.multimodal.preprocess_ipc import (
+    SharedPreprocessSources,
+    _SourceSlice,
     _rebuild_storage_fd,
     _reduce_storage,
     pack_preprocess_tensors,
+    read_preprocess_sources,
     register_preprocess_storage_reducer,
 )
 
@@ -29,7 +32,73 @@ def _make_packed():
     )
 
 
+_source_view = None
+
+
+def _init_sources(buffer):
+    global _source_view
+    _source_view = memoryview(buffer).cast("B")
+    register_preprocess_storage_reducer()
+
+
+def _read_sources(sources):
+    from rtp_llm.models_py.modules.dsv41.vision_preprocess_tables import (
+        prepare_resize_tables,
+    )
+
+    return read_preprocess_sources(sources, _source_view), prepare_resize_tables(
+        (32, 32), (16, 16), patch_size=16
+    )
+
+
 class PreprocessIpcTest(unittest.TestCase):
+    def test_shared_source_outlives_slot_reuse_and_worker_exit(self):
+        ctx = multiprocessing.get_context("spawn")
+        with patch.object(SharedPreprocessSources, "_SLOTS", 1):
+            arena = SharedPreprocessSources(ctx)
+        source = b"a" * arena._MIN_BYTES
+        replacement = b"b" * len(source)
+        transported, lease = arena.prepare((source, b"small", None))
+        self.assertIsInstance(transported[0], _SourceSlice)
+        self.assertEqual(arena.prepare((replacement,)), ((replacement,), None))
+        with patch.dict(os.environ, {"MM_VIT_SHARED_PREPROCESS_IPC": "1"}):
+            os.environ.pop("MM_VIT_PACKED_PREPROCESS_IPC", None)
+            with ctx.Pool(1, initializer=_init_sources, initargs=(arena.buffer,)) as pool:
+                actual, tables = pool.apply_async(_read_sources, (transported,)).get(
+                    timeout=30
+                )
+                arena.release(lease)
+                next_sources, next_lease = arena.prepare((replacement,))
+                self.assertEqual(next_sources, (transported[0],))
+                arena.release(lease)
+                self.assertEqual(arena.prepare((source,)), ((source,), None))
+                arena.release(next_lease)
+        expected, expected_tables = _read_sources((source, b"small", None))
+        self.assertEqual(actual, expected)
+        for actual_axis, expected_axis in (
+            (tables.horizontal, expected_tables.horizontal),
+            (tables.vertical, expected_tables.vertical),
+        ):
+            for actual_tensor, expected_tensor in zip(actual_axis, expected_axis):
+                self.assertFalse(actual_tensor.is_shared())
+                self.assertTrue(torch.equal(actual_tensor, expected_tensor))
+        self.assertTrue(torch.equal(tables.normalization, expected_tables.normalization))
+
+    def test_reset_ignores_late_release(self):
+        ctx = multiprocessing.get_context("spawn")
+        with patch.object(SharedPreprocessSources, "_SLOTS", 1):
+            arena = SharedPreprocessSources(ctx)
+        sources = (b"a" * arena._MIN_BYTES,)
+        _, abandoned = arena.prepare(sources)
+        arena.reset()
+        _, current = arena.prepare(sources)
+        arena.release(abandoned)
+        self.assertEqual(arena.prepare(sources), (sources, None))
+        arena.release(current)
+        self.assertIsNotNone(arena.prepare(sources)[1])
+        with self.assertRaises(RuntimeError):
+            read_preprocess_sources((_SourceSlice(0, len(arena._view) + 1),), arena._view)
+
     def test_spawn_worker_preserves_shared_views_after_exit(self):
         import rtp_llm.ops  # Load the native config module as a ViT parent does.
 
