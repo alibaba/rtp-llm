@@ -1110,10 +1110,7 @@ class TestCudaGraphTaggedCache(unittest.TestCase):
         # Run in a fresh process for each async environment: the production
         # helper intentionally caches these startup switches. Observe the
         # actual wait scopes, not elapsed time or unrelated copy synchronizations.
-        stream_async = any(
-            os.environ.get(name) == "1"
-            for name in ("RTP_LLM_STREAM_ASYNC", "RTP_LLM_MTP_ASYNC_PREPARE")
-        )
+        stream_async = os.environ.get("RTP_LLM_MTP_ASYNC_PREPARE") == "1"
         for role in ("decode", "target_verify", "embedding", "generation"):
             runner = CudaGraphRunner()
             if role in ("decode", "target_verify"):
@@ -1178,6 +1175,17 @@ class TestCudaGraphTaggedCache(unittest.TestCase):
                         prefix + "wait_forward_event)" in scopes,
                         role != "generation" and (not skip_sync or not stream_async),
                     )
+                    if role != "generation" and (not skip_sync or not stream_async):
+                        ordered = [
+                            ev.key
+                            for ev in sorted(prof.events(), key=lambda e: e.time_range.start)
+                            if ev.key.startswith(prefix)
+                        ]
+                        idx_d2d = ordered.index(prefix + "fused_d2d_copy)")
+                        idx_wait = ordered.index(prefix + "wait_forward_event)")
+                        idx_host = ordered.index(prefix + "host_mirror_copy)")
+                        self.assertLess(idx_d2d, idx_wait)
+                        self.assertLess(idx_wait, idx_host)
                     for event in (
                         "generation_prefill_wait_staging_event)",
                         "generation_prefill_wait_forward_event)",

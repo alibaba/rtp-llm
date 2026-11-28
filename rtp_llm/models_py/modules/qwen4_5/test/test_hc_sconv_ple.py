@@ -1958,6 +1958,85 @@ def test_r9_l2_swapped_hc_and_norm5120() -> None:
     print("  PASS: R9 swapped (HC, row) HC combine+norm, split-5120 norm & DFlash2/mix_reduce verified.")
 
 
+def test_r11_hc_up_mix_sk_1d_and_sconv_decode() -> None:
+    import torch.nn.functional as F
+
+    print("[Test R11] Fused _hc_up_mix_sk_1d_kernel (0 nvjet) + ShortConv BLOCK_C/nw parity...")
+    device = torch.device("cuda:0")
+    dtype = torch.bfloat16
+    torch.manual_seed(202611)
+    H, HC, LR = 5120, 4, 128
+    ws = HCStaticWorkspace()
+
+    with torch.no_grad():
+        hc = Qwen4_5HyperConnection(H, HC, LR, dtype=dtype, device=device).eval()
+        for M in (1, 4, 8, 16, 17, 24, 32, 48, 64):
+            hi_pad = torch.randn((M, HC * H + 8), dtype=dtype, device=device) * 0.25
+            hi = hi_pad[:, : HC * H]
+            pl_pad = torch.randn((M, LR + 4), dtype=dtype, device=device) * 0.25
+            pl = pl_pad[:, :LR]
+            m_ws, r_ws, ij_ws, lt_ws = hc.mix_with_latent(hi, prev_latent=pl, ws=ws)
+            m_no, r_no, ij_no, lt_no = hc.mix_with_latent(hi, prev_latent=pl, ws=None)
+            m_ref, _, ij_ref, lt_ref = hc.mix_with_latent_ref(hi, prev_latent=pl)
+            for a, b in ((m_ws, m_no), (r_ws, r_no), (ij_ws, ij_no), (lt_ws, lt_no)):
+                assert float((a - b).abs().max().item()) == 0.0, f"M={M} ws vs no_ws mismatch"
+            for name, a, b in (("mixed", m_ws, m_ref), ("inj", ij_ws, ij_ref), ("latent", lt_ws, lt_ref)):
+                cos = F.cosine_similarity(a.float().reshape(-1), b.float().reshape(-1), dim=0).item()
+                assert cos >= 0.9999, f"R11 HC M={M} {name} cos={cos}"
+
+        # Verify CUDA Graph + 0 splitKreduce / 0 cutlass_80 / 0 nvjet across B=1,16,48
+        for cg_b in (1, 16, 48):
+            hi_cg = torch.randn((cg_b, HC * H), dtype=dtype, device=device) * 0.25
+            pl_cg = torch.randn((cg_b, LR), dtype=dtype, device=device) * 0.25
+            _ = hc.mix_with_latent(hi_cg, prev_latent=pl_cg, ws=ws)
+            torch.cuda.synchronize()
+            g = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(g):
+                mo_cg, _, io_cg, lo_cg = hc.mix_with_latent(hi_cg, prev_latent=pl_cg, ws=ws)
+            g.replay()
+            torch.cuda.synchronize()
+            mo_ref, _, io_ref, lo_ref = hc.mix_with_latent_ref(hi_cg, prev_latent=pl_cg)
+            for a, b in ((mo_cg, mo_ref), (io_cg, io_ref), (lo_cg, lo_ref)):
+                assert F.cosine_similarity(a.float().reshape(-1), b.float().reshape(-1), dim=0).item() >= 0.9999
+
+            with torch.profiler.profile(activities=[torch.profiler.ProfilerActivity.CUDA]) as prof:
+                _ = hc.mix_with_latent(hi_cg, prev_latent=pl_cg, ws=ws)
+                torch.cuda.synchronize()
+            cnames = [
+                str(getattr(e, "name", "")).lower()
+                for e in prof.events()
+                if e.device_type == torch.profiler.DeviceType.CUDA and getattr(e, "device_time_total", 0) > 0
+            ]
+            assert any("_hc_up_mix_sk_1d_kernel" in nm for nm in cnames), f"M={cg_b} missing _hc_up_mix_sk_1d_kernel: {cnames}"
+            assert not any("nvjet" in nm or "cutlass_80" in nm or "splitkreduce" in nm for nm in cnames), (
+                f"Unexpected GEMM/splitkreduce kernel at M={cg_b}: {cnames}"
+            )
+
+        # ShortConv C=256 and C=5120 opaque/dense decode BLOCK_C/num_warps parity across B=1,16,32,64
+        for C in (256, 5120):
+            conv = Qwen4_5ShortConv(C, kernel_size=4, dtype=dtype, device=device).eval()
+            tpb, max_blk, n_blk = 16, 4, 256
+            for b_sc in (1, 16, 32, 64):
+                x_sc = torch.randn((b_sc, 1, C), dtype=dtype, device=device) * 0.25
+                pool = torch.randn((n_blk, C * 3), dtype=dtype, device=device) * 0.25
+                pool_ref = pool.clone()
+                bt = torch.arange(1, b_sc * max_blk + 1, dtype=torch.int32, device=device).reshape(b_sc, max_blk)
+                seq_b = torch.full((b_sc,), 15, dtype=torch.int32, device=device)
+                out_op = causal_dwconv1d_decode_opaque_triton(
+                    x_sc, conv.weight, pool, bt, seq_b, page_size=tpb,
+                    residual=conv.residual, use_activation=conv.use_activation, clamp_val=10.0,
+                )
+                st_dense = ShortConvState(pool_ref[bt[:, 0]].reshape(b_sc, C, 3).clone())
+                out_de = causal_dwconv1d_decode_triton(
+                    x_sc, conv.weight, st_dense.conv_state,
+                    residual=conv.residual, use_activation=conv.use_activation, clamp_val=10.0,
+                )
+                assert F.cosine_similarity(out_op.float().reshape(-1), out_de.float().reshape(-1), dim=0).item() >= 0.99999
+                assert float((out_op - out_de).abs().max().item()) == 0.0
+
+    print("  PASS: R11 HC 1D fused up-mix (M=1..48, 0 nvjet/cutlass_80) & ShortConv parity verified.")
+
+
 def main() -> int:
     print(
         f"Device: {torch.cuda.get_device_name(0)} "
@@ -1977,6 +2056,7 @@ def main() -> int:
     test_r7_fused_hc_epilogues_branch5120_workspaces_and_sp_shortconv()
     test_r8_hc_splitk_and_dflash_branch5120()
     test_r9_l2_swapped_hc_and_norm5120()
+    test_r11_hc_up_mix_sk_1d_and_sconv_decode()
     run_benchmarks()
     print(f"\nALL TESTS & BENCHMARKS PASSED in {time.perf_counter() - t0:.2f}s!")
     return 0

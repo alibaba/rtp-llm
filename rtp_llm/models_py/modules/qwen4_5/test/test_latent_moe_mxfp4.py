@@ -3734,6 +3734,192 @@ def test_r10_dg_jit_dedup_and_shared_tgv(device: torch.device) -> None:
     print("  PASS test_r10_dg_jit_dedup_and_shared_tgv")
 
 
+def test_r11_warmup_mem_and_masked_kernels(device: torch.device) -> None:
+    """Verify M11-1 zero-pinning DeepGEMM warmup and parallel masked kernels."""
+    from rtp_llm.models_py.modules.qwen4_5 import mxfp4_ops
+    from rtp_llm.models_py.modules.qwen4_5.alltoall_comm import _pack_dense_dp_bf16_to_fp8_kernel
+    from rtp_llm.models_py.modules.qwen4_5.mxfp4_ops import mxfp4_moe_deepgemm_masked
+
+    dev_idx = int(device.index or 0)
+
+    # 1. M11-1 Part 1: warmup must NOT pin _MASKED_WS_CACHE or leak resident VRAM
+    if has_deepgemm_fp8_fp4(dev_idx):
+        w13_u8, w13_sc = quantize_mxfp4(
+            torch.randn((64, 2048, 1024), dtype=torch.bfloat16, device=device) * 0.02
+        )
+        w2_u8, w2_sc = quantize_mxfp4(
+            torch.randn((64, 1024, 1024), dtype=torch.bfloat16, device=device) * 0.02
+        )
+        mw_w = prepare_mxfp4_moe_weights(
+            w13_u8=w13_u8, w13_scale=w13_sc, w2_u8=w2_u8, w2_scale=w2_sc
+        )
+        mw_w.get_deepgemm_pair()
+        del w13_u8, w13_sc, w2_u8, w2_sc
+
+        saved_ws = dict(mxfp4_ops._MASKED_WS_CACHE)
+        saved_warmed = set(mxfp4_ops._WARMED_DG_GROUPED_KEYS)
+        try:
+            mxfp4_ops._MASKED_WS_CACHE.clear()
+            mxfp4_ops._WARMED_DG_GROUPED_KEYS.clear()
+            torch.cuda.synchronize(device)
+            alloc0 = torch.cuda.memory_allocated(device)
+            warmed = mxfp4_ops.warmup_deepgemm_mxfp4_moe_kernels(
+                mw_w, ep_size=4, backend="auto", compute_mode="fp8", force=True
+            )
+            assert warmed == 2, f"Expected 2 warmed DeepGEMM modes, got {warmed}"
+            assert len(mxfp4_ops._MASKED_WS_CACHE) == 0, (
+                f"Warmup must not pin _MASKED_WS_CACHE, got keys={list(mxfp4_ops._MASKED_WS_CACHE)}"
+            )
+            torch.cuda.synchronize(device)
+            alloc1 = torch.cuda.memory_allocated(device)
+            assert (alloc1 - alloc0) <= 64 * 1024, (
+                f"Warmup retained {(alloc1 - alloc0) / 1024**2:.2f} MiB"
+            )
+            mxfp4_ops._WARMED_DG_GROUPED_KEYS.clear()
+            alloc2 = torch.cuda.memory_allocated(device)
+            warmed2 = mxfp4_ops.warmup_deepgemm_mxfp4_moe_kernels(
+                mw_w, ep_size=4, backend="auto", compute_mode="fp8", force=True
+            )
+            assert warmed2 == 2
+            torch.cuda.synchronize(device)
+            alloc3 = torch.cuda.memory_allocated(device)
+            assert alloc3 == alloc2, f"Repeat warmup leaked {alloc3 - alloc2} bytes"
+            assert len(mxfp4_ops._MASKED_WS_CACHE) == 0
+
+            x_chk = torch.randn((8, 1024), dtype=torch.bfloat16, device=device) * 0.3
+            ids_chk = torch.randint(0, 64, (8, 8), dtype=torch.int32, device=device)
+            tw_chk = torch.softmax(torch.randn((8, 8), dtype=torch.float32, device=device), dim=-1)
+            mxfp4_moe_deepgemm_masked(x_chk, ids_chk, tw_chk, mw_w, cache_workspace=False)
+            assert len(mxfp4_ops._MASKED_WS_CACHE) == 0
+            mxfp4_moe_deepgemm_masked(x_chk, ids_chk, tw_chk, mw_w)
+            assert len(mxfp4_ops._MASKED_WS_CACHE) == 1
+        finally:
+            mxfp4_ops._MASKED_WS_CACHE.clear()
+            mxfp4_ops._MASKED_WS_CACHE.update(saved_ws)
+            mxfp4_ops._WARMED_DG_GROUPED_KEYS.clear()
+            mxfp4_ops._WARMED_DG_GROUPED_KEYS.update(saved_warmed)
+            del mw_w
+
+    # 2. M11-1 Part 2a: row-tile & row-persistent masked SiTU-GLU across actual_m & hot-expert skew
+    for E_t, max_m_t, D_t, act_m_t in (
+        (64, 128, 2560, 16),
+        (64, 128, 2560, 128),
+        (64, 256, 2560, 256),
+        (64, 128, 2560, 1280),
+        (16, 16, 512, 8),
+        (16, 64, 512, None),
+    ):
+        gu = torch.randn((E_t, max_m_t, 2 * D_t), dtype=torch.bfloat16, device=device) * 0.5
+        mm = torch.zeros((E_t,), dtype=torch.int32, device=device)
+        mm[0] = min(max_m_t, 50)
+        mm[1] = min(max_m_t, 17)
+        mm[E_t // 2] = 1
+        q_ref, sc_ref = situ_glu_fp8_quant_masked_packed(gu.cpu(), mm.cpu())
+        q_ref_g = q_ref.to(device)
+        sc_ref_g = sc_ref.to(device)
+
+        num_packs_t = (D_t // 32 + 3) // 4
+        tma_m_t = ((max_m_t + 3) // 4) * 4
+        out_sc_dirty = torch.full(
+            (E_t, num_packs_t, tma_m_t), 77, dtype=torch.int32, device=device
+        ).transpose(1, 2)[:, :max_m_t, :]
+        for z_flag in (True, False):
+            sc_buf = out_sc_dirty.clone()
+            q_gpu, sc_gpu = situ_glu_fp8_quant_masked_packed(
+                gu, mm, zero_unused_scales=z_flag, out_sc=sc_buf, actual_m=act_m_t
+            )
+            for e_idx in range(E_t):
+                cnt = int(mm[e_idx].item())
+                if cnt > 0:
+                    assert torch.equal(
+                        q_gpu[e_idx, :cnt].view(torch.uint8),
+                        q_ref_g[e_idx, :cnt].view(torch.uint8),
+                    ), f"situ_glu_masked q mismatch E={E_t}, max_m={max_m_t}, D={D_t}, act={act_m_t}"
+                    assert torch.equal(
+                        sc_gpu[e_idx, :cnt], sc_ref_g[e_idx, :cnt]
+                    ), f"situ_glu_masked sc mismatch E={E_t}, max_m={max_m_t}, D={D_t}, act={act_m_t}"
+                if z_flag and cnt < max_m_t:
+                    assert bool((sc_gpu[e_idx, cnt:] == 0).all()), (
+                        f"Expected zeroed unused scales E={E_t}, e={e_idx}, act={act_m_t}"
+                    )
+
+    # 3. M11-1 Part 2b: 2-stage quant/packed scatter, CG replay, & top_k>16 fallback parity
+    if has_deepgemm_fp8_fp4(dev_idx):
+        L_m, I_m, E_m = 2560, 2560, 32
+        w13_u8, w13_sc = quantize_mxfp4(
+            torch.randn((E_m, 2 * I_m, L_m), dtype=torch.bfloat16, device=device) * 0.02
+        )
+        w2_u8, w2_sc = quantize_mxfp4(
+            torch.randn((E_m, L_m, I_m), dtype=torch.bfloat16, device=device) * 0.02
+        )
+        mw_m = prepare_mxfp4_moe_weights(
+            w13_u8=w13_u8, w13_scale=w13_sc, w2_u8=w2_u8, w2_scale=w2_sc
+        )
+        del w13_u8, w13_sc, w2_u8, w2_sc
+
+        for M_t, top_k_t in ((1, 10), (16, 10), (128, 10), (8, 17)):
+            xm = torch.randn((M_t, L_m), dtype=torch.bfloat16, device=device) * 0.4
+            ids = torch.randint(0, E_m * 2, (M_t, top_k_t), dtype=torch.int32, device=device)
+            if M_t >= 2:
+                ids[0, 0] = E_m + 3
+                ids[0, 1] = E_m + 3  # duplicate local expert
+                ids[-1] = -1  # masked empty token
+            tw = torch.softmax(torch.randn((M_t, top_k_t), dtype=torch.float32, device=device), dim=-1)
+            if M_t >= 2:
+                tw[-1] = 0.0
+            sg = torch.randn((M_t, 2), dtype=torch.bfloat16, device=device) * 0.5
+
+            y_ref = mxfp4_moe_forward_ref(
+                xm, ids, tw, mw_m, ep_start=E_m, ep_size=2, fp8_activations=True
+            )
+            y_ref_sg = (
+                y_ref.float() * torch.sigmoid(sg[:, 1:2].float()).to(y_ref.dtype).float()
+            ).to(y_ref.dtype)
+
+            y_raw = mxfp4_moe_deepgemm_masked(
+                xm, ids, tw, mw_m, ep_start=E_m, ep_size=2, scale_gate=sg, scale_gate_col=1
+            )
+            assert _diff_stats(y_raw, y_ref_sg)[2] >= 0.9999, f"raw mismatch M={M_t}, K={top_k_t}"
+
+            ng = L_m // 32
+            sc_off = ((L_m + 15) // 16) * 16
+            meta_off = sc_off + ((ng + 15) // 16) * 16
+            row_bytes = meta_off + ((2 * top_k_t * 4 + 15) // 16) * 16
+            all_buf = torch.empty((M_t, row_bytes), dtype=torch.uint8, device=device)
+            _pack_dense_dp_bf16_to_fp8_kernel[(M_t,)](
+                xm, ids, tw, all_buf, M_t, L_m, ng, top_k_t,
+                row_bytes, sc_off, meta_off, xm.stride(0), ids.stride(0), tw.stride(0),
+                eps=1e-10, BLOCK_B=512, num_warps=4,
+            )
+            y_pk = mxfp4_moe_deepgemm_masked(
+                None, ids, tw, mw_m,
+                ep_start=E_m, ep_size=2,
+                prequant_packed=(all_buf, L_m, sc_off, meta_off, row_bytes, top_k_t),
+                scale_gate=sg, scale_gate_col=1,
+            )
+            assert _diff_stats(y_pk, y_ref_sg)[2] >= 0.9999, f"packed mismatch M={M_t}, K={top_k_t}"
+
+            if M_t == 16 and top_k_t == 10:
+                g = torch.cuda.CUDAGraph()
+                with torch.cuda.graph(g):
+                    y_raw_cg = mxfp4_moe_deepgemm_masked(
+                        xm, ids, tw, mw_m, ep_start=E_m, ep_size=2, scale_gate=sg, scale_gate_col=1
+                    )
+                    y_pk_cg = mxfp4_moe_deepgemm_masked(
+                        None, ids, tw, mw_m,
+                        ep_start=E_m, ep_size=2,
+                        prequant_packed=(all_buf, L_m, sc_off, meta_off, row_bytes, top_k_t),
+                        scale_gate=sg, scale_gate_col=1,
+                    )
+                g.replay()
+                torch.cuda.synchronize(device)
+                assert torch.equal(y_raw_cg, y_raw)
+                assert torch.equal(y_pk_cg, y_pk)
+                g.reset()
+
+    print("  PASS test_r11_warmup_mem_and_masked_kernels")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Qwen 4.5-Flash LatentMoE & SM100 MXFP4 test suite")
     parser.add_argument("--distributed", action="store_true", help="Run multi-GPU FastAllReduce/TP/EP tests")
@@ -3801,6 +3987,7 @@ def main() -> int:
         test_r8_splitk_router_bf16_tgv_and_dp_tpsp(device)
         test_r9_tgv_tactics_and_contig_overlap(device)
         test_r10_dg_jit_dedup_and_shared_tgv(device)
+        test_r11_warmup_mem_and_masked_kernels(device)
 
     if args.distributed:
         test_distributed_fast_comm_tp_ep(world_size=args.world_size)

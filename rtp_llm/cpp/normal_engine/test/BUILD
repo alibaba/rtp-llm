@@ -157,3 +157,32 @@ cc_test(
         ("async", "1"),
     ]
 ]
+
+cc_test(
+    name = "normal_executor_co_async_test",
+    srcs = ["NormalExecutorCoAsyncTest.cc"],
+    copts = test_copts,
+    deps = [
+        ":mock_engine",
+        "//rtp_llm/cpp/engine_base/grammar:grammar_cpp_lib",
+        "//rtp_llm/cpp/models:logits_processor",
+        "@xgrammar",
+    ] + cuda13_torch_link_deps,
+    env = select({
+        "@//:using_rocm": {
+            "TEST_USING_DEVICE": "ROCM",
+            "RTP_LLM_STREAM_ASYNC": "1",
+            "RTP_LLM_DROP_BROAD_SYNC": "1",
+            "RTP_LLM_DEVICE_INPUT": "1",
+        },
+        "//conditions:default": {
+            "TEST_USING_DEVICE": "CUDA",
+            "LD_PRELOAD": "libtorch_cpu.so",
+            "RTP_LLM_STREAM_ASYNC": "1",
+            "RTP_LLM_DROP_BROAD_SYNC": "1",
+            "RTP_LLM_DEVICE_INPUT": "1",
+        },
+    }),
+    exec_properties = {"gpu": "L20_CU13"},
+    tags = ["L20_CU13"],
+)

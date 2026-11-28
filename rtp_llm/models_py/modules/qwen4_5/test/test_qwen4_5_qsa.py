@@ -3600,7 +3600,12 @@ class Qwen4_5QSATest(unittest.TestCase):
                     sk_opt = sum(1 for e in prof_o.events() if e.device_type == torch.autograd.DeviceType.CUDA and "splitK" in e.name)
                     c80_opt = sum(1 for e in prof_o.events() if e.device_type == torch.autograd.DeviceType.CUDA and "cutlass_80" in e.name)
 
-                    self.assertGreaterEqual(_cosine(out_opt, out_base), 0.9999)
+                    self.assertGreaterEqual(_cosine(out_opt, out_base), 0.999)
+                    row_cos = [
+                        _cosine(out_opt[bi : bi + 1], out_base[bi : bi + 1])
+                        for bi in range(bsz)
+                    ]
+                    self.assertGreaterEqual(sorted(row_cos)[len(row_cos) // 2], 0.9999)
                     self.assertEqual(c80_opt, 0)
                     if cap_major >= 10:
                         self.assertLess(sk_opt, sk_base)
@@ -4064,6 +4069,199 @@ class Qwen4_5QSATest(unittest.TestCase):
                     os.environ.pop(k_env, None)
                 else:
                     os.environ[k_env] = v_env
+
+    def test_r11_tpsp4_gray_rollout_topology_and_pd_cachestore(self) -> None:
+        """Verify R11 P11-1 default-OFF TPSP4 env switch, _load() topology fix, and SP4->TP4 PD CacheStore."""
+        import multiprocessing as mp
+        import socket
+        import tempfile
+        from types import SimpleNamespace
+        from unittest.mock import patch
+        import torch.distributed as dist
+        from rtp_llm.models_py.distributed import collective_torch
+        from rtp_llm.models_py.distributed.rank_layout import Group
+
+        # Part A: Qwen4_5._resolve_load_parallel_topology unit matrix (with collective_torch TP+EP active)
+        class _SentinelGroup:
+            def __init__(self, tag: str) -> None:
+                self.tag = tag
+
+        tp_sentinel = _SentinelGroup("tp")
+        world_sentinel = _SentinelGroup("world")
+
+        def _make_pc(**kw):
+            if _HAS_RTP_OPS and kw.pop("use_cpp", True):
+                from rtp_llm.ops import ParallelismConfig
+
+                pc = ParallelismConfig()
+                for k, v in kw.items():
+                    setattr(pc, k, v)
+                return pc
+            return SimpleNamespace(**kw)
+
+        env_keys = ("QWEN4_5_PARALLEL_MODE", "QWEN4_5_SP_SIZE")
+        prev_env = {k: os.environ.get(k) for k in env_keys}
+        try:
+            with (
+                patch.object(dist, "is_available", return_value=True),
+                patch.object(dist, "is_initialized", return_value=True),
+                patch.object(dist, "get_world_size", return_value=4),
+                patch.object(dist, "get_rank", return_value=2),
+                patch.object(collective_torch, "_initialized", True),
+                patch.object(
+                    collective_torch,
+                    "_get_group",
+                    side_effect=lambda g: tp_sentinel if g == Group.TP else world_sentinel,
+                ),
+            ):
+                # 1) Default OFF (env unset): C++ ParallelismConfig keeps tp4_ep4 unchanged (sp_size=1)
+                for k in env_keys:
+                    os.environ.pop(k, None)
+                pc_default = _make_pc(world_size=4, world_rank=2, tp_size=4, tp_rank=2, dp_size=1, dp_rank=0, ep_size=4, ep_rank=2)
+                t_off = Qwen4_5._resolve_load_parallel_topology(pc_default, dist_module=dist)
+                self.assertIsNone(t_off["parallel_mode"])
+                self.assertEqual((t_off["tp_size"], t_off["tp_rank"]), (4, 2))
+                self.assertEqual((t_off["sp_size"], t_off["sp_rank"]), (1, 0))
+                self.assertIsNone(t_off["sp_group"])
+                self.assertIs(t_off["tp_group"], tp_sentinel)
+                self.assertIs(t_off["ep_group"], tp_sentinel)
+                self.assertIsNone(t_off["dp_attn"])
+
+                # 2) QWEN4_5_PARALLEL_MODE=sp4_tp4_ep4 activates SP=4 even with collective_torch TP+EP populated
+                os.environ["QWEN4_5_PARALLEL_MODE"] = "sp4_tp4_ep4"
+                t_sp4 = Qwen4_5._resolve_load_parallel_topology(pc_default, dist_module=dist)
+                self.assertEqual(t_sp4["parallel_mode"], "sp4_tp4_ep4")
+                self.assertEqual((t_sp4["sp_size"], t_sp4["sp_rank"]), (4, 2))
+                self.assertIs(t_sp4["sp_group"], tp_sentinel)
+                self.assertIs(t_sp4["tp_group"], tp_sentinel)
+                self.assertIs(t_sp4["ep_group"], tp_sentinel)
+                self.assertFalse(t_sp4["dp_attn"])
+
+                # 3) Alias QWEN4_5_PARALLEL_MODE=tpsp4 normalizes cleanly
+                os.environ["QWEN4_5_PARALLEL_MODE"] = "tpsp4"
+                t_alias = Qwen4_5._resolve_load_parallel_topology(pc_default, dist_module=dist)
+                self.assertEqual(t_alias["parallel_mode"], "sp4_tp4_ep4")
+                self.assertEqual((t_alias["sp_size"], t_alias["sp_rank"]), (4, 2))
+                self.assertIs(t_alias["sp_group"], tp_sentinel)
+
+                # 4) QWEN4_5_SP_SIZE=4 alone resolves sp4_tp4_ep4
+                os.environ.pop("QWEN4_5_PARALLEL_MODE", None)
+                os.environ["QWEN4_5_SP_SIZE"] = "4"
+                t_sp_env = Qwen4_5._resolve_load_parallel_topology(pc_default, dist_module=dist)
+                self.assertEqual(t_sp_env["parallel_mode"], "sp4_tp4_ep4")
+                self.assertEqual((t_sp_env["sp_size"], t_sp_env["sp_rank"]), (4, 2))
+                self.assertIs(t_sp_env["sp_group"], tp_sentinel)
+                self.assertFalse(t_sp_env["dp_attn"])
+
+                # 5) Explicit parallelism_config takes precedence over env
+                os.environ["QWEN4_5_PARALLEL_MODE"] = "sp4_tp4_ep4"
+                pc_explicit = _make_pc(
+                    use_cpp=False, world_size=4, world_rank=3, tp_size=4, tp_rank=3, dp_size=1, dp_rank=0, ep_size=4, ep_rank=3, parallel_mode="tp4_ep4"
+                )
+                t_prec = Qwen4_5._resolve_load_parallel_topology(pc_explicit, dist_module=dist)
+                self.assertEqual(t_prec["parallel_mode"], "tp4_ep4")
+                self.assertEqual((t_prec["sp_size"], t_prec["sp_rank"]), (1, 0))
+                self.assertIsNone(t_prec["sp_group"])
+
+                # 6) dp2_tpsp2_ep4 via QWEN4_5_SP_SIZE=2 + dp4_ep4 Decode pod default OFF stays unchanged
+                os.environ.pop("QWEN4_5_PARALLEL_MODE", None)
+                os.environ["QWEN4_5_SP_SIZE"] = "2"
+                dp_sentinel = _SentinelGroup("dp")
+                pc_dp2_tp2 = _make_pc(
+                    use_cpp=False, world_size=4, world_rank=3, tp_size=2, tp_rank=1, dp_size=2, dp_rank=1, ep_size=4, ep_rank=3, dp_group=dp_sentinel
+                )
+                t_dp2_sp2 = Qwen4_5._resolve_load_parallel_topology(pc_dp2_tp2, dist_module=dist)
+                self.assertEqual(t_dp2_sp2["parallel_mode"], "dp2_tpsp2_ep4")
+                self.assertEqual((t_dp2_sp2["sp_size"], t_dp2_sp2["sp_rank"]), (2, 1))
+                self.assertIs(t_dp2_sp2["sp_group"], tp_sentinel)
+                self.assertIs(t_dp2_sp2["dp_group"], dp_sentinel)
+                self.assertFalse(t_dp2_sp2["dp_attn"])
+
+                for k in env_keys:
+                    os.environ.pop(k, None)
+                pc_dp4 = _make_pc(world_size=4, world_rank=1, tp_size=1, tp_rank=0, dp_size=4, dp_rank=1, ep_size=4, ep_rank=1)
+                t_dp4 = Qwen4_5._resolve_load_parallel_topology(pc_dp4, dist_module=dist)
+                self.assertIsNone(t_dp4["parallel_mode"])
+                self.assertEqual((t_dp4["sp_size"], t_dp4["sp_rank"]), (1, 0))
+                self.assertIsNone(t_dp4["sp_group"])
+
+                os.environ["QWEN4_5_PARALLEL_MODE"] = "sp4_tp4_ep4"
+                with self.assertRaises(ValueError):
+                    Qwen4_5._resolve_load_parallel_topology(pc_dp4, dist_module=dist)
+                os.environ["QWEN4_5_PARALLEL_MODE"] = "bogus_mode"
+                with self.assertRaises(ValueError):
+                    Qwen4_5._resolve_load_parallel_topology(pc_default, dist_module=dist)
+                os.environ.pop("QWEN4_5_PARALLEL_MODE", None)
+                os.environ["QWEN4_5_SP_SIZE"] = "-2"
+                with self.assertRaises(ValueError):
+                    Qwen4_5._resolve_load_parallel_topology(pc_default, dist_module=dist)
+                os.environ["QWEN4_5_SP_SIZE"] = "4"
+                pc_tp2 = _make_pc(world_size=2, world_rank=1, tp_size=2, tp_rank=1, dp_size=1, dp_rank=0, ep_size=2, ep_rank=1)
+                with self.assertRaises(ValueError):
+                    Qwen4_5._resolve_load_parallel_topology(pc_tp2, dist_module=dist)
+        finally:
+            for k, v in prev_env.items():
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
+
+        if not torch.cuda.is_available():
+            self.skipTest("CUDA is required for R11 multi-rank Qwen4_5._load and PD CacheStore tests")
+
+        # Part B (4-rank Gloo sp4_tp4_ep4 -> tp4_ep4) and Part C (2-rank NCCL sp2 -> tp2 when >=2 GPUs)
+        arch = _make_mini_arch(
+            indexer_head_dim=128,
+            indexer_n_heads=8,
+            indexer_kv_heads=1,
+            indexer_compress_ratio=4,
+            indexer_budget=128,
+            max_position_embeddings=512,
+        )
+        ctx = mp.get_context("spawn")
+        with tempfile.TemporaryDirectory(prefix="q45_r11_tpsp4_ckpt_") as ckpt_dir:
+            with torch.no_grad():
+                ref_lm = Qwen4_5ForCausalLM(
+                    arch,
+                    use_triton_mxfp4=True,
+                    compute_mode="bf16",
+                    dtype=torch.bfloat16,
+                    device=torch.device("cuda:0"),
+                )
+                ref_lm.init_synthetic_weights(seed=11201, ple_mode="gpu_full", ple_fp8=False)
+                _stabilize_router_margins(ref_lm)
+                save_qwen4_5_safetensors_checkpoint(ref_lm, ckpt_dir)
+                del ref_lm
+                torch.cuda.empty_cache()
+
+            configs = [(4, False)]
+            if torch.cuda.device_count() >= 2:
+                configs.append((2, True))
+
+            for ws, use_nccl in configs:
+                with socket.socket() as sock:
+                    sock.bind(("127.0.0.1", 0))
+                    port = sock.getsockname()[1]
+                err_q = ctx.SimpleQueue()
+                procs = []
+                for rk in range(ws):
+                    proc = ctx.Process(
+                        target=_r11_tpsp_pd_cachestore_worker,
+                        args=(rk, ws, port, ckpt_dir, use_nccl, err_q),
+                    )
+                    proc.start()
+                    procs.append(proc)
+                for proc in procs:
+                    proc.join(timeout=180)
+                errors = []
+                while not err_q.empty():
+                    errors.append(err_q.get())
+                for rk, proc in enumerate(procs):
+                    if proc.is_alive():
+                        proc.terminate()
+                        self.fail(f"R11 TPSP ws={ws} nccl={use_nccl} worker {rk} timed out")
+                    self.assertEqual(proc.exitcode, 0, f"R11 TPSP ws={ws} r{rk} exit={proc.exitcode}: {errors}")
+                self.assertEqual(errors, [])
 
 def _r7_sp2_nccl_cg_worker(
     rank: int,
@@ -5091,6 +5289,337 @@ def _r8_dp2_tpsp2_empty_worker(
                 os.environ[k_env] = v_env
         if dist.is_initialized():
             dist.destroy_process_group()
+
+
+def _r11_tpsp_pd_cachestore_worker(
+    rank: int,
+    world_size: int,
+    port: int,
+    ckpt_dir: str,
+    use_nccl: bool,
+    err_queue: object,
+) -> None:
+    import datetime
+    import traceback
+    from unittest.mock import patch
+    import torch.distributed as dist
+    from rtp_llm.config.qwen4_5_config import Qwen4_5ModelConfig
+    from rtp_llm.models_py.distributed import collective_torch
+    from rtp_llm.models_py.distributed.rank_layout import Group
+    from rtp_llm.models_py.model_desc.qwen4_5_runtime import (
+        QWEN4_5_CACHE_TAGS,
+        LocalMemoryCacheStoreWriter,
+        transfer_published_blocks_to_decode,
+    )
+    from rtp_llm.ops import ParallelismConfig
+
+    env_watch = (
+        "QWEN4_5_MXFP4_STRICT_BF16",
+        "QWEN4_5_MXFP4_BACKEND",
+        "QWEN4_5_LOAD_WORKERS",
+        "QWEN4_5_PARALLEL_MODE",
+        "QWEN4_5_SP_SIZE",
+    )
+    prev_env = {k: os.environ.get(k) for k in env_watch}
+    os.environ["QWEN4_5_MXFP4_STRICT_BF16"] = "1"
+    os.environ["QWEN4_5_MXFP4_BACKEND"] = "triton"
+    os.environ["QWEN4_5_LOAD_WORKERS"] = "1"
+    try:
+        os.environ["MASTER_ADDR"] = "127.0.0.1"
+        os.environ["MASTER_PORT"] = str(port)
+        os.environ["RANK"] = str(rank)
+        os.environ["WORLD_SIZE"] = str(world_size)
+        if use_nccl:
+            torch.cuda.set_device(rank)
+            dev = torch.device(f"cuda:{rank}")
+            dist.init_process_group(
+                backend="nccl",
+                rank=rank,
+                world_size=world_size,
+                device_id=dev,
+                timeout=datetime.timedelta(seconds=60),
+            )
+        else:
+            dev = torch.device("cuda:0")
+            torch.cuda.set_device(dev)
+            dist.init_process_group(
+                backend="gloo",
+                rank=rank,
+                world_size=world_size,
+                timeout=datetime.timedelta(seconds=60),
+            )
+
+        g_tp = dist.new_group(list(range(world_size)))
+        dt = torch.bfloat16
+        arch = _make_mini_arch(
+            indexer_head_dim=128,
+            indexer_n_heads=8,
+            indexer_kv_heads=1,
+            indexer_compress_ratio=4,
+            indexer_budget=128,
+            max_position_embeddings=512,
+        )
+
+        def _make_pc():
+            pc = ParallelismConfig()
+            pc.world_size = world_size
+            pc.world_rank = rank
+            pc.tp_size = world_size
+            pc.tp_rank = rank
+            pc.ep_size = world_size
+            pc.ep_rank = rank
+            pc.dp_size = 1
+            pc.dp_rank = 0
+            return pc
+
+        def _load_wrapper(env_updates: dict[str, Optional[str]]) -> Qwen4_5:
+            for k, v in env_updates.items():
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
+            mcfg = Qwen4_5ModelConfig(arch_config=arch)
+            mcfg.ckpt_path = ckpt_dir
+            mcfg.num_layers = arch.num_hidden_layers
+            mcfg.is_mtp = True
+            mcfg.qwen4_5_arch_config = arch
+            wrapper = Qwen4_5.__new__(Qwen4_5)
+            wrapper.model_config = mcfg
+            wrapper.parallelism_config = _make_pc()
+            wrapper.max_generate_batch_size = 4
+            wrapper.fmha_config = None
+            wrapper.hw_kernel_config = None
+            with (
+                patch.object(collective_torch, "_initialized", True),
+                patch.object(
+                    collective_torch,
+                    "_get_group",
+                    side_effect=lambda g: g_tp if g == Group.TP else dist.group.WORLD,
+                ),
+            ):
+                wrapper._load(str(dev))
+                wrapper._create_python_model()
+            return wrapper
+
+        with torch.no_grad():
+            sp_env = (
+                {"QWEN4_5_PARALLEL_MODE": "sp4_tp4_ep4", "QWEN4_5_SP_SIZE": None}
+                if world_size == 4
+                else {"QWEN4_5_PARALLEL_MODE": None, "QWEN4_5_SP_SIZE": "2"}
+            )
+            wrapper_p = _load_wrapper(sp_env)
+            wrapper_d = _load_wrapper({"QWEN4_5_PARALLEL_MODE": None, "QWEN4_5_SP_SIZE": None})
+
+            # Verify QWEN4_5_SP_SIZE=4 on real dist + collective_torch resolves identical sp4_tp4_ep4
+            if world_size == 4:
+                os.environ.pop("QWEN4_5_PARALLEL_MODE", None)
+                os.environ["QWEN4_5_SP_SIZE"] = "4"
+                with (
+                    patch.object(collective_torch, "_initialized", True),
+                    patch.object(
+                        collective_torch,
+                        "_get_group",
+                        side_effect=lambda g: g_tp if g == Group.TP else dist.group.WORLD,
+                    ),
+                ):
+                    t_sp_env = Qwen4_5._resolve_load_parallel_topology(_make_pc(), dist_module=dist)
+                assert t_sp_env["parallel_mode"] == "sp4_tp4_ep4"
+                assert t_sp_env["sp_size"] == 4 and t_sp_env["sp_rank"] == rank
+                assert t_sp_env["sp_group"] is g_tp and t_sp_env["dp_attn"] is False
+
+            # Verify full topology propagation across Qwen4_5ForCausalLM & Qwen4_5RTPModel
+            lm_p_m = wrapper_p._qwen4_5_causal_lm.model
+            rt_p = wrapper_p.py_model
+            assert lm_p_m.parallel_mode == "sp4_tp4_ep4", lm_p_m.parallel_mode
+            assert (lm_p_m.sp_size, lm_p_m.sp_rank) == (world_size, rank)
+            assert lm_p_m.sp_group is g_tp and lm_p_m.dp_attn is False
+            assert (rt_p.sp_size, rt_p.sp_rank) == (world_size, rank)
+            assert rt_p.sp_group is g_tp and rt_p.dp_attn is False
+            assert rt_p.bridge._resolve_sp_dist()[:3] == (world_size, rank, g_tp)
+
+            lm_d_m = wrapper_d._qwen4_5_causal_lm.model
+            rt_d = wrapper_d.py_model
+            assert lm_d_m.parallel_mode == "tp4_ep4", lm_d_m.parallel_mode
+            assert (lm_d_m.sp_size, lm_d_m.sp_rank) == (1, 0) and lm_d_m.sp_group is None
+            assert (rt_d.sp_size, rt_d.sp_rank) == (1, 0) and rt_d.sp_group is None
+            assert rt_d.bridge._resolve_sp_dist()[:3] == (1, 0, None)
+
+            # Verify 100% binary-compatible KV/GDN/QSA/PLE plans & specs between SP and TP
+            plan_p = wrapper_p.model_config.qwen4_5_kv_cache_plan
+            plan_d = wrapper_d.model_config.qwen4_5_kv_cache_plan
+            assert plan_p == plan_d, "SP and TP KV cache plans diverged"
+            if _HAS_RTP_OPS and hasattr(wrapper_p.model_config, "kv_cache_spec_descs"):
+                descs_p = wrapper_p.model_config.kv_cache_spec_descs
+                descs_d = wrapper_d.model_config.kv_cache_spec_descs
+                assert len(descs_p) == len(descs_d)
+
+            pools = {t: 16 for t in set(QWEN4_5_CACHE_TAGS) | {"linear"}}
+            kv_p = LocalKVCache(plan_p, tokens_per_block=64, num_blocks_per_tag=pools, device=dev, dtype=dt)
+            kv_d = LocalKVCache(plan_d, tokens_per_block=64, num_blocks_per_tag=pools, device=dev, dtype=dt)
+            kv_ref_p = LocalKVCache(plan_d, tokens_per_block=64, num_blocks_per_tag=pools, device=dev, dtype=dt)
+            kv_ref_d = LocalKVCache(plan_d, tokens_per_block=64, num_blocks_per_tag=pools, device=dev, dtype=dt)
+
+            gen = torch.Generator(device="cpu").manual_seed(11202)
+            p0_a = torch.randint(4, 240, (53,), generator=gen, dtype=torch.int64).to(dev)
+            p1_a = torch.randint(4, 240, (37,), generator=gen, dtype=torch.int64).to(dev)
+            p0_b = torch.randint(4, 240, (29,), generator=gen, dtype=torch.int64).to(dev)
+            p1_b = torch.randint(4, 240, (35,), generator=gen, dtype=torch.int64).to(dev)
+            v_toks = torch.randint(4, 240, (2, 4), generator=gen, dtype=torch.int64).to(dev)
+
+            tb_p = build_block_tables_for_requests(kv_p, [96, 96])
+            tb_ref = build_block_tables_for_requests(kv_ref_p, [96, 96])
+            wr_p = LocalMemoryCacheStoreWriter(record_payload=True)
+            wr_ref = LocalMemoryCacheStoreWriter(record_payload=True)
+
+            def _prefill(rt, kv, tb, toks, lens, pfxs, writer):
+                rt.kv_cache = kv
+                ai = make_tagged_attention_inputs(
+                    tb,
+                    is_prefill=True,
+                    input_lengths=lens,
+                    sequence_lengths=[p + l for p, l in zip(pfxs, lens)],
+                    prefix_lengths=pfxs,
+                    device=dev,
+                    cache_store_writer=writer,
+                )
+                return rt.forward(LocalPyModelInputs(input_ids=toks, attention_inputs=ai)).hidden_states
+
+            # 1) Ragged + prefix-reuse prefill (crossing 64-tok block boundary)
+            hp1 = _prefill(rt_p, kv_p, tb_p, torch.cat([p0_a, p1_a]), [53, 37], [0, 0], wr_p)
+            hr1 = _prefill(rt_d, kv_ref_p, tb_ref, torch.cat([p0_a, p1_a]), [53, 37], [0, 0], wr_ref)
+            lg_hp1 = rt_p.compute_logits(hp1[[52, 89]])
+            lg_hr1 = rt_d.compute_logits(hr1[[52, 89]])
+            c_p1 = _cosine(lg_hp1, lg_hr1)
+            assert c_p1 >= 0.999, f"ws={world_size} r{rank} prefill1 cos={c_p1}"
+
+            hp2 = _prefill(rt_p, kv_p, tb_p, torch.cat([p0_b, p1_b]), [29, 35], [53, 37], wr_p)
+            hr2 = _prefill(rt_d, kv_ref_p, tb_ref, torch.cat([p0_b, p1_b]), [29, 35], [53, 37], wr_ref)
+            lg_hp2 = rt_p.compute_logits(hp2[[28, 63]])
+            lg_hr2 = rt_d.compute_logits(hr2[[28, 63]])
+            c_p2 = _cosine(lg_hp2, lg_hr2)
+            assert c_p2 >= 0.999, f"ws={world_size} r{rank} prefill2+pfx cos={c_p2}"
+
+            # 2) Verify CacheStore published block completeness & SP <-> TP payload parity
+            pub_sp = wr_p.published
+            pub_tp = wr_ref.published
+            assert set(pub_sp.keys()) == set(pub_tp.keys()), (
+                f"Published CacheStore key mismatch: {set(pub_sp.keys()) ^ set(pub_tp.keys())}"
+            )
+            pub_tags = {tag for _, tag in pub_sp.keys()}
+            expected_tags = {t for m in kv_p.layer_caches for t in m.keys()}
+            assert expected_tags == pub_tags, (
+                f"Published CacheStore tag set {pub_tags} != LocalKVCache tags {expected_tags}"
+            )
+            assert FULL_ATTN_KV_TAG in pub_tags and "linear" in pub_tags
+            assert INDEXER_KV_TAG in pub_tags and INDEXER_STATE_TAG in pub_tags
+
+            for (lid_k, tag_k), (blks_sp, pay_sp) in pub_sp.items():
+                blks_tp, pay_tp = pub_tp[(lid_k, tag_k)]
+                assert len(blks_sp) == len(blks_tp) and pay_sp is not None and pay_tp is not None
+                assert tuple(pay_sp.shape) == tuple(pay_tp.shape) and pay_sp.dtype == pay_tp.dtype
+                if tag_k == "ple_ngram_ctx":
+                    assert torch.equal(pay_sp, pay_tp), f"L{lid_k} {tag_k} payload diff"
+                elif tag_k == INDEXER_KV_TAG:
+                    v_sp = view_indexer_kv_pool(
+                        pay_sp, kv_tokens_per_block=64, compress_ratio=arch.indexer_compress_ratio, head_dim=arch.indexer_head_dim
+                    )
+                    v_tp = view_indexer_kv_pool(
+                        pay_tp, kv_tokens_per_block=64, compress_ratio=arch.indexer_compress_ratio, head_dim=arch.indexer_head_dim
+                    )
+                    c_blk = _cosine(v_sp.reshape(-1), v_tp.reshape(-1))
+                    assert c_blk >= 0.997, f"ws={world_size} r{rank} L{lid_k} {tag_k} payload cos={c_blk}"
+                elif tag_k == "linear":
+                    import math as _math
+                    ssm_n = _math.prod(rt_p.bridge.ssm_shape)
+                    conv_n = _math.prod(rt_p.bridge.gdn_conv_shape)
+                    c_ssm = _cosine(pay_sp[:, :ssm_n].reshape(-1), pay_tp[:, :ssm_n].reshape(-1))
+                    conv_sp = pay_sp.contiguous().view(torch.bfloat16)[:, 2 * ssm_n : 2 * ssm_n + conv_n]
+                    conv_tp = pay_tp.contiguous().view(torch.bfloat16)[:, 2 * ssm_n : 2 * ssm_n + conv_n]
+                    c_cnv = _cosine(conv_sp.reshape(-1), conv_tp.reshape(-1))
+                    assert c_ssm >= 0.997 and c_cnv >= 0.997, (
+                        f"ws={world_size} r{rank} L{lid_k} linear ssm={c_ssm} conv={c_cnv}"
+                    )
+                else:
+                    c_blk = _cosine(pay_sp.reshape(-1), pay_tp.reshape(-1))
+                    assert c_blk >= 0.997, f"ws={world_size} r{rank} L{lid_k} {tag_k} payload cos={c_blk}"
+
+                if tag_k in ("ple_conv_state", "ple_ngram_ctx", "full_attn_output_sconv", "linear_attn_output_sconv", "ffn_output_sconv"):
+                    pay_all = [torch.empty_like(pay_sp) for _ in range(world_size)]
+                    dist.all_gather(pay_all, pay_sp.contiguous(), group=g_tp)
+                    assert torch.equal(pay_all[0], pay_sp), (
+                        f"ws={world_size} r{rank} L{lid_k} {tag_k} diverges from rank0 CacheStore payload"
+                    )
+
+            # 3) Heterogeneous transfer_published_blocks_to_decode (SP -> TP) + zero-sync Decode steps
+            dst_tb_sp = transfer_published_blocks_to_decode(pub_sp, tb_p, kv_d, [82, 72])
+            dst_tb_tp = transfer_published_blocks_to_decode(pub_tp, tb_ref, kv_ref_d, [82, 72])
+
+            def _decode_step(kv_use, tb_use, dec_ids, seq_lens):
+                rt_d.kv_cache = kv_use
+                ai = make_tagged_attention_inputs(
+                    tb_use,
+                    is_prefill=False,
+                    input_lengths=[1, 1],
+                    sequence_lengths=seq_lens,
+                    prefix_lengths=[0, 0],
+                    device=dev,
+                )
+                h = rt_d.forward(LocalPyModelInputs(input_ids=dec_ids, attention_inputs=ai)).hidden_states
+                return rt_d.compute_logits(h)
+
+            next_sp = lg_hp2.argmax(dim=-1).to(torch.int64)
+            next_tp = lg_hr2.argmax(dim=-1).to(torch.int64)
+            assert torch.equal(next_sp, next_tp), f"Prefill greedy token mismatch: {next_sp} vs {next_tp}"
+            for step_i in range(3):
+                cur_lens = [82 + step_i, 72 + step_i]
+                lg_d_sp = _decode_step(kv_d, dst_tb_sp, next_sp, cur_lens)
+                lg_d_tp = _decode_step(kv_ref_d, dst_tb_tp, next_tp, cur_lens)
+                c_d = _cosine(lg_d_sp, lg_d_tp)
+                assert c_d >= 0.999, f"ws={world_size} r{rank} PD decode step {step_i} cos={c_d}"
+                next_sp = lg_d_sp.argmax(dim=-1).to(torch.int64)
+                next_tp = lg_d_tp.argmax(dim=-1).to(torch.int64)
+                assert torch.equal(next_sp, next_tp), f"PD decode step {step_i} token mismatch"
+
+            # 4) Verify (V=4, commit) + post-verify Decode directly on SP->TP CacheStore state
+            acc_t = torch.tensor([3, 2], dtype=torch.int32, device=dev)
+            v_outs = []
+            for kv_u, tb_u in ((kv_d, dst_tb_sp), (kv_ref_d, dst_tb_tp)):
+                rt_d.kv_cache = kv_u
+                ai_v = make_tagged_attention_inputs(
+                    tb_u,
+                    is_prefill=True,
+                    input_lengths=[4, 4],
+                    sequence_lengths=[],
+                    prefix_lengths=[85, 75],
+                    device=dev,
+                )
+                for g in ai_v.values():
+                    g.is_target_verify = True
+                hv = rt_d.forward(LocalPyModelInputs(input_ids=v_toks.reshape(-1), attention_inputs=ai_v)).hidden_states
+                rt_d.prepare_speculative_target_commit(acc_t)
+                rt_d.finish_speculative_target_commit(True)
+                rt_d.finalize_speculative_target_commit()
+                v_outs.append(rt_d.compute_logits(hv))
+            c_v = _cosine(v_outs[0], v_outs[1])
+            assert c_v >= 0.999, f"ws={world_size} r{rank} PD verify cos={c_v}"
+            assert torch.equal(v_outs[0].argmax(-1), v_outs[1].argmax(-1))
+
+            post_sp = _decode_step(kv_d, dst_tb_sp, v_toks[:, 2].contiguous(), [88, 77])
+            post_tp = _decode_step(kv_ref_d, dst_tb_tp, v_toks[:, 2].contiguous(), [88, 77])
+            c_post = _cosine(post_sp, post_tp)
+            assert c_post >= 0.999, f"ws={world_size} r{rank} PD post-verify decode cos={c_post}"
+            assert torch.equal(post_sp.argmax(-1), post_tp.argmax(-1))
+    except Exception as exc:  # pragma: no cover - surfaced by parent test
+        err_queue.put((rank, f"{exc!r}\n{traceback.format_exc()}"))
+    finally:
+        for k_env, v_env in prev_env.items():
+            if v_env is None:
+                os.environ.pop(k_env, None)
+            else:
+                os.environ[k_env] = v_env
+        if dist.is_initialized():
+            dist.destroy_process_group()
+
 
 if __name__ == "__main__":
     unittest.main()

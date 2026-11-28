@@ -944,6 +944,118 @@ def _hc_mix_reduce_with_down_inject_sk_kernel(
     )
 
 
+@triton.jit(do_not_specialize=["M"])
+def _hc_up_mix_sk_1d_kernel(
+    PART_PTR,
+    UP_PTR,
+    PREV_LATENT_PTR,
+    NORMED_PTR,
+    OUT_PTR,
+    LATENT_PTR,
+    INJ_PTR,
+    M,
+    SPLIT_K: tl.constexpr,
+    N_OUT: tl.constexpr,
+    LOWRANK: tl.constexpr,
+    HC_COUNT: tl.constexpr,
+    HIDDEN: tl.constexpr,
+    NUM_H_BLOCKS: tl.constexpr,
+    BLOCK_M: tl.constexpr,
+    BLOCK_K: tl.constexpr,
+    BLOCK_SK: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    BLOCK_H: tl.constexpr,
+):
+    """1D-scheduled fused up-proj + sigmoid*normed mix_reduce + per-row Split-K epilogue."""
+    pid = tl.program_id(0).to(tl.int64)
+    m_i64 = M.to(tl.int64)
+    if pid < m_i64:
+        row = pid
+        offs_n = tl.arange(0, BLOCK_N).to(tl.int64)
+        offs_sk = tl.arange(0, BLOCK_SK).to(tl.int64)
+        n_mask = offs_n < N_OUT
+        sk_mask = offs_sk < SPLIT_K
+        vals = tl.load(
+            PART_PTR + offs_sk[:, None] * (m_i64 * N_OUT) + row * N_OUT + offs_n[None, :],
+            mask=sk_mask[:, None] & n_mask[None, :],
+            other=0.0,
+        )
+        raw = tl.sum(vals, axis=0)
+        scaled = raw * (1.0 / HC_COUNT)
+        sig_s = tl.sigmoid(scaled)
+        tl.store(
+            LATENT_PTR + row * LOWRANK + offs_n,
+            (scaled * sig_s).to(LATENT_PTR.dtype.element_ty),
+            mask=offs_n < LOWRANK,
+        )
+        tl.store(
+            INJ_PTR + row * HC_COUNT + (offs_n - LOWRANK),
+            (2.0 * sig_s).to(INJ_PTR.dtype.element_ty),
+            mask=(offs_n >= LOWRANK) & n_mask,
+        )
+        return
+
+    tile = pid - m_i64
+    pid_m = tile // NUM_H_BLOCKS
+    pid_h = tile % NUM_H_BLOCKS
+    offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M).to(tl.int64)
+    m_mask = offs_m < m_i64
+    offs_h = pid_h * BLOCK_H + tl.arange(0, BLOCK_H).to(tl.int64)
+    mh = offs_h < HIDDEN
+
+    acc_h = tl.zeros((BLOCK_M, BLOCK_H), dtype=tl.float32)
+    if BLOCK_K >= LOWRANK:
+        offs_k = tl.arange(0, LOWRANK).to(tl.int64)
+        pl = tl.load(
+            PREV_LATENT_PTR + offs_m[:, None] * LOWRANK + offs_k[None, :],
+            mask=m_mask[:, None],
+            other=0.0,
+        )
+        for b in tl.static_range(HC_COUNT):
+            bh_offs = b * HIDDEN + offs_h
+            up_w = tl.load(
+                UP_PTR + bh_offs[:, None] * LOWRANK + offs_k[None, :],
+                mask=mh[:, None],
+                other=0.0,
+            )
+            logits = tl.dot(pl, tl.trans(up_w))
+            xv = tl.load(
+                NORMED_PTR + offs_m[:, None] * (HC_COUNT * HIDDEN) + bh_offs[None, :],
+                mask=m_mask[:, None] & mh[None, :],
+                other=0.0,
+            ).to(tl.float32)
+            acc_h += tl.sigmoid(logits) * xv
+    else:
+        for b in tl.static_range(HC_COUNT):
+            bh_offs = b * HIDDEN + offs_h
+            logits = tl.zeros((BLOCK_M, BLOCK_H), dtype=tl.float32)
+            for ks in tl.static_range(0, LOWRANK, BLOCK_K):
+                offs_k = (ks + tl.arange(0, BLOCK_K)).to(tl.int64)
+                pl = tl.load(
+                    PREV_LATENT_PTR + offs_m[:, None] * LOWRANK + offs_k[None, :],
+                    mask=m_mask[:, None],
+                    other=0.0,
+                )
+                up_w = tl.load(
+                    UP_PTR + bh_offs[:, None] * LOWRANK + offs_k[None, :],
+                    mask=mh[:, None],
+                    other=0.0,
+                )
+                logits = tl.dot(pl, tl.trans(up_w), logits)
+            xv = tl.load(
+                NORMED_PTR + offs_m[:, None] * (HC_COUNT * HIDDEN) + bh_offs[None, :],
+                mask=m_mask[:, None] & mh[None, :],
+                other=0.0,
+            ).to(tl.float32)
+            acc_h += tl.sigmoid(logits) * xv
+
+    tl.store(
+        OUT_PTR + offs_m[:, None] * HIDDEN + offs_h[None, :],
+        (acc_h * (1.0 / HC_COUNT)).to(OUT_PTR.dtype.element_ty),
+        mask=m_mask[:, None] & mh[None, :],
+    )
+
+
 @triton.jit
 def _hc_mix_reduce_with_down_inject_kernel(
     LOGITS_PTR,
@@ -1488,6 +1600,8 @@ def hc_sconv_decode_opaque_combine_norm_triton(
     )
     if hidden_size == 5120 and hc_count == 4:
         if rows <= 64 and sub_c.dtype == res_c.dtype:
+            sc_bc = 256
+            sc_nw = 8 if rows <= 32 else 4
             sconv_sub = _hc_alloc_from_pool(
                 _HC_INTERNAL_NORMED_POOL, (rows, hidden_size), sub_c.dtype, sub_c.device, "sconv_sub", 1
             )
@@ -1503,16 +1617,16 @@ def hc_sconv_decode_opaque_combine_norm_triton(
                 res_c.device.index, 35, sub_c.dtype, cw_c.dtype, pool_2d.dtype, sconv_sub.dtype,
                 block_table.dtype, seq_before.dtype,
                 _triton_int_spec(sxb), _triton_int_spec(spb), _triton_int_spec(sbt0), _triton_int_spec(sbt1),
-                hidden_size, conv_residual, conv_use_silu, False, has_c, cval, 512,
+                hidden_size, conv_residual, conv_use_silu, False, has_c, cval, sc_bc, sc_nw,
             )
             triton_fast_launch(
                 _HC_TRITON_CACHE, sc_ckey, _causal_dwconv1d_decode_opaque_k4_kernel,
-                rows, triton.cdiv(hidden_size, 512), 1, sc_ptr_or, sc_rt,
+                rows, triton.cdiv(hidden_size, sc_bc), 1, sc_ptr_or, sc_rt,
                 {
                     "C": hidden_size, "RESIDUAL": conv_residual, "USE_SILU": conv_use_silu,
-                    "ROUND_PRE_ACT": False, "HAS_CLAMP": has_c, "CLAMP_VAL": cval, "BLOCK_C": 512,
+                    "ROUND_PRE_ACT": False, "HAS_CLAMP": has_c, "CLAMP_VAL": cval, "BLOCK_C": sc_bc,
                 },
-                num_warps=4,
+                num_warps=sc_nw,
             )
             _launch_hc_combine_and_norm_branch5120(
                 res_c, sconv_sub, inj_c, w_c, b_c, combined, normed,
@@ -1888,10 +2002,12 @@ def hc_mix_reduce_with_down_inject_triton(
 
 
 def _hc_sk_params(rows: int) -> Tuple[int, int, int, int, int]:
-    """Select (BLOCK_M, BLOCK_N, SPLIT_K, BLOCK_K, BLOCK_H) for K=20480, N=132, M<=32."""
-    if rows <= 8:
-        return 16, 32, 40, 64, 512
-    return 16, 32, 40, 128, 512
+    """Select (BLOCK_M, BLOCK_N, SPLIT_K, BLOCK_K, BLOCK_H) for K=20480, N=132."""
+    if rows <= 16:
+        return 16, 64, 80, 64, 32
+    if rows <= 32:
+        return 32, 32, 80, 64, 32
+    return 64, 64, 40, 64, 32
 
 
 def hc_down_inject_sk_and_mix_triton(
@@ -1904,9 +2020,11 @@ def hc_down_inject_sk_and_mix_triton(
     *,
     ws: Optional[HCStaticWorkspace] = None,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Eliminate cublasLt splitKreduce by computing Split-K partials and fusing reduction into mix_reduce."""
+    """Eliminate cublasLt splitKreduce and fuse prev_latent up-proj + mix_reduce into one 1D epilogue kernel."""
     normed_c = normed if normed.is_contiguous() else normed.contiguous()
     w_c = down_inject_weight if down_inject_weight.is_contiguous() else down_inject_weight.contiguous()
+    up_c = up_weight if up_weight.is_contiguous() else up_weight.contiguous()
+    pl_c = prev_latent if prev_latent.is_contiguous() else prev_latent.contiguous()
     prefix = normed_c.shape[:-1]
     width = int(normed_c.shape[-1])
     hidden_size = width // hc_count
@@ -1924,7 +2042,7 @@ def hc_down_inject_sk_and_mix_triton(
     dev_idx = normed_c.device.index if normed_c.device.index is not None else torch.cuda.current_device()
     n_2d = normed_c.view(rows, width)
 
-    ckey_gemm = (dev_idx, 35, normed_c.dtype, w_c.dtype, n_out, width, sk, bm, bn, bk)
+    ckey_gemm = (dev_idx, 39, normed_c.dtype, w_c.dtype, n_out, width, sk, bm, bn, bk, 4, 3)
     triton_fast_launch(
         _HC_TRITON_CACHE,
         ckey_gemm,
@@ -1939,13 +2057,70 @@ def hc_down_inject_sk_and_mix_triton(
         num_stages=3,
     )
 
-    gate_logits = F.linear(prev_latent, up_weight)
-    logits_c = gate_logits if gate_logits.is_contiguous() else gate_logits.contiguous()
     block_sk = max(16, triton.next_power_of_2(sk))
     block_n = max(16, triton.next_power_of_2(n_out))
+    can_fuse_up = (
+        up_c.dtype == normed_c.dtype
+        and pl_c.dtype == normed_c.dtype
+        and tuple(up_c.shape) == (width, hc_lowrank)
+        and pl_c.numel() == rows * hc_lowrank
+        and hidden_size >= 16
+        and hc_lowrank >= 16
+        and (hc_lowrank & (hc_lowrank - 1)) == 0
+    )
+    if can_fuse_up:
+        pl_2d = pl_c.view(rows, hc_lowrank)
+        bm_mix = 16
+        bk_mix = hc_lowrank
+        ns_mix = 2
+        nhb = triton.cdiv(hidden_size, bh)
+        grid1d = triton.cdiv(rows, bm_mix) * nhb + rows
+        ckey_up_mix = (
+            dev_idx, 38, up_c.dtype, pl_c.dtype, normed_c.dtype, out.dtype,
+            sk, n_out, hc_lowrank, hc_count, hidden_size, nhb, bm_mix, bk_mix, block_sk, block_n, bh, ns_mix,
+        )
+        ptr_or = (
+            part.data_ptr()
+            | up_c.data_ptr()
+            | pl_2d.data_ptr()
+            | n_2d.data_ptr()
+            | out.data_ptr()
+            | latent.data_ptr()
+            | inject_w.data_ptr()
+        )
+        triton_fast_launch(
+            _HC_TRITON_CACHE,
+            ckey_up_mix,
+            _hc_up_mix_sk_1d_kernel,
+            grid1d,
+            1,
+            1,
+            ptr_or,
+            (part, up_c, pl_2d, n_2d, out, latent, inject_w, rows),
+            {
+                "SPLIT_K": sk,
+                "N_OUT": n_out,
+                "LOWRANK": hc_lowrank,
+                "HC_COUNT": hc_count,
+                "HIDDEN": hidden_size,
+                "NUM_H_BLOCKS": nhb,
+                "BLOCK_M": bm_mix,
+                "BLOCK_K": bk_mix,
+                "BLOCK_SK": block_sk,
+                "BLOCK_N": block_n,
+                "BLOCK_H": bh,
+            },
+            num_warps=4,
+            num_stages=ns_mix,
+        )
+        return out, latent, inject_w
+
+    bh_fallback = 512
+    gate_logits = F.linear(prev_latent, up_weight)
+    logits_c = gate_logits if gate_logits.is_contiguous() else gate_logits.contiguous()
     ckey_mix = (
-        dev_idx, 36, logits_c.dtype, normed_c.dtype, out.dtype,
-        sk, n_out, hc_lowrank, hc_count, hidden_size, block_sk, block_n, bh,
+        dev_idx, 40, logits_c.dtype, normed_c.dtype, out.dtype,
+        sk, n_out, hc_lowrank, hc_count, hidden_size, block_sk, block_n, bh_fallback,
     )
     ptr_or = (
         part.data_ptr()
@@ -1960,7 +2135,7 @@ def hc_down_inject_sk_and_mix_triton(
         ckey_mix,
         _hc_mix_reduce_with_down_inject_sk_kernel,
         rows,
-        triton.cdiv(hidden_size, bh),
+        triton.cdiv(hidden_size, bh_fallback),
         1,
         ptr_or,
         (part, logits_c, n_2d, out, latent, inject_w, rows),
@@ -1972,7 +2147,7 @@ def hc_down_inject_sk_and_mix_triton(
             "HIDDEN": hidden_size,
             "BLOCK_SK": block_sk,
             "BLOCK_N": block_n,
-            "BLOCK_H": bh,
+            "BLOCK_H": bh_fallback,
         },
         num_warps=4,
     )
@@ -2186,7 +2361,7 @@ class Qwen4_5HyperConnection(nn.Module):
                     self.hidden_size == 5120
                     and self.hc_count == 4
                     and self.hc_lowrank == 128
-                    and 0 < rows <= 32
+                    and 0 < rows <= 48
                     and normed.dtype in (torch.bfloat16, torch.float16)
                     and w_fused.dtype == normed.dtype
                     and not (

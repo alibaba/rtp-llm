@@ -125,22 +125,16 @@ private:
     std::string old_value_;
 };
 
-// The stream-async pipelines (RTP_LLM_STREAM_ASYNC / RTP_LLM_MTP_ASYNC_PREPARE
-// all set to 1 on the reference deployment) run the syncing prepare on a
-// dedicated worker (PyWrappedModel::prepareAttentionInputs with
-// skip_forward_event_sync=false) and keep every replay-prep mutation
-// stream-ordered, so skipping the forward-event wait there is safe. The
-// default host pipeline mutates pinned capture buffers directly from the CPU
-// (host memcpy / fill_params / fa2 replan staging), exactly like main, and
-// therefore must wait for the previous replay before touching them — main did
-// this unconditionally in prepareInputs().
+// Only explicit async replay preparation (RTP_LLM_MTP_ASYNC_PREPARE=1) runs
+// the syncing prepare on a dedicated worker (PyWrappedModel::prepareAttentionInputs
+// with skip_forward_event_sync=false) and keeps replay-prep mutations isolated.
+// NormalExecutor sets RTP_LLM_STREAM_ASYNC=1 only for dispatch overlap without an
+// async prepare worker and calls forward() -> prepareInputs(skip_forward_event_sync=true),
+// so it must still guard host mirror/plan mutations with forward_event_.
 bool streamAsyncReplayPrepEnabled() {
     static const bool enabled = []() {
-        auto is_on = [](const char* name) {
-            const char* value = std::getenv(name);
-            return value != nullptr && std::string(value) == "1";
-        };
-        return is_on("RTP_LLM_STREAM_ASYNC") || is_on("RTP_LLM_MTP_ASYNC_PREPARE");
+        const char* value = std::getenv("RTP_LLM_MTP_ASYNC_PREPARE");
+        return value != nullptr && std::string(value) == "1";
     }();
     return enabled;
 }
@@ -461,9 +455,6 @@ void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
             RTP_LLM_PROFILE_SCOPE("cuda_graph.prepareAttentionInputs(generation_prefill_wait_forward_event)");
             forward_event_.synchronize();
         }
-    } else if (!skip_forward_event_sync || !streamAsyncReplayPrepEnabled()) {
-        RTP_LLM_PROFILE_SCOPE("cuda_graph.prepareAttentionInputs(wait_forward_event)");
-        forward_event_.synchronize();
     }
 
     struct GenerationPrefillPrepareCompletionGuard {
@@ -767,16 +758,6 @@ void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
     }
 #endif
 
-    if (!has_tagged_cache) {
-        // The host mirror must be cleared with the device block table. fillParams
-        // walks every graph-batch row and may dereference padding rows when a
-        // backend keeps input_lengths uniform for graph-stable cu_seqlens. Without
-        // this reset, a padding row can retain a previous replay's block ID and
-        // route a KV write into a live request's block. Block 0 is reserved and is
-        // therefore the safe destination for padding rows.
-        py_model_inputs_.attention_inputs.kv_cache_kernel_block_id.fill_(0);
-    }
-
     // Graph kernels consume the group-local kernel block tables. Model-owned
     // state caches derive their page views from those same tables. Cache-store
     // operations run outside the graph on the original physical input tables.
@@ -852,9 +833,6 @@ void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
                                     "CUDA graph capture has no attention input for tag=%s",
                                     tag.c_str());
             auto& dst_inputs = dst_it->second;
-            if (dst_inputs.kv_cache_kernel_block_id.defined() && !dst_inputs.kv_cache_kernel_block_id.is_cuda()) {
-                dst_inputs.kv_cache_kernel_block_id.zero_();
-            }
             tryAddStridedD2DCopy(src_inputs.kv_cache_kernel_block_id_device,
                                  dst_inputs.kv_cache_kernel_block_id_device);
         }
@@ -865,6 +843,13 @@ void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
         RTP_LLM_PROFILE_SCOPE("cuda_graph.prepareAttentionInputs(fused_d2d_copy)");
         fusedCopy(d2d_copies);
         fusedStridedCopy(strided_d2d_copies);
+    }
+
+    // Wait for the preceding replay after stream-ordered fills/D2D copies are queued,
+    // right before CPU mutations to pinned host mirrors / FlashInfer plan buffers.
+    if (!isGenerationPrefillCudaGraph() && (!skip_forward_event_sync || !streamAsyncReplayPrepEnabled())) {
+        RTP_LLM_PROFILE_SCOPE("cuda_graph.prepareAttentionInputs(wait_forward_event)");
+        forward_event_.synchronize();
     }
 
     // NOTE: we do H2H after D2D copies to let GPU finish the D2D copies as soon as possible,
@@ -908,7 +893,10 @@ void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
         }
 
         if (!has_tagged_cache) {
-            // Common H2H strided copies for kv_cache block tables (both decode & prefill)
+            // Common H2H strided copies for kv_cache block tables (both decode & prefill).
+            // Resetting here after wait_forward_event ensures padding rows never retain
+            // a previous replay's block ID without racing the in-flight graph.
+            py_model_inputs_.attention_inputs.kv_cache_kernel_block_id.fill_(0);
             stridedCopyHost(inputs.attention_inputs.kv_cache_kernel_block_id,
                             py_model_inputs_.attention_inputs.kv_cache_kernel_block_id);
         }
@@ -1001,6 +989,9 @@ void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
         if (has_tagged_cache) {
             for (const auto& [tag, src_inputs] : inputs.attention_inputs_by_tag) {
                 auto& dst_inputs = py_model_inputs_.attention_inputs_by_tag.at(tag);
+                if (dst_inputs.kv_cache_kernel_block_id.defined() && !dst_inputs.kv_cache_kernel_block_id.is_cuda()) {
+                    dst_inputs.kv_cache_kernel_block_id.zero_();
+                }
                 stridedCopyHost(src_inputs.kv_cache_kernel_block_id, dst_inputs.kv_cache_kernel_block_id);
             }
         }

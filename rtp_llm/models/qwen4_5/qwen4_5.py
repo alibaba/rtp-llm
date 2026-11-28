@@ -284,15 +284,207 @@ class Qwen4_5(_BaseModel):
         )
         self._create_python_model()
 
+    @staticmethod
+    def _resolve_load_parallel_topology(parallelism_config: Any, *, dist_module: Any):
+        """Resolve runtime TP/DP/EP/SP topology for `_load()` with opt-in env rollout."""
+        from rtp_llm.models_py.model_desc.qwen4_5 import (
+            _SUPPORTED_PARALLEL_MODES,
+            resolve_qwen4_5_parallel_topology,
+        )
+
+        mode_aliases = {
+            "tpsp4": "sp4_tp4_ep4",
+            "tpsp4_ep4": "sp4_tp4_ep4",
+        }
+
+        def _parse_mode(raw: Any, source: str) -> Optional[str]:
+            if raw is None:
+                return None
+            mode_s = str(raw).strip().lower()
+            if not mode_s:
+                return None
+            mode_s = mode_aliases.get(mode_s, mode_s)
+            if mode_s not in _SUPPORTED_PARALLEL_MODES:
+                raise ValueError(
+                    f"Unsupported {source}={raw!r}; expected one of {_SUPPORTED_PARALLEL_MODES}"
+                )
+            return mode_s
+
+        def _parse_sp_size(raw: Any, source: str) -> Optional[int]:
+            if raw is None:
+                return None
+            if isinstance(raw, str):
+                s_val = raw.strip()
+                if not s_val:
+                    return None
+                try:
+                    sp_i = int(s_val)
+                except ValueError as exc:
+                    raise ValueError(f"Invalid integer for {source}={raw!r}") from exc
+            else:
+                sp_i = int(raw)
+            if sp_i < 0:
+                raise ValueError(f"{source} must be non-negative, got {raw!r}")
+            return None if sp_i == 0 else sp_i
+
+        tp_size = int(parallelism_config.tp_size)
+        tp_rank = int(parallelism_config.tp_rank)
+        dp_size = int(parallelism_config.dp_size)
+        dp_rank = int(getattr(parallelism_config, "dp_rank", 0))
+        ep_size_cfg = int(getattr(parallelism_config, "ep_size", 1))
+        ep_rank_cfg = int(getattr(parallelism_config, "ep_rank", 0))
+
+        cfg_mode = _parse_mode(
+            getattr(parallelism_config, "parallel_mode", None),
+            "parallelism_config.parallel_mode",
+        )
+        raw_parallel_mode = (
+            cfg_mode
+            if cfg_mode is not None
+            else _parse_mode(os.environ.get("QWEN4_5_PARALLEL_MODE"), "QWEN4_5_PARALLEL_MODE")
+        )
+
+        cfg_sp_size = _parse_sp_size(
+            getattr(parallelism_config, "sp_size", None),
+            "parallelism_config.sp_size",
+        )
+        # Explicit parallelism_config.parallel_mode controls topology without mixing stale env overrides.
+        raw_sp_size = (
+            cfg_sp_size
+            if (cfg_sp_size is not None or cfg_mode is not None)
+            else _parse_sp_size(os.environ.get("QWEN4_5_SP_SIZE"), "QWEN4_5_SP_SIZE")
+        )
+
+        raw_sp_rank_attr = getattr(parallelism_config, "sp_rank", None)
+        raw_sp_rank = int(raw_sp_rank_attr) if raw_sp_rank_attr is not None else None
+        raw_dp_attn = getattr(parallelism_config, "dp_attn", None)
+
+        if raw_parallel_mode == "sp4_tp4_ep4" and dp_size != 1:
+            raise ValueError(
+                f"parallel_mode='sp4_tp4_ep4' requires dp_size=1, got dp_size={dp_size} (tp_size={tp_size})."
+            )
+        if raw_parallel_mode == "dp2_tpsp2_ep4" and dp_size <= 1:
+            raise ValueError(
+                f"parallel_mode='dp2_tpsp2_ep4' requires dp_size > 1, got dp_size={dp_size}."
+            )
+        if raw_parallel_mode in ("sp4_tp4_ep4", "dp2_tpsp2_ep4"):
+            if tp_size <= 1:
+                raise ValueError(
+                    f"parallel_mode={raw_parallel_mode!r} requires tp_size > 1, got tp_size={tp_size}."
+                )
+            if raw_sp_size == 1:
+                raise ValueError(
+                    f"parallel_mode={raw_parallel_mode!r} conflicts with sp_size=1."
+                )
+        if raw_parallel_mode in ("tp4_ep4", "dp4_ep4", "dp2_tp2_ep4") and (
+            raw_sp_size is not None and raw_sp_size > 1
+        ):
+            raise ValueError(
+                f"parallel_mode={raw_parallel_mode!r} conflicts with sp_size={raw_sp_size}."
+            )
+        if raw_sp_size is not None and raw_sp_size > 1 and (tp_size <= 1 or raw_sp_size != tp_size):
+            raise ValueError(
+                f"SP requires tp_size == sp_size > 1, got tp_size={tp_size}, sp_size={raw_sp_size}."
+            )
+
+        tp_group = getattr(parallelism_config, "tp_group", None)
+        dp_group = getattr(parallelism_config, "dp_group", None)
+        sp_group = getattr(parallelism_config, "sp_group", None)
+        ep_group = getattr(parallelism_config, "ep_group", None)
+
+        dist_init = bool(dist_module.is_available() and dist_module.is_initialized())
+        collective_get_group = None
+        collective_group_cls = None
+        if dist_init:
+            try:
+                from rtp_llm.models_py.distributed import collective_torch
+
+                if getattr(collective_torch, "_initialized", False):
+                    from rtp_llm.models_py.distributed.collective_torch import _get_group
+                    from rtp_llm.models_py.distributed.rank_layout import Group
+
+                    collective_get_group = _get_group
+                    collective_group_cls = Group
+            except Exception:
+                pass
+
+        if tp_size > 1 and tp_group is None and collective_get_group is not None:
+            try:
+                tp_group = collective_get_group(collective_group_cls.TP)
+            except Exception:
+                pass
+
+        eff_ep_size = 1
+        eff_ep_rank = 0
+        if tp_size > 1 and dp_size == 1:
+            eff_ep_size = tp_size
+            eff_ep_rank = tp_rank
+            if ep_group is None:
+                ep_group = tp_group
+        elif ep_size_cfg > 1:
+            eff_ep_size = ep_size_cfg
+            eff_ep_rank = ep_rank_cfg
+            if ep_group is None and collective_get_group is not None:
+                try:
+                    ep_group = collective_get_group(collective_group_cls.WORLD)
+                except Exception:
+                    pass
+
+        # Always resolve SP/DP/TP topology even when collective_torch already populated tp_group & ep_group,
+        # so sp_size == tp_size inherits sp_group = tp_group, sp_rank = tp_rank, dp_attn = False cleanly.
+        topo = resolve_qwen4_5_parallel_topology(
+            parallel_mode=raw_parallel_mode,
+            tp_size=tp_size,
+            tp_rank=tp_rank,
+            tp_group=tp_group,
+            ep_size=eff_ep_size,
+            ep_rank=eff_ep_rank,
+            ep_group=ep_group,
+            dp_size=dp_size,
+            dp_rank=dp_rank,
+            dp_group=dp_group,
+            sp_size=raw_sp_size,
+            sp_rank=raw_sp_rank,
+            sp_group=sp_group,
+            dp_attn=raw_dp_attn,
+        )
+        sp_or_mode_explicit = (raw_parallel_mode is not None) or (
+            raw_sp_size is not None and raw_sp_size > 1
+        )
+        resolved_sp_group = topo.sp_group
+        if (
+            resolved_sp_group is None
+            and dist_init
+            and int(topo.sp_size) > 1
+            and int(topo.sp_size) == int(topo.tp_size)
+            and topo.tp_group is not None
+        ):
+            resolved_sp_group = topo.tp_group
+        eff_parallel_mode = topo.parallel_mode if sp_or_mode_explicit else None
+        eff_dp_attn = topo.dp_attn if sp_or_mode_explicit else raw_dp_attn
+        return {
+            "parallel_mode": eff_parallel_mode,
+            "tp_size": int(topo.tp_size),
+            "tp_rank": int(topo.tp_rank),
+            "tp_group": topo.tp_group,
+            "dp_size": int(topo.dp_size),
+            "dp_rank": int(topo.dp_rank),
+            "dp_group": topo.dp_group,
+            "ep_size": int(topo.ep_size),
+            "ep_rank": int(topo.ep_rank),
+            "ep_group": topo.ep_group,
+            "sp_size": int(topo.sp_size),
+            "sp_rank": int(topo.sp_rank),
+            "sp_group": resolved_sp_group,
+            "dp_attn": eff_dp_attn,
+        }
+
     def _load(self, device: str) -> None:
         import torch
         import torch.distributed as dist
 
         from rtp_llm.model_loader.model_weight_info import ModelWeights
-        from rtp_llm.models_py.model_desc.qwen4_5 import (
-            Qwen4_5ForCausalLM,
-            resolve_qwen4_5_parallel_topology,
-        )
+        from rtp_llm.models_py.model_desc.qwen4_5 import Qwen4_5ForCausalLM
         from rtp_llm.models_py.modules.qwen4_5.checkpoint_loader import (
             load_qwen4_5_from_checkpoint,
         )
@@ -303,89 +495,50 @@ class Qwen4_5(_BaseModel):
 
         self.device = device
         arch_cfg = self.model_config.arch_config
-        parallel_mode = getattr(self.parallelism_config, "parallel_mode", None)
-        tp_size = int(self.parallelism_config.tp_size)
-        tp_rank = int(self.parallelism_config.tp_rank)
-        dp_size = int(self.parallelism_config.dp_size)
-        dp_rank = int(getattr(self.parallelism_config, "dp_rank", 0))
-        sp_size = int(getattr(self.parallelism_config, "sp_size", 1) or 1)
-        sp_rank = int(getattr(self.parallelism_config, "sp_rank", 0) or 0)
-        ep_size_cfg = int(getattr(self.parallelism_config, "ep_size", 1))
         kv_dtype = str(getattr(self.model_config, "kv_dtype", "bf16") or "bf16")
-
-        tp_group = None
-        dp_group = getattr(self.parallelism_config, "dp_group", None)
-        sp_group = getattr(self.parallelism_config, "sp_group", None)
-        ep_group = None
-        if tp_size > 1 and dist.is_available() and dist.is_initialized():
-            try:
-                from rtp_llm.models_py.distributed import collective_torch
-
-                if getattr(collective_torch, "_initialized", False):
-                    from rtp_llm.models_py.distributed.collective_torch import _get_group
-                    from rtp_llm.models_py.distributed.rank_layout import Group
-
-                    tp_group = _get_group(Group.TP)
-            except Exception:
-                pass
-
-        eff_ep_size = 1
-        eff_ep_rank = 0
-        if tp_size > 1 and dp_size == 1:
-            eff_ep_size = tp_size
-            eff_ep_rank = tp_rank
-            ep_group = tp_group
-        elif ep_size_cfg > 1:
-            eff_ep_size = ep_size_cfg
-            eff_ep_rank = int(getattr(self.parallelism_config, "ep_rank", 0))
-            if dist.is_available() and dist.is_initialized():
-                try:
-                    from rtp_llm.models_py.distributed import collective_torch
-
-                    if getattr(collective_torch, "_initialized", False):
-                        from rtp_llm.models_py.distributed.collective_torch import _get_group
-                        from rtp_llm.models_py.distributed.rank_layout import Group
-
-                        ep_group = _get_group(Group.WORLD)
-                except Exception:
-                    pass
-
-        if dist.is_available() and dist.is_initialized() and (
-            (tp_size > 1 and tp_group is None)
-            or (eff_ep_size > 1 and ep_group is None)
-            or (dp_size > 1 and dp_group is None)
-        ):
-            topo = resolve_qwen4_5_parallel_topology(
-                parallel_mode=parallel_mode,
-                tp_size=tp_size,
-                tp_rank=tp_rank,
-                tp_group=tp_group,
-                ep_size=eff_ep_size,
-                ep_rank=eff_ep_rank,
-                ep_group=ep_group,
-                dp_size=dp_size,
-                dp_rank=dp_rank,
-                dp_group=dp_group,
-                sp_size=sp_size,
-                sp_rank=sp_rank,
-                sp_group=sp_group,
-                dp_attn=getattr(self.parallelism_config, "dp_attn", None),
+        topo_cfg = self._resolve_load_parallel_topology(
+            self.parallelism_config, dist_module=dist
+        )
+        parallel_mode = topo_cfg["parallel_mode"]
+        tp_size = topo_cfg["tp_size"]
+        tp_rank = topo_cfg["tp_rank"]
+        tp_group = topo_cfg["tp_group"]
+        dp_size = topo_cfg["dp_size"]
+        dp_rank = topo_cfg["dp_rank"]
+        dp_group = topo_cfg["dp_group"]
+        eff_ep_size = topo_cfg["ep_size"]
+        eff_ep_rank = topo_cfg["ep_rank"]
+        ep_group = topo_cfg["ep_group"]
+        sp_size = topo_cfg["sp_size"]
+        sp_rank = topo_cfg["sp_rank"]
+        sp_group = topo_cfg["sp_group"]
+        dp_attn = topo_cfg["dp_attn"]
+        if sp_size > 1 or parallel_mode is not None:
+            logging.info(
+                "Qwen4_5._load topology: parallel_mode=%s tp=%d/%d dp=%d/%d ep=%d/%d sp=%d/%d dp_attn=%s",
+                parallel_mode,
+                tp_rank,
+                tp_size,
+                dp_rank,
+                dp_size,
+                eff_ep_rank,
+                eff_ep_size,
+                sp_rank,
+                sp_size,
+                dp_attn,
             )
-            tp_group = topo.tp_group
-            ep_group = topo.ep_group
-            dp_group = topo.dp_group
-            sp_group = topo.sp_group
 
         # Refresh TP-aware KV/GDN cache plan and KVCacheSpecDescs before engine pool creation.
         if tp_size > 1:
             self.model_config.qwen4_5_kv_cache_plan = self.build_kv_cache_plan(
-                arch_cfg, tp_size=tp_size
+                arch_cfg, tp_size=tp_size, parallel_mode=parallel_mode
             )
             try:
                 self.model_config.kv_cache_spec_descs = build_qwen4_5_kv_cache_spec_descs(
                     self.model_config,
                     arch_cfg,
                     tp_size=tp_size,
+                    parallel_mode=parallel_mode,
                     allow_small_block_explicit=True,
                 )
             except Exception:
@@ -430,7 +583,7 @@ class Qwen4_5(_BaseModel):
             sp_size=sp_size,
             sp_rank=sp_rank,
             sp_group=sp_group,
-            dp_attn=getattr(self.parallelism_config, "dp_attn", None),
+            dp_attn=dp_attn,
             kv_dtype=kv_dtype,
             dense_linear_mode=getattr(self.model_config, "dense_linear_mode", None),
             fast_all_reduce=fast_all_reduce,

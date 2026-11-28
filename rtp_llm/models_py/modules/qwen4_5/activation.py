@@ -1216,6 +1216,109 @@ def _situ_glu_fp8_quant_masked_packed_kernel(
         )
 
 
+@triton.jit
+def _resolve_masked_row(offs_e, ends, row_id):
+    """Map flattened active row index ``row_id`` to ``(expert_idx, local_row)``."""
+    e = tl.sum((ends <= row_id).to(tl.int32), axis=0).to(tl.int64)
+    m_start_e = tl.sum(tl.where(offs_e == (e - 1), ends, 0), axis=0).to(tl.int64)
+    m = row_id.to(tl.int64) - m_start_e
+    return e, m
+
+
+@triton.jit
+def _situ_glu_quant_masked_tile(
+    x_base,
+    q_base,
+    sc_base,
+    t,
+    D: tl.constexpr,
+    stride_sck: tl.constexpr,
+    gate_beta: tl.constexpr,
+    up_beta: tl.constexpr,
+    eps: tl.constexpr,
+    BLOCK_D: tl.constexpr,
+    GROUPS: tl.constexpr,
+    PACKS: tl.constexpr,
+    shifts,
+):
+    """Compute one ``BLOCK_D``-wide SiTU-GLU + block-32 UE8M0 FP8 quant tile."""
+    offs_d = t * BLOCK_D + tl.arange(0, BLOCK_D)
+    gate = tl.load(x_base + offs_d).to(tl.float32)
+    up = tl.load(x_base + D + offs_d).to(tl.float32)
+    y = _situ_glu_fp32_to_bf16(gate, up, gate_beta=gate_beta, up_beta=up_beta)
+    q, biased = _compute_ue8m0_fp8_block32(y.reshape((GROUPS, 32)), eps=eps)
+    tl.store(q_base + offs_d, q.reshape((BLOCK_D,)))
+    packed = tl.sum(
+        biased.to(tl.uint8).to(tl.uint32).reshape((PACKS, 4)) << shifts,
+        axis=1,
+    ).to(tl.int32)
+    pack_offs = t * PACKS + tl.arange(0, PACKS)
+    tl.store(sc_base + pack_offs.to(tl.int64) * stride_sck, packed)
+
+
+@triton.jit(
+    do_not_specialize=[
+        "max_m",
+        "stride_xe",
+        "stride_xm",
+        "stride_qe",
+        "stride_qm",
+        "stride_sce",
+        "stride_sck",
+    ]
+)
+def _situ_glu_fp8_quant_masked_row_tile_persistent_kernel(
+    x_ptr,
+    q_ptr,
+    sc_ptr,
+    masked_m_ptr,
+    max_m,
+    E,
+    D: tl.constexpr,
+    stride_xe: tl.int64,
+    stride_xm: tl.int64,
+    stride_qe: tl.int64,
+    stride_qm: tl.int64,
+    stride_sce: tl.int64,
+    stride_sck: tl.int64,
+    gate_beta: tl.constexpr,
+    up_beta: tl.constexpr,
+    eps: tl.constexpr,
+    BLOCK_D: tl.constexpr,
+    E_PAD: tl.constexpr,
+):
+    """Row-and-tile persistent masked SiTU-GLU + FP8 quant balancing hot skewed experts across SMs."""
+    offs_e, ends, total_rows = _masked_prefix_map(masked_m_ptr, max_m, E, E_PAD)
+    if total_rows == 0:
+        return
+    pid = tl.program_id(0)
+    num_ctas = tl.num_programs(0)
+    TILES: tl.constexpr = D // BLOCK_D
+    GROUPS: tl.constexpr = BLOCK_D // 32
+    PACKS: tl.constexpr = GROUPS // 4
+    shifts = (tl.arange(0, 4)[None, :] * 8).to(tl.uint32)
+    total_tasks = total_rows * TILES
+    for task_id in range(pid, total_tasks, num_ctas):
+        row_id = task_id // TILES
+        t = task_id % TILES
+        e, m = _resolve_masked_row(offs_e, ends, row_id)
+        _situ_glu_quant_masked_tile(
+            x_ptr + e * stride_xe + m * stride_xm,
+            q_ptr + e * stride_qe + m * stride_qm,
+            sc_ptr + e * stride_sce + m,
+            t,
+            D=D,
+            stride_sck=stride_sck,
+            gate_beta=gate_beta,
+            up_beta=up_beta,
+            eps=eps,
+            BLOCK_D=BLOCK_D,
+            GROUPS=GROUPS,
+            PACKS=PACKS,
+            shifts=shifts,
+        )
+
+
 @triton.jit(do_not_specialize=["max_m", "stride_xe", "stride_xm", "stride_qe", "stride_qm", "stride_sce", "stride_sck"])
 def _situ_glu_fp8_quant_masked_row_persistent_kernel(
     x_ptr,
@@ -1249,25 +1352,26 @@ def _situ_glu_fp8_quant_masked_row_persistent_kernel(
     shifts = (tl.arange(0, 4)[None, :] * 8).to(tl.uint32)
 
     for row_id in range(pid, total_rows, num_ctas):
-        e = tl.sum((ends <= row_id).to(tl.int32), axis=0).to(tl.int64)
-        m_start_e = tl.sum(tl.where(offs_e == (e - 1), ends, 0), axis=0).to(tl.int64)
-        m = row_id.to(tl.int64) - m_start_e
+        e, m = _resolve_masked_row(offs_e, ends, row_id)
         x_base = x_ptr + e * stride_xe + m * stride_xm
         q_base = q_ptr + e * stride_qe + m * stride_qm
         sc_base = sc_ptr + e * stride_sce + m
         for t in tl.static_range(TILES):
-            offs_d = t * BLOCK_D + tl.arange(0, BLOCK_D)
-            gate = tl.load(x_base + offs_d).to(tl.float32)
-            up = tl.load(x_base + D + offs_d).to(tl.float32)
-            y = _situ_glu_fp32_to_bf16(gate, up, gate_beta=gate_beta, up_beta=up_beta)
-            q, biased = _compute_ue8m0_fp8_block32(y.reshape((GROUPS, 32)), eps=eps)
-            tl.store(q_base + offs_d, q.reshape((BLOCK_D,)))
-            packed = tl.sum(
-                biased.to(tl.uint8).to(tl.uint32).reshape((PACKS, 4)) << shifts,
-                axis=1,
-            ).to(tl.int32)
-            pack_offs = t * PACKS + tl.arange(0, PACKS)
-            tl.store(sc_base + pack_offs.to(tl.int64) * stride_sck, packed)
+            _situ_glu_quant_masked_tile(
+                x_base,
+                q_base,
+                sc_base,
+                t,
+                D=D,
+                stride_sck=stride_sck,
+                gate_beta=gate_beta,
+                up_beta=up_beta,
+                eps=eps,
+                BLOCK_D=BLOCK_D,
+                GROUPS=GROUPS,
+                PACKS=PACKS,
+                shifts=shifts,
+            )
 
 
 @triton.jit(do_not_specialize=["max_m", "stride_xe", "stride_xm", "stride_qe", "stride_qm", "stride_sce", "stride_sck"])
@@ -1697,6 +1801,7 @@ def situ_glu_fp8_quant_masked_packed(
     zero_unused_scales: bool = True,
     out_q: Optional[torch.Tensor] = None,
     out_sc: Optional[torch.Tensor] = None,
+    actual_m: Optional[int] = None,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """Fused SiTU-GLU + block-32 UE8M0 FP8 quant for 3D masked MoE ``[E, max_m, 2*D]``."""
     if group_size != 32:
@@ -1738,11 +1843,23 @@ def situ_glu_fp8_quant_masked_packed(
     BLOCK_D = _pick_block_d(D)
     d_tiles = triton.cdiv(D, BLOCK_D)
     mm_c = masked_m if masked_m.is_contiguous() else masked_m.contiguous()
-    if E <= _MASKED_PERSIST_MAX_E and D >= 512 and D % 512 == 0:
+    use_row_tile = (actual_m is not None and actual_m <= 1024) or (
+        actual_m is None and max_m <= 1024
+    )
+    if E <= _MASKED_PERSIST_MAX_E and D >= 512 and D % 512 == 0 and E > 0 and max_m > 0:
         sm_count = _get_sm_count(int(x_c.device.index or 0))
-        num_ctas = min(sm_count * 4, E * max_m)
+        d_tiles_512 = D // 512
+        e_pad = max(32, triton.next_power_of_2(E))
+        if use_row_tile:
+            # Spread (row, 512-col tile) pairs across SMs to saturate small/skewed batches
+            # without hot-expert serialization.
+            num_ctas = min(sm_count * 4, E * max_m * d_tiles_512)
+            kernel = _situ_glu_fp8_quant_masked_row_tile_persistent_kernel
+        else:
+            num_ctas = min(sm_count * 4, E * max_m)
+            kernel = _situ_glu_fp8_quant_masked_row_persistent_kernel
         with _cuda_device_ctx(x_c.device):
-            _situ_glu_fp8_quant_masked_row_persistent_kernel[(num_ctas,)](
+            kernel[(num_ctas,)](
                 x_c,
                 q,
                 sc,
@@ -1760,7 +1877,7 @@ def situ_glu_fp8_quant_masked_packed(
                 up_beta=float(up_beta),
                 eps=float(eps),
                 BLOCK_D=512,
-                E_PAD=max(32, triton.next_power_of_2(E)),
+                E_PAD=e_pad,
                 num_warps=4,
             )
     elif E <= _MASKED_PERSIST_MAX_E:

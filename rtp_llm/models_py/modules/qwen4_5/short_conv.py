@@ -986,8 +986,8 @@ def causal_dwconv1d_decode_triton(
     if B == 0:
         return out
 
-    block_c = 256 if C <= 512 else 512
-    num_warps = 4 if block_c <= 256 else 8
+    block_c = (64 if B <= 16 else 128) if C <= 512 else 256
+    num_warps = 4 if (C <= 512 or B > 32) else 8
     sxb = int(x_c.stride(0))
     has_c = clamp_val is not None
     cval = float(clamp_val) if has_c else 0.0
@@ -1053,8 +1053,8 @@ def causal_dwconv1d_decode_opaque_triton(
     out = torch.empty((B, 1, C), dtype=x_c.dtype, device=x_c.device)
     if B == 0:
         return out
-    block_c = 256 if C <= 512 else 512
-    num_warps = 4 if block_c <= 256 else 8
+    block_c = (64 if B <= 16 else 128) if C <= 512 else 256
+    num_warps = 4 if (C <= 512 or B > 32) else 8
     sxb = int(x_c.stride(0))
     spb = int(pool_2d.stride(0))
     sbt0 = int(block_table.stride(0))

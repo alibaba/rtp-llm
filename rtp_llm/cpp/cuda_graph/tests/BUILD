@@ -214,6 +214,30 @@ py_test(
 )
 
 py_test(
+    name = "cuda_graph_tagged_cache_stream_async_test",
+    main = "cuda_graph_tagged_cache_test.py",
+    srcs = ["cuda_graph_tagged_cache_test.py"],
+    args = ["TestCudaGraphTaggedCache.test_prepare_sync_policy_is_role_scoped"],
+    data = [
+        ":test_cuda_graph_runner",
+        "//:th_transformer",
+    ],
+    deps = [
+        ":cuda_graph_test_utils",
+        "//rtp_llm/models_py:modules",
+        "//rtp_llm/test/model_test/test_util",
+    ],
+    env = {
+        "ENABLE_CUDA_GRAPH_DEBUG_MODE": "1",
+        "NOT_USE_DEFAULT_STREAM": "1",
+        "RTP_LLM_STREAM_ASYNC": "1",
+        "TEST_USING_DEVICE": "CUDA",
+    },
+    exec_properties = {"gpu": "L20_CU13"},
+    tags = ["L20_CU13"],
+)
+
+py_test(
     name = "cuda_graph_tagged_cache_test_rocm",
     main = "cuda_graph_tagged_cache_test.py",
     srcs = ["cuda_graph_tagged_cache_test.py"],

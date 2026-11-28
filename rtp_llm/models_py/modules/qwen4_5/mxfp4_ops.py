@@ -3200,6 +3200,237 @@ def mxfp4_moe_deepgemm_contiguous(
     return out
 
 
+@triton.jit
+def _assign_token_slots(
+    e_raw,
+    mk,
+    masked_m_ptr,
+    dst_pos_row_ptr,
+    e_lo,
+    E_local,
+):
+    """Assign per-expert local row slots for one token via masked_m atomic_add."""
+    le = e_raw - e_lo
+    valid_e = mk & (le >= 0) & (le < E_local)
+    pos = tl.where(
+        valid_e,
+        tl.atomic_add(masked_m_ptr + tl.where(valid_e, le, 0), 1, mask=valid_e),
+        -1,
+    )
+    tl.store(dst_pos_row_ptr, pos, mask=mk)
+
+
+@triton.jit(do_not_specialize=["M", "e_lo", "E_local"])
+def _assign_masked_slots_kernel(
+    ids_ptr,
+    masked_m_ptr,
+    dst_pos_ptr,
+    M,
+    TOP_K: tl.constexpr,
+    TOP_K_PAD: tl.constexpr,
+    e_lo,
+    E_local,
+):
+    """Assign destination row indices in masked_m for dense topk_ids."""
+    m = tl.program_id(0).to(tl.int64)
+    if m >= M:
+        return
+    slots_k = tl.arange(0, TOP_K_PAD)
+    mk = slots_k < TOP_K
+    e_raw = tl.load(ids_ptr + m * TOP_K + slots_k, mask=mk, other=-1).to(tl.int32)
+    _assign_token_slots(
+        e_raw, mk, masked_m_ptr, dst_pos_ptr + m * TOP_K + slots_k, e_lo, E_local
+    )
+
+
+@triton.jit(do_not_specialize=["M", "meta_off", "row_bytes", "e_lo", "E_local"])
+def _assign_masked_slots_packed_kernel(
+    all_ptr,
+    masked_m_ptr,
+    dst_pos_ptr,
+    M,
+    meta_off,
+    row_bytes,
+    e_lo,
+    E_local,
+    TOP_K: tl.constexpr,
+    TOP_K_PAD: tl.constexpr,
+):
+    """Assign destination row indices in masked_m from packed EP alltoall buffers."""
+    m = tl.program_id(0).to(tl.int64)
+    if m >= M:
+        return
+    ids_base = (all_ptr + m * row_bytes + meta_off).to(tl.pointer_type(tl.int32))
+    slots_k = tl.arange(0, TOP_K_PAD)
+    mk = slots_k < TOP_K
+    e_raw = tl.load(ids_base + slots_k, mask=mk, other=-1).to(tl.int32)
+    _assign_token_slots(
+        e_raw, mk, masked_m_ptr, dst_pos_ptr + m * TOP_K + slots_k, e_lo, E_local
+    )
+
+
+@triton.jit
+def _scatter_tile_to_masked_experts(
+    qf_u8,
+    pk,
+    ids_row_ptr,
+    dst_pos_row_ptr,
+    a_q_ptr,
+    a_scale_ptr,
+    ol,
+    po,
+    stride_aqe: tl.int64,
+    stride_aqm: tl.int64,
+    stride_asce: tl.int64,
+    stride_asck: tl.int64,
+    e_lo,
+    E_local,
+    TOP_K: tl.constexpr,
+):
+    """Scatter one quantized feature/scale tile across a token's local top-k experts."""
+    for k in tl.static_range(TOP_K):
+        ek = tl.load(ids_row_ptr + k).to(tl.int32) - e_lo
+        pk_slot = tl.load(dst_pos_row_ptr + k)
+        ok = (
+            (pk_slot >= 0)
+            & (pk_slot.to(tl.int64) * stride_aqm < stride_aqe)
+            & (ek >= 0)
+            & (ek < E_local)
+        )
+        ek_s = tl.where(ok, ek, 0).to(tl.int64)
+        pk_s = tl.where(ok, pk_slot, 0).to(tl.int64)
+        tl.store(a_q_ptr + ek_s * stride_aqe + pk_s * stride_aqm + ol, qf_u8, mask=ok)
+        tl.store(
+            a_scale_ptr + ek_s * stride_asce + po.to(tl.int64) * stride_asck + pk_s,
+            pk,
+            mask=ok,
+        )
+
+
+@triton.jit(
+    do_not_specialize=[
+        "stride_xm",
+        "stride_aqe",
+        "stride_aqm",
+        "stride_asce",
+        "stride_asck",
+        "e_lo",
+        "E_local",
+    ]
+)
+def _quant_scatter_parallel_tile_kernel(
+    x_ptr,
+    ids_ptr,
+    dst_pos_ptr,
+    a_q_ptr,
+    a_sc_ptr,
+    stride_xm: tl.int64,
+    stride_aqe: tl.int64,
+    stride_aqm: tl.int64,
+    stride_asce: tl.int64,
+    stride_asck: tl.int64,
+    e_lo,
+    E_local,
+    TOP_K: tl.constexpr,
+    eps: tl.constexpr,
+    BLOCK_L: tl.constexpr,
+):
+    """2D (token, L-tile) fused BF16->UE8M0-FP8 quant + masked scatter using preassigned slots."""
+    m = tl.program_id(0).to(tl.int64)
+    t = tl.program_id(1)
+    ol = t * BLOCK_L + tl.arange(0, BLOCK_L)
+    GROUPS: tl.constexpr = BLOCK_L // 32
+    PACKS: tl.constexpr = GROUPS // 4
+    shifts = (tl.arange(0, 4)[None, :] * 8).to(tl.uint32)
+    xv = tl.load(x_ptr + m * stride_xm + ol).to(tl.float32)
+    q, biased = _compute_ue8m0_fp8_block32(xv.reshape((GROUPS, 32)), eps=eps)
+    qf_u8 = q.reshape((BLOCK_L,)).to(tl.uint8, bitcast=True)
+    pk = tl.sum(
+        biased.to(tl.uint8).to(tl.uint32).reshape((PACKS, 4)) << shifts, axis=1
+    ).to(tl.int32)
+    po = t * PACKS + tl.arange(0, PACKS)
+    _scatter_tile_to_masked_experts(
+        qf_u8,
+        pk,
+        ids_ptr + m * TOP_K,
+        dst_pos_ptr + m * TOP_K,
+        a_q_ptr,
+        a_sc_ptr,
+        ol,
+        po,
+        stride_aqe,
+        stride_aqm,
+        stride_asce,
+        stride_asck,
+        e_lo,
+        E_local,
+        TOP_K=TOP_K,
+    )
+
+
+@triton.jit(
+    do_not_specialize=[
+        "sc_off",
+        "meta_off",
+        "row_bytes",
+        "e_lo",
+        "E_local",
+        "stride_aqe",
+        "stride_aqm",
+        "stride_asce",
+        "stride_asck",
+    ]
+)
+def _scatter_packed_parallel_tile_kernel(
+    all_ptr,
+    dst_pos_ptr,
+    a_q_ptr,
+    a_sc_ptr,
+    sc_off,
+    meta_off,
+    row_bytes,
+    e_lo,
+    E_local,
+    stride_aqe: tl.int64,
+    stride_aqm: tl.int64,
+    stride_asce: tl.int64,
+    stride_asck: tl.int64,
+    TOP_K: tl.constexpr,
+    BLOCK_L: tl.constexpr,
+):
+    """2D (token, L-tile) packed-FP8 masked scatter using preassigned slots."""
+    m = tl.program_id(0).to(tl.int64)
+    t = tl.program_id(1)
+    row_base = all_ptr + m * row_bytes
+    ids_base = (row_base + meta_off).to(tl.pointer_type(tl.int32))
+    GROUPS: tl.constexpr = BLOCK_L // 32
+    PACKS: tl.constexpr = GROUPS // 4
+    shifts = (tl.arange(0, 4)[None, :] * 8).to(tl.uint32)
+    ol = t * BLOCK_L + tl.arange(0, BLOCK_L)
+    og = t * GROUPS + tl.arange(0, GROUPS)
+    po = t * PACKS + tl.arange(0, PACKS)
+    qf_u8 = tl.load(row_base + ol)
+    sc_u8 = tl.load(row_base + sc_off + og)
+    pk = tl.sum(sc_u8.to(tl.uint32).reshape((PACKS, 4)) << shifts, axis=1).to(tl.int32)
+    _scatter_tile_to_masked_experts(
+        qf_u8,
+        pk,
+        ids_base,
+        dst_pos_ptr + m * TOP_K,
+        a_q_ptr,
+        a_sc_ptr,
+        ol,
+        po,
+        stride_aqe,
+        stride_aqm,
+        stride_asce,
+        stride_asck,
+        e_lo,
+        E_local,
+        TOP_K=TOP_K,
+    )
+
+
 @triton.jit(
     do_not_specialize=[
         "M",
@@ -3532,6 +3763,7 @@ def mxfp4_moe_deepgemm_masked(
     scale_gate: Optional[torch.Tensor] = None,
     scale_gate_col: int = 0,
     out_dtype: Optional[torch.dtype] = None,
+    cache_workspace: bool = True,
 ) -> torch.Tensor:
     """DeepGEMM SM100 ``m_grouped_fp8_fp4_gemm_nt_masked`` (100% CUDA-Graph Decode)."""
     import deep_gemm
@@ -3594,7 +3826,9 @@ def mxfp4_moe_deepgemm_masked(
     off_reg1 = off_reg2 + sz_reg2
     total_ws = off_reg1 + sz_reg1
 
-    slab = _get_masked_ws_slab(dev, total_ws, cacheable=(max_m <= _MASKED_WS_MAX_M))
+    slab = _get_masked_ws_slab(
+        dev, total_ws, cacheable=(cache_workspace and max_m <= _MASKED_WS_MAX_M)
+    )
     masked_m = slab[: E_local * 4].view(torch.int32)
     masked_m.zero_()
     dst_pos = slab[off_dp : off_dp + M * top_k * 4].view(torch.int32).view(M, top_k)
@@ -3635,55 +3869,121 @@ def mxfp4_moe_deepgemm_masked(
     if prequant_packed is not None:
         assert all_buf is not None
         block_l = 512 if (L % 512 == 0) else (256 if (L % 256 == 0) else 128)
-        _scatter_packed_fp8_to_masked_kernel[(M,)](
-            all_buf,
-            masked_m,
-            a_fp8.view(torch.uint8),
-            a_scale,
-            dst_pos.view(-1),
-            M,
-            sc_off,
-            meta_off,
-            row_bytes,
-            e_lo,
-            E_local,
-            a_fp8.stride(0),
-            a_fp8.stride(1),
-            a_scale.stride(0),
-            a_scale.stride(2),
-            TOP_K=top_k,
-            TOP_K_PAD=max(16, triton.next_power_of_2(top_k)),
-            L=L,
-            BLOCK_L=block_l,
-            num_warps=4,
-        )
+        top_k_pad = max(16, triton.next_power_of_2(top_k))
+        if top_k <= 16:
+            _assign_masked_slots_packed_kernel[(M,)](
+                all_buf,
+                masked_m,
+                dst_pos.view(-1),
+                M,
+                meta_off,
+                row_bytes,
+                e_lo,
+                E_local,
+                TOP_K=top_k,
+                TOP_K_PAD=top_k_pad,
+                num_warps=1,
+            )
+            _scatter_packed_parallel_tile_kernel[(M, L // block_l)](
+                all_buf,
+                dst_pos.view(-1),
+                a_fp8.view(torch.uint8),
+                a_scale,
+                sc_off,
+                meta_off,
+                row_bytes,
+                e_lo,
+                E_local,
+                a_fp8.stride(0),
+                a_fp8.stride(1),
+                a_scale.stride(0),
+                a_scale.stride(2),
+                TOP_K=top_k,
+                BLOCK_L=block_l,
+                num_warps=4,
+            )
+        else:
+            _scatter_packed_fp8_to_masked_kernel[(M,)](
+                all_buf,
+                masked_m,
+                a_fp8.view(torch.uint8),
+                a_scale,
+                dst_pos.view(-1),
+                M,
+                sc_off,
+                meta_off,
+                row_bytes,
+                e_lo,
+                E_local,
+                a_fp8.stride(0),
+                a_fp8.stride(1),
+                a_scale.stride(0),
+                a_scale.stride(2),
+                TOP_K=top_k,
+                TOP_K_PAD=top_k_pad,
+                L=L,
+                BLOCK_L=block_l,
+                num_warps=4,
+            )
         ids_c = all_buf
     elif prequant_fp8 is None and x is not None and M <= 2048:
         ids_c = topk_ids if topk_ids.is_contiguous() else topk_ids.contiguous()
         x_c = x if x.stride(-1) == 1 else x.contiguous()
         block_l = 512 if (L % 512 == 0) else (256 if (L % 256 == 0) else 128)
-        _quant_and_scatter_fp8_to_masked_kernel[(M,)](
-            x_c,
-            ids_c,
-            masked_m,
-            a_fp8.view(torch.uint8),
-            a_scale,
-            dst_pos.view(-1),
-            M,
-            TOP_K=top_k,
-            TOP_K_PAD=max(16, triton.next_power_of_2(top_k)),
-            L=L,
-            e_lo=e_lo,
-            E_local=E_local,
-            stride_xm=x_c.stride(0),
-            stride_aqe=a_fp8.stride(0),
-            stride_aqm=a_fp8.stride(1),
-            stride_asce=a_scale.stride(0),
-            stride_asck=a_scale.stride(2),
-            eps=float(_QUANT_EPS),
-            BLOCK_L=block_l,
-            num_warps=4,
-        )
+        top_k_pad = max(16, triton.next_power_of_2(top_k))
+        if top_k <= 16:
+            _assign_masked_slots_kernel[(M,)](
+                ids_c,
+                masked_m,
+                dst_pos.view(-1),
+                M,
+                TOP_K=top_k,
+                TOP_K_PAD=top_k_pad,
+                e_lo=e_lo,
+                E_local=E_local,
+                num_warps=1,
+            )
+            _quant_scatter_parallel_tile_kernel[(M, L // block_l)](
+                x_c,
+                ids_c,
+                dst_pos.view(-1),
+                a_fp8.view(torch.uint8),
+                a_scale,
+                x_c.stride(0),
+                a_fp8.stride(0),
+                a_fp8.stride(1),
+                a_scale.stride(0),
+                a_scale.stride(2),
+                e_lo,
+                E_local,
+                TOP_K=top_k,
+                eps=float(_QUANT_EPS),
+                BLOCK_L=block_l,
+                num_warps=4,
+            )
+        else:
+            _quant_and_scatter_fp8_to_masked_kernel[(M,)](
+                x_c,
+                ids_c,
+                masked_m,
+                a_fp8.view(torch.uint8),
+                a_scale,
+                dst_pos.view(-1),
+                M,
+                TOP_K=top_k,
+                TOP_K_PAD=top_k_pad,
+                L=L,
+                e_lo=e_lo,
+                E_local=E_local,
+                stride_xm=x_c.stride(0),
+                stride_aqe=a_fp8.stride(0),
+                stride_aqm=a_fp8.stride(1),
+                stride_asce=a_scale.stride(0),
+                stride_asck=a_scale.stride(2),
+                eps=float(_QUANT_EPS),
+                BLOCK_L=block_l,
+                num_warps=4,
+            )
     else:
         ids_c = topk_ids if topk_ids.is_contiguous() else topk_ids.contiguous()
         if prequant_fp8 is not None:
@@ -3737,6 +4037,7 @@ def mxfp4_moe_deepgemm_masked(
         zero_unused_scales=False,
         out_q=h_fp8,
         out_sc=h_scale,
+        actual_m=M,
     )
 
     with _dg_jit_serialize("masked", int(w2_i8.shape[0]), int(w2_i8.shape[1]), int(h_fp8.shape[-1])):
@@ -4761,14 +5062,25 @@ def warmup_deepgemm_mxfp4_moe_kernels(
         tw_w = torch.ones((1, 1), dtype=torch.float32, device=dev)
         for mode in needed:
             if mode == "masked":
+                # Do not pin the 252 MiB decode workspace slab in _MASKED_WS_CACHE during load-time
+                # warmup (critical for Prefill pods that never run masked decode at runtime).
                 mxfp4_moe_deepgemm_masked(
-                    x_w, ids_w, tw_w, weights, ep_start=ep_start, ep_size=ep_sz
+                    x_w,
+                    ids_w,
+                    tw_w,
+                    weights,
+                    ep_start=ep_start,
+                    ep_size=ep_sz,
+                    cache_workspace=False,
                 )
             else:
                 mxfp4_moe_deepgemm_contiguous(
                     x_w, ids_w, tw_w, weights, ep_start=ep_start, ep_size=ep_sz
                 )
             warmed += 1
+        del x_w, ids_w, tw_w
+    if warmed > 0:
+        torch.cuda.empty_cache()
     return warmed
 
 

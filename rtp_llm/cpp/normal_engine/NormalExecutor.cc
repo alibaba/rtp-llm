@@ -51,6 +51,42 @@ void holdSamplerInputHostBuffers(TensorHolder& holder, const SamplerInputs& inpu
     holder.hold_host(inputs.cum_log_probs);
 }
 
+bool canUseNormalDeviceState(const StreamGroups& stream_groups, bool check_blocking_processors) {
+    // Decode-only batch is the only shape the device-state path supports.
+    if (stream_groups.totalContextBatchSize() != 0 || stream_groups.totalDecodeBatchSize() == 0) {
+        return false;
+    }
+    for (const auto& stream : stream_groups.decodeStreams()) {
+        // Use config-only proxies for the batch-1 check. currentBatchSize() reads
+        // outputTokenLen() -> seqLength() which itself races with the worker we're
+        // trying to decide whether to skip syncing.
+        if (stream->hasNumBeams() || stream->numReturnSequences() > 1) {
+            return false;
+        }
+        if (check_blocking_processors) {
+            bool has_blocking_stateful_processor = false;
+            for (const auto& processor : stream->getAllLogitsProcessorPtr()) {
+                if (processor != nullptr && processor->isStateful() && !processor->supportsNormalAsyncDeviceState()) {
+                    has_blocking_stateful_processor = true;
+                    break;
+                }
+            }
+            // NormalAsyncDeviceState mirrors token ids and sequence length. Stateful
+            // processors that cannot publish their own device-side next-step state
+            // still need the wait before the next sampler consumes logits.
+            if (has_blocking_stateful_processor && stream->hasPendingAsyncBookkeeping()) {
+                return false;
+            }
+        }
+        const auto& state = stream->getNormalAsyncDeviceState();
+        if (!state.last_sample_token_gpu.defined() || !state.last_sample_token_gpu.is_cuda()
+            || !state.next_seq_len_gpu.defined() || !state.next_seq_len_gpu.is_cuda()) {
+            return false;
+        }
+    }
+    return true;
+}
+
 }  // namespace
 
 NormalExecutor::ModelFactory NormalExecutor::test_model_factory = nullptr;
@@ -292,7 +328,9 @@ absl::Status NormalExecutor::process(const ScheduleOutput& schedule_output, int6
     StreamGroups stream_groups(streams);
     prepareGrpcNormalDeviceState(stream_groups);
 
-    if (useStreamAsync() && useDropBroadSync() && !gatherCanUseDeviceState(stream_groups)) {
+    // Gather model inputs only need token/seq device state; stateful logits
+    // processors are synced before sampler_->forward() at wait_prev_dispatch_pre_sampler.
+    if (useStreamAsync() && useDropBroadSync() && !canUseNormalDeviceState(stream_groups, /*check_blocking_processors=*/false)) {
         RTP_LLM_PROFILE_SCOPE_DYNAMIC("executor.wait_prev_dispatch(stream_count=%zu)", streams.size());
         dispatch_runner_.sync(cuda_graph::graphGetCurrentStream());
         worker_synced = true;
@@ -436,8 +474,17 @@ absl::Status NormalExecutor::process(const ScheduleOutput& schedule_output, int6
     }
 
     if (tp_rank_ > 0 || warm_up_ || streams.size() == 0) {
-        cudaSyncAndCheck();
-        model_->releaseBuffers();
+        const bool is_decode_only =
+            (!model_input.prefix_lengths.defined() || model_input.prefix_lengths.numel() == 0)
+            && model_input.sequence_lengths.defined() && model_input.sequence_lengths.numel() > 0;
+        const bool can_skip_non_root_decode_sync = tp_rank_ > 0 && !warm_up_ && !model_input.warmup
+                                                   && !model_input.skip_run && !model_input.skip_lm_head
+                                                   && is_decode_only && useStreamAsync() && useDropBroadSync()
+                                                   && useDeviceInput();
+        if (!can_skip_non_root_decode_sync) {
+            cudaSyncAndCheck();
+            model_->releaseBuffers();
+        }
         if (profile_step_finish_) {
             profile_step_finish_();
         }
@@ -689,37 +736,7 @@ void NormalExecutor::checkModelInputsOnCuda(const GptModelInputs& model_input, c
 }
 
 bool NormalExecutor::gatherCanUseDeviceState(const StreamGroups& stream_groups) const {
-    // Decode-only batch is the only shape the device-state path supports.
-    if (stream_groups.totalContextBatchSize() != 0 || stream_groups.totalDecodeBatchSize() == 0) {
-        return false;
-    }
-    for (const auto& stream : stream_groups.decodeStreams()) {
-        // Use config-only proxies for the batch-1 check. currentBatchSize() reads
-        // outputTokenLen() → seqLength() which itself races with the worker we're
-        // trying to decide whether to skip syncing.
-        if (stream->hasNumBeams() || stream->numReturnSequences() > 1) {
-            return false;
-        }
-        bool has_blocking_stateful_processor = false;
-        for (const auto& processor : stream->getAllLogitsProcessorPtr()) {
-            if (processor != nullptr && processor->isStateful() && !processor->supportsNormalAsyncDeviceState()) {
-                has_blocking_stateful_processor = true;
-                break;
-            }
-        }
-        // NormalAsyncDeviceState mirrors token ids and sequence length. Stateful
-        // processors that cannot publish their own device-side next-step state
-        // still need the old wait before the next sampler consumes logits.
-        if (has_blocking_stateful_processor && stream->hasPendingAsyncBookkeeping()) {
-            return false;
-        }
-        const auto& state = stream->getNormalAsyncDeviceState();
-        if (!state.last_sample_token_gpu.defined() || !state.last_sample_token_gpu.is_cuda()
-            || !state.next_seq_len_gpu.defined() || !state.next_seq_len_gpu.is_cuda()) {
-            return false;
-        }
-    }
-    return true;
+    return canUseNormalDeviceState(stream_groups, /*check_blocking_processors=*/true);
 }
 
 void NormalExecutor::prepareGrpcNormalDeviceState(const StreamGroups& stream_groups) {
