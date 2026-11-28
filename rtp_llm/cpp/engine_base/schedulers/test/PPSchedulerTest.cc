@@ -816,7 +816,7 @@ TEST_F(PPSchedulerTest, RejectsUnsupportedRequestsBeforeKvAdmissionEvenAtCapacit
         {RoleType::PREFILL, 1, false},
         {RoleType::PREFILL, 0, false},
         {RoleType::DECODE, 1, false},
-        {RoleType::DECODE, 0, true},
+        {RoleType::DECODE, 0, false},
     };
     installReadinessAllocator([](const MallocInfo&) { return std::shared_ptr<AsyncContext>{}; });
     for (const auto& request : cases) {
@@ -850,6 +850,7 @@ TEST_F(PPSchedulerTest, DecodeRejectsContextStreams) {
             stream->setIsFakeStream(fake);
             stream->setPerfTest(perf);
             ASSERT_TRUE(stream->initKVBlock().ok());
+            stream->generateConfig()->pd_separation = true;
             stream->reportEvent(StreamEvents::LoadInitiated);
             ASSERT_TRUE(stream->isContextStream());
             ASSERT_TRUE(scheduler->enqueue(stream).ok());
@@ -865,6 +866,30 @@ TEST_F(PPSchedulerTest, DecodeRejectsContextStreams) {
             EXPECT_TRUE(scheduler->empty());
         }
     }
+}
+
+TEST_F(PPSchedulerTest, PdDecodeAdmitsCacheLoadBeforeFirstToken) {
+    auto load = makeControlledAllocatorContext();
+    installReadinessAllocator([&](const MallocInfo&) { return load; });
+    auto scheduler = createScheduler(1, RoleType::DECODE);
+    auto stream    = createStream({1, 2, 3}, false, false, 8, {}, RoleType::DECODE);
+    stream->generateConfig()->pd_separation = true;
+    ASSERT_TRUE(stream->isContextStream());
+    ASSERT_TRUE(scheduler->enqueue(stream).ok());
+
+    auto loading = scheduler->schedule();
+    ASSERT_TRUE(loading.ok());
+    EXPECT_TRUE(loading->streams.empty());
+    ASSERT_EQ(stream->getStatus(), StreamState::LOADING_CACHE);
+    EXPECT_FALSE(stream->isPPInflight());
+
+    // The P2P handoff supplies the first token along with the cache.
+    stream->update({torch::tensor({{4}}, torch::kInt32), 1});
+    ASSERT_TRUE(load->completeTransfers(1, true));
+    auto decode = scheduler->schedule();
+    ASSERT_TRUE(decode.ok());
+    EXPECT_EQ(decode->streams, (std::list<GenerateStreamPtr>{stream}));
+    EXPECT_FALSE(stream->isContextStream());
 }
 
 TEST_F(PPSchedulerTest, DecodeContinuesReadyStreamsWhenContextIsRejected) {

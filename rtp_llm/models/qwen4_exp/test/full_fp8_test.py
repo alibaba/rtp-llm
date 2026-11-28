@@ -421,6 +421,8 @@ class FullFp8CudaTest(unittest.TestCase):
         model = Qwen4ExpModel.__new__(Qwen4ExpModel)
         nn.Module.__init__(model)
         model.config = SimpleNamespace(
+            is_mtp=False,
+            num_layers=1,
             _qwen4_ple_layer_ids=[1],
             _qwen4_split_ngram_parts=1,
             _qwen4_ngram_size=2,
@@ -430,8 +432,9 @@ class FullFp8CudaTest(unittest.TestCase):
             special_tokens=SimpleNamespace(eos_token_id=0),
         )
         model.parallelism_config = SimpleNamespace(
-            get_attn_tp_size=lambda: 1, get_attn_tp_rank=lambda: 0
+            pp_size=1, get_attn_tp_size=lambda: 1, get_attn_tp_rank=lambda: 0
         )
+        model.layer_num = model.config.num_layers
         model.layers = nn.ModuleList([nn.Identity()])
         model.ple_layers = nn.ModuleDict()
         model.weight = compute_weight_view(storage)

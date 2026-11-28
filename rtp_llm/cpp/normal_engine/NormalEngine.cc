@@ -520,11 +520,10 @@ NormalEngine::runPrefillWarmupShape(const std::shared_ptr<GenerateInput>& genera
     }
 
     stream->setReuseLength(reuse_length);
-    // The temporary manager owns valid physical block 0. Alias the logical prompt table to that
-    // block so the warmup shapes exercise the production paged-attention path without reserving
-    // a production-sized KV cache before capacity is sampled.
-    stream->fakeInitKVBlock((static_cast<size_t>(stream->seqLength()) + static_cast<size_t>(block_size) - 1)
-                            / block_size);
+    // Each temporary pool has two physical blocks. Alias the logical prompt table to
+    // block 1 so readers such as QSA can exercise paged attention with a valid block ID.
+    const size_t reserved_blocks = (static_cast<size_t>(stream->seqLength()) + block_size - 1) / block_size;
+    stream->fakeInitKVBlock(reserved_blocks, 1);
 
     std::list<GenerateStreamPtr> streams{stream};
     if (token_budget <= 0) {

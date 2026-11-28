@@ -89,6 +89,7 @@ def ple_state_desc(
     desc = KVCacheSpecDesc()
     desc.tag = PLE_STATE_TAG
     desc.cache_type = KVCacheSpecType.OPAQUE_STATE
+    desc.speculative_state_blocks = True
     desc.is_state_cache = True
     desc.dtype = dtype
     desc.entry_dtype = dtype
@@ -111,6 +112,7 @@ def ple_ngram_ctx_desc(ngram_size: int) -> KVCacheSpecDesc:
     desc = KVCacheSpecDesc()
     desc.tag = PLE_NGRAM_CTX_TAG
     desc.cache_type = KVCacheSpecType.OPAQUE_STATE
+    desc.speculative_state_blocks = True
     desc.is_state_cache = True
     desc.dtype = DataType.TYPE_INT64
     desc.entry_dtype = DataType.TYPE_INT64

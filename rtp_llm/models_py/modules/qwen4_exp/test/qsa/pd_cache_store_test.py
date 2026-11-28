@@ -152,7 +152,9 @@ class Qwen4PDCacheStoreTest(unittest.TestCase):
 
         model = qwen4_exp.Qwen4ExpModel.__new__(qwen4_exp.Qwen4ExpModel)
         nn.Module.__init__(model)
-        model.config = SimpleNamespace(is_mtp=False)
+        model.config = SimpleNamespace(is_mtp=False, num_layers=1)
+        model.parallelism_config = SimpleNamespace(pp_size=1)
+        model.layer_num = model.config.num_layers
         model.word_embedding = lambda inputs: torch.zeros(1, 4)
         model.layers = nn.ModuleList([Layer()])
         model.ple_layers = nn.ModuleDict({"0": nn.Identity()})

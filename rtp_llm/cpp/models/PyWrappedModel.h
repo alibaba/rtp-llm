@@ -104,11 +104,6 @@ public:
     std::string                waitCacheStorePublication() override;
     HiddenStateCaptureStats    hiddenStateCaptureStats() const;
     std::optional<std::string> takeDeferredHiddenStateCaptureError() override;
-    bool                       hasSpeculativeTargetCommitHooks() const override;
-    std::string                prepareSpeculativeTargetCommit(const torch::Tensor& accept_len) override;
-    std::string                finishSpeculativeTargetCommit(bool commit) override;
-    std::string                finalizeSpeculativeTargetCommit() override;
-    std::optional<bool>        reduceSpeculativeTargetPrepareStatus(bool local_ok) override;
     void                       loadMtpIndexerTopk(const torch::Tensor& topk) override;
     torch::Tensor              snapshotMtpIndexerTopk(int64_t batch_size) override;
 
@@ -193,8 +188,6 @@ private:
         GenerationPrefillCudaGraphStatus::NOT_REQUESTED};
     bool use_spec_decoding_{false};
     bool has_mtp_hidden_buffer_{false};
-    bool has_speculative_target_commit_hooks_{false};
-    bool has_speculative_target_status_reducer_{false};
     bool supports_micro_batch_{false};
     bool synchronize_moe_forward_{false};
     bool moe_forward_allows_graph_{true};
@@ -381,42 +374,6 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
     py::object py_init_result;
     // Always initialize py_model_ so it can be used as fallback when CUDA graph cannot run
     py_model_ = py_instance;
-    // MtpExecutor passes use_spec_decoding only to its target wrapper. The
-    // normal and draft wrappers may share the same Python class, but must not
-    // activate target transactions.
-    if (use_spec_decoding_) {
-        const bool has_prepare_speculative_target_commit = py::hasattr(py_model_, "prepare_speculative_target_commit");
-        const bool has_finish_speculative_target_commit  = py::hasattr(py_model_, "finish_speculative_target_commit");
-        const bool has_finalize_speculative_target_commit =
-            py::hasattr(py_model_, "finalize_speculative_target_commit");
-        RTP_LLM_CHECK_WITH_INFO(has_prepare_speculative_target_commit == has_finish_speculative_target_commit
-                                    && has_prepare_speculative_target_commit == has_finalize_speculative_target_commit,
-                                "Python speculative target model must implement prepare_speculative_target_commit and "
-                                "finish_speculative_target_commit as a pair, together with "
-                                "finalize_speculative_target_commit");
-        has_speculative_target_commit_hooks_ =
-            has_prepare_speculative_target_commit
-            && (!py::hasattr(py_model_, "requires_speculative_target_commit")
-                || py_model_.attr("requires_speculative_target_commit")().cast<bool>());
-        if (has_speculative_target_commit_hooks_ && py::hasattr(py_model_, "has_speculative_target_status_reducer")) {
-            has_speculative_target_status_reducer_ =
-                py_model_.attr("has_speculative_target_status_reducer")().cast<bool>();
-            RTP_LLM_CHECK_WITH_INFO(!has_speculative_target_status_reducer_
-                                        || py::hasattr(py_model_, "reduce_speculative_target_prepare_status"),
-                                    "Python target status reducer capability requires its reduce hook");
-        }
-        if (has_speculative_target_commit_hooks_ && enable_cuda_graph_) {
-            RTP_LLM_CHECK_WITH_INFO(py::hasattr(py_model_, "on_cuda_graph_warmup")
-                                        && py::hasattr(py_model_, "on_cuda_graph_capture")
-                                        && py::hasattr(py_model_, "on_cuda_graph_replay"),
-                                    "speculative target CUDA Graph requires capture, save and replay transaction "
-                                    "hooks to preserve side-state across graph instances");
-        }
-        RTP_LLM_CHECK_WITH_INFO(!has_speculative_target_commit_hooks_ || params.parallelism_config.tp_size <= 1
-                                    || has_speculative_target_status_reducer_,
-                                "speculative target transactions require a CPU TP status reducer");
-    }
-
     supports_micro_batch_ = py::hasattr(py_model_, "forward_micro_batch");
     synchronize_moe_forward_ =
         params.sp_config.type == SP_TYPE_NONE && params.parallelism_config.role_type == RoleType::PDFUSION

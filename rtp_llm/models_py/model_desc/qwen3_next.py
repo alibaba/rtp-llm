@@ -1558,7 +1558,7 @@ class Qwen3NextModel(GptModelBase):
             Embedding(
                 model_config, parallelism_config, weights.get_global_weight(W.embedding)
             )
-            if 0 in layer_ids
+            if self.owns_model_input
             else None
         )
         # Get enable_cuda_graph from py_hw_kernel_config
@@ -1592,7 +1592,7 @@ class Qwen3NextModel(GptModelBase):
                 weights.get_global_weight(W.final_ln_gamma),
                 eps=model_config.layernorm_eps,
             )
-            if self.layer_num - 1 in self.layer_ids()
+            if self.owns_model_output
             else None
         )
         self._init_capture_context(

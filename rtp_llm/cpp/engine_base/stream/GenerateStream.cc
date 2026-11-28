@@ -259,9 +259,9 @@ absl::Status GenerateStream::initKVBlock() {
     return ret;
 }
 
-void GenerateStream::fakeInitKVBlock(size_t reserved_blocks) {
+void GenerateStream::fakeInitKVBlock(size_t reserved_blocks, BlockIdxType block_id) {
     std::lock_guard<std::mutex> lock(*mutex_);
-    stream_cache_resource_->fakeInitKVBlock(reserved_blocks);
+    stream_cache_resource_->fakeInitKVBlock(reserved_blocks, block_id);
 }
 
 absl::Status GenerateStream::incrKVBlock() {
@@ -1304,13 +1304,13 @@ bool GenerateStream::prepareMtpCacheForNextStep() {
     const auto& resource = stream_cache_resource_->kvCache();
     RTP_LLM_CHECK_WITH_INFO(state.next_kv_cache_block_id_gpu.size(0) == static_cast<int64_t>(tags.size()),
                             "MTP cache snapshot must match the allocator topology");
-    // Only legacy LINEAR groups permute proposal slots. Preserve their device
-    // prefix whether the worker has already committed its host swaps or not.
-    std::vector<BlockIndicesType> previous_linear_blocks(tags.size());
+    // Preserve the device prefix for groups whose proposal slots may still be
+    // waiting for the corresponding host swaps.
+    std::vector<BlockIndicesType> previous_state_blocks(tags.size());
     std::vector<size_t>           previous_kernel_sizes(tags.size(), 0);
     for (size_t row = 0; row < tags.size(); ++row) {
-        if (config.isLegacyLinearGroup(static_cast<int>(row))) {
-            previous_linear_blocks[row] = resource.blocks(0, tags[row]);
+        if (config.usesSpeculativeStateBlocks(row)) {
+            previous_state_blocks[row] = resource.blocks(0, tags[row]);
             previous_kernel_sizes[row]  = resource.kernelBlocks(0, tags[row]).size();
         }
     }
@@ -1320,7 +1320,7 @@ bool GenerateStream::prepareMtpCacheForNextStep() {
         return false;
     }
     for (size_t row = 0; row < tags.size(); ++row) {
-        const auto& previous = previous_linear_blocks[row];
+        const auto& previous = previous_state_blocks[row];
         const auto& current  = resource.blocks(0, tags[row]);
         if (current.size() < previous.size()
             || !std::equal(
@@ -1352,7 +1352,7 @@ bool GenerateStream::prepareMtpCacheForNextStep() {
         // PyTorch's pinned allocator delays reuse until the copy completes.
         auto device = host.to(previous.options(), /*non_blocking=*/true);
         for (size_t row = 0; row < tags.size(); ++row) {
-            const int64_t prefix = kernel ? previous_kernel_sizes[row] : previous_linear_blocks[row].size();
+            const int64_t prefix = kernel ? previous_kernel_sizes[row] : previous_state_blocks[row].size();
             if (prefix > 0) {
                 device.select(0, row).narrow(1, 0, prefix).copy_(previous.select(0, row).narrow(1, 0, prefix));
             }
@@ -1657,20 +1657,21 @@ void GenerateStream::specUpdate(const StreamSpecUpdateInfo& update_info,
         sp_output_buffer_->propose_tokens_gpu = *update_info.draft_token_gpu;
     }
 
-    // for spec-decode linear attention, we need to adjust cache blocks
+    // Select accepted states and preserve completed page checkpoints.
     if (accept_token_num > 1 && stream_cache_resource_) {
         const auto& config   = stream_cache_resource_->resourceContext().cache_manager->cacheConfig();
         const auto& topology = config.topology();
-        for (const auto& group : topology.groups()) {
-            const int group_id = static_cast<int>(topology.groupIdForTag(group.tag));
+        const auto& groups = topology.groups();
+        for (size_t group_id = 0; group_id < groups.size(); ++group_id) {
             // Replay commits accepted state through its log, without proposal-slot swaps.
-            if (!config.isLegacyLinearGroup(group_id)) {
+            if (!config.usesSpeculativeStateBlocks(group_id)) {
                 continue;
             }
-            // Calculate the two swaps in this LINEAR group's block-table coordinates.
+            const auto& group = groups[group_id];
+            // Calculate the two swaps in this group's block-table coordinates.
             const auto span = group.seqSizePerBlock();
             RTP_LLM_CHECK_WITH_INFO(span > 0 && span <= static_cast<size_t>(std::numeric_limits<int>::max()),
-                                    "invalid LINEAR group %s token span %zu",
+                                    "invalid speculative state group %s token span %zu",
                                     group.tag.c_str(),
                                     span);
             const auto [cached_src, cached_dst] =
@@ -1684,7 +1685,7 @@ void GenerateStream::specUpdate(const StreamSpecUpdateInfo& update_info,
                            && static_cast<size_t>(dst) < block_num);
             };
             RTP_LLM_CHECK_WITH_INFO(valid_swap(cached_src, cached_dst) && valid_swap(final_src, final_dst),
-                                    "LINEAR group %s span %zu table size %zu cannot commit %d -> %d: "
+                                    "speculative state group %s span %zu table size %zu cannot commit %d -> %d: "
                                     "swaps (%d,%d), (%d,%d)",
                                     group.tag.c_str(),
                                     span,

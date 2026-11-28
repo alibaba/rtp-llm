@@ -947,20 +947,19 @@ class Qwen4ExpPLELayer(nn.Module):
         *,
         embeddings: Optional[torch.Tensor] = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Evaluate a speculative decode chunk without committing its state.
+        """Evaluate a speculative decode chunk and return its convolution inputs.
 
         ``hyper_states`` contains the candidate rows ``[B, G, hc_hidden]`` and
         ``token_history`` contains the cached n-gram context followed by those
         same ``G`` token ids.  The returned second tensor is the normalized
         convolution input for each candidate row, not a materialised
-        ``[B, G, state_len, hc_hidden]`` state tensor.  A caller can recover the
-        state after accepting ``A`` rows by taking the last ``state_len`` rows
-        of ``cat(conv_buffer, candidate_inputs)[:, :state_len + A]``.
+        ``[B, G, state_len, hc_hidden]`` state tensor. The caller takes one
+        sliding window per step from ``cat(conv_buffer, candidate_inputs)``
+        and writes it into the corresponding candidate block.
 
         Concatenating the committed buffer with all candidate inputs and
         applying the dilated convolution once is numerically identical to
-        calling :meth:`decode_step` in order, while keeping persistent cache
-        mutation outside the target-verify forward.
+        calling :meth:`decode_step` in order.
         """
         if hyper_states.dim() != 3:
             raise ValueError(

@@ -62,10 +62,3 @@ py_library(
     ],
     visibility = ["//visibility:public"],
 )
-
-py_library(
-    name = "cpu_status",
-    srcs = ["cpu_status.py"],
-    deps = ["//rtp_llm:torch"],
-    visibility = ["//visibility:public"],
-)

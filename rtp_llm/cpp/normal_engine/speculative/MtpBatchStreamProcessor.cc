@@ -252,19 +252,19 @@ torch::Tensor MtpBatchStreamProcessor::advanceEngramTokenWindows(const torch::Te
 torch::Tensor MtpBatchStreamProcessor::advanceLinearCacheBlockTable(const torch::Tensor& current_table,
                                                                     const torch::Tensor& previous_seq_lengths,
                                                                     const torch::Tensor& accept_lengths,
-                                                                    const std::vector<CacheGroupType>& group_types,
+                                                                    const std::vector<bool>& state_block_groups,
                                                                     int64_t seq_size_per_block) {
     return advanceLinearCacheBlockTable(current_table,
                                         previous_seq_lengths,
                                         accept_lengths,
-                                        group_types,
-                                        std::vector<int64_t>(group_types.size(), seq_size_per_block));
+                                        state_block_groups,
+                                        std::vector<int64_t>(state_block_groups.size(), seq_size_per_block));
 }
 
 torch::Tensor MtpBatchStreamProcessor::advanceLinearCacheBlockTable(const torch::Tensor& current_table,
                                                                     const torch::Tensor& previous_seq_lengths,
                                                                     const torch::Tensor& accept_lengths,
-                                                                    const std::vector<CacheGroupType>& group_types,
+                                                                    const std::vector<bool>&          state_block_groups,
                                                                     const std::vector<int64_t>&        group_spans) {
     RTP_LLM_PROFILE_SCOPE("executor.mtp.advance_linear_cache_block_table");
     RTP_LLM_CHECK_WITH_INFO(current_table.defined() && current_table.is_cuda()
@@ -280,18 +280,18 @@ torch::Tensor MtpBatchStreamProcessor::advanceLinearCacheBlockTable(const torch:
     const int64_t group_count = current_table.size(0);
     const int64_t batch_size  = current_table.size(1);
     const int64_t block_count = current_table.size(2);
-    RTP_LLM_CHECK_WITH_INFO(static_cast<int64_t>(group_types.size()) == group_count,
+    RTP_LLM_CHECK_WITH_INFO(static_cast<int64_t>(state_block_groups.size()) == group_count,
                             "MTP cache snapshot group count mismatch: table=%ld config=%zu",
                             group_count,
-                            group_types.size());
+                            state_block_groups.size());
     RTP_LLM_CHECK_WITH_INFO(static_cast<int64_t>(group_spans.size()) == group_count,
                             "MTP cache snapshot span count mismatch: table=%ld spans=%zu",
                             group_count,
                             group_spans.size());
     for (int64_t group_id = 0; group_id < group_count; ++group_id) {
-        if (group_types[static_cast<size_t>(group_id)] == CacheGroupType::LINEAR) {
+        if (state_block_groups[static_cast<size_t>(group_id)]) {
             RTP_LLM_CHECK_WITH_INFO(group_spans[static_cast<size_t>(group_id)] > 0,
-                                    "MTP LINEAR cache snapshot span must be positive: group=%ld span=%ld",
+                                    "MTP state cache snapshot span must be positive: group=%ld span=%ld",
                                     group_id,
                                     group_spans[static_cast<size_t>(group_id)]);
         }
@@ -302,7 +302,7 @@ torch::Tensor MtpBatchStreamProcessor::advanceLinearCacheBlockTable(const torch:
                             previous_seq_lengths.numel(),
                             accept_lengths.numel());
     if (batch_size == 0 || block_count == 0
-        || std::find(group_types.begin(), group_types.end(), CacheGroupType::LINEAR) == group_types.end()) {
+        || std::find(state_block_groups.begin(), state_block_groups.end(), true) == state_block_groups.end()) {
         return current_table.clone();
     }
 
@@ -319,13 +319,8 @@ torch::Tensor MtpBatchStreamProcessor::advanceLinearCacheBlockTable(const torch:
     auto active         = accept > 1;
     auto zeros          = torch::zeros_like(current_cached);
 
-    auto next_table = current_table.clone();
-    for (int64_t group_id = 0; group_id < group_count; ++group_id) {
-        if (group_types[static_cast<size_t>(group_id)] != CacheGroupType::LINEAR) {
-            continue;
-        }
-        const auto seq_size_per_block = group_spans[static_cast<size_t>(group_id)];
-        auto       permutation        = identity.clone();
+    const auto build_permutation = [&](int64_t seq_size_per_block) {
+        auto permutation = identity.clone();
         auto apply_swap = [&](torch::Tensor source, torch::Tensor destination, const torch::Tensor& enabled) {
             auto safe_source        = torch::where(enabled, source, zeros);
             auto safe_destination   = torch::where(enabled, destination, zeros);
@@ -348,7 +343,21 @@ torch::Tensor MtpBatchStreamProcessor::advanceLinearCacheBlockTable(const torch:
         auto final_source      = torch::floor_divide(current_cached, seq_size_per_block) + accept - 1;
         auto final_destination = torch::floor_divide(next_cached - 1, seq_size_per_block);
         apply_swap(final_source, final_destination, active);
+        return permutation;
+    };
 
+    auto          next_table = current_table.clone();
+    int64_t       last_span  = 0;
+    torch::Tensor permutation;
+    for (int64_t group_id = 0; group_id < group_count; ++group_id) {
+        if (!state_block_groups[static_cast<size_t>(group_id)]) {
+            continue;
+        }
+        const auto span = group_spans[static_cast<size_t>(group_id)];
+        if (span != last_span) {
+            permutation = build_permutation(span);
+            last_span   = span;
+        }
         next_table.select(0, group_id).copy_(current_table.select(0, group_id).gather(1, permutation));
     }
     return next_table;

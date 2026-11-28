@@ -70,6 +70,7 @@ uint32_t SpecBuilder::kernelSeqSizePerBlock(const KVCacheSpecDesc&  desc,
 
 CacheGroupPolicy SpecBuilder::groupPolicy(const KVCacheSpecDesc& desc) {
     CacheGroupPolicy policy = defaultCacheGroupPolicy(groupType(desc));
+    policy.speculative_state_blocks = desc.speculative_state_blocks;
     if (desc.is_state_cache) {
         policy.enable_prefix_reuse = true;
     }

@@ -53,10 +53,10 @@ int64_t CudaGraphRunner::captureKernelBlockTableWidth(const CacheTopology& topol
     for (const auto& group : topology.groups()) {
         const size_t span = group.seqSizePerBlock();
         RTP_LLM_CHECK_WITH_INFO(span > 0, "CUDA graph requires a positive group block span");
-        const size_t tokens =
-            group.policy.group_type == CacheGroupType::LINEAR ? max_seq_len : max_seq_len + max_reserved_step;
+        const bool state_blocks = group.policy.usesSpeculativeStateBlocks();
+        const size_t tokens = state_blocks ? max_seq_len : max_seq_len + max_reserved_step;
         size_t physical = tokens / span + (tokens % span != 0);
-        if (group.policy.group_type == CacheGroupType::LINEAR && max_reserved_step > 0) {
+        if (state_blocks && max_reserved_step > 0) {
             physical += max_reserved_step - 1;
         }
         width = std::max(width, expandedCaptureBlockTableWidth(group, physical));

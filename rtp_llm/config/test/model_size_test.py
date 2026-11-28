@@ -478,6 +478,7 @@ class WeightConvertDeviceDecisionReplayTest(unittest.TestCase):
         # Bypass ModelLoader.__init__: only the fields touched by the two
         # decision helpers are populated, no GPU or database needed.
         loader = object.__new__(ModelLoader)
+        loader.model_config = config
         loader._load_config = SimpleNamespace(
             force_cpu_load_weights=False,
             num_layers=config.num_layers,

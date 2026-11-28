@@ -1190,7 +1190,7 @@ const CacheKeysType& StreamCacheResource::cacheKeys(int32_t batch_id) const {
     return batch_kv_cache_resource_->cacheKeys(batch_id);
 }
 
-void StreamCacheResource::fakeInitKVBlock(size_t reserved_blocks) {
+void StreamCacheResource::fakeInitKVBlock(size_t reserved_blocks, BlockIdxType block_id) {
     fake_inited_ = true;
     batch_kv_cache_resource_->resetBatchSize(stream_->maxBatchSize());
     const auto topology = resource_context_.cache_manager ?
@@ -1199,7 +1199,7 @@ void StreamCacheResource::fakeInitKVBlock(size_t reserved_blocks) {
     batch_kv_cache_resource_->initGroups(topology);
 
     reserved_blocks = std::max(1ul, reserved_blocks);
-    batch_kv_cache_resource_->resizeBlocks(reserved_blocks, 0);
+    batch_kv_cache_resource_->resizeBlocks(reserved_blocks, block_id);
 }
 
 int StreamCacheResource::mallocFailedTimes() const {
@@ -1260,7 +1260,7 @@ void StreamCacheResource::swapLinearBlocks(int32_t batch_id, size_t rhs, size_t 
     const auto& config = resource_context_.cache_manager->cacheConfig();
     for (size_t group_id = 0; group_id < config.groups().size(); ++group_id) {
         const auto& group = config.groups()[group_id];
-        if (config.isLegacyLinearGroup(static_cast<int>(group_id))) {
+        if (config.usesSpeculativeStateBlocks(group_id)) {
             batch_kv_cache_resource_->swapBlocks(batch_id, group.tag, rhs, lhs);
         }
     }

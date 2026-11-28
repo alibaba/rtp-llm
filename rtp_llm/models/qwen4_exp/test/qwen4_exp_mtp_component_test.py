@@ -216,6 +216,7 @@ class Qwen4ExpMTPComponentTest(unittest.TestCase):
     def test_target_vocabulary_aliases_require_semantic_compatibility(self):
         draft = self.config
         target = Qwen4Exp.__new__(Qwen4Exp)
+        target.parallelism_config = ParallelismConfig()
         target.model_config = SimpleNamespace(
             **{
                 name: getattr(draft, name)
@@ -230,6 +231,12 @@ class Qwen4ExpMTPComponentTest(unittest.TestCase):
         self.assertEqual(
             Qwen4ExpMTP.speculative_weight_alias_names(target, draft),
             (W.embedding, W.lm_head),
+        )
+        target.parallelism_config.pp_size = 2
+        target.parallelism_config.pp_rank = 1
+        self.assertEqual(
+            Qwen4ExpMTP.speculative_weight_alias_names(target, draft),
+            (W.lm_head,),
         )
 
         target.model_config.hidden_size += 1
@@ -256,6 +263,7 @@ class Qwen4ExpMTPComponentTest(unittest.TestCase):
         draft._qwen4_full_fp8_nvfp4 = True
         draft._qwen4_dense_storage = "source_bf16"
         target = Qwen4Exp.__new__(Qwen4Exp)
+        target.parallelism_config = ParallelismConfig()
         target.model_config = SimpleNamespace(
             **{
                 name: getattr(draft, name)
@@ -306,6 +314,7 @@ class Qwen4ExpMTPComponentTest(unittest.TestCase):
             draft = self._precision_config(Qwen4ExpMTP, mode)
             draft._qwen4_full_fp8_nvfp4 = True
             target = Qwen4Exp.__new__(Qwen4Exp)
+            target.parallelism_config = ParallelismConfig()
             target.model_config = SimpleNamespace(
                 **{
                     name: getattr(draft, name)
@@ -336,6 +345,12 @@ class Qwen4ExpMTPComponentTest(unittest.TestCase):
                         W.embedding + FP8_STORAGE_SCALE_SUFFIX,
                         W.lm_head_s,
                     ),
+                )
+                target.parallelism_config.pp_size = 2
+                target.parallelism_config.pp_rank = 1
+                self.assertEqual(
+                    Qwen4ExpMTP.speculative_weight_alias_names(target, draft),
+                    (W.lm_head, W.lm_head_s),
                 )
             target.model_config.hidden_size += 1
             with self.assertRaisesRegex(ValueError, "semantically incompatible"):

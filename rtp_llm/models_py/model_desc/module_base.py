@@ -128,6 +128,16 @@ class GptModelBase(nn.Module):
         """Global layer IDs constructed and executed by this model instance."""
         return local_layer_range(self.config, self.parallelism_config)
 
+    @property
+    def owns_model_input(self) -> bool:
+        """Whether this instance owns the model's first decoder layer."""
+        return 0 in self.layer_ids()
+
+    @property
+    def owns_model_output(self) -> bool:
+        """Whether this instance owns the model's final decoder layer."""
+        return self.layer_num - 1 in self.layer_ids()
+
     def make_empty_intermediate_tensors(self, hidden_template: Any) -> dict[str, Any]:
         """Build this model's stage-boundary inputs for stage-local PP warmup."""
         return {"hidden_states": hidden_template}
@@ -347,7 +357,7 @@ class GptModelBase(nn.Module):
             )
         if self._mtp_aux_capture_buffer is None:
             raise RuntimeError("auxiliary hidden capture buffer is unavailable")
-        if self.layer_num - 1 in self.layer_ids():
+        if self.owns_model_output:
             self._mtp_target_hidden_states = self._mtp_aux_capture_buffer
 
     def get_mtp_target_hidden_states(self, num_tokens: int) -> Optional[torch.Tensor]:

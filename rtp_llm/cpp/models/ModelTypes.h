@@ -228,41 +228,6 @@ public:
         return {};
     }
 
-    // Optional target-verify side-state transaction. Models that stage
-    // recurrent/side-cache candidates during speculative target verification
-    // opt in here. The prepare phase must validate and select the accepted
-    // candidates without mutating persistent cache pools. Once every TP rank
-    // has prepared successfully, finish(true) tentatively applies that
-    // prevalidated plan while retaining enough original state for rollback.
-    // finish(false) discards an uncommitted plan or rolls back a tentative
-    // commit and must be idempotent. Both finish paths report errors instead
-    // of throwing so every TP rank can reach the same status rendezvous.
-    virtual bool hasSpeculativeTargetCommitHooks() const {
-        return false;
-    }
-
-    // Optional host consensus, selected collectively at model startup. nullopt
-    // means the original device collective. A transport/protocol exception is
-    // fail-stop and must propagate; asymmetric fallback is forbidden.
-    virtual std::optional<bool> reduceSpeculativeTargetPrepareStatus(bool /*local_ok*/) {
-        return std::nullopt;
-    }
-
-    virtual std::string prepareSpeculativeTargetCommit(const torch::Tensor& /*accept_len*/) {
-        return {};
-    }
-
-    virtual std::string finishSpeculativeTargetCommit(bool /*commit*/) {
-        return {};
-    }
-
-    // Called only after every TP rank has tentatively committed. This releases
-    // the retained originals/undo log without changing the committed state.
-    // A finalize error is fail-stop because rollback is no longer legal.
-    virtual std::string finalizeSpeculativeTargetCommit() {
-        return {};
-    }
-
     // Optional spec-decode hand-off: target model exposes the pre-output-projection
     // residual buffer (DSv4: pre-``hc_head`` ``[T, hc*D]``) so MtpExecutor can
     // normalize it into ``GptModelOutputs::all_hidden_states`` instead of the

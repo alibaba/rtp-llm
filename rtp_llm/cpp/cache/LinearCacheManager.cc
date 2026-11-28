@@ -6,6 +6,7 @@
 #include <unordered_set>
 
 #include "rtp_llm/cpp/utils/Logger.h"
+#include "rtp_llm/cpp/utils/LinearBlocksUtil.h"
 
 namespace rtp_llm {
 namespace {
@@ -85,9 +86,7 @@ void LinearCacheManager::filterValidBlocks(const BlockIndicesType& in, BlockIndi
 }
 
 int LinearCacheManager::needBlocksNum(int seq_len, int current_blocks, int reserve_step) const {
-    int       extra_blocks = reserve_step ? reserve_step - 1 : 0;
-    const int block_size   = seqSizePerBlock();
-    return std::max((seq_len + block_size - 1) / block_size + extra_blocks - current_blocks, 0);
+    return std::max(linearStateBlockCount(seq_len, seqSizePerBlock(), reserve_step) - current_blocks, 0);
 }
 
 // History-reclaim helpers (opt-in via enable_linear_cache_reclaim). The tail

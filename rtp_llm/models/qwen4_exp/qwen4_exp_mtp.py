@@ -62,10 +62,8 @@ class Qwen4ExpMTPWeight(Qwen4ExpWeight):
     def _create_global_weights(self) -> List[WeightModule]:
         mixer = _MTP_PREFIX + "hyper_connection_mixer."
         return [
-            # The draft checkpoint intentionally omits both vocabulary matrices;
-            # BaseModel aliases compatible target storage. A source-BF16 draft
-            # may load these same checkpoint tensors independently when the
-            # target vocabulary has been quantized to FP8.
+            # Use the target checkpoint's vocabulary. Compatible weights owned
+            # by the local target stage can be aliased instead of loaded again.
             AtomicWeight(
                 W.embedding,
                 [CkptWeightInfo("model.language_model.embed_tokens.weight", identity)],
@@ -211,14 +209,19 @@ class Qwen4ExpMTP(Qwen4Exp):
                 # target checkpoint keys declared above, without FP8 scales.
                 return ()
             raise ValueError("qwen4_exp MTP vocabulary storage is incompatible")
-        names = (W.embedding, W.lm_head)
+        # PP loads the draft on the last stage. The target's embedding is only
+        # local when that stage also owns the target input.
+        share_embedding = target_model.parallelism_config.pp_rank == 0
+        names = (W.embedding, W.lm_head) if share_embedding else (W.lm_head,)
         if (
             getattr(target_config, "_qwen4_full_fp8_nvfp4", False) is True
             and target_vocab != "source_bf16"
         ):
             from rtp_llm.model_loader.fp8_weight import FP8_STORAGE_SCALE_SUFFIX
 
-            return names + (W.embedding + FP8_STORAGE_SCALE_SUFFIX, W.lm_head_s)
+            if share_embedding:
+                names += (W.embedding + FP8_STORAGE_SCALE_SUFFIX,)
+            names += (W.lm_head_s,)
         return names
 
     @classmethod

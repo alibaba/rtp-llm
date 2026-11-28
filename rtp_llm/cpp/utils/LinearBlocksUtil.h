@@ -4,6 +4,11 @@
 
 namespace rtp_llm {
 
+inline int linearStateBlockCount(int seq_len, int seq_size_per_block, int reserve_step) {
+    const int extra_blocks = reserve_step > 0 ? reserve_step - 1 : 0;
+    return (seq_len + seq_size_per_block - 1) / seq_size_per_block + extra_blocks;
+}
+
 inline std::pair<int, int> getCachedTokenBlockSwapIdx(int cur_cached_len, int nxt_cached_len, int seq_size_per_block) {
     // check if generate tokens has cached tokens
     // we only checked tokens except first and last tokens

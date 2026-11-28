@@ -41,6 +41,7 @@ from rtp_llm.ops import (
     ParallelismConfig,
     RoleType,
     RopeStyle,
+    TaskType,
 )
 from rtp_llm.utils.model_weight import W
 
@@ -211,6 +212,29 @@ class Qwen4ExpTest(unittest.TestCase):
             with mock.patch.object(Qwen35Moe, "load", return_value="loaded") as parent:
                 self.assertEqual(model.load(skip_python_model=True), "loaded")
             parent.assert_called_once_with(skip_python_model=True)
+
+    def test_pp_load_admits_multimodal_decode(self):
+        config = Qwen4Exp._create_config_from_json(
+            self._temp_dir.name,
+            {**self._config(), "language_model_only": False},
+        )
+        model = self._loaded_model(
+            task_type=TaskType.LANGUAGE_MODEL,
+            mm_model_config=config.mm_model_config,
+        )
+        model.parallelism_config.pp_size = 2
+        model.parallelism_config.role_type = RoleType.DECODE
+        model.hw_kernel_config = SimpleNamespace(enable_cuda_graph=False)
+        with (
+            mock.patch.object(model, "_init_custom_module", return_value=None),
+            mock.patch.object(
+                model,
+                "create_model_loader",
+                side_effect=RuntimeError("reached weight loader"),
+            ),
+            self.assertRaisesRegex(RuntimeError, "reached weight loader"),
+        ):
+            model.load()
 
     def test_full_checkpoint_owns_all_side_regions(self):
         self.assertEqual(len(self.config.kv_cache_spec_descs), self.config.num_layers)

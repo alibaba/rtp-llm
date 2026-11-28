@@ -2292,7 +2292,7 @@ TEST_F(MtpBatchStreamProcessorTest, ReplaySnapshotsDoNotRequirePerProposalPages)
         MtpBatchStreamProcessor::advanceLinearCacheBlockTable(table,
                                                               torch::tensor({2}, torch::kInt32).to(torch::kCUDA),
                                                               torch::tensor({8}, torch::kInt32).to(torch::kCUDA),
-                                                              {CacheGroupType::FULL, CacheGroupType::FULL},
+                                                              {false, false},
                                                               /*group_spans=*/{0, 0});
     EXPECT_TRUE(torch::equal(actual.cpu(), table.cpu()));
     EXPECT_NE(actual.data_ptr(), table.data_ptr());
@@ -2311,7 +2311,7 @@ TEST_F(MtpBatchStreamProcessorTest, testAdvanceLinearCacheBlockTableMatchesHostC
                       current.to(torch::kCUDA),
                       torch::tensor(previous_lengths, torch::kInt32).to(torch::kCUDA),
                       torch::tensor(accept_lengths, torch::kInt32).to(torch::kCUDA),
-                      {CacheGroupType::LINEAR, CacheGroupType::FULL, CacheGroupType::LINEAR},
+                      {true, false, true},
                       /*seq_size_per_block=*/64)
                       .cpu();
 
@@ -2361,7 +2361,7 @@ TEST_F(MtpBatchStreamProcessorTest, testAdvanceLinearCacheBlockTableMatchesEvery
                       current.to(torch::kCUDA),
                       torch::tensor(previous_lengths, torch::kInt32).to(torch::kCUDA),
                       torch::tensor(accept_lengths, torch::kInt32).to(torch::kCUDA),
-                      {CacheGroupType::LINEAR, CacheGroupType::FULL},
+                      {true, false},
                       block_size)
                       .cpu();
 
@@ -2437,7 +2437,7 @@ TEST_F(MtpBatchStreamProcessorTest, testSparseLinearSnapshotCommitsAcceptedState
                       device_current,
                       torch::tensor(previous_lengths, torch::kInt32).to(torch::kCUDA),
                       torch::tensor(accept_lengths, torch::kInt32).to(torch::kCUDA),
-                      {CacheGroupType::LINEAR, CacheGroupType::FULL, CacheGroupType::LINEAR},
+                      {true, false, true},
                       block_size)
                       .cpu();
 

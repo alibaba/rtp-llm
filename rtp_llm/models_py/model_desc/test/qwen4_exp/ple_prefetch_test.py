@@ -21,7 +21,13 @@ class Qwen4ExpPLEForwardPreparationTest(TestCase):
     def test_each_forward_shares_fresh_text_ids_between_prefetch_and_ple(self):
         model = qwen4_exp.Qwen4ExpModel.__new__(qwen4_exp.Qwen4ExpModel)
         nn.Module.__init__(model)
-        model.config = SimpleNamespace(special_tokens=SimpleNamespace(eos_token_id=7))
+        model.layer_num = 1
+        model.config = SimpleNamespace(
+            is_mtp=False,
+            num_layers=1,
+            special_tokens=SimpleNamespace(eos_token_id=7),
+        )
+        model.parallelism_config = SimpleNamespace(pp_size=1)
         model.ple_layers = {"0": object()}
         model.layers = [lambda hidden, *args, **kwargs: hidden]
         model.kv_cache = SimpleNamespace(get_layer_cache=lambda *args: object())
@@ -131,7 +137,7 @@ class Qwen4ExpPLEPrefetchTest(PLERuntimeFixture, TestCase):
             torch.testing.assert_close(self.state_base, expected_state, atol=0, rtol=0)
             torch.testing.assert_close(self.ctx_base, expected_context, atol=0, rtol=0)
 
-    def test_async_target_verify_commit_and_rollback_preserve_state(self):
+    def test_async_target_verify_matches_eager_candidate_writes(self):
         embedding = self._enable_async_cpu_ple()
         device = torch.device("cuda")
         prefixes = (self._PAGE - 1, self._PAGE)
@@ -141,15 +147,9 @@ class Qwen4ExpPLEPrefetchTest(PLERuntimeFixture, TestCase):
         hyper = torch.randn(6, _HC * _HIDDEN, device=device, dtype=torch.bfloat16)
         inputs = self._target_inputs(prefixes, 3)
         expected = self.model._apply_ple(1, hyper, ids.flatten(), inputs)
-        self.model.prepare_speculative_target_commit(
-            torch.tensor([1, 3], device=device, dtype=torch.int32)
-        )
-        self.model.finish_speculative_target_commit(True)
-        committed_state, committed_context = (
-            self.state_base.clone(),
-            self.ctx_base.clone(),
-        )
-        self.model.finish_speculative_target_commit(False)
+        expected_state, expected_context = self.state_base.clone(), self.ctx_base.clone()
+        self.state_base.copy_(before_state)
+        self.ctx_base.copy_(before_context)
         plans = self.model._start_eager_ple_prefetch(
             SimpleNamespace(input_ids=ids.flatten()), inputs
         )
@@ -158,18 +158,8 @@ class Qwen4ExpPLEPrefetchTest(PLERuntimeFixture, TestCase):
         )
         embedding.finish_prefetch()
         torch.testing.assert_close(actual, expected, atol=0, rtol=0)
-        torch.testing.assert_close(self.state_base, before_state, atol=0, rtol=0)
-        torch.testing.assert_close(self.ctx_base, before_context, atol=0, rtol=0)
-
-        self.model.prepare_speculative_target_commit(
-            torch.tensor([1, 3], device=device, dtype=torch.int32)
-        )
-        self.model.finish_speculative_target_commit(True)
-        torch.testing.assert_close(self.state_base, committed_state, atol=0, rtol=0)
-        torch.testing.assert_close(self.ctx_base, committed_context, atol=0, rtol=0)
-        self.model.finish_speculative_target_commit(False)
-        torch.testing.assert_close(self.state_base, before_state, atol=0, rtol=0)
-        torch.testing.assert_close(self.ctx_base, before_context, atol=0, rtol=0)
+        torch.testing.assert_close(self.state_base, expected_state, atol=0, rtol=0)
+        torch.testing.assert_close(self.ctx_base, expected_context, atol=0, rtol=0)
 
     def test_async_budget_fallback_preserves_prefill_pages(self):
         embedding = self._enable_async_cpu_ple()

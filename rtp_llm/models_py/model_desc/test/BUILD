@@ -181,6 +181,7 @@ test_suite(
         "//rtp_llm/models_py/model_desc/test/qwen4_exp:ple_graph_test",
         "//rtp_llm/models_py/model_desc/test/qwen4_exp:ple_host_test",
         "//rtp_llm/models_py/model_desc/test/qwen4_exp:ple_prefetch_test",
+        "//rtp_llm/models_py/model_desc/test/qwen4_exp:pp_test",
         "//rtp_llm/models_py/model_desc/test/qwen4_exp:qsa_wiring_test",
         "//rtp_llm/models_py/model_desc/test/qwen4_exp:wiring_test",
     ],

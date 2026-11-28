@@ -715,9 +715,16 @@ class ModelLoader:
 
     def is_global_weight_local(self, name: str) -> bool:
         """Place boundary globals by layer range so full-range drafts keep both ends."""
+        output_weight_names = getattr(
+            self.model_config, "pp_output_weight_names", ()
+        )
         if name in (W.embedding, W.positional_embedding):
             return 0 in self._load_config.layer_range
-        if name in (W.lm_head, W.lm_head_b) or name.startswith("final_layernorm."):
+        if (
+            name in (W.lm_head, W.lm_head_b)
+            or name.startswith("final_layernorm.")
+            or name in output_weight_names
+        ):
             return self._load_config.num_layers - 1 in self._load_config.layer_range
         return True
 

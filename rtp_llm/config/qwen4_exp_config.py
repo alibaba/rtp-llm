@@ -15,6 +15,7 @@ from rtp_llm.config.quant_config import (
     init_quant_config,
 )
 from rtp_llm.ops import DataType, KvCacheDataType
+from rtp_llm.utils.model_weight import W
 
 
 def ple_eos_token_id(config):
@@ -26,6 +27,13 @@ def ple_eos_token_id(config):
 
 
 class Qwen4ModelConfig(ModelConfig):
+    pp_output_weight_names = frozenset(
+        {
+            W.qwen4_hc_mixer_norm,
+            W.qwen4_hc_mixer_mix_down,
+            W.qwen4_hc_mixer_mix_up,
+        }
+    )
     _python_fields = ModelConfig._python_fields | {
         "qwen4_ple_prefetch_mb",
         "linear_attn_norm_activation",
@@ -223,12 +231,13 @@ def resolve_qwen4_parallelism(config, parallelism):
     cp = resolved.prefill_cp_config
     if (
         resolved.dp_size != 1
-        or resolved.pp_size != 1
-        or resolved.world_size != resolved.tp_size
+        or resolved.world_size != resolved.pp_size * resolved.tp_size
         or cp.is_enabled()
         or cp.is_prefill_enabled()
     ):
-        raise ValueError("Qwen4 NVFP4 requires pure TP or pure EP without DP/PP/CP")
+        raise ValueError(
+            "Qwen4 NVFP4 requires pure TP or pure EP per PP stage without DP/CP"
+        )
     if resolved.ep_size == 1 and resolved.tp_size in (1, 2):
         resolved.ffn_tp_size = resolved.tp_size
         resolved.ffn_tp_rank = resolved.tp_rank

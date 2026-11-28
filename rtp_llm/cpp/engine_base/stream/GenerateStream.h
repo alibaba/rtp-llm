@@ -225,7 +225,7 @@ public:
 
     // Only used in C++ world.
     int                  reuseBlockSize() const;
-    void                 fakeInitKVBlock(size_t reserved_blocks = 0);
+    void                 fakeInitKVBlock(size_t reserved_blocks = 0, BlockIdxType block_id = 0);
     virtual absl::Status initKVBlock();
     virtual absl::Status incrKVBlock();
     virtual void         releaseResource();

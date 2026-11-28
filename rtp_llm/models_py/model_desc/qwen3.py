@@ -105,7 +105,7 @@ class Qwen3Model(GptModelBase):
             Embedding(
                 config, parallelism_config, weights.get_global_weight(W.embedding)
             )
-            if 0 in layer_ids
+            if self.owns_model_input
             else None
         )
         self.layers = nn.ModuleList(
@@ -125,7 +125,7 @@ class Qwen3Model(GptModelBase):
             RMSNorm(
                 weights.get_global_weight(W.final_ln_gamma), eps=config.layernorm_eps
             )
-            if self.layer_num - 1 in layer_ids
+            if self.owns_model_output
             else None
         )
         self._init_capture_context(

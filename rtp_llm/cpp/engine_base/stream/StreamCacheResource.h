@@ -84,7 +84,7 @@ public:
     // future decode as well as current execution, so a fresh context is allowed.
     bool                        canReclaimLinearHistory(int target_batch_size) const;
     void                        drainLinearHistory();
-    void                        fakeInitKVBlock(size_t reserved_blocks = 0);
+    void                        fakeInitKVBlock(size_t reserved_blocks = 0, BlockIdxType block_id = 0);
     int                         tryReleaseKVBlock(size_t nums);
     void                        freeBatchBlocks(size_t batch_id, std::vector<int>& blocks);
     void                        releaseResource();

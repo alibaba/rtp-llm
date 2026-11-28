@@ -195,13 +195,15 @@ class PLERuntimeFixture:
         self.model = qwen4_exp.Qwen4ExpModel.__new__(qwen4_exp.Qwen4ExpModel)
         nn.Module.__init__(self.model)
         self.model.ple_layers = nn.ModuleDict({"1": self.ple})
-        self.model._ple_target_transaction = None
-        self.model._ple_graph_target_transactions = {}
         self.model.kv_cache = _Cache(self)
+        self.model.layer_num = 2
         self.model.config = SimpleNamespace(
-            special_tokens=SimpleNamespace(eos_token_id=7)
+            is_mtp=False,
+            num_layers=2,
+            special_tokens=SimpleNamespace(eos_token_id=7),
         )
         self.model.parallelism_config = SimpleNamespace(
+            pp_size=1,
             prefill_cp_config=SimpleNamespace(
                 is_enabled=lambda: False, is_prefill_enabled=lambda: False
             )

@@ -455,7 +455,6 @@ def _register_identity_allreduce() -> None:
     _register_no_collectives(identity_allreduce)
 
 
-run_speculative_commit_bridge = _extension.run_speculative_commit_bridge
 
 
 class CacheStoreForwardModel:
@@ -788,52 +787,6 @@ class UnsupportedCaptureModel:
 
     def forward(self, inputs, fmha_impl=None) -> PyModelOutputs:
         raise AssertionError("unsupported capture model must fail during construction")
-
-
-class SpeculativeCommitBridgeModel:
-    def __init__(
-        self,
-        *,
-        prepare_error: bool = False,
-        commit_error: bool = False,
-        abort_error: bool = False,
-    ):
-        self.prepare_error = prepare_error
-        self.commit_error = commit_error
-        self.abort_error = abort_error
-        self.finish_calls: list[bool] = []
-        self.finalize_calls = 0
-
-    def initialize(self, resources) -> bool:
-        return True
-
-    def forward(self, inputs: PyModelInputs) -> PyModelOutputs:
-        raise AssertionError("bridge-only test must not execute forward")
-
-    def prepare_speculative_target_commit(self, accept_len: torch.Tensor) -> None:
-        if self.prepare_error:
-            raise RuntimeError("prepare bridge boom")
-
-    def finish_speculative_target_commit(self, commit: bool) -> None:
-        self.finish_calls.append(commit)
-        if commit and self.commit_error:
-            raise RuntimeError("commit bridge boom")
-        if not commit and self.abort_error:
-            raise RuntimeError("abort bridge boom")
-
-    def finalize_speculative_target_commit(self) -> None:
-        self.finalize_calls += 1
-
-
-class PrepareOnlySpeculativeCommitBridgeModel:
-    def initialize(self, resources) -> bool:
-        return True
-
-    def forward(self, inputs: PyModelInputs) -> PyModelOutputs:
-        raise AssertionError("bridge-only test must not execute forward")
-
-    def prepare_speculative_target_commit(self, accept_len: torch.Tensor) -> None:
-        pass
 
 
 def _blocks_by_key(result: dict) -> dict[str, dict]:
@@ -1477,86 +1430,6 @@ class PyWrappedModelCacheStoreIntegrationTest(unittest.TestCase):
                 self.assertEqual(metric_types[name], _KMONITOR_STATUS)
             else:
                 self.assertEqual(metric_types[name], _KMONITOR_GAUGE)
-
-    def test_speculative_commit_hooks_must_be_implemented_as_a_pair(self) -> None:
-        with self.assertRaisesRegex(RuntimeError, "must implement.*as a pair"):
-            run_speculative_commit_bridge(
-                PrepareOnlySpeculativeCommitBridgeModel(), "has_hooks"
-            )
-
-    def test_speculative_commit_explicit_capability_disables_inactive_hooks(self):
-        model = SpeculativeCommitBridgeModel()
-        self.assertTrue(run_speculative_commit_bridge(model, "has_hooks"))
-        model.requires_speculative_target_commit = lambda: False
-        self.assertFalse(run_speculative_commit_bridge(model, "has_hooks"))
-        model.requires_speculative_target_commit = lambda: True
-        self.assertTrue(run_speculative_commit_bridge(model, "has_hooks"))
-        self.assertFalse(run_speculative_commit_bridge(model, "has_hooks", False))
-
-    def test_cpu_status_bridge_preserves_false_and_ignores_non_target(self):
-        model = SpeculativeCommitBridgeModel()
-        calls = []
-        model.has_speculative_target_status_reducer = lambda: True
-        model.reduce_speculative_target_prepare_status = lambda ok: (
-            calls.append(ok),
-            False,
-        )[1]
-        self.assertFalse(run_speculative_commit_bridge(model, "reduce_true"))
-        self.assertFalse(run_speculative_commit_bridge(model, "reduce_false"))
-        self.assertEqual(calls, [True, False])
-        self.assertIsNone(run_speculative_commit_bridge(model, "reduce_true", False))
-        self.assertEqual(calls, [True, False])
-
-    def test_cpu_status_bridge_optional_and_disabled_capabilities(self):
-        model = SpeculativeCommitBridgeModel()
-        self.assertIsNone(run_speculative_commit_bridge(model, "reduce_true"))
-        model.has_speculative_target_status_reducer = lambda: False
-        model.reduce_speculative_target_prepare_status = lambda ok: (
-            _ for _ in ()
-        ).throw(AssertionError("disabled hook"))
-        self.assertIsNone(run_speculative_commit_bridge(model, "reduce_true"))
-
-    def test_cpu_status_bridge_transport_errors_propagate(self):
-        model = SpeculativeCommitBridgeModel()
-        model.has_speculative_target_status_reducer = lambda: True
-
-        def fail(ok):
-            raise RuntimeError("status transport poisoned")
-
-        model.reduce_speculative_target_prepare_status = fail
-        with self.assertRaisesRegex(RuntimeError, "status transport poisoned"):
-            run_speculative_commit_bridge(model, "reduce_true")
-
-    def test_speculative_commit_prepare_exception_becomes_error(self) -> None:
-        model = SpeculativeCommitBridgeModel(prepare_error=True)
-
-        self.assertTrue(run_speculative_commit_bridge(model, "has_hooks"))
-        error = run_speculative_commit_bridge(model, "prepare")
-
-        self.assertIn("prepare bridge boom", error)
-
-    def test_speculative_commit_abort_exception_does_not_escape(self) -> None:
-        model = SpeculativeCommitBridgeModel(abort_error=True)
-
-        self.assertIsNone(run_speculative_commit_bridge(model, "abort"))
-        self.assertEqual(model.finish_calls, [False])
-
-    def test_speculative_commit_exception_becomes_error(self) -> None:
-        model = SpeculativeCommitBridgeModel(commit_error=True)
-
-        error = run_speculative_commit_bridge(model, "commit")
-
-        self.assertIn("commit bridge boom", error)
-        self.assertEqual(model.finish_calls, [True])
-
-    def test_non_target_wrapper_ignores_speculative_commit_hooks(self) -> None:
-        self.assertFalse(
-            run_speculative_commit_bridge(
-                PrepareOnlySpeculativeCommitBridgeModel(),
-                "has_hooks",
-                False,
-            )
-        )
 
     def test_multi_tag_uses_each_tag_local_physical_block_table(self) -> None:
         model = CacheStoreForwardModel()

@@ -22,9 +22,11 @@ def recipe():
     )
 
 
-def topology(tp, ep, rank=0):
+def topology(tp, ep, rank=0, pp=1):
     pc = ParallelismConfig()
-    pc.tp_size = pc.world_size = pc.local_world_size = tp
+    pc.tp_size = tp
+    pc.pp_size = pp
+    pc.world_size = pc.local_world_size = tp * pp
     pc.ep_size = ep
     pc.world_rank = rank
     set_parallelism_config(pc)
@@ -33,14 +35,16 @@ def topology(tp, ep, rank=0):
 
 class Qwen4ParallelismTest(unittest.TestCase):
     def test_nvfp4_tensor_parallel_uses_native_topology(self):
-        pc = topology(2, 1)
-        config = SimpleNamespace(
-            parallelism_config=pc,
-            model_config=SimpleNamespace(quant_config=recipe()),
-            tp_size=2,
-            ep_size=1,
-        )
-        self.assertTrue(use_nvfp4_tensor_parallel(config))
+        for pp in (1, 2):
+            pc = topology(2, 1, rank=2 * pp - 1, pp=pp)
+            config = SimpleNamespace(
+                parallelism_config=pc,
+                model_config=SimpleNamespace(quant_config=recipe()),
+                tp_size=2,
+                ep_size=1,
+            )
+            with self.subTest(pp=pp):
+                self.assertTrue(use_nvfp4_tensor_parallel(config))
 
     def test_effective_layout_is_model_owned_and_repeatable(self):
         for tp, ep in ((1, 1), (2, 1), (2, 2), (8, 8)):
@@ -71,6 +75,21 @@ class Qwen4ParallelismTest(unittest.TestCase):
         resolved = resolve_qwen4_parallelism(SimpleNamespace(quant_config=None), pc)
         self.assertEqual(resolved.get_ffn_tp_size(), 2)
         self.assertEqual(resolved.get_ffn_tp_rank(), 1)
+
+    def test_pp_preserves_stage_local_nvfp4_sharding(self):
+        for config in (
+            SimpleNamespace(quant_config=recipe()),
+            SimpleNamespace(_qwen4_nvfp4_source=True),
+        ):
+            for ep, ffn_tp_size, ffn_tp_rank, ep_rank in ((1, 2, 1, 0), (2, 1, 0, 1)):
+                with self.subTest(config=config, ep=ep):
+                    original = topology(2, ep, rank=3, pp=2)
+                    resolved = resolve_qwen4_parallelism(config, original)
+                    self.assertEqual(resolved.pp_rank, 1)
+                    self.assertEqual(resolved.tp_rank, 1)
+                    self.assertEqual(resolved.get_ffn_tp_size(), ffn_tp_size)
+                    self.assertEqual(resolved.get_ffn_tp_rank(), ffn_tp_rank)
+                    self.assertEqual(resolved.ep_rank, ep_rank)
 
     def test_unsupported_layout_is_rejected_before_loading(self):
         config = SimpleNamespace(quant_config=recipe())

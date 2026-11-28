@@ -146,6 +146,11 @@ public:
                && !isLinearReplayGroup(group_id);
     }
 
+    bool usesSpeculativeStateBlocks(size_t group_id) const {
+        return groups()[group_id].policy.usesSpeculativeStateBlocks()
+               && !isLinearReplayGroup(static_cast<int>(group_id));
+    }
+
     CacheTopology::GroupRefs groupsForLayer(int layer_id) const {
         return topology().groupsForLayer(layer_id);
     }
