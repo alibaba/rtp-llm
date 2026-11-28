@@ -17,6 +17,7 @@ from torch import nn
 
 from rtp_llm.models_py.kernels.cuda.fast_topk import fast_topk_transform_ragged_fused
 from rtp_llm.models_py.modules import LayerNorm
+from rtp_llm.models_py.modules.base.cuda.indexer_op import _paged_mqa_logits_metadata
 from rtp_llm.models_py.modules.factory import LinearFactory
 from rtp_llm.ops import AttentionConfigs, HWKernelConfig
 from rtp_llm.ops.compute_ops import KVCache, PyAttentionInputs
@@ -638,7 +639,7 @@ def prepare_indexer_params(
         slot_mapping = block_numbers.long() * seq_size_per_block + block_offsets.long()
 
     seqlens_32 = seq_lens.to(torch.int32).to("cuda")
-    schedule_metadata = deep_gemm.get_paged_mqa_logits_metadata(
+    schedule_metadata = _paged_mqa_logits_metadata(
         seqlens_32.view(-1, 1), blocksize, deep_gemm.get_num_sms()
     )
 

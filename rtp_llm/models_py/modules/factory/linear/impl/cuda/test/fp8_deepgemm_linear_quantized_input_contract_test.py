@@ -28,7 +28,7 @@ def _install_stubs(calls):
 
     deepgemm_wrapper.fp8_gemm_nt = fp8_gemm_nt
     deepgemm_wrapper.has_deep_gemm = lambda: True
-    deepgemm_wrapper.is_deep_gemm_e8m0_used = lambda: True
+    deepgemm_wrapper.is_deep_gemm_e8m0_used = lambda device=None: True
 
     fp8_kernel = types.ModuleType("rtp_llm.models_py.kernels.cuda.fp8_kernel")
 

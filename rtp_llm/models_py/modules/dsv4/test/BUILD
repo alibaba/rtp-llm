@@ -1,4 +1,4 @@
-load(":defs.bzl", "dsv4_py_test", "dsv4_sm100_py_test")
+load(":defs.bzl", "dsv4_py_test", "dsv4_sm100_py_test", "dsv4_sm120_py_test")
 
 package(default_visibility = ["//visibility:public"])
 
@@ -177,6 +177,78 @@ _PAIRED_GPU_TESTS = [
     "//rtp_llm/models_py/triton_kernels/moe/test:test_mega_moe_gate_pack_cuda13",
 ]
 
+_DSV4_CUDA13_X86 = select({
+    "@//:using_cuda13_x86": [],
+    "//conditions:default": ["@platforms//:incompatible"],
+})
+
+# Source-level CPU contracts for the SM120/CP prefill path.
+_SOURCE_CPU_TESTS = [
+    "test_cp_host_staging_cpu",
+    "test_head_host_mirror_scalars_cpu",
+    "test_prefill_async_head_cpu",
+    "test_suffix_gather_max_host_cpu",
+]
+
+[
+    py_test(
+        name = name,
+        srcs = [name + ".py"] + (["test_prefill_async_head_cpu.py"] if name == "test_head_host_mirror_scalars_cpu" else []),
+        main = name + ".py",
+        deps = _MODEL_TEST_DEPS,
+        env = {
+            "CUDA_VISIBLE_DEVICES": "",
+            "TRITON_INTERPRET": "1",
+        } if name in (
+            "test_head_host_mirror_scalars_cpu",
+            "test_prefill_async_head_cpu",
+        ) else {"CUDA_VISIBLE_DEVICES": ""},
+        target_compatible_with = _DSV4_CUDA13_X86,
+    )
+    for name in _SOURCE_CPU_TESTS
+]
+
+py_test(
+    name = "test_prefill_integration_policy",
+    srcs = ["test_prefill_integration_policy.py"],
+    deps = _MODEL_TEST_DEPS,
+    env = {"CUDA_VISIBLE_DEVICES": ""},
+    target_compatible_with = _DSV4_CUDA13_X86,
+)
+
+dsv4_sm120_py_test(
+    name = "test_fp4_indexer_contract",
+    deps = _MODEL_TEST_DEPS,
+)
+
+dsv4_sm120_py_test(
+    name = "test_indexer_topk_backend_sm120",
+    src = "test_indexer_topk_backend.py",
+    deps = _MODEL_TEST_DEPS,
+)
+
+dsv4_sm120_py_test(
+    name = "test_sm120_small_batch_projections",
+    deps = _MODEL_TEST_DEPS,
+)
+
+dsv4_sm120_py_test(
+    name = "test_sm120_ordered_reduce_scatter",
+    gpu_count = 8,
+    args = ["-k", "test_producer_and_subgroup_reduction_8rank"],
+    tags = ["manual", "multi_device"],
+    deps = _MODEL_TEST_DEPS + ["//rtp_llm/models_py/triton_kernels:moe"],
+)
+
+dsv4_sm120_py_test(
+    name = "test_sm120_ordered_reduce_scatter_4rank",
+    src = "test_sm120_ordered_reduce_scatter.py",
+    gpu_count = 4,
+    args = ["-k", "test_producer_and_subgroup_reduction_4rank"],
+    tags = ["multi_device"],
+    deps = _MODEL_TEST_DEPS + ["//rtp_llm/models_py/triton_kernels:moe"],
+)
+
 test_suite(
     name = "dsv4_cuda13_unit",
     tests = [":" + name for name in _CP_HELPER_TESTS + _MODEL_CONTRACT_TESTS + _GPU_TESTS] + _MOVED_CONTRACT_TESTS + _PAIRED_GPU_TESTS,
@@ -196,4 +268,37 @@ test_suite(
 dsv4_sm100_py_test(
     name = "test_mega_inv_rope_fp8_quant",
     deps = _DSV4_TEST_DEPS,
+)
+
+dsv4_sm120_py_test(
+    name = "test_sm120_batch_invariant_linear",
+    args = [
+        "-k",
+        "not(test_nondefault_device_and_stream)",
+    ],
+    deps = _MODEL_TEST_DEPS,
+)
+
+dsv4_sm120_py_test(
+    name = "test_sm120_batch_invariant_linear_multi_gpu",
+    src = "test_sm120_batch_invariant_linear.py",
+    gpu_count = 2,
+    args = [
+        "-k",
+        "test_nondefault_device_and_stream",
+    ],
+    tags = ["multi_device"],
+    deps = _MODEL_TEST_DEPS,
+)
+
+dsv4_sm120_py_test(
+    name = "test_hc_impl_sm120",
+    src = "test_hc_impl.py",
+    deps = _MODEL_TEST_DEPS + ["//rtp_llm/models_py:tile_kernels_mhc"],
+)
+
+dsv4_sm120_py_test(
+    name = "test_dsv4_kernel_jit_warmup_sm120",
+    src = "test_dsv4_kernel_jit_warmup.py",
+    deps = _MODEL_TEST_DEPS,
 )

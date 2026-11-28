@@ -105,6 +105,7 @@ class Block(nn.Module):
         commit_only: bool = False,
         v41_config: Optional[Dict] = None,
         shared_attention: Optional[Dict] = None,
+        moe_workspace: Optional[object] = None,
     ):
         super().__init__()
         self.layer_id = layer_id
@@ -197,6 +198,7 @@ class Block(nn.Module):
             chunking_enabled=chunked_moe_enabled(),
             model_type="deepseek_v41",
             moe_w1_layout="gate_up",
+            moe_workspace=moe_workspace,
             record_function_scope=_profiler.moe_record_function_scope,
         )
         if v41_config is not None and not is_decode_role:

@@ -1,4 +1,7 @@
 import multiprocessing
+import os
+import subprocess
+import sys
 import unittest
 from contextlib import ExitStack
 from types import SimpleNamespace
@@ -8,6 +11,36 @@ from rtp_llm import start_backend_server, start_server
 from rtp_llm.ops import RoleType, SpeculativeType
 from rtp_llm.utils.backend_restart import RestartOutcome
 from rtp_llm.utils.drain_flag import DrainFlag
+
+_ENTRY_MODULES = (
+    "rtp_llm.start_server",
+    "rtp_llm.start_backend_server",
+    "rtp_llm.start_frontend_server",
+)
+
+_CUTLASS_PATH_PROBE = """
+import importlib
+import os
+import sys
+
+needles = (
+    os.path.join("nvidia_cutlass_dsl", "python_packages"),
+    os.path.join("nvidia_cutlass_dsl", "dsl_packages"),
+    "rtp-cutlass-dsl-",
+)
+
+
+def cutlass_entries():
+    return {entry for entry in sys.path if any(n in entry for n in needles)}
+
+
+before = cutlass_entries()
+importlib.import_module(sys.argv[1])
+added = sorted(cutlass_entries() - before)
+loaded_cutlass = "rtp_llm.models_py.utils.cutlass" in sys.modules
+print(repr({"added": added, "loaded_cutlass": loaded_cutlass}))
+raise SystemExit(1 if (added or loaded_cutlass) else 0)
+"""
 
 
 class ServiceDrainingPropagationTest(unittest.TestCase):
@@ -410,6 +443,80 @@ class StartupRealWarmupTest(unittest.TestCase):
                 start_server._get_startup_real_warmup_speculative_reserve_step(dflash),
                 9,
             )
+
+
+def _warmup_configs(
+    role_type,
+    *,
+    warm_up=True,
+    model_warm_up=True,
+    world_rank=0,
+    world_size=4,
+    tp_size=4,
+    model_type="deepseek_v4",
+):
+    return SimpleNamespace(
+        runtime_config=SimpleNamespace(warm_up=warm_up, model_warm_up=model_warm_up),
+        role_config=SimpleNamespace(role_type=role_type),
+        parallelism_config=SimpleNamespace(
+            world_rank=world_rank,
+            world_size=world_size,
+            tp_size=tp_size,
+            dp_size=max(1, world_size // tp_size),
+            pp_size=1,
+        ),
+        model_args=SimpleNamespace(model_type=model_type),
+    )
+
+
+class StartServerImportTest(unittest.TestCase):
+    def test_entry_imports_do_not_setup_cutlass_import_path(self):
+        for module_name in _ENTRY_MODULES:
+            with self.subTest(module=module_name):
+                result = subprocess.run(
+                    [sys.executable, "-c", _CUTLASS_PATH_PROBE, module_name],
+                    env=os.environ.copy(),
+                    capture_output=True,
+                    text=True,
+                    timeout=90,
+                )
+                self.assertEqual(
+                    result.returncode,
+                    0,
+                    f"importing {module_name} changed the CUTLASS sys.path "
+                    f"delta to {result.stdout.strip()}:\n{result.stderr}",
+                )
+
+
+class StartupRealWarmupMatrixTest(unittest.TestCase):
+    def test_main_warmup_predicate_matrix(self):
+        predicate = start_server._should_run_startup_real_warmup
+
+        for warm_up, model_warm_up in ((False, True), (True, False), (False, False)):
+            cfg = _warmup_configs(
+                RoleType.PREFILL, warm_up=warm_up, model_warm_up=model_warm_up
+            )
+            self.assertIs(predicate(cfg), False, (warm_up, model_warm_up))
+
+        for role in (RoleType.DECODE, RoleType.PDFUSION):
+            self.assertIs(predicate(_warmup_configs(role)), False, role)
+
+        for mt in ("deepseek_v3", "deepseek_v2", "", "qwen3"):
+            cfg = _warmup_configs(RoleType.PREFILL, model_type=mt)
+            self.assertIs(predicate(cfg), False, mt)
+
+        for rank, ws in ((1, 4), (5, 8)):
+            cfg = _warmup_configs(RoleType.PREFILL, world_rank=rank, world_size=ws)
+            self.assertIs(predicate(cfg), False, (rank, ws))
+        for rank, ws in ((0, 4), (4, 8), (8, 16)):
+            cfg = _warmup_configs(RoleType.PREFILL, world_rank=rank, world_size=ws)
+            self.assertIs(predicate(cfg), True, (rank, ws))
+
+        self.assertIs(
+            predicate(_warmup_configs(RoleType.PREFILL, world_size=1, world_rank=0)),
+            True,
+        )
+        self.assertIs(predicate(_warmup_configs(RoleType.PREFILL)), True)
 
 
 if __name__ == "__main__":

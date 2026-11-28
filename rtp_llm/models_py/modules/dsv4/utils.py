@@ -1,32 +1,68 @@
 """Shared DSV4 utility functions used across BF16 and FP8 paths."""
 
+from typing import Optional
+
 import torch
 
 from rtp_llm.config.quant_config import Fp8BlockWiseQuantConfig
+from rtp_llm.models_py.kernels.cuda.quant_layouts import is_e8m0_scale
 from rtp_llm.models_py.modules.factory.linear import LinearFactory
 
 _V4_FP8_BLOCK_CFG = Fp8BlockWiseQuantConfig()
 
 
-def _repack_v4_fp8_scale_to_int32(scale: torch.Tensor) -> torch.Tensor:
-    """V4 ckpt UE8M0 ``[N/128, K/128]`` to DeepGEMM int32-packed scale."""
+def _repack_v4_fp8_scale_to_int32(
+    scale: torch.Tensor,
+    n_rows: Optional[int] = None,
+    k_cols: Optional[int] = None,
+) -> torch.Tensor:
+    """V4 ckpt UE8M0 ``[ceil(N/128), K/128]`` to DeepGEMM int32-packed scale."""
     from deep_gemm.utils.layout import get_mn_major_tma_aligned_packed_ue8m0_tensor
 
-    assert scale.dtype == torch.float8_e8m0fnu, f"unexpected scale dtype {scale.dtype}"
-    assert scale.dim() == 2, f"unexpected scale dim {scale.dim()}"
+    if not is_e8m0_scale(scale):
+        raise ValueError(f"unexpected compact V4 scale dtype {scale.dtype}")
+    if scale.dim() != 2:
+        raise ValueError(f"unexpected compact V4 scale dim {scale.dim()}")
 
-    n_blk, _ = scale.shape
-    n = n_blk * 128
+    if n_rows is not None and k_cols is not None:
+        if k_cols % 128 != 0:
+            raise ValueError(f"V4 FP8 linear requires K % 128 == 0, got K={k_cols}")
+        expected_shape = ((n_rows + 127) // 128, k_cols // 128)
+        if tuple(scale.shape) != expected_shape:
+            raise ValueError(
+                f"V4 compact scale shape mismatch: expected {expected_shape} "
+                f"for weight {(n_rows, k_cols)}, got {tuple(scale.shape)}"
+            )
+
+    n = n_rows if n_rows is not None else scale.shape[0] * 128
     idx = torch.arange(n, device=scale.device) // 128
     scale_rep = scale.float().index_select(-2, idx)
     return get_mn_major_tma_aligned_packed_ue8m0_tensor(scale_rep)
 
 
 def _v4_fp8_linear(w: torch.Tensor, s: torch.Tensor):
-    """Build a CudaFp8DeepGEMMLinear from raw V4 FP8 weight + scale tensors."""
-    assert s is not None, "expected non-null FP8 scale"
-    if s.dtype == torch.float8_e8m0fnu:
-        s = _repack_v4_fp8_scale_to_int32(s)
+    """Build an FP8 PER_BLOCK linear from raw V4 FP8 weight + scale tensors."""
+    if w.dim() != 2:
+        raise ValueError(f"V4 FP8 weight must be 2D, got {tuple(w.shape)}")
+    if s is None:
+        raise ValueError("expected non-null FP8 scale")
+    if w.device != s.device:
+        raise ValueError(
+            f"V4 FP8 weight device {w.device} != scale device {s.device}"
+        )
+    if s.dtype == torch.int32:
+        if w.shape[1] % 128 != 0:
+            raise ValueError(
+                f"V4 FP8 linear requires K % 128 == 0, got K={w.shape[1]}"
+            )
+        expected_packed = (w.shape[0], (w.shape[1] + 511) // 512)
+        if tuple(s.shape) != expected_packed:
+            raise ValueError(
+                f"V4 packed scale shape mismatch: expected {expected_packed} "
+                f"for weight {tuple(w.shape)}, got {tuple(s.shape)}"
+            )
+    elif is_e8m0_scale(s):
+        s = _repack_v4_fp8_scale_to_int32(s, n_rows=w.shape[0], k_cols=w.shape[1])
     local = {"_w": w, "_s": s}
     return LinearFactory.create_linear_from_weights(
         local,
@@ -40,8 +76,14 @@ def _v4_fp8_linear_from_dict(weights: dict, weight_key: str, scale_key: str):
     """Backwards-compat bridge over ``_v4_fp8_linear`` for flat dict callers."""
     w = weights[weight_key]
     s = weights[scale_key]
-    if s.dtype == torch.float8_e8m0fnu:
-        s = _repack_v4_fp8_scale_to_int32(s)
+    if is_e8m0_scale(s):
+        if w.dim() != 2:
+            raise ValueError(f"V4 FP8 weight must be 2D, got {tuple(w.shape)}")
+        if w.device != s.device:
+            raise ValueError(
+                f"V4 FP8 weight device {w.device} != scale device {s.device}"
+            )
+        s = _repack_v4_fp8_scale_to_int32(s, n_rows=w.shape[0], k_cols=w.shape[1])
         weights[scale_key] = s
     return _v4_fp8_linear(w, s)
 

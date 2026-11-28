@@ -1,5 +1,16 @@
 load("//rtp_llm/models_py/modules/dsv4/test:defs.bzl", "dsv4_py_test")
 
+_CUDA_ONLY = select({
+    "@//:using_cuda": [],
+    "//conditions:default": ["@platforms//:incompatible"],
+})
+
+_CUDA13_ONLY = select({
+    "@//:using_cuda13_x86": [],
+    "@//:using_cuda13_arm": [],
+    "//conditions:default": ["@platforms//:incompatible"],
+})
+
 py_test(
     name = "test_config_resolver",
     srcs = ["test_config_resolver.py"],
@@ -16,6 +27,15 @@ py_test(
     deps = [
         "//rtp_llm:testlib",
     ],
+)
+
+py_test(
+    name = "test_sm120_strategy_select",
+    srcs = ["test_sm120_strategy_select.py"],
+    deps = [
+        "//rtp_llm:testlib",
+    ],
+    target_compatible_with = _CUDA_ONLY,
 )
 
 py_test(
@@ -60,4 +80,25 @@ dsv4_py_test(
         "//rtp_llm/models_py:modules",
     ],
     visibility = ["//visibility:public"],
+)
+
+py_test(
+    name = "test_cutedsl_availability",
+    srcs = ["test_cutedsl_availability.py"],
+    deps = [
+        "//rtp_llm:flashinfer-python",
+        "//rtp_llm:testlib",
+    ],
+    exec_properties = {"gpu": "L20_CU13"},
+    tags = ["L20_CU13"],
+    target_compatible_with = _CUDA13_ONLY,
+)
+
+py_test(
+    name = "test_sm120_decode_a2a_coordination",
+    srcs = ["test_sm120_decode_a2a_coordination.py"],
+    deps = [
+        "//rtp_llm:testlib",
+    ],
+    target_compatible_with = _CUDA_ONLY,
 )

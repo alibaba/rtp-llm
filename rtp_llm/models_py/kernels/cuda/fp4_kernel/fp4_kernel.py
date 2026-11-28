@@ -3,14 +3,16 @@ from typing import Tuple
 
 import torch
 
-from rtp_llm.models_py.utils.arch import get_sm, is_cuda
+from rtp_llm.models_py.utils.arch import is_cuda, is_sm10x
 
 logger = logging.getLogger(__name__)
 
 _NVFP4_READY = False
 _NVFP4_IMPORT_ERROR = None
+cutlass_scaled_fp4_mm = None
+scaled_fp4_quant = None
 
-if is_cuda() and get_sm()[0] >= 10:
+if is_cuda() and torch.cuda.is_available() and is_sm10x():
     try:
         from rtp_kernel.nvfp4 import cutlass_scaled_fp4_mm, scaled_fp4_quant
 
@@ -42,7 +44,18 @@ def _require_nvfp4() -> None:
             "pinned by deps/requirements_lock_torch_gpu_cuda13.txt"
         )
     raise RuntimeError(
-        "rtp_kernel.nvfp4 is only available on CUDA devices with sm >= 10"
+        "rtp_kernel.nvfp4 is only available on CUDA devices with SM10x"
+    )
+
+
+def is_legacy_cutlass_fp4_available() -> bool:
+    """Whether the CUTLASS FP4 provider used by sgl_cutlass is available."""
+    return (
+        _NVFP4_READY
+        and is_cuda()
+        and torch.cuda.is_available()
+        and is_sm10x()
+        and callable(cutlass_scaled_fp4_mm)
     )
 
 

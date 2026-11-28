@@ -9,17 +9,22 @@ from unittest import mock
 import torch
 import torch.nn as nn
 
+from rtp_llm.models_py.modules.factory.fused_moe.defs.fused_moe import MoeWorkspace
 from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.mega_moe import (
     _mega_output_capacity,
 )
 from rtp_llm.models_py.modules.factory.fused_moe.utils.fp8_fp4.chunked_layer import (
-    _FINAL_OUT_CACHE,
     DEFAULT_MOE_CHUNK_TOKENS,
     ChunkedFp8Fp4MoeLayer,
     cp_padded_tokens_per_rank_bound,
+    moe_decode_forward,
+    planned_moe_tokens,
     resolve_moe_max_tokens_per_rank,
     run_moe_chunks,
     synchronized_moe_chunk_plan,
+)
+from rtp_llm.models_py.modules.factory.fused_moe.utils.sm120.workspace import (
+    Sm120MoeWorkspace,
 )
 from rtp_llm.models_py.utils.profiler import (
     disable_record_function_ranges,
@@ -118,7 +123,7 @@ class _FakeMoe(nn.Module):
         return result
 
 
-def _fake_layer(dim=4, capacity=5, is_decode_role=False):
+def _fake_layer(dim=4, capacity=5, is_decode_role=False, moe_workspace=None):
     layer = ChunkedFp8Fp4MoeLayer.__new__(ChunkedFp8Fp4MoeLayer)
     nn.Module.__init__(layer)
     layer.layer_id = 0
@@ -128,6 +133,9 @@ def _fake_layer(dim=4, capacity=5, is_decode_role=False):
     layer.chunking_enabled = True
     layer._observer_factory = None
     layer._record_function_scope = nullcontext
+    layer._moe_workspace = (
+        moe_workspace if moe_workspace is not None else MoeWorkspace()
+    )
     layer._moe = _FakeMoe(capacity)
     layer.strategy_name = "local_loop"
     return layer
@@ -277,28 +285,48 @@ class ChunkedMoeTest(unittest.TestCase):
         )
 
     def test_nonchunked_forward_reuses_final_output_storage(self):
-        _FINAL_OUT_CACHE.clear()
-        self.addCleanup(_FINAL_OUT_CACHE.clear)
-        layer = _fake_layer(dim=3, capacity=5)
+        shared_ws = MoeWorkspace()
+        draft_ws = MoeWorkspace()
+        sm120_ws = shared_ws.get_or_create(Sm120MoeWorkspace)
+        layer = _fake_layer(dim=3, capacity=5, moe_workspace=shared_ws)
+        layer2 = _fake_layer(dim=3, capacity=5, moe_workspace=shared_ws)
+        draft_layer = _fake_layer(dim=3, capacity=5, moe_workspace=draft_ws)
         x = torch.arange(4 * 3, dtype=torch.float32).view(4, 3)
 
         first = layer(x)
-        cache_key = (x.device, layer.dim, x.dtype)
-        self.assertEqual(_FINAL_OUT_CACHE[cache_key].size(0), layer.max_tokens_per_rank)
-        second = layer(x + 1)
+        bucket = shared_ws.cache("fp8_fp4_final_out", x.device)
+        self.assertEqual(bucket[(3, x.dtype)].size(0), layer.max_tokens_per_rank)
+        second = layer2(x + 1)
+        draft_out = draft_layer(x + 5)
 
         self.assertTrue(torch.equal(second, (x + 1) * 3))
-        self.assertEqual(len(layer._moe.output_buffers), 2)
+        self.assertTrue(torch.equal(draft_out, (x + 5) * 3))
         self.assertEqual(
             first.untyped_storage().data_ptr(),
             second.untyped_storage().data_ptr(),
         )
+        # Distinct model owners isolate final outputs so draft never clobbers target.
+        self.assertNotEqual(
+            draft_out.untyped_storage().data_ptr(),
+            second.untyped_storage().data_ptr(),
+        )
+        # Upgrading MoeWorkspace preserves keyed Sm120MoeWorkspace coexistence.
+        self.assertIs(shared_ws.get_or_create(Sm120MoeWorkspace), sm120_ws)
         self.assertTrue(
             all(
                 buf.untyped_storage().data_ptr() == second.untyped_storage().data_ptr()
-                for buf in layer._moe.output_buffers
+                for buf in layer._moe.output_buffers + layer2._moe.output_buffers
             )
         )
+
+        # Graph-context buffers stay separate from eager buckets and retired buffers
+        # are retained on graph growth so earlier captured raw pointers stay valid.
+        with mock.patch.object(shared_ws, "is_graph_context", return_value=True):
+            graph_small = layer._get_or_create_final_out(2, 3, x.dtype, x.device)
+            graph_large = layer._get_or_create_final_out(9, 3, x.dtype, x.device)
+        self.assertIsNot(graph_small, graph_large)
+        self.assertIn(graph_small, shared_ws._retired_graph_buffers)
+        self.assertEqual(graph_small.untyped_storage().data_ptr(), shared_ws._retired_graph_buffers[-1].untyped_storage().data_ptr())
 
     def test_speculative_decode_budget_accounts_for_generated_tokens(self):
         self.assertEqual(
@@ -457,6 +485,72 @@ class ChunkedMoeTest(unittest.TestCase):
         all_reduce.assert_called_once()
         self.assertEqual(first._moe.token_chunks, [3, 0])
         self.assertEqual(second._moe.token_chunks, [3, 0])
+
+    def test_world_executor_reuses_stack_plan_on_empty_rank(self):
+        layer = _fake_layer(capacity=4)
+        layer.strategy_name = "sm120_fused_moe"
+        executor = layer.fused_moe.fused_experts
+        executor.requires_synchronized_chunk_schedule = True
+        x = torch.empty(0, 4)
+        world = object()
+        with (
+            mock.patch.object(torch.distributed, "group", SimpleNamespace(WORLD=world)),
+            mock.patch("torch.distributed.is_initialized", return_value=True),
+            mock.patch(
+                "torch.distributed.all_reduce",
+                side_effect=lambda count, **_: count.fill_(9),
+            ) as reduce,
+        ):
+            with synchronized_moe_chunk_plan([SimpleNamespace(ffn=layer)], 0, x.device):
+                self.assertEqual(planned_moe_tokens(), 9)
+                self.assertEqual(layer(x).shape, x.shape)
+            self.assertIsNone(planned_moe_tokens())
+            self.assertEqual(layer._moe.token_chunks, [0, 0, 0])
+            self.assertEqual(reduce.call_count, 1)
+            self.assertIs(reduce.call_args.kwargs["group"], world)
+            self.assertEqual(
+                reduce.call_args.kwargs["op"], torch.distributed.ReduceOp.MAX
+            )
+
+            # Equal CP slices do not exchange a chunk plan.
+            reduce.reset_mock()
+            executor.requires_synchronized_chunk_schedule = False
+            with synchronized_moe_chunk_plan([layer], 0, x.device):
+                self.assertIsNone(planned_moe_tokens())
+                layer(x)
+            reduce.assert_not_called()
+            self.assertEqual(layer._moe.token_chunks, [0, 0, 0, 0])
+
+    def test_single_round_executor_uses_chunk_policy_in_forward(self):
+        layer = _fake_layer(capacity=4)
+        layer.strategy_name = "sm120_a2a_decode"
+        layer.fused_moe.fused_experts.single_round_dispatch = True
+        layer._moe.capacity = 9  # The transport has its own round capacity.
+        x = torch.ones(9, 4)
+        torch.testing.assert_close(layer(x), x * 3)
+        self.assertEqual(layer._moe.token_chunks, [9])
+
+        with synchronized_moe_chunk_plan([layer], 9, x.device, is_decode_forward=True):
+            self.assertTrue(moe_decode_forward())
+            with self.assertRaisesRegex(ValueError, "decode.*max_tokens_per_rank"):
+                layer(x)
+        self.assertFalse(moe_decode_forward())
+        self.assertEqual(layer._moe.token_chunks, [9])
+
+    def test_mega_fp8_stack_plan_does_not_add_standalone_collectives(self):
+        layer = _fake_layer()
+        layer.strategy_name = "mega_moe_fp8"
+        x = torch.ones(3, 4)
+        with (
+            mock.patch("torch.distributed.is_initialized", return_value=True),
+            mock.patch("torch.distributed.all_reduce") as reduce,
+        ):
+            layer(x)
+            reduce.assert_not_called()
+            with synchronized_moe_chunk_plan([layer], 3, x.device):
+                self.assertEqual(planned_moe_tokens(), 3)
+                layer(x)
+            self.assertEqual(reduce.call_count, 1)
 
     def test_mixed_non_mega_layer_ignores_synchronized_token_count(self):
         mega = _fake_layer()

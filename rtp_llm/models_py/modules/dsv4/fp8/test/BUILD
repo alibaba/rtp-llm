@@ -1,7 +1,13 @@
-load("//rtp_llm/models_py/modules/dsv4/test:defs.bzl", "dsv4_py_test", "dsv4_sm100_py_test")
+load("//rtp_llm/models_py/modules/dsv4/test:defs.bzl", "dsv4_py_test", "dsv4_sm100_py_test", "dsv4_sm120_py_test")
 load("//rtp_llm/test/utils:cuda13_sm100_test.bzl", "cuda13_sm100_py_test")
 
 package(default_visibility = ["//visibility:public"])
+
+_CUDA13_ONLY = select({
+    "@//:using_cuda13_x86": [],
+    "@//:using_cuda13_arm": [],
+    "//conditions:default": ["@platforms//:incompatible"],
+})
 
 _DSV4_FP8_TEST_DEPS = [
     "//rtp_llm/models_py/standalone:py_standalone_testlib",
@@ -50,6 +56,7 @@ _GPU_TESTS = [
     "test_pool_slot_mapping_split",
     "test_indexer_cp_padded_gather_triton",
     "test_prefill_common_metadata_cuda",
+    "test_pack_slots_to_paged",
 ]
 
 # Mock only non-target transport/kernel boundaries; these verify scheduling,
@@ -66,6 +73,7 @@ _CONTRACT_TESTS = [
     "test_mega_support",
     "test_prefill_mixed_layer_cache_store",
     "test_fp8_sparse_attn_decode_op",
+    "test_sparse_decode_backend",
     "test_compressor_cp_merged_gather",
 ]
 
@@ -77,13 +85,27 @@ _CONTRACT_TESTS = [
         args = [
             "-k",
             "SwaDequantLargeStrideTest",
-        ] if name == "test_swa_dequant_large_stride" else [],
+        ] if name == "test_swa_dequant_large_stride" else (
+            ["-k", "not(test_workspace_cross_device_rejected)"]
+            if name == "test_dsv4_persistent_topk"
+            else []
+        ),
         gpu_count = 2 if name == "test_topk_v3" else 1,
         tags = ["multi_device"] if name == "test_topk_v3" else [],
         deps = _DSV4_FP8_TEST_DEPS,
     )
     for name in _GPU_TESTS + _CONTRACT_TESTS
 ]
+
+dsv4_py_test(
+    name = "test_swa_slot_gather_packed",
+    src = "test_swa_dequant_large_stride.py",
+    args = [
+        "-k",
+        "SwaSlotGatherPackedTest",
+    ],
+    deps = _DSV4_FP8_TEST_DEPS,
+)
 
 dsv4_py_test(
     name = "test_indexer_cp_padded_gather_distributed",
@@ -157,6 +179,9 @@ test_suite(
     name = "dsv4_fp8_cuda13_unit",
     tests = [":" + name for name in _GPU_TESTS + _CONTRACT_TESTS] + [
         ":test_indexer_cp_padded_gather_distributed",
+        ":test_swa_slot_gather_packed",
+        ":test_dspark_sparse_backend",
+        ":test_grouped_output_weights",
     ],
 )
 
@@ -202,4 +227,155 @@ dsv4_sm100_py_test(
         deps = _DSV4_FP8_TEST_DEPS,
     )
     for name in ["test_mega_csa_adapter", "test_mega_hca_adapter"]
+]
+
+[
+    py_test(
+        name = name,
+        srcs = [name + ".py"],
+        deps = _DSV4_FP8_TEST_DEPS,
+        env = {"CUDA_VISIBLE_DEVICES": ""},
+        target_compatible_with = _CUDA13_ONLY,
+    )
+    for name in [
+        "test_sm120_prefill_indices",
+        "test_sm120_sparse_mla",
+    ]
+]
+
+[
+    py_test(
+        name = name,
+        srcs = [name + ".py"],
+        deps = _DSV4_FP8_TEST_DEPS,
+        env = {"CUDA_VISIBLE_DEVICES": ""},
+        target_compatible_with = _CUDA13_ONLY,
+    )
+    for name in [
+        "test_attention_packed_prefix_cpu",
+        "test_serialized_indexer_tail_cpu",
+        "test_backend_contracts",
+        "test_grouped_output_weights",
+    ]
+]
+
+py_test(
+    name = "test_dspark_sparse_backend",
+    srcs = ["test_dspark_sparse_backend.py"],
+    deps = _DSV4_FP8_TEST_DEPS + ["//rtp_llm/models_py:models"],
+    env = {"CUDA_VISIBLE_DEVICES": ""},
+    target_compatible_with = _CUDA13_ONLY,
+)
+
+dsv4_sm120_py_test(
+    name = "test_indexer_fp8_score_sm120",
+    src = "test_indexer_fp8_score.py",
+    deps = _DSV4_FP8_TEST_DEPS,
+)
+
+dsv4_sm120_py_test(
+    name = "test_fp8_paged_indexer_score_sm120",
+    src = "test_fp8_paged_indexer_score.py",
+    deps = _DSV4_FP8_TEST_DEPS,
+)
+
+dsv4_sm120_py_test(
+    name = "test_fp8_mqa_prefill_indexer_score_sm120",
+    src = "test_fp8_mqa_prefill_indexer_score.py",
+    deps = _DSV4_FP8_TEST_DEPS,
+)
+
+dsv4_sm120_py_test(
+    name = "test_indexer_fp8_prefill_chain_sm120",
+    src = "test_indexer_fp8_prefill_chain.py",
+    deps = _DSV4_FP8_TEST_DEPS,
+)
+
+dsv4_sm120_py_test(
+    name = "test_grouped_output_weights_sm120",
+    src = "test_grouped_output_weights.py",
+    deps = _DSV4_FP8_TEST_DEPS,
+)
+
+dsv4_sm120_py_test(
+    name = "test_swa_slot_gather_packed_sm120",
+    src = "test_swa_dequant_large_stride.py",
+    args = [
+        "-k",
+        "SwaSlotGatherPackedTest",
+    ],
+    deps = _DSV4_FP8_TEST_DEPS,
+)
+
+dsv4_sm120_py_test(
+    name = "test_swa_slot_mapping_sm120",
+    src = "test_swa_slot_mapping.py",
+    args = [
+        "-k",
+        "Sm120",
+    ],
+    deps = _DSV4_FP8_TEST_DEPS,
+)
+
+dsv4_sm120_py_test(
+    name = "test_swa_fp8_kv_roundtrip_sm120",
+    src = "test_swa_fp8_kv_roundtrip.py",
+    args = [
+        "-k",
+        "Sm120",
+    ],
+    deps = _DSV4_FP8_TEST_DEPS,
+)
+
+dsv4_sm120_py_test(
+    name = "test_pack_slots_to_paged_sm120",
+    src = "test_pack_slots_to_paged.py",
+    deps = _DSV4_FP8_TEST_DEPS,
+)
+
+dsv4_sm120_py_test(
+    name = "test_dsv4_persistent_topk_sm120",
+    src = "test_dsv4_persistent_topk.py",
+    args = [
+        "-k",
+        "not(test_workspace_cross_device_rejected)",
+    ],
+    deps = _DSV4_FP8_TEST_DEPS,
+)
+
+dsv4_sm120_py_test(
+    name = "test_dsv4_persistent_topk_multi_gpu",
+    src = "test_dsv4_persistent_topk.py",
+    gpu_count = 2,
+    tags = ["multi_device"],
+    args = [
+        "-k",
+        "test_workspace_cross_device_rejected",
+    ],
+    deps = _DSV4_FP8_TEST_DEPS,
+)
+
+dsv4_sm120_py_test(
+    name = "test_sm120_indexer_multidevice",
+    src = "test_sm120_indexer_hardware.py",
+    gpu_count = 2,
+    tags = ["multi_device"],
+    args = [
+        "-k",
+        "test_sm120_native_mqa_nondefault_device",
+    ],
+    deps = _DSV4_FP8_TEST_DEPS,
+)
+
+[
+    dsv4_sm120_py_test(
+        name = name,
+        deps = _DSV4_FP8_TEST_DEPS,
+    )
+    for name in [
+        "test_sm120_cp_compressor_projection",
+        "test_sm120_sparse_mla_hardware",
+        "test_sm120_indexer_hardware",
+        "test_sm120_prefill_indices_producer_matrix",
+    ]
 ]

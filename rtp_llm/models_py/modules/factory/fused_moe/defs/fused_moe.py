@@ -1,3 +1,4 @@
+import threading
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import (
@@ -10,6 +11,7 @@ from typing import (
     Optional,
     Tuple,
     TypedDict,
+    TypeVar,
     Union,
     final,
 )
@@ -203,6 +205,9 @@ class FusedMoeDataRouter(ABC):
 class FusedMoeExpertExecutor(ABC):
     includes_shared_expert = False
     execute_empty_inputs = False
+    preserve_output_dtype = False
+    requires_oom_defrag_retry: bool = False
+    defrag_on_large_prefill: bool = False
 
     def __init__(
         self,
@@ -485,3 +490,69 @@ class FusedMoe(torch.nn.Module):
         ), f"output batch size mismatch: expected {hidden_states.shape}, got {output.shape}"
 
         return output
+
+
+_T = TypeVar("_T")
+
+
+class MoeWorkspace:
+    """Arch-neutral, thread-safe lazy workspace holder owned by a model instance."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._impls: dict[Any, Any] = {}
+        self._caches: dict[tuple[str, str, Optional[int], Optional[int]], dict[Any, Any]] = {}
+        self._retired_graph_buffers: list[Any] = []
+
+    def get_or_create(self, factory: Callable[[], _T], key: Any = None) -> _T:
+        """Return or initialize a keyed sub-workspace owned by this model holder."""
+        cache_key = factory if key is None else key
+        impl = self._impls.get(cache_key)
+        if impl is None:
+            with self._lock:
+                impl = self._impls.get(cache_key)
+                if impl is None:
+                    impl = factory()
+                    self._impls[cache_key] = impl
+        return impl
+
+    @staticmethod
+    def is_graph_context(device: torch.device) -> bool:
+        """Return whether ``device`` is capturing or warming up a CUDA graph."""
+        from rtp_llm.models_py.modules.factory.fused_moe.utils.mega_moe.warmup_sync import (
+            cuda_graph_warmup_forward_enabled,
+        )
+
+        if device.type != "cuda" or not torch.cuda.is_available():
+            return False
+        if cuda_graph_warmup_forward_enabled():
+            return True
+        if device.index is None:
+            return bool(torch.cuda.is_current_stream_capturing())
+        with torch.cuda.device(device):
+            return bool(torch.cuda.is_current_stream_capturing())
+
+    def cache(self, namespace: str, device: torch.device) -> dict[Any, Any]:
+        """Return a per-stream or graph-scoped cache bucket for ``namespace``."""
+        graph = self.is_graph_context(device)
+        if device.type == "cuda" and torch.cuda.is_available():
+            dev_idx = (
+                torch.cuda.current_device() if device.index is None else device.index
+            )
+            stream = None if graph else torch.cuda.current_stream(device).cuda_stream
+        else:
+            dev_idx = device.index
+            stream = None if graph else 0
+        key = (namespace, device.type, dev_idx, stream)
+        with self._lock:
+            bucket = self._caches.get(key)
+            if bucket is None:
+                bucket = {}
+                self._caches[key] = bucket
+            return bucket
+
+    def retire_if_graph(self, device: torch.device, obj: Any) -> None:
+        """Retain superseded buffers created under graph contexts so raw pointers stay valid."""
+        if obj is not None and self.is_graph_context(device):
+            with self._lock:
+                self._retired_graph_buffers.append(obj)

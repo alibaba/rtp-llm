@@ -4,6 +4,7 @@
 #include "vec_dtypes.cuh"
 #include "util.h"
 #include <ATen/cuda/CUDAContext.h>
+#include <c10/cuda/CUDAGuard.h>
 #include <c10/util/Float8_e4m3fn.h>
 #include <cmath>
 #include <type_traits>
@@ -150,13 +151,27 @@ void per_token_group_quant_8bit(torch::Tensor input,
                                 bool          scale_ue8m0 = false) {
     CHECK_INPUT(input);
     CHECK_INPUT(output_q);
+    TORCH_CHECK(output_q.device() == input.device() && output_s.device() == input.device(),
+                "input, output_q, and output_s must be on the same CUDA device");
+    TORCH_CHECK(reinterpret_cast<uintptr_t>(input.data_ptr()) % 16 == 0,
+                "per_token_group_quant_8bit input must be 16-byte aligned");
+    TORCH_CHECK(reinterpret_cast<uintptr_t>(output_q.data_ptr()) % 16 == 0,
+                "per_token_group_quant_8bit output_q must be 16-byte aligned");
 
     const int num_groups = input.numel() / group_size;
 
+    TORCH_CHECK(input.dim() >= 1 && input.size(-1) % group_size == 0,
+                "per_token_group_quant_8bit input last dim must be divisible by group_size");
     CHECK_EQ(input.numel() % group_size, 0);
+    TORCH_CHECK(output_q.numel() == input.numel(),
+                "per_token_group_quant_8bit output_q numel must match input numel");
     CHECK_EQ(output_s.dim(), 2);
+    if (num_groups == 0) {
+        return;
+    }
 
-    cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+    const c10::cuda::CUDAGuard device_guard(input.device());
+    cudaStream_t               stream = at::cuda::getCurrentCUDAStream(input.device().index());
 
     constexpr int THREADS_PER_GROUP = 16;
 
@@ -179,7 +194,16 @@ void per_token_group_quant_8bit(torch::Tensor input,
     const bool is_column_major    = output_s.stride(0) < output_s.stride(1);
     const int  hidden_dim         = input.size(input.dim() - 1);
     const int  num_groups_per_row = hidden_dim / group_size;
+    const int  num_rows           = num_groups / num_groups_per_row;
     const int  scale_stride       = output_s.stride(1);
+    if (is_column_major) {
+        const int elems_per_pack = scale_ue8m0 ? 4 : 1;
+        const int needed_cols    = (num_groups_per_row + elems_per_pack - 1) / elems_per_pack;
+        TORCH_CHECK(output_s.size(0) >= num_rows && output_s.size(1) >= needed_cols,
+                    "per_token_group_quant_8bit output_s too small for column-major scales");
+    } else {
+        TORCH_CHECK(output_s.numel() >= num_groups, "per_token_group_quant_8bit output_s too small");
+    }
 
 #define LAUNCH_KERNEL(T, DST_DTYPE)                                                                                    \
     do {                                                                                                               \

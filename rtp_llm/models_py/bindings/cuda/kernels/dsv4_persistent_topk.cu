@@ -5,10 +5,14 @@
 #include "rtp_llm/models_py/bindings/cuda/kernels/dsv4_persistent_topk.h"
 
 #include <ATen/cuda/CUDAContext.h>
+#include <c10/cuda/CUDAGuard.h>
 #include <cuda_runtime.h>
 #include <torch/all.h>
 
 #include <algorithm>
+#include <array>
+#include <cstdint>
+#include <mutex>
 
 #ifndef USE_ROCM
 #include "rtp_llm/models_py/bindings/cuda/kernels/dsv4_persistent_topk.cuh"
@@ -17,6 +21,29 @@
 namespace torch_ext {
 
 namespace {
+
+struct DeviceTopKAttrs {
+    int            num_sms            = 0;
+    int            max_smem_per_block = 0;
+    std::once_flag once;
+};
+
+void get_device_topk_attrs(int device, int& num_sms, int& max_smem_per_block) {
+    static constexpr int                                  kMaxCachedDevices = 64;
+    static std::array<DeviceTopKAttrs, kMaxCachedDevices> cache;
+    if (device >= 0 && device < kMaxCachedDevices) {
+        auto& entry = cache[device];
+        std::call_once(entry.once, [device, &entry]() {
+            cudaDeviceGetAttribute(&entry.num_sms, cudaDevAttrMultiProcessorCount, device);
+            cudaDeviceGetAttribute(&entry.max_smem_per_block, cudaDevAttrMaxSharedMemoryPerBlockOptin, device);
+        });
+        num_sms            = entry.num_sms;
+        max_smem_per_block = entry.max_smem_per_block;
+        return;
+    }
+    cudaDeviceGetAttribute(&num_sms, cudaDevAttrMultiProcessorCount, device);
+    cudaDeviceGetAttribute(&max_smem_per_block, cudaDevAttrMaxSharedMemoryPerBlockOptin, device);
+}
 
 #ifndef USE_ROCM
 template<int TopK>
@@ -27,18 +54,14 @@ void launch_persistent_topk(const torch::Tensor& logits,
                             int64_t              max_seq_len) {
     namespace P = vllm::persistent;
 
-    const int64_t num_rows = logits.size(0);
-    const int64_t stride   = logits.stride(0);
-    cudaStream_t  stream   = at::cuda::getCurrentCUDAStream();
+    const int64_t num_rows   = logits.size(0);
+    const int64_t stride     = logits.stride(0);
+    const int     device_idx = logits.device().index();
+    cudaStream_t  stream     = at::cuda::getCurrentCUDAStream(device_idx);
 
-    static int num_sms            = 0;
-    static int max_smem_per_block = 0;
-    if (num_sms == 0) {
-        int device;
-        cudaGetDevice(&device);
-        cudaDeviceGetAttribute(&num_sms, cudaDevAttrMultiProcessorCount, device);
-        cudaDeviceGetAttribute(&max_smem_per_block, cudaDevAttrMaxSharedMemoryPerBlockOptin, device);
-    }
+    int num_sms            = 0;
+    int max_smem_per_block = 0;
+    get_device_topk_attrs(device_idx, num_sms, max_smem_per_block);
 
     if (num_rows > 32 && max_smem_per_block >= 128 * 1024) {
         cudaError_t status = vllm::FilteredTopKRaggedTransform<float, int32_t, TopK>(logits.data_ptr<float>(),
@@ -50,8 +73,12 @@ void launch_persistent_topk(const torch::Tensor& logits,
                                                                                      stream);
         TORCH_CHECK(status == cudaSuccess, "FilteredTopK failed: ", cudaGetErrorString(status));
     } else {
-        TORCH_CHECK(workspace.is_cuda(), "workspace must be CUDA tensor");
+        TORCH_CHECK(workspace.is_cuda() && workspace.device() == logits.device(),
+                    "workspace must be on the same CUDA device as logits");
         TORCH_CHECK(workspace.dtype() == torch::kUInt8, "workspace must be uint8");
+        TORCH_CHECK(workspace.is_contiguous(), "workspace must be contiguous");
+        TORCH_CHECK(reinterpret_cast<uintptr_t>(workspace.data_ptr()) % alignof(P::RadixRowState) == 0,
+                    "workspace must be aligned to RadixRowState");
 
         int effective_max_smem;
         if (num_rows <= 4) {
@@ -66,10 +93,11 @@ void launch_persistent_topk(const torch::Tensor& logits,
         size_t   available_for_ordered = static_cast<size_t>(effective_max_smem) - P::kFixedSmemLarge;
         uint32_t max_chunk_elements    = static_cast<uint32_t>(available_for_ordered / sizeof(uint32_t));
 
-        uint32_t vec_size = 1;
-        if (stride % 4 == 0)
+        const uintptr_t logits_addr = reinterpret_cast<uintptr_t>(logits.data_ptr<float>());
+        uint32_t        vec_size    = 1;
+        if (stride % 4 == 0 && logits_addr % 16 == 0)
             vec_size = 4;
-        else if (stride % 2 == 0)
+        else if (stride % 2 == 0 && logits_addr % 8 == 0)
             vec_size = 2;
 
         max_chunk_elements = (max_chunk_elements / vec_size) * vec_size;
@@ -149,16 +177,14 @@ void launch_persistent_topk(const torch::Tensor& logits,
         }
 
         size_t state_bytes = num_groups * sizeof(P::RadixRowState);
-        TORCH_CHECK(workspace.size(0) >= static_cast<int64_t>(state_bytes),
+        TORCH_CHECK(workspace.numel() >= static_cast<int64_t>(state_bytes),
                     "workspace too small, need ",
                     state_bytes,
                     " bytes");
 
         {
             cudaError_t mz_err = cudaMemsetAsync(workspace.data_ptr<uint8_t>(), 0, state_bytes, stream);
-            TORCH_CHECK(mz_err == cudaSuccess,
-                        "row_states memset failed: ",
-                        cudaGetErrorString(mz_err));
+            TORCH_CHECK(mz_err == cudaSuccess, "row_states memset failed: ", cudaGetErrorString(mz_err));
         }
 
         P::PersistentTopKParams params;
@@ -206,8 +232,11 @@ void dsv4_persistent_topk(const torch::Tensor& logits,
                           int64_t              max_seq_len) {
 #ifndef USE_ROCM
     TORCH_CHECK(logits.is_cuda(), "logits must be CUDA tensor");
-    TORCH_CHECK(lengths.is_cuda(), "lengths must be CUDA tensor");
-    TORCH_CHECK(output.is_cuda(), "output must be CUDA tensor");
+    TORCH_CHECK(lengths.is_cuda() && lengths.device() == logits.device(),
+                "lengths must be on the same CUDA device as logits");
+    TORCH_CHECK(output.is_cuda() && output.device() == logits.device(),
+                "output must be on the same CUDA device as logits");
+    const c10::cuda::CUDAGuard device_guard(logits.device());
     TORCH_CHECK(logits.dtype() == torch::kFloat32, "Only float32 supported");
     TORCH_CHECK(lengths.dtype() == torch::kInt32, "lengths must be int32");
     TORCH_CHECK(output.dtype() == torch::kInt32, "output must be int32");
@@ -216,6 +245,7 @@ void dsv4_persistent_topk(const torch::Tensor& logits,
     TORCH_CHECK(lengths.is_contiguous(), "lengths must be contiguous");
     TORCH_CHECK(logits.stride(1) == 1, "logits rows must be contiguous");
     TORCH_CHECK(output.dim() == 2, "output must be 2D");
+    TORCH_CHECK(output.is_contiguous(), "output must be contiguous");
 
     const int64_t num_rows = logits.size(0);
 

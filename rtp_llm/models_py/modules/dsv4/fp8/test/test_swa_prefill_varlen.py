@@ -959,5 +959,20 @@ class ViaConcatScatterTest(unittest.TestCase):
         self.assertTrue(torch.all(ws[1, 11:, :] == 0))
 
 
+class SuffixPoolSlotMappingTest(unittest.TestCase):
+    def test_sparse_absolute_block_columns_are_not_compacted(self) -> None:
+        slots = _build_suffix_pool_slot_mapping(
+            block_table=torch.tensor([[-1, -1, 10, 11]], dtype=torch.int32),
+            seq_lens=torch.tensor([256], dtype=torch.int32),
+            gather_lens=torch.tensor([128], dtype=torch.int32),
+            entries_per_block=64,
+            tokens_per_block_for_block_table=64,
+            ring_entries=64,
+        )
+
+        self.assertEqual(tuple(slots.shape), (1, 128))
+        self.assertTrue(torch.equal(slots[0], torch.arange(640, 768)))
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -1,10 +1,12 @@
 import copy
 import functools
+from contextlib import nullcontext
 from typing import Any, Dict, List, Optional, Union
 
 import torch
 
 from rtp_llm.config.quant_config import Fp8BlockWiseQuantConfig, QuantizationConfig
+from rtp_llm.device.device_type import DeviceType
 from rtp_llm.model_loader.attn_weight import AttnAtomicWeight, MlaAttnAtomicWeight
 from rtp_llm.model_loader.ffn_weight import FfnAtomicWeight, MoeAtomicWeight
 from rtp_llm.model_loader.linear_attn_weight import (
@@ -52,6 +54,32 @@ B_SUFFIX = ".bias"
 QW_SUFFIX = ".weight"
 QS_SUFFIX = ".weight_scale_inv"
 APPEND_SUFFIX = "_scale_inv"
+
+
+def _resolve_target_cuda_device(
+    kernel_weight: torch.Tensor, load_config: LoadConfig
+) -> Optional[Union[int, str]]:
+    """Resolve target CUDA ordinal, 'cpu' for explicit CPU residency, or None if unspecified."""
+    if kernel_weight.is_cuda:
+        return kernel_weight.device.index
+    target_device = getattr(load_config, "target_device", None)
+    if isinstance(target_device, (str, torch.device)):
+        target = torch.device(target_device)
+        if target.type != "cuda":
+            return "cpu"
+        if target.index is not None:
+            return target.index
+        if torch.cuda.is_available():
+            return torch.cuda.current_device()
+        return 0
+    exported_device = getattr(load_config, "exported_device", None)
+    if exported_device is not None:
+        dev_type = exported_device.get_device_type()
+        if dev_type == DeviceType.Cpu:
+            return "cpu"
+        if dev_type == DeviceType.Cuda:
+            return int(exported_device.get_device_id())
+    return None
 
 
 def dequant_weight_split_k(
@@ -888,18 +916,25 @@ class PerBlockFp8Weight(CompositeWeight, QuantWeight):
         from rtp_llm.models_py.kernels.cuda.deepgemm_wrapper import (
             is_deep_gemm_e8m0_used,
         )
+        from rtp_llm.models_py.kernels.cuda.fp8_kernel import requant_weight_ue8m0
         from rtp_llm.models_py.kernels.cuda.fp8_kernel.fp8_kernel import (
             _transform_scale_ue8m0,
-            requant_weight_ue8m0,
         )
 
-        # need reshape for kernel weight
         processed_res = super()._postprocess(tensor, device, load_config)
         kernel_weight = processed_res[self.kernel.name]
 
-        # e8m0 not reshape, weight scale need be non contiguous
-        # TODO: rm reshape all time
-        if not is_deep_gemm_e8m0_used():
+        # Preserve (N, K) layout when UE8M0 packed scales are used; reshape legacy layouts.
+        target_device = _resolve_target_cuda_device(kernel_weight, load_config)
+        is_dense_weight = self.kernel.name not in (W.moe_w1, W.moe_w2)
+        if target_device == "cpu":
+            use_e8m0 = False
+        elif isinstance(target_device, int):
+            use_e8m0 = is_deep_gemm_e8m0_used(target_device)
+        else:
+            use_e8m0 = is_deep_gemm_e8m0_used()
+        reshape_legacy = not use_e8m0
+        if reshape_legacy:
             kernel_weight = (
                 kernel_weight.reshape(kernel_weight.shape[-1], -1)
                 if kernel_weight.dim() == 2
@@ -909,7 +944,7 @@ class PerBlockFp8Weight(CompositeWeight, QuantWeight):
         if self.scale is not None:
             scale_weight = processed_res[self.scale.name]
             native_e8m0_dtype = getattr(torch, "float8_e8m0fnu", None)
-            if not is_deep_gemm_e8m0_used():
+            if reshape_legacy:
                 if (
                     native_e8m0_dtype is not None
                     and scale_weight.dtype == native_e8m0_dtype
@@ -930,24 +965,34 @@ class PerBlockFp8Weight(CompositeWeight, QuantWeight):
                 scale_weight,
                 use_swizzle_a=load_config.use_swizzleA,
             )
-            # kernel_weight, scale_weight = load_config.exported_device.convert_fp8_weight_params(kernel_weight, scale_weight)
 
-            skip_moe_scale_repack = self.kernel.name in (
-                W.moe_w1,
-                W.moe_w2,
-            ) and load_config.moe_strategy in ("mega_moe_fp8", "mega_moe_fp8_se")
-            if is_deep_gemm_e8m0_used() and not skip_moe_scale_repack:
-                if (
-                    native_e8m0_dtype is not None
-                    and scale_weight.dtype == native_e8m0_dtype
-                ):
-                    scale_weight = _transform_scale_ue8m0(
-                        scale_weight, mn=kernel_weight.shape[-2]
-                    )
-                elif scale_weight.dtype != torch.int32:
-                    kernel_weight, scale_weight = requant_weight_ue8m0(
-                        kernel_weight, scale_weight
-                    )
+            skip_moe_scale_repack = (
+                not is_dense_weight
+                and load_config.moe_strategy
+                in (
+                    "mega_moe_fp8",
+                    "mega_moe_fp8_se",
+                )
+            )
+            if use_e8m0 and not skip_moe_scale_repack:
+                dev_ctx = (
+                    torch.cuda.device(target_device)
+                    if isinstance(target_device, int) and torch.cuda.is_available()
+                    else nullcontext()
+                )
+                with dev_ctx:
+                    if (
+                        native_e8m0_dtype is not None
+                        and scale_weight.dtype == native_e8m0_dtype
+                    ):
+                        scale_weight = _transform_scale_ue8m0(
+                            scale_weight, mn=kernel_weight.shape[-2]
+                        )
+                    # Online loading may already provide the final packed scales.
+                    elif scale_weight.dtype != torch.int32:
+                        kernel_weight, scale_weight = requant_weight_ue8m0(
+                            kernel_weight, scale_weight
+                        )
 
             processed_res[self.scale.name] = scale_weight
             processed_res[self.kernel.name] = kernel_weight
@@ -1067,9 +1112,15 @@ class LoadQuantPerBlockFp8Weight(PerBlockFp8Weight):
         )
 
         is_dense_weight = self.kernel.name not in (W.moe_w1, W.moe_w2)
-        direct_ue8m0 = (
-            self.scale is not None and is_dense_weight and is_deep_gemm_e8m0_used()
+        target_device = _resolve_target_cuda_device(
+            kernel[self.kernel.name], load_config
         )
+        if self.scale is None or not is_dense_weight or target_device == "cpu":
+            direct_ue8m0 = False
+        elif isinstance(target_device, int):
+            direct_ue8m0 = is_deep_gemm_e8m0_used(target_device)
+        else:
+            direct_ue8m0 = is_deep_gemm_e8m0_used()
         if direct_ue8m0 and self.group_size != 128:
             raise ValueError(
                 "SM100/SM120 DeepGEMM packed UE8M0 requires group_size=128, "
@@ -1093,9 +1144,15 @@ class LoadQuantPerBlockFp8Weight(PerBlockFp8Weight):
             # AtomicWeight already merged HF Q/K/V [N_i, K] into [K, N].
             # Quantization and the head splitters below consume [N, K].
             source_weight = source_weight.T
-            quant_kernel, scale = quant_weight_ue8m0_packed(
-                source_weight.contiguous().to(device)
+            dev_ctx = (
+                torch.cuda.device(target_device)
+                if isinstance(target_device, int) and torch.cuda.is_available()
+                else nullcontext()
             )
+            with dev_ctx:
+                quant_kernel, scale = quant_weight_ue8m0_packed(
+                    source_weight.contiguous().to(device)
+                )
         elif self.scale:
             quant_kernel, scale = per_block_cast_to_fp8(
                 kernel.get(self.kernel.name), self.group_size
@@ -1105,6 +1162,8 @@ class LoadQuantPerBlockFp8Weight(PerBlockFp8Weight):
         else:
             quant_kernel = cast_to_fp8(kernel.get(self.kernel.name))
 
+        # Generic BF16 descriptors produce input-major [K, N], including
+        # composite QKV and FFN merges. Both dense FP8 backends consume [N, K].
         if self.kernel.name == W.moe_w1 or self.kernel.name == W.moe_w2:
             pass
         elif quant_kernel.dim() == 2 and not direct_ue8m0:

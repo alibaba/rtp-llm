@@ -66,9 +66,7 @@ def init_server(
 ):
 
     py_env_configs.server_config.ip = socket.gethostbyname(socket.gethostname())
-    set_parallelism_config(
-        py_env_configs.parallelism_config, rank
-    )
+    set_parallelism_config(py_env_configs.parallelism_config, rank)
     py_env_configs.server_config.set_local_rank(
         py_env_configs.parallelism_config.local_rank
     )
@@ -87,9 +85,7 @@ def regist_server(
     stop_event: threading.Event,
 ):
     py_env_configs.server_config.ip = socket.gethostbyname(socket.gethostname())
-    set_parallelism_config(
-        py_env_configs.parallelism_config, rank
-    )
+    set_parallelism_config(py_env_configs.parallelism_config, rank)
     py_env_configs.server_config.set_local_rank(
         py_env_configs.parallelism_config.local_rank
     )
@@ -108,9 +104,7 @@ def start_server(
     world_size: int,
 ):
     py_env_configs.server_config.ip = socket.gethostbyname(socket.gethostname())
-    set_parallelism_config(
-        py_env_configs.parallelism_config, rank
-    )
+    set_parallelism_config(py_env_configs.parallelism_config, rank)
     py_env_configs.server_config.set_local_rank(
         py_env_configs.parallelism_config.local_rank
     )
@@ -196,16 +190,295 @@ class PPPartitionConsistencyTest(unittest.TestCase):
     def test_missing_rank_snapshot_becomes_bounded_store_failure(self):
         server = self._server()
         with self.assertRaisesRegex(RuntimeError, "world_rank=1"):
-            server.validate_pp_partition_consistency(
-                self._config(world_size=2)
-            )
+            server.validate_pp_partition_consistency(self._config(world_size=2))
 
     def test_single_stage_does_not_touch_store(self):
         server = self._server()
-        server.validate_pp_partition_consistency(
-            self._config(world_size=1, pp_size=1)
-        )
+        server.validate_pp_partition_consistency(self._config(world_size=1, pp_size=1))
         self.assertEqual(server.store._data, {})
+
+
+class MoeEpConsistencyTest(unittest.TestCase):
+    @staticmethod
+    def _snap(
+        rank,
+        *,
+        role_type=0,
+        pp_size=1,
+        dp_size=4,
+        tp_size=1,
+        ep_size=4,
+        cap=(12, 0),
+        moe_strategy="sm120_a2a_decode",
+        use_deepep_moe=False,
+        use_deepep_low_latency=False,
+        use_deepep_internode=False,
+        use_mori_ep=False,
+        use_all_gather=False,
+        deepep_supported=False,
+    ):
+        return ds.MoeEpRuntimeSnapshot(
+            world_rank=rank,
+            role_type=role_type,
+            pp_size=pp_size,
+            dp_size=dp_size,
+            tp_size=tp_size,
+            ep_size=ep_size,
+            cuda_capability=cap,
+            is_sm120=(cap == (12, 0)),
+            moe_strategy=moe_strategy,
+            use_deepep_moe=use_deepep_moe,
+            use_deepep_low_latency=use_deepep_low_latency,
+            use_deepep_internode=use_deepep_internode,
+            use_mori_ep=use_mori_ep,
+            use_all_gather=use_all_gather,
+            deepep_supported=deepep_supported,
+        )
+
+    def test_homogeneous_sm120_and_sm100_pass(self):
+        ds.validate_moe_ep_snapshots([self._snap(r) for r in range(4)])
+        ds.validate_moe_ep_snapshots(
+            [
+                self._snap(
+                    r,
+                    cap=(10, 0),
+                    moe_strategy="auto",
+                    use_deepep_moe=True,
+                    deepep_supported=True,
+                )
+                for r in range(8)
+            ]
+        )
+
+    def test_mixed_sm100_and_sm120_ranks_rejected(self):
+        for deepep_flag in (False, True):
+            with self.subTest(use_deepep_moe=deepep_flag):
+                snaps = [
+                    self._snap(
+                        0,
+                        cap=(10, 0),
+                        moe_strategy="auto",
+                        use_deepep_moe=deepep_flag,
+                        deepep_supported=True,
+                    ),
+                    self._snap(
+                        1,
+                        cap=(10, 0),
+                        moe_strategy="auto",
+                        use_deepep_moe=deepep_flag,
+                        deepep_supported=True,
+                    ),
+                    self._snap(
+                        2,
+                        cap=(12, 0),
+                        moe_strategy="sm120_a2a_decode",
+                        use_deepep_moe=deepep_flag,
+                        deepep_supported=False,
+                    ),
+                    self._snap(
+                        3,
+                        cap=(12, 0),
+                        moe_strategy="sm120_a2a_decode",
+                        use_deepep_moe=deepep_flag,
+                        deepep_supported=False,
+                    ),
+                ]
+                with self.assertRaisesRegex(ValueError, "mismatch"):
+                    ds.validate_moe_ep_snapshots(snaps)
+
+    def test_explicit_deepep_on_unsupported_sm120_rejected(self):
+        snaps = [
+            self._snap(
+                r,
+                cap=(12, 0),
+                moe_strategy="sm120_a2a_decode",
+                use_deepep_moe=True,
+                deepep_supported=False,
+            )
+            for r in range(4)
+        ]
+        with self.assertRaisesRegex(ValueError, "unsupported ranks"):
+            ds.validate_moe_ep_snapshots(snaps)
+
+    def test_mixed_deepep_supported_allowed_when_deepep_not_selected_and_rejected_when_selected(
+        self,
+    ):
+        for use_all_gather, use_deepep_moe in (
+            (True, False),
+            (True, True),
+            (False, False),
+        ):
+            with self.subTest(
+                use_all_gather=use_all_gather, use_deepep_moe=use_deepep_moe
+            ):
+                snaps = [
+                    self._snap(
+                        r,
+                        cap=(9, 0),
+                        moe_strategy="auto",
+                        use_all_gather=use_all_gather,
+                        use_deepep_moe=use_deepep_moe,
+                        deepep_supported=(r == 0),
+                    )
+                    for r in range(4)
+                ]
+                ds.validate_moe_ep_snapshots(snaps)
+
+        selected_snaps = [
+            self._snap(
+                r,
+                cap=(9, 0),
+                moe_strategy="auto",
+                use_all_gather=False,
+                use_deepep_moe=True,
+                deepep_supported=(r == 0),
+            )
+            for r in range(4)
+        ]
+        with self.assertRaisesRegex(ValueError, "unsupported ranks"):
+            ds.validate_moe_ep_snapshots(selected_snaps)
+
+    def test_pp_stage_asymmetry_and_pure_pp_preserved(self):
+        # Pure PP (ep_size=1) across heterogeneous stages is allowed.
+        pure_pp = [
+            self._snap(
+                0,
+                pp_size=2,
+                dp_size=1,
+                tp_size=1,
+                ep_size=1,
+                cap=(10, 0),
+                moe_strategy="auto",
+                deepep_supported=True,
+            ),
+            self._snap(
+                1,
+                pp_size=2,
+                dp_size=1,
+                tp_size=1,
+                ep_size=1,
+                cap=(12, 0),
+                moe_strategy="auto",
+                deepep_supported=False,
+            ),
+        ]
+        ds.validate_moe_ep_snapshots(pure_pp)
+
+        # Multi-stage PP with ep_size=4 validates per Group.STAGE so stage 0
+        # internode=False and stage 1 internode=True stay valid.
+        multi_stage = [
+            self._snap(
+                r,
+                pp_size=2,
+                dp_size=1,
+                tp_size=4,
+                ep_size=4,
+                cap=(10, 0),
+                moe_strategy="auto",
+                use_deepep_moe=True,
+                use_deepep_internode=(r >= 4),
+                deepep_supported=True,
+            )
+            for r in range(8)
+        ]
+        ds.validate_moe_ep_snapshots(multi_stage)
+
+    def test_distributed_server_store_handles_dense_noop_and_ep_skew(self):
+        server = PPPartitionConsistencyTest._server()
+        cfg = SimpleNamespace(
+            parallelism_config=SimpleNamespace(
+                world_rank=0,
+                world_size=2,
+                role_type=0,
+                pp_size=1,
+                dp_size=2,
+                tp_size=1,
+                ep_size=2,
+            ),
+            moe_config=SimpleNamespace(
+                moe_strategy="sm120_a2a_decode",
+                use_deepep_moe=False,
+                use_deepep_low_latency=False,
+                use_deepep_internode=False,
+                use_mori_ep=False,
+                use_all_gather=False,
+            ),
+        )
+        # Dense model (expert_num == 0): no TCPStore exchange.
+        server.validate_moe_ep_consistency(cfg, expert_num=0)
+        self.assertEqual(server.store._data, {})
+
+        # Rank 1 published ep_size=1 (skewed against rank 0's ep_size=2).
+        skewed_r1 = self._snap(1, dp_size=1, ep_size=1, moe_strategy="auto")
+        server.store.set(
+            server.MOE_EP_SNAPSHOT_KEY + "1",
+            json.dumps(skewed_r1.to_dict()),
+        )
+        with (
+            patch(
+                "rtp_llm.device.cuda_capability.device_cuda_capability",
+                return_value=(12, 0),
+            ),
+            patch(
+                "rtp_llm.models_py.distributed.deepep_wrapper.DeepEPWrapper.supported",
+                return_value=False,
+            ),
+        ):
+            with self.assertRaisesRegex(ValueError, "WORLD topology mismatch"):
+                server.validate_moe_ep_consistency(cfg, expert_num=256)
+
+    def test_validate_moe_ep_consistency_skips_deepep_import_when_not_required(self):
+        for use_deepep, use_all_gather in ((False, False), (True, True)):
+            with self.subTest(use_deepep=use_deepep, use_all_gather=use_all_gather):
+                server = PPPartitionConsistencyTest._server()
+                cfg = SimpleNamespace(
+                    parallelism_config=SimpleNamespace(
+                        world_rank=0,
+                        world_size=2,
+                        role_type=0,
+                        pp_size=1,
+                        dp_size=2,
+                        tp_size=1,
+                        ep_size=2,
+                    ),
+                    moe_config=SimpleNamespace(
+                        moe_strategy="sm120_a2a_decode",
+                        use_deepep_moe=use_deepep,
+                        use_deepep_low_latency=False,
+                        use_deepep_internode=False,
+                        use_mori_ep=False,
+                        use_all_gather=use_all_gather,
+                    ),
+                )
+                r1 = self._snap(
+                    1,
+                    dp_size=2,
+                    ep_size=2,
+                    cap=(12, 0),
+                    moe_strategy="sm120_a2a_decode",
+                    use_deepep_moe=use_deepep,
+                    use_all_gather=use_all_gather,
+                    deepep_supported=False,
+                )
+                server.store.set(
+                    server.MOE_EP_SNAPSHOT_KEY + "1",
+                    json.dumps(r1.to_dict()),
+                )
+                with (
+                    patch.dict(
+                        "sys.modules",
+                        {"rtp_llm.models_py.distributed.deepep_wrapper": None},
+                    ),
+                    patch(
+                        "rtp_llm.device.cuda_capability.device_cuda_capability",
+                        return_value=(12, 0),
+                    ),
+                ):
+                    server.validate_moe_ep_consistency(cfg, expert_num=256)
+                published = ds.MoeEpRuntimeSnapshot.from_dict(
+                    json.loads(server.store.get(server.MOE_EP_SNAPSHOT_KEY + "0"))
+                )
+                self.assertFalse(published.deepep_supported)
 
 
 class DistributedServerTest(unittest.TestCase):

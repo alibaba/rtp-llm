@@ -1669,13 +1669,10 @@ def _generate_dense_gemm_warmup_m_grid(
 
 
 def _mhc_prenorm_deepgemm_backend_enabled() -> bool:
-    # DeepGEMM is the only mHC prenorm GEMM backend; constant seam kept for
-    # warmup tests that patch this selector.
     return True
 
 
 def _mhc_prenorm_deepgemm_backend_name() -> str:
-    # DeepGEMM is the only mHC prenorm GEMM backend.
     return "deepgemm"
 
 
@@ -1727,15 +1724,6 @@ def _generate_mhc_prenorm_warmup_specs(
             break
 
     return tuple((split, reps_by_split[split]) for split in sorted(reps_by_split))
-
-
-def _fp8_mqa_logits_available() -> bool:
-    try:
-        import deep_gemm
-
-        return hasattr(deep_gemm, "fp8_mqa_logits")
-    except Exception:
-        return False
 
 
 @torch.inference_mode()
@@ -1834,6 +1822,12 @@ def warmup_batched_fp8_einsum_jit(
     device = torch.device(device)
     if not _is_cuda_device(device) or not shapes:
         return
+    from rtp_llm.models_py.modules.dsv4.fp8.attention_backend import (
+        get_sparse_attention_backend,
+    )
+
+    if not get_sparse_attention_backend(device).uses_deepgemm_einsum:
+        return
     _assert_not_capturing()
 
     num_sms = _get_deep_gemm_num_sms(device)
@@ -1925,16 +1919,29 @@ def warmup_mhc_prenorm_gemm_jit(
 
     backend = _mhc_prenorm_deepgemm_backend_name()
     num_sms = _get_deep_gemm_num_sms(device)
+    sm_counts = [num_sms]
+    if torch.cuda.is_available():
+        phys_sms = int(torch.cuda.get_device_properties(device).multi_processor_count)
+        if phys_sms > 0 and phys_sms not in sm_counts:
+            sm_counts.append(phys_sms)
+
     shape_keys = tuple(sorted(shapes.keys()))
-    specs_by_shape = {
-        key: _generate_mhc_prenorm_warmup_specs(
-            max_m=int(max_m),
-            k_value=int(key[1]),
-            num_sms=num_sms,
-        )
-        for key in shape_keys
-    }
-    specs_by_shape = {key: specs for key, specs in specs_by_shape.items() if specs}
+    if not _mhc_prenorm_deepgemm_backend_enabled():
+        return
+    specs_by_shape = {}
+    for key in shape_keys:
+        by_split: dict[int, int] = {}
+        for sm_count in sm_counts:
+            for split, m_value in _generate_mhc_prenorm_warmup_specs(
+                max_m=int(max_m),
+                k_value=int(key[1]),
+                num_sms=sm_count,
+            ):
+                by_split.setdefault(split, m_value)
+        if by_split:
+            specs_by_shape[key] = tuple(
+                (split, by_split[split]) for split in sorted(by_split)
+            )
     if not specs_by_shape:
         return
 
@@ -1942,7 +1949,7 @@ def warmup_mhc_prenorm_gemm_jit(
         int(max_m),
         str(backend),
         tuple((key, specs_by_shape.get(key, ())) for key in shape_keys),
-        int(num_sms),
+        tuple(sm_counts),
         str(device),
     )
     if warmup_key in _MHC_PRENORM_GEMM_JIT_WARMED_KEYS:
@@ -1952,11 +1959,11 @@ def warmup_mhc_prenorm_gemm_jit(
     if rank == 0:
         total_launches = sum(len(specs) for specs in specs_by_shape.values())
         logging.info(
-            "[DSV4 mHC] JIT warmup start: %d shapes, %d num_splits launches, max_m=%d, num_sms=%d, backend=%s: %s",
+            "[DSV4 mHC] JIT warmup start: %d shapes, %d num_splits launches, max_m=%d, sm_counts=%s, backend=%s: %s",
             len(shape_keys),
             total_launches,
             int(max_m),
-            num_sms,
+            sm_counts,
             backend,
             shape_keys,
         )
@@ -2070,11 +2077,23 @@ def warmup_fp8_mqa_logits_jit(
     device = torch.device(device)
     if not _is_cuda_device(device) or not shapes:
         return
-    if not _fp8_mqa_logits_available():
+    from rtp_llm.models_py.modules.dsv4.fp8._indexer_score import (
+        supports_dsv4_mqa_logits,
+    )
+
+    if not supports_dsv4_mqa_logits(device):
         return
     _assert_not_capturing()
 
-    shape_keys = tuple(sorted(shapes.keys()))
+    shape_keys = tuple(
+        sorted(
+            key
+            for key in shapes.keys()
+            if supports_dsv4_mqa_logits(device, num_heads=key[0])
+        )
+    )
+    if not shape_keys:
+        return
     warmup_key = (shape_keys, str(device))
     if warmup_key in _FP8_MQA_LOGITS_JIT_WARMED_KEYS:
         return
@@ -2622,6 +2641,8 @@ def _launch_dummy_fp8_mqa_logits(
 ) -> None:
     import deep_gemm
 
+    from rtp_llm.models_py.utils.arch import is_sm120
+
     num_heads, head_dim = key
     block_q = max(1, 128 // int(num_heads))
     seq_len = max(1, block_q)
@@ -2636,13 +2657,26 @@ def _launch_dummy_fp8_mqa_logits(
     ks = torch.zeros((seq_len,), dtype=torch.int32, device=device)
     ke = torch.full((seq_len,), seq_len_kv, dtype=torch.int32, device=device)
 
-    logits = deep_gemm.fp8_mqa_logits(
-        q,
-        (k, k_scale),
-        weights,
-        ks,
-        ke,
-        False,
-        0,
-    )
+    if is_sm120(device):
+        logits = deep_gemm.fp8_fp4_mqa_logits(
+            (q, None),
+            (k, k_scale),
+            weights,
+            ks,
+            ke,
+            0,
+            None,
+            False,
+            torch.float32,
+        )
+    else:
+        logits = deep_gemm.fp8_mqa_logits(
+            q,
+            (k, k_scale),
+            weights,
+            ks,
+            ke,
+            False,
+            0,
+        )
     del q, k, k_scale, weights, ks, ke, logits

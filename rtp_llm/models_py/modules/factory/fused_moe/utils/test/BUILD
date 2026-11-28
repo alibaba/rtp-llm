@@ -1,10 +1,52 @@
-load("//rtp_llm/models_py/modules/dsv4/test:defs.bzl", "dsv4_py_test", "dsv4_sm100_py_test")
+load("//rtp_llm/models_py/modules/dsv4/test:defs.bzl", "dsv4_py_test", "dsv4_sm100_py_test", "dsv4_sm120_py_test")
 
 _CUDA13_ONLY = select({
     "@//:using_cuda13_x86": [],
     "@//:using_cuda13_arm": [],
     "//conditions:default": ["@platforms//:incompatible"],
 })
+
+dsv4_sm120_py_test(
+    name = "test_sm120_decode_combine",
+    args = [
+        "--deselect=rtp_llm/models_py/modules/factory/fused_moe/utils/test/test_sm120_decode_combine.py::test_bounded_dispatch_with_real_nccl_2rank",
+        "--deselect=rtp_llm/models_py/modules/factory/fused_moe/utils/test/test_sm120_decode_combine.py::test_bounded_dispatch_with_real_nccl_4rank",
+    ],
+    deps = [
+        "//rtp_llm/models_py:modules",
+        "//rtp_llm:testlib",
+    ],
+    visibility = ["//visibility:public"],
+)
+
+dsv4_sm120_py_test(
+    name = "test_sm120_moe_numerics",
+    deps = [
+        "//rtp_llm/models_py:modules",
+        "//rtp_llm/resident_weights",
+        "//rtp_llm:testlib",
+    ],
+)
+
+dsv4_sm120_py_test(
+    name = "test_sm120_decode_transport",
+    src = "test_sm120_decode_combine.py",
+    gpu_count = 2,
+    tags = ["multi_device"],
+    args = ["-k", "test_bounded_dispatch_with_real_nccl_2rank"],
+    deps = ["//rtp_llm/models_py:modules", "//rtp_llm:testlib"],
+)
+
+dsv4_sm120_py_test(
+    name = "test_sm120_decode_transport_4rank",
+    src = "test_sm120_decode_combine.py",
+    gpu_count = 4,
+    args = ["-k", "test_bounded_dispatch_with_real_nccl_4rank"],
+    # Required DP4/EP4 DECODE baseline. The dedicated four-GPU CI job selects
+    # it explicitly; multi_device keeps it out of broad UT lanes.
+    tags = ["multi_device"],
+    deps = ["//rtp_llm/models_py:modules", "//rtp_llm:testlib"],
+)
 
 py_test(
     name = "timeline_test",
@@ -78,6 +120,16 @@ dsv4_py_test(
 
 dsv4_sm100_py_test(
     name = "test_shared_expert_executor",
+    deps = [
+        "//rtp_llm/models_py:modules",
+        "//rtp_llm:testlib",
+    ],
+    visibility = ["//visibility:public"],
+)
+
+dsv4_sm120_py_test(
+    name = "test_shared_expert_executor_sm120",
+    src = "test_shared_expert_executor.py",
     deps = [
         "//rtp_llm/models_py:modules",
         "//rtp_llm:testlib",

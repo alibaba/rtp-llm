@@ -34,17 +34,21 @@ buffer, since V4 keeps KV in BF16).
 
 from __future__ import annotations
 
+from contextlib import nullcontext
 import os
 
 import torch
 
+from rtp_llm.models_py.modules.dsv4.fp8._indexer_score import (
+    deepgemm_supports_block_kv,
+    fp8_paged_mqa_uses_2d_context_lens,
+    get_fp8_paged_mqa_logits_metadata,
+    prepare_fp8_paged_mqa_inputs,
+    supports_paged_mqa_logits,
+)
 from rtp_llm.models_py.modules.dsv4.indexer_topk import (
     TorchIndexerTopKBackend,
     select_indexer_topk,
-)
-
-from rtp_llm.models_py.modules.dsv4.fp8._indexer_score import (
-    deepgemm_supports_block_kv,
 )
 
 try:
@@ -53,21 +57,23 @@ except Exception:  # pragma: no cover - non-cuda env
     deep_gemm = None  # type: ignore[assignment]
 
 
-def _fast_path_available(device=None, block_kv=None) -> bool:
+def _fast_path_available(device=None, block_kv=64) -> bool:
     """Whether the DeepGEMM paged fast path can serve this device/block.
 
-    Shares the block-size contract with ``fp8_paged_indexer_score`` (SM90/SM100
-    accept ``block_kv == 64``; SM100 additionally accepts 32), so the decode op
-    and the indexer score wrapper cannot drift apart.
+    Shares the ABI + block-size contract with ``fp8_paged_indexer_score`` so
+    the decode op and the indexer score wrapper cannot drift apart.
     """
     if not (
         torch.cuda.is_available()
         and deep_gemm is not None
         and hasattr(deep_gemm, "fp8_paged_mqa_logits")
-        and hasattr(deep_gemm, "get_paged_mqa_logits_metadata")
+        and (
+            hasattr(deep_gemm, "get_legacy_paged_mqa_logits_metadata")
+            or hasattr(deep_gemm, "get_paged_mqa_logits_metadata")
+        )
     ):
         return False
-    return block_kv is None or deepgemm_supports_block_kv(device, block_kv)
+    return supports_paged_mqa_logits(device, block_kv, backend=deep_gemm)
 
 
 _USE_DEEP_GEMM_FAST_PATH = (
@@ -82,21 +88,24 @@ def _fast_path_unavailable_reason(q_indexer: torch.Tensor, block_kv=None) -> str
         return "torch.cuda.is_available() is False"
     if deep_gemm is None:
         return "deep_gemm import failed"
-    missing = [
-        name
-        for name in ("fp8_paged_mqa_logits", "get_paged_mqa_logits_metadata")
-        if not hasattr(deep_gemm, name)
-    ]
-    if missing:
-        return f"deep_gemm missing required symbols: {missing}"
+    if not hasattr(deep_gemm, "fp8_paged_mqa_logits"):
+        return "deep_gemm missing required symbol: fp8_paged_mqa_logits"
+    if not (
+        hasattr(deep_gemm, "get_legacy_paged_mqa_logits_metadata")
+        or hasattr(deep_gemm, "get_paged_mqa_logits_metadata")
+    ):
+        return "deep_gemm missing required metadata symbol"
     if block_kv is not None and not deepgemm_supports_block_kv(
-        q_indexer.device, block_kv
+        q_indexer.device, block_kv, backend=deep_gemm
     ):
         return (
             f"deep_gemm paged MQA logits does not accept block_kv={block_kv} on "
             f"capability {torch.cuda.get_device_capability(q_indexer.device)}"
         )
-    return "unknown"
+    return (
+        "deep_gemm paged MQA logits is not supported on capability "
+        f"{torch.cuda.get_device_capability(q_indexer.device)}"
+    )
 
 
 class IndexerDecodeV4Op:
@@ -180,9 +189,8 @@ class IndexerDecodeV4Op:
         assert out_buffer.dtype == torch.int32, "out_buffer must be int32"
 
         if (not force_reference) and _USE_DEEP_GEMM_FAST_PATH:
-            if (
-                not _fast_path_available(q_indexer.device, self.page_block_size)
-                or not q_indexer.is_cuda
+            if not q_indexer.is_cuda or not _fast_path_available(
+                q_indexer.device, self.page_block_size
             ):
                 raise RuntimeError(
                     "DSV4 indexer decode fast path is required by default but "
@@ -269,6 +277,16 @@ class IndexerDecodeV4Op:
         )
 
         B, q_len, H, D = q_indexer.shape
+        if B == 0 or q_len == 0 or out_buffer.numel() == 0:
+            return out_buffer
+        if kv_indexer.shape[1] == 0:
+            out_buffer.fill_(-1)
+            return out_buffer
+        if D != self.block_size:
+            raise ValueError(
+                f"DSV4 indexer decode fast path requires head dim {D} == "
+                f"block_size {self.block_size}"
+            )
         T_max = kv_indexer.shape[1]
         device = q_indexer.device
         block_kv = self.page_block_size  # paged blocksize
@@ -289,20 +307,26 @@ class IndexerDecodeV4Op:
         q_fp8 = q_fp8.view(B * q_len, H, D)
 
         # Fold per-token Q scale into ``weights`` (kernel expects scaled weights).
+        unpack_ue8m0_scale = None
         if self.scale_fmt == "ue8m0":
             from rtp_llm.models_py.modules.base.cuda.indexer_op import (
                 _unpack_ue8m0_scale,
             )
 
-            q_scale = _unpack_ue8m0_scale(q_scale)
+            unpack_ue8m0_scale = _unpack_ue8m0_scale
+            q_scale = unpack_ue8m0_scale(q_scale)
         q_scale = q_scale.view(B * q_len, H, 1)
         scaled_weights = (
-            weights.contiguous().view(B * q_len, H, 1).float()
-            * q_scale.float()
-            * self.softmax_scale
-        ).view(B * q_len, H)
+            (
+                weights.contiguous().view(B * q_len, H, 1).float()
+                * q_scale.float()
+                * self.softmax_scale
+            )
+            .view(B * q_len, H)
+            .contiguous()
+        )
 
-        # ---- Quantize K and pack into per-block (data || scale) layout -
+        # ---- Quantize K and pack into per-block striped (K || scale) ---
         # Pad KV to block-aligned T_padded.
         if T_padded != T_max:
             kv_padded = torch.zeros(
@@ -315,61 +339,51 @@ class IndexerDecodeV4Op:
             kv_padded = kv_indexer.contiguous()
 
         k_flat = kv_padded.view(-1, D)  # [B*T_padded, D]
+        use_ue8m0 = self.scale_fmt == "ue8m0"
         k_fp8, k_scale = sgl_per_token_group_quant_fp8(
             k_flat,
             group_size=self.block_size,
             eps=1e-4,
-            column_major_scales=False,
-            scale_tma_aligned=False,
-            scale_ue8m0=(self.scale_fmt == "ue8m0"),
+            column_major_scales=use_ue8m0,
+            scale_tma_aligned=use_ue8m0,
+            scale_ue8m0=use_ue8m0,
         )
-        # k_scale is [B*T_padded, D//group_size] either int32 (ue8m0) or fp32.
-        # Pack each token as: [data fp8 (D bytes)] || [scale fp32 per group].
+        # k_scale is [B*T_padded, D//group_size] either packed int32 (ue8m0) or fp32.
+        # DeepGEMM expects a per-block striped layout matching _indexer_quant_triton:
+        # [0 : block_kv*D) = all K bytes in the block,
+        # [block_kv*D : block_kv*(D+4)) = all fp32 K scales in the block.
         scales_per_token = D // self.block_size  # 1 for D=128, group=128
         head_dim_with_sf = D + scales_per_token * 4  # bytes per token
 
-        # Build [num_blocks, blocksize, 1, head_dim_with_sf] uint8 cache.
         num_blocks = B * num_blocks_per_req
         kv_cache_u8 = torch.zeros(
             (num_blocks, block_kv, 1, head_dim_with_sf),
             dtype=torch.uint8,
             device=device,
         )
-        # Reshape data: per block of block_kv tokens.
-        k_fp8_blk = (
-            k_fp8.view(B, num_blocks_per_req, block_kv, D)
-            .view(
-                num_blocks,
-                block_kv,
-                D,
-            )
+        kv_block_bytes = kv_cache_u8.view(num_blocks, block_kv * head_dim_with_sf)
+        k_data_bytes = block_kv * D
+        kv_block_bytes[:, :k_data_bytes].copy_(
+            k_fp8.view(num_blocks, block_kv, D)
+            .contiguous()
             .view(torch.uint8)
+            .reshape(num_blocks, k_data_bytes)
         )
-        kv_cache_u8[:, :, 0, :D] = k_fp8_blk
-
-        # Scale: k_scale is shape [B*T_padded, scales_per_token].
-        if self.scale_fmt == "ue8m0":
-            # int32 packed scales -> view as 4 bytes each.
-            k_scale_u8 = k_scale.view(
-                B, num_blocks_per_req, block_kv, scales_per_token
-            ).contiguous()
-            k_scale_u8 = k_scale_u8.view(num_blocks, block_kv, scales_per_token).view(
-                torch.uint8
+        k_scale_f32 = (
+            unpack_ue8m0_scale(k_scale)
+            if unpack_ue8m0_scale is not None
+            else k_scale.to(torch.float32)
+        )
+        k_scale_contig = k_scale_f32.contiguous().reshape(
+            num_blocks, block_kv * scales_per_token
+        )
+        if k_scale_contig.stride(-1) != 1:
+            k_scale_contig = k_scale_contig.clone(memory_format=torch.contiguous_format)
+        kv_block_bytes[:, k_data_bytes:].copy_(
+            k_scale_contig.view(torch.uint8).reshape(
+                num_blocks, block_kv * scales_per_token * 4
             )
-            # scales_per_token * 4 bytes per token.
-            kv_cache_u8[:, :, 0, D:].copy_(
-                k_scale_u8.view(num_blocks, block_kv, scales_per_token * 4),
-            )
-        else:
-            k_scale_f32 = k_scale.view(
-                B, num_blocks_per_req, block_kv, scales_per_token
-            ).contiguous()
-            k_scale_u8 = k_scale_f32.view(num_blocks, block_kv, scales_per_token).view(
-                torch.uint8
-            )
-            kv_cache_u8[:, :, 0, D:].copy_(
-                k_scale_u8.view(num_blocks, block_kv, scales_per_token * 4),
-            )
+        )
 
         # ---- block_table: one block-row per request, listing its blocks --
         block_table = torch.arange(
@@ -378,37 +392,49 @@ class IndexerDecodeV4Op:
             device=device,
         ).view(B, num_blocks_per_req)
 
-        # ---- kv_lens (per-(B*q_len) sequence; one entry per Q token) ----
-        # Indexer's "context_lens" are the valid compressed K count per req.
-        kv_lens = compressed_len_per_req.to(torch.int32).contiguous()
+        # ---- kv_lens: 2D [B, next_n] on >=2.8 wheels, 1D [B] on <=2.1 wheels ----
+        kv_lens_req = compressed_len_per_req.to(
+            device=device, dtype=torch.int32
+        ).contiguous()
+        kv_lens_2d = kv_lens_req.view(B, 1).expand(B, q_len).contiguous()
+        kv_lens_raw = (
+            kv_lens_2d
+            if fp8_paged_mqa_uses_2d_context_lens(deep_gemm)
+            else kv_lens_req
+        )
 
         max_seq_len = T_padded
-        schedule_meta = deep_gemm.get_paged_mqa_logits_metadata(
-            kv_lens,
-            block_kv,
-            deep_gemm.get_num_sms(),
+        dev_ctx = (
+            torch.cuda.device(device)
+            if q_indexer.is_cuda
+            else nullcontext()
         )
+        with dev_ctx:
+            q_fp8_in, kv_lens_in, block_table_in = prepare_fp8_paged_mqa_inputs(
+                q_fp8.view(B, q_len, H, D), kv_lens_raw, block_table, backend=deep_gemm
+            )
+            schedule_meta = get_fp8_paged_mqa_logits_metadata(
+                deep_gemm, kv_lens_in, block_kv, deep_gemm.get_num_sms()
+            )
 
-        # q shape for the kernel is [B, q_len, H, D] fp8.
-        q_fp8_in = q_fp8.view(B, q_len, H, D)
-        logits = deep_gemm.fp8_paged_mqa_logits(
-            q_fp8_in,
-            kv_cache_u8,
-            scaled_weights,
-            kv_lens,
-            block_table,
-            schedule_meta,
-            max_seq_len,
-            clean_logits=False,
-        )  # [B*q_len, max_seq_len] fp32
+            logits = deep_gemm.fp8_paged_mqa_logits(
+                q_fp8_in,
+                kv_cache_u8,
+                scaled_weights,
+                kv_lens_in,
+                block_table_in,
+                schedule_meta,
+                max_seq_len,
+                clean_logits=False,
+            )  # [B*q_len, max_seq_len] fp32
 
-        # ---- TopK + length mask ---------------------------------------
-        logits = logits.view(B, q_len, max_seq_len)
-        idxs = select_indexer_topk(
-            logits,
-            self.index_topk,
-            lengths=compressed_len_per_req.view(B, 1).expand(B, q_len).reshape(-1),
-        )
+            # ---- TopK + length mask ---------------------------------------
+            logits = logits.view(B, q_len, max_seq_len)
+            idxs = select_indexer_topk(
+                logits,
+                self.index_topk,
+                lengths=kv_lens_2d.reshape(-1),
+            )
 
-        out_buffer.copy_(idxs)
-        return out_buffer
+            out_buffer.copy_(idxs)
+            return out_buffer

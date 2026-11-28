@@ -44,7 +44,7 @@ class CudaFp8FlashinferLinear(LinearBase):
             return False
         if quant_config.get_method() != "FP8_PER_BLOCK":
             return False
-        if not is_sm90():
+        if not is_sm90(weight.device):
             return False
         return _has_flashinfer_sm90_fp8_gemm()
 

@@ -1,4 +1,5 @@
 import inspect
+import threading
 import unittest
 from collections import namedtuple
 from contextlib import nullcontext
@@ -10,13 +11,22 @@ import torch
 import torch.nn as nn
 
 import rtp_llm.models_py.model_desc.deepseek_v4_model as model_module
+import rtp_llm.models_py.modules.dsv4.transformer as transformer_module
 from rtp_llm.models_py.model_desc.deepseek_v4_model import DeepSeekV4Model
 from rtp_llm.models_py.model_desc.hidden_state_capture import CaptureContext
+from rtp_llm.models_py.modules.base.common.embedding import EmbeddingTorch
 from rtp_llm.models_py.modules.dsv4 import _profiler
 from rtp_llm.models_py.modules.dsv4.block import Block
 from rtp_llm.models_py.modules.dsv4.fp8.attention import AttentionFP8
+from rtp_llm.models_py.modules.dsv4.fp8.attention_backend import (
+    SparseAttentionWorkspace,
+)
 from rtp_llm.models_py.modules.dsv4.prefill import forward as prefill_forward
-from rtp_llm.models_py.modules.dsv4.transformer import V4Transformer
+from rtp_llm.models_py.modules.dsv4.transformer import (
+    ShardedEmbeddingTorch,
+    V4Args,
+    V4Transformer,
+)
 from rtp_llm.models_py.utils import profiler as moe_profiler
 
 _FakePrefillMeta = namedtuple("_FakePrefillMeta", ["workspace"])
@@ -1240,6 +1250,289 @@ class PrefillFastPathTest(_PrefillForwardTestBase):
 
                 with self.assertRaisesRegex(RuntimeError, "no non-empty input_lengths"):
                     self._run_forward_prefill_with(attn)
+
+
+class ShardedEmbeddingAndWorkspaceTest(unittest.TestCase):
+    """Folded Cases 1-8 covering ShardedEmbeddingTorch and V4Transformer attn_workspace."""
+
+    @staticmethod
+    def _minimal_v4_args(*, n_layers: int = 0, dim: int = 8, tp_size: int = 1, commit_only: bool = False) -> V4Args:
+        return V4Args(
+            vocab_size=16,
+            n_layers=n_layers,
+            n_mtp_layers=0,
+            dim=dim,
+            n_heads=2,
+            q_lora_rank=4,
+            head_dim=4,
+            rope_head_dim=4,
+            o_groups=2,
+            o_lora_rank=4,
+            window_size=4,
+            compress_ratios=[0] * max(n_layers, 1),
+            original_seq_len=16,
+            index_n_heads=2,
+            index_head_dim=4,
+            index_topk=2,
+            moe_inter_dim=8,
+            n_routed_experts=2,
+            n_shared_experts=1,
+            n_activated_experts=1,
+            hc_mult=1,
+            max_batch_size=2,
+            max_seq_len=16,
+            tp_size=tp_size,
+            commit_only=commit_only,
+        )
+
+    @staticmethod
+    def _minimal_global_weights(vocab: int = 16, dim: int = 8, embed_width: int = 8):
+        from rtp_llm.utils.model_weight import W
+
+        return {
+            W.embedding: torch.randn(vocab, embed_width, dtype=torch.bfloat16),
+            W.final_ln_gamma: torch.ones(dim, dtype=torch.bfloat16),
+            W.lm_head: torch.zeros(vocab, dim, dtype=torch.bfloat16),
+            W.v4_hc_head_fn: torch.zeros(dim, dtype=torch.float32),
+            W.v4_hc_head_base: torch.zeros(dim, 1, dtype=torch.float32),
+            W.v4_hc_head_scale: torch.ones(1, dtype=torch.float32),
+        }
+
+    # Case (1): replicated embedding uses plain EmbeddingTorch and avoids all_gather
+    def test_replicated_embedding_uses_plain_embedding_without_all_gather(self):
+        args = self._minimal_v4_args(n_layers=0, dim=8, tp_size=4)
+        mw = SimpleNamespace(global_weights=self._minimal_global_weights(dim=8, embed_width=8), weights=[])
+        with (
+            patch.object(transformer_module, "build_hc_head", return_value=nn.Identity()),
+            patch.object(transformer_module, "RMSNorm", return_value=nn.Identity()),
+            patch(
+                "rtp_llm.models_py.distributed.collective_torch.all_gather",
+                side_effect=AssertionError("all_gather must not run for replicated embedding"),
+            ),
+        ):
+            v4 = V4Transformer(args, mw)
+            self.assertIs(type(v4.embed), EmbeddingTorch)
+            out = v4.embed(input=torch.tensor([[1, 2]], dtype=torch.long))
+        self.assertEqual(tuple(out.shape), (1, 2, 8))
+
+    # Case (2): 1-D mock weight bypasses ShardedEmbeddingTorch and honors patched EmbeddingTorch
+    def test_non_2d_embedding_honors_patched_embedding_torch(self):
+        args = self._minimal_v4_args(n_layers=0, dim=8, tp_size=2)
+        gw = self._minimal_global_weights(dim=8, embed_width=8)
+        from rtp_llm.utils.model_weight import W
+
+        gw[W.embedding] = torch.ones(1)
+        mw = SimpleNamespace(global_weights=gw, weights=[])
+        sentinel = object()
+        with (
+            patch.object(transformer_module, "EmbeddingTorch", return_value=sentinel) as emb_cls,
+            patch.object(transformer_module, "build_hc_head", return_value=nn.Identity()),
+            patch.object(transformer_module, "RMSNorm", return_value=nn.Identity()),
+        ):
+            v4 = V4Transformer(args, mw)
+        emb_cls.assert_called_once_with(gw[W.embedding])
+        self.assertIs(v4.embed, sentinel)
+
+    # Case (3): pure-TP4 all_gather rank-major reassembly (arch-neutral + SM120 mock)
+    def test_sharded_embedding_tp4_reassembles_across_non_sm120_and_sm120(self):
+        weight = torch.arange(16 * 2, dtype=torch.float32).view(16, 2)
+        emb = ShardedEmbeddingTorch(weight, full_dim=8, expected_tp_size=4)
+        input_ids = torch.tensor([[3, 4], [5, 6]], dtype=torch.long)
+
+        def fake_all_gather(local, group):
+            self.assertEqual(group.name, "TP")
+            return torch.cat([local + 100 * rank for rank in range(4)], dim=0)
+
+        for arch_sm120 in (False, True):
+            with (
+                self.subTest(sm120=arch_sm120),
+                patch("rtp_llm.models_py.utils.arch.is_sm120", return_value=arch_sm120),
+                patch(
+                    "rtp_llm.models_py.distributed.collective_torch.all_gather",
+                    side_effect=fake_all_gather,
+                ),
+            ):
+                out = emb(input_ids)
+            expected_local = weight[input_ids]
+            expected = torch.cat([expected_local + 100 * r for r in range(4)], dim=-1)
+            torch.testing.assert_close(out, expected)
+
+    # Case (4): single-rank divisible shard raises ValueError before collective
+    def test_sharded_embedding_rejects_divisible_shard_at_expected_tp1(self):
+        weight = torch.zeros(16, 4)
+        with patch(
+            "rtp_llm.models_py.distributed.collective_torch.all_gather",
+            side_effect=AssertionError("must fail in __init__"),
+        ):
+            with self.assertRaisesRegex(ValueError, "does not match attention TP size 1"):
+                ShardedEmbeddingTorch(weight, full_dim=8, expected_tp_size=1)
+
+    # Case (5): non-divisible local_dim, mismatched expected_tp_size, mismatched gather rows
+    def test_sharded_embedding_validation_errors(self):
+        with self.assertRaisesRegex(ValueError, "incompatible hidden size"):
+            ShardedEmbeddingTorch(torch.zeros(16, 3), full_dim=8, expected_tp_size=2)
+        with self.assertRaisesRegex(ValueError, "does not match attention TP size"):
+            ShardedEmbeddingTorch(torch.zeros(16, 2), full_dim=8, expected_tp_size=2)
+        emb = ShardedEmbeddingTorch(torch.zeros(16, 2), full_dim=8, expected_tp_size=4)
+        with patch(
+            "rtp_llm.models_py.distributed.collective_torch.all_gather",
+            return_value=torch.zeros(4, 2),  # expected 4 * 2 = 8 rows for 2 tokens
+        ):
+            with self.assertRaisesRegex(ValueError, "all_gather row count mismatch"):
+                emb(torch.tensor([1, 2], dtype=torch.long))
+
+    # Case (6): real ParallelismConfig TP4/CP4 -> _apply_parallelism_to_v4_args lowers args.tp_size -> 1
+    def test_cp4_tp4_parallelism_config_to_v4_transformer_embedding_wiring(self):
+        from rtp_llm.ops import CPRotateMethod, ParallelismConfig
+
+        pc = ParallelismConfig()
+        pc.tp_size = 4
+        pc.prefill_cp_config.method = CPRotateMethod.ALL_GATHER
+        args = self._minimal_v4_args(n_layers=0, dim=8, tp_size=4)
+        model_module._apply_parallelism_to_v4_args(args, pc)
+
+        self.assertEqual(pc.tp_size, 4)
+        self.assertEqual(pc.get_attn_tp_size(), 1)
+        self.assertEqual(args.tp_size, 1)
+
+        with (
+            patch.object(transformer_module, "build_hc_head", return_value=nn.Identity()),
+            patch.object(transformer_module, "RMSNorm", return_value=nn.Identity()),
+            patch(
+                "rtp_llm.models_py.distributed.collective_torch.all_gather",
+                side_effect=AssertionError("CP replicated embedding must not all_gather"),
+            ),
+        ):
+            mw_replicated = SimpleNamespace(
+                global_weights=self._minimal_global_weights(dim=8, embed_width=8),
+                weights=[],
+            )
+            v4 = V4Transformer(args, mw_replicated)
+            self.assertIs(type(v4.embed), EmbeddingTorch)
+
+            mw_partial = SimpleNamespace(
+                global_weights=self._minimal_global_weights(dim=8, embed_width=2),
+                weights=[],
+            )
+            with self.assertRaisesRegex(ValueError, "does not match attention TP size 1"):
+                V4Transformer(args, mw_partial)
+
+    # Case (7): scalar token ID sharded gather reassembles [full_dim]
+    def test_sharded_embedding_scalar_token_id(self):
+        weight = torch.arange(16 * 2, dtype=torch.float32).view(16, 2)
+        emb = ShardedEmbeddingTorch(weight, full_dim=8, expected_tp_size=4)
+        with patch(
+            "rtp_llm.models_py.distributed.collective_torch.all_gather",
+            side_effect=lambda local, group: torch.cat(
+                [local + 10 * r for r in range(4)], dim=0
+            ),
+        ):
+            out = emb(torch.tensor(3, dtype=torch.long))
+        expected = torch.cat([weight[3] + 10 * r for r in range(4)], dim=-1)
+        self.assertEqual(tuple(out.shape), (8,))
+        torch.testing.assert_close(out, expected)
+
+    # Case (8): V4Transformer -> real _build_block -> real Block shares v4._attn_workspace
+    def test_v4_transformer_build_block_shares_attn_workspace(self):
+        from rtp_llm.utils.model_weight import W
+
+        args = self._minimal_v4_args(n_layers=2, dim=8, tp_size=1, commit_only=True)
+        layer_w = {
+            W.v4_attn_wkv_w: torch.zeros(1),
+            W.v4_attn_wkv_s: torch.zeros(1),
+            W.v4_attn_kv_norm: torch.zeros(8),
+        }
+        mw = SimpleNamespace(
+            global_weights=self._minimal_global_weights(dim=8, embed_width=8),
+            weights=[dict(layer_w), dict(layer_w)],
+        )
+        observed_workspaces = []
+        real_block_cls = Block
+
+        def spy_block(*b_args, **b_kwargs):
+            observed_workspaces.append(b_kwargs.get("attn_workspace"))
+            return real_block_cls(*b_args, **b_kwargs)
+
+        with (
+            patch.object(transformer_module, "Block", side_effect=spy_block),
+            patch(
+                "rtp_llm.models_py.modules.dsv4.fp8.attention._v4_fp8_linear",
+                side_effect=lambda w, s: nn.Identity(),
+            ),
+        ):
+            v4 = V4Transformer(args, mw)
+
+        self.assertIsInstance(v4._attn_workspace, SparseAttentionWorkspace)
+        self.assertEqual(len(observed_workspaces), 2)
+        self.assertIs(observed_workspaces[0], v4._attn_workspace)
+        self.assertIs(observed_workspaces[1], v4._attn_workspace)
+        for layer in v4.layers:
+            self.assertIs(layer.attn._sparse_mla_workspace, v4._attn_workspace)
+
+    def test_v4_transformer_build_block_shares_moe_workspace_and_binds_defrag_traits(
+        self,
+    ):
+        from rtp_llm.models_py.modules.factory.fused_moe.defs.fused_moe import (
+            MoeWorkspace,
+        )
+        from rtp_llm.models_py.modules.factory.fused_moe.utils.sm120.workspace import (
+            Sm120MoeWorkspace,
+            workspace_for,
+        )
+        from rtp_llm.utils.model_weight import W
+
+        args = self._minimal_v4_args(n_layers=2, dim=8, tp_size=1, commit_only=True)
+        layer_w = {
+            W.v4_attn_wkv_w: torch.zeros(1),
+            W.v4_attn_wkv_s: torch.zeros(1),
+            W.v4_attn_kv_norm: torch.zeros(8),
+        }
+        mw = SimpleNamespace(
+            global_weights=self._minimal_global_weights(dim=8, embed_width=8),
+            weights=[dict(layer_w), dict(layer_w)],
+        )
+        observed_moe_workspaces = []
+        real_block_cls = Block
+
+        def spy_block(*b_args, **b_kwargs):
+            observed_moe_workspaces.append(b_kwargs.get("moe_workspace"))
+            blk = real_block_cls(*b_args, **b_kwargs)
+            blk.defrag_on_large_prefill = b_kwargs.get("layer_id") == 1
+            return blk
+
+        with (
+            patch.object(transformer_module, "Block", side_effect=spy_block),
+            patch(
+                "rtp_llm.models_py.modules.dsv4.fp8.attention._v4_fp8_linear",
+                side_effect=lambda w, s: nn.Identity(),
+            ),
+        ):
+            v4 = V4Transformer(args, mw)
+
+        self.assertIsInstance(v4._moe_workspace, MoeWorkspace)
+        self.assertEqual(len(observed_moe_workspaces), 2)
+        self.assertIs(observed_moe_workspaces[0], v4._moe_workspace)
+        self.assertIs(observed_moe_workspaces[1], v4._moe_workspace)
+        sm120_0 = workspace_for(SimpleNamespace(moe_workspace=observed_moe_workspaces[0]))
+        sm120_1 = workspace_for(SimpleNamespace(moe_workspace=observed_moe_workspaces[1]))
+        self.assertIsInstance(sm120_0, Sm120MoeWorkspace)
+        self.assertIs(sm120_0, sm120_1)
+        self.assertTrue(v4._defrag_before_large_prefill)
+
+        def spy_block_no_defrag(*b_args, **b_kwargs):
+            blk = real_block_cls(*b_args, **b_kwargs)
+            blk.defrag_on_large_prefill = False
+            return blk
+
+        with (
+            patch.object(transformer_module, "Block", side_effect=spy_block_no_defrag),
+            patch(
+                "rtp_llm.models_py.modules.dsv4.fp8.attention._v4_fp8_linear",
+                side_effect=lambda w, s: nn.Identity(),
+            ),
+        ):
+            v4_no_defrag = V4Transformer(args, mw)
+        self.assertFalse(v4_no_defrag._defrag_before_large_prefill)
 
 
 if __name__ == "__main__":

@@ -12,7 +12,10 @@ py_library(
         "utils/*.py",
     ]),
     visibility = ["//visibility:public"],
-    deps = ["//rtp_llm:torch"],
+    deps = [
+        "//rtp_llm:device_type",
+        "//rtp_llm:torch",
+    ],
 )
 
 # CPU-only subset of the DSv4 decode package: pure-torch modules plus the
@@ -179,6 +182,20 @@ cc_binary(
     ],
     linkshared = True,
     deps = [":marlin_nvfp4_kernels"],
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "prefill_optimization_source_data",
+    srcs = glob([
+        "modules/dsv4/**/*.py",
+        "modules/dsv4/*.py",
+        "3rdparty/tile_kernels/modeling/mhc/**/*.py",
+        "utils/arch.py",
+        "utils/cuda_graph_warmup.py",
+        "kernels/cuda/deepgemm_wrapper.py",
+        "utils/profiler.py",
+    ]) + ["//rtp_llm:device_type_source"],
     visibility = ["//visibility:public"],
 )
 

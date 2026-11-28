@@ -2996,6 +2996,87 @@ void MtpExecutor::releaseAllModelBuffers() {
     }
 }
 
+bool MtpExecutor::isPrefillPhaseStream(const GenerateStreamPtr& stream) {
+    if (!stream) {
+        return false;
+    }
+    return isPrefillOnly(stream) || (!stream->hasMtpCacheSnapshot() && stream->isContextStream());
+}
+
+MtpStreamFilterResult MtpExecutor::validateAndFilterStreams(std::list<GenerateStreamPtr>& streams,
+                                                            RoleType                      role_type) {
+    MtpStreamFilterResult result;
+    std::vector<std::list<GenerateStreamPtr>::iterator> prefill_iters;
+    std::vector<std::list<GenerateStreamPtr>::iterator> decode_iters;
+
+    for (auto it = streams.begin(); it != streams.end();) {
+        const auto& stream = *it;
+        if (!stream) {
+            it = streams.erase(it);
+            continue;
+        }
+        const bool is_prefill_phase = isPrefillPhaseStream(stream);
+        auto&      dropped_flag     = is_prefill_phase ? result.dropped_prefill : result.dropped_decode;
+        if (stream->hasError()) {
+            dropped_flag = true;
+            it           = streams.erase(it);
+            continue;
+        }
+        if (isPrefillOnly(stream)) {
+            if (role_type == RoleType::DECODE) {
+                stream->reportError(ErrorCode::INVALID_PARAMS, kDecodeRolePrefillOnlyError);
+                result.dropped_decode = true;
+                it                    = streams.erase(it);
+                continue;
+            }
+            prefill_iters.push_back(it);
+            ++it;
+            continue;
+        }
+        if (auto error = LogitsProcessorFactory::validateMtpCompatibility(stream->getAllLogitsProcessorPtr());
+            error.has_value()) {
+            stream->reportError(error->code(), error->ToString());
+            dropped_flag = true;
+            it           = streams.erase(it);
+            continue;
+        }
+        if (is_prefill_phase) {
+            prefill_iters.push_back(it);
+        } else {
+            decode_iters.push_back(it);
+        }
+        ++it;
+    }
+
+    const auto reject_mixed_bucket = [&](const std::vector<std::list<GenerateStreamPtr>::iterator>& bucket,
+                                         bool&                                                      dropped_flag) {
+        if (bucket.size() <= 1) {
+            return;
+        }
+        const bool first_prefill_only = isPrefillOnly(*bucket.front());
+        bool       mixed              = false;
+        for (size_t i = 1; i < bucket.size(); ++i) {
+            if (isPrefillOnly(*bucket[i]) != first_prefill_only) {
+                mixed = true;
+                break;
+            }
+        }
+        if (!mixed) {
+            return;
+        }
+        for (const auto& bucket_it : bucket) {
+            if (!(*bucket_it)->hasError()) {
+                (*bucket_it)->reportError(ErrorCode::INVALID_PARAMS, kMixedExecutionModeBatchError);
+            }
+            streams.erase(bucket_it);
+        }
+        dropped_flag = true;
+    };
+    reject_mixed_bucket(prefill_iters, result.dropped_prefill);
+    reject_mixed_bucket(decode_iters, result.dropped_decode);
+    return result;
+}
+
 void MtpExecutor::prepareStreams(const std::list<GenerateStreamPtr>& streams,
                                  std::list<GenerateStreamPtr>&       prefill_streams,
                                  std::list<GenerateStreamPtr>&       decode_streams) {
@@ -3028,7 +3109,7 @@ void MtpExecutor::prepareStreams(const std::list<GenerateStreamPtr>& streams,
         // speculative buffer were initialized before the first async round;
         // repeated writes here would race the worker's specUpdate reads/writes.
         const bool use_mtp_snapshot = stream->hasMtpCacheSnapshot();
-        const bool is_context       = use_mtp_snapshot ? false : stream->isContextStream();
+        const bool is_context       = isPrefillPhaseStream(stream);
 
         // split streams into prefill and decode
         if (is_context) {

@@ -828,7 +828,7 @@ class Dsv4KernelJitWarmupTest(unittest.TestCase):
                 "_assert_not_capturing", lambda: None
             )
             old_values["_get_deep_gemm_num_sms"] = with_patch(
-                "_get_deep_gemm_num_sms", lambda device: 148
+                "_get_deep_gemm_num_sms", lambda device: 102
             )
             old_values["_mhc_prenorm_deepgemm_backend_name"] = with_patch(
                 "_mhc_prenorm_deepgemm_backend_name", lambda: "deepgemm"
@@ -838,7 +838,11 @@ class Dsv4KernelJitWarmupTest(unittest.TestCase):
             )
             old_values["_generate_mhc_prenorm_warmup_specs"] = with_patch(
                 "_generate_mhc_prenorm_warmup_specs",
-                lambda **kwargs: ((8, 65), (1, 129)),
+                lambda **kwargs: (
+                    ((8, 65), (1, 129))
+                    if kwargs["num_sms"] == 102
+                    else ((13, 45), (1, 129))
+                ),
             )
             old_values["_dist_rank"] = with_patch("_dist_rank", lambda: 0)
             old_values["_sync_cuda"] = with_patch("_sync_cuda", lambda device: None)
@@ -856,6 +860,13 @@ class Dsv4KernelJitWarmupTest(unittest.TestCase):
                     launch_fn(),
                 ),
             )
+            old_values["_run_tilelang_warmup_launch_with_retry"] = with_patch(
+                "_run_tilelang_warmup_launch_with_retry",
+                lambda label, desc, launch_fn, device: (
+                    calls.append(("fuse", desc)),
+                    launch_fn(),
+                ),
+            )
             old_values["_launch_dummy_mhc_prenorm_gemm"] = with_patch(
                 "_launch_dummy_mhc_prenorm_gemm",
                 lambda **kwargs: calls.append(("gemm_launch", kwargs["num_splits"])),
@@ -866,11 +877,19 @@ class Dsv4KernelJitWarmupTest(unittest.TestCase):
             )
             warmup_module._MHC_PRENORM_GEMM_JIT_WARMED_KEYS.clear()
 
-            warmup_module.warmup_mhc_prenorm_gemm_jit(
-                shapes,
-                max_m=1024,
-                device=torch.device("cuda"),
-            )
+            with (
+                mock.patch.object(torch.cuda, "is_available", return_value=True),
+                mock.patch.object(
+                    torch.cuda,
+                    "get_device_properties",
+                    return_value=mock.Mock(multi_processor_count=110),
+                ),
+            ):
+                warmup_module.warmup_mhc_prenorm_gemm_jit(
+                    shapes,
+                    max_m=1024,
+                    device=torch.device("cuda"),
+                )
         finally:
             for name, value in old_values.items():
                 setattr(warmup_module, name, value)
@@ -878,11 +897,11 @@ class Dsv4KernelJitWarmupTest(unittest.TestCase):
 
         self.assertEqual(
             [c for c in calls if c[0] == "gemm_launch"],
-            [("gemm_launch", 8), ("gemm_launch", 1)],
+            [("gemm_launch", 1), ("gemm_launch", 8), ("gemm_launch", 13)],
         )
         self.assertEqual(
             [c for c in calls if c[0] == "fuse_launch"],
-            [("fuse_launch", 8), ("fuse_launch", 1)],
+            [("fuse_launch", 1), ("fuse_launch", 8), ("fuse_launch", 13)],
         )
 
     def test_mhc_head_fused_warmup_uses_batched_two_token_shape(self):
@@ -1375,6 +1394,139 @@ class Dsv4KernelJitWarmupTest(unittest.TestCase):
                 launch,
                 device=torch.device("cpu"),
             )
+
+
+class Dsv4KernelJitWarmupTestSm120(unittest.TestCase):
+    """DeepGEMM mHC split-union and SM120 MQA logits warmup selection cases."""
+
+    def test_mhc_prenorm_warmup_always_uses_deepgemm(self):
+        self.assertTrue(warmup_module._mhc_prenorm_deepgemm_backend_enabled())
+        self.assertEqual(warmup_module._mhc_prenorm_deepgemm_backend_name(), "deepgemm")
+
+    def test_mhc_warmup_unions_lowered_and_device0_sm_splits(self):
+        device = torch.device("cuda:0")
+        shapes = {(24, 16384): {"name": "attn_hc"}}
+        seen_sm_counts = []
+        launched_splits = []
+
+        def fake_specs(*, max_m, k_value, num_sms):
+            seen_sm_counts.append(num_sms)
+            if num_sms == 102:
+                return ((1, 513), (55, 65))
+            if num_sms == 110:
+                return ((1, 513), (13, 449), (55, 65))
+            return ()
+
+        with (
+            mock.patch.object(
+                warmup_module, "model_warm_up_enabled", return_value=True
+            ),
+            mock.patch.object(warmup_module, "_is_cuda_device", return_value=True),
+            mock.patch.object(warmup_module, "_assert_not_capturing"),
+            mock.patch.object(warmup_module, "_dist_rank", return_value=0),
+            mock.patch.object(warmup_module, "_sync_cuda"),
+            mock.patch.object(warmup_module, "_release_cuda_cache"),
+            mock.patch.object(
+                warmup_module,
+                "_get_deep_gemm_num_sms",
+                return_value=102,
+            ),
+            mock.patch.object(
+                warmup_module,
+                "_generate_mhc_prenorm_warmup_specs",
+                side_effect=fake_specs,
+            ),
+            mock.patch.object(
+                warmup_module,
+                "_run_deepgemm_warmup_launches_serialized",
+                side_effect=lambda _label, fn: fn(),
+            ),
+            mock.patch.object(
+                warmup_module,
+                "_run_deepgemm_warmup_launch_with_retry",
+                side_effect=lambda _label, _desc, fn, device: fn(),
+            ),
+            mock.patch.object(
+                warmup_module,
+                "_run_tilelang_warmup_launch_with_retry",
+                side_effect=lambda _label, _desc, fn, device: None,
+            ),
+            mock.patch.object(
+                warmup_module,
+                "_launch_dummy_mhc_prenorm_gemm",
+                side_effect=lambda **kwargs: launched_splits.append(
+                    kwargs["num_splits"]
+                ),
+            ),
+            mock.patch.object(torch.cuda, "is_available", return_value=True),
+            mock.patch.object(
+                torch.cuda,
+                "get_device_properties",
+                return_value=mock.Mock(multi_processor_count=110),
+            ),
+        ):
+            warmup_module._MHC_PRENORM_GEMM_JIT_WARMED_KEYS.clear()
+            warmup_module.warmup_mhc_prenorm_gemm_jit(
+                shapes, max_m=1024, device=device
+            )
+
+        self.assertEqual(seen_sm_counts, [102, 110])
+        self.assertEqual(launched_splits, [1, 13, 55])
+
+    def test_fp8_mqa_logits_warmup_filters_by_head_and_dispatches_sm120_api(self):
+        import rtp_llm.models_py.modules.dsv4.fp8._indexer_score as idx_score
+
+        device = torch.device("cuda:0")
+        shapes = {(8, 128): {"name": "idx8"}, (64, 128): {"name": "idx64"}}
+        launched = []
+        fake_dg = mock.Mock()
+        with (
+            mock.patch.object(
+                warmup_module, "model_warm_up_enabled", return_value=True
+            ),
+            mock.patch.object(warmup_module, "_is_cuda_device", return_value=True),
+            mock.patch.object(warmup_module, "_assert_not_capturing"),
+            mock.patch.object(warmup_module, "_dist_rank", return_value=0),
+            mock.patch.object(warmup_module, "_sync_cuda"),
+            mock.patch.object(warmup_module, "_release_cuda_cache"),
+            mock.patch.object(
+                idx_score,
+                "supports_dsv4_mqa_logits",
+                side_effect=lambda dev, *, num_heads=None: (
+                    num_heads is None or num_heads == 64
+                ),
+            ),
+            mock.patch.object(
+                warmup_module,
+                "_run_deepgemm_warmup_launches_serialized",
+                side_effect=lambda _label, fn: fn(),
+            ),
+            mock.patch.object(
+                warmup_module,
+                "_run_deepgemm_warmup_launch_with_retry",
+                side_effect=lambda _label, _desc, fn, device: launched.append(
+                    fn.keywords["key"]
+                ),
+            ),
+        ):
+            warmup_module._FP8_MQA_LOGITS_JIT_WARMED_KEYS.clear()
+            warmup_module.warmup_fp8_mqa_logits_jit(shapes, device=device)
+
+        self.assertEqual(launched, [(64, 128)])
+
+        fake_dg = mock.Mock()
+        with (
+            mock.patch.dict("sys.modules", {"deep_gemm": fake_dg}),
+            mock.patch("rtp_llm.models_py.utils.arch.is_sm120", return_value=True),
+            mock.patch.object(torch, "zeros", return_value=torch.empty(0)),
+            mock.patch.object(torch, "ones", return_value=torch.empty(0)),
+            mock.patch.object(torch, "full", return_value=torch.empty(0)),
+        ):
+            warmup_module._launch_dummy_fp8_mqa_logits(
+                key=(64, 128), device=torch.device("cpu")
+            )
+        fake_dg.fp8_fp4_mqa_logits.assert_called_once()
+        fake_dg.fp8_mqa_logits.assert_not_called()
 
 
 if __name__ == "__main__":

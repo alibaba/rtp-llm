@@ -52,7 +52,7 @@ from rtp_llm.models_py.modules.dsv4.fp8._indexer_quant_triton import (
 )
 from rtp_llm.models_py.modules.dsv4.fp8._indexer_score import (
     fp8_mqa_indexer_score,
-    supports_mqa_logits,
+    supports_dsv4_mqa_logits,
 )
 from rtp_llm.models_py.triton_kernels import (
     legacy_fp8_indexer_score as _legacy_fallback_mod,
@@ -73,6 +73,10 @@ class _CountingDeepGemm:
     def fp8_mqa_logits(self, *args, **kwargs):
         self.mqa += 1
         return self._inner.fp8_mqa_logits(*args, **kwargs)
+
+    def fp8_fp4_mqa_logits(self, *args, **kwargs):
+        self.mqa += 1
+        return self._inner.fp8_fp4_mqa_logits(*args, **kwargs)
 
 
 @contextlib.contextmanager
@@ -98,7 +102,7 @@ def _count_mqa_dispatch():
 
 def _assert_mqa_path(counted, fallback) -> None:
     """The chain's score stage must run on exactly the path the predicate picks."""
-    expects_deepgemm = supports_mqa_logits(torch.device("cuda"))
+    expects_deepgemm = supports_dsv4_mqa_logits(torch.device("cuda"), num_heads=32)
     expected_deepgemm = 1 if expects_deepgemm else 0
     expected_fallback = 0 if expects_deepgemm else 1
     assert counted.mqa == expected_deepgemm, (

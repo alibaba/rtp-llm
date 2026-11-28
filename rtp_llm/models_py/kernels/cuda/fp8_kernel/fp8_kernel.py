@@ -57,7 +57,7 @@ def ceil_to_ue8m0(x: torch.Tensor):
 
 
 # NOTE copy and modified from DeepGEMM
-def _transform_scale_ue8m0(sf, mn):
+def _transform_scale_ue8m0(sf, mn, cuda_device: Optional[int] = None):
     import deep_gemm.utils.layout
 
     expected_rows = ceil_div(mn, 128)
@@ -65,14 +65,29 @@ def _transform_scale_ue8m0(sf, mn):
         raise ValueError(
             f"expected 128-row block scales with {expected_rows} rows, got {tuple(sf.shape)}"
         )
-    if not sf.is_cuda:
-        sf = sf.cuda()
+    orig_device = sf.device
+    if cuda_device is not None:
+        target_device = torch.device("cuda", cuda_device)
+    elif orig_device.type == "cuda":
+        target_device = orig_device
+    else:
+        target_device = torch.device("cuda", torch.cuda.current_device())
     # Exponent-only UE8M0 values are exactly representable in float32.
     # DeepGEMM's layout conversion accepts float scales before packing.
-    if sf.dtype == getattr(torch, "float8_e8m0fnu", None):
-        sf = sf.float()
-    sf = sf.index_select(-2, torch.arange(mn, device=sf.device) // 128)
-    sf = deep_gemm.utils.layout.get_mn_major_tma_aligned_packed_ue8m0_tensor(sf)
+    with torch.cuda.device(target_device):
+        if sf.device != target_device:
+            sf = sf.to(target_device)
+        if sf.dtype == getattr(torch, "float8_e8m0fnu", None):
+            sf = sf.float()
+        sf = sf.index_select(-2, torch.arange(mn, device=target_device) // 128)
+        sf = deep_gemm.utils.layout.get_mn_major_tma_aligned_packed_ue8m0_tensor(sf)
+    if sf.device != orig_device:
+        # Preserve DeepGEMM's TMA-aligned column strides when returning to orig_device.
+        dst = torch.empty_strided(
+            sf.shape, sf.stride(), dtype=sf.dtype, device=orig_device
+        )
+        dst.copy_(sf)
+        sf = dst
     return sf
 
 
@@ -130,6 +145,7 @@ def sgl_per_token_group_quant_fp8(
     fuse_silu_and_mul: bool = False,
     masked_m: Optional[torch.Tensor] = None,
     preserve_silu_mul_rounding: bool = False,
+    enable_v2: Optional[bool] = None,
 ):
     assert (
         x.shape[-1] % group_size == 0
@@ -152,6 +168,43 @@ def sgl_per_token_group_quant_fp8(
                 "unmasked input, and TMA-aligned column-major UE8M0 scales"
             )
 
+    if fuse_silu_and_mul:
+        if not (column_major_scales and scale_tma_aligned and scale_ue8m0):
+            raise ValueError(
+                "fuse_silu_and_mul requires column_major_scales=True, "
+                "scale_tma_aligned=True, and scale_ue8m0=True"
+            )
+        if x.dtype not in (torch.float16, torch.bfloat16):
+            raise ValueError(
+                f"fuse_silu_and_mul requires float16 or bfloat16 input, got {x.dtype}"
+            )
+        if group_size not in (16, 32, 64, 128):
+            raise ValueError(
+                "fuse_silu_and_mul requires group_size in (16, 32, 64, 128), "
+                f"got {group_size}"
+            )
+        if (x.shape[-1] // 2) % group_size != 0:
+            raise ValueError(
+                "fuse_silu_and_mul requires half hidden dim divisible by group_size"
+            )
+    if masked_m is not None and (
+        not fuse_silu_and_mul
+        or not column_major_scales
+        or not scale_tma_aligned
+        or not scale_ue8m0
+        or x.dim() != 3
+        or masked_m.dim() != 1
+        or masked_m.shape[0] != x.shape[0]
+        or masked_m.dtype != torch.int32
+        or not masked_m.is_contiguous()
+        or (x.is_cuda and masked_m.device != x.device)
+    ):
+        raise ValueError(
+            "masked_m requires 3D input, 1D contiguous int32 per-expert masked_m "
+            "on the input device, fuse_silu_and_mul=True, and TMA-aligned "
+            "column-major UE8M0 scales"
+        )
+
     out_shape = (*x.shape[:-1], x.shape[-1] // (2 if fuse_silu_and_mul else 1))
     x_q = torch.empty(out_shape, device=x.device, dtype=fp8_dtype)
     x_s = create_per_token_group_quant_fp8_output_scale(
@@ -167,6 +220,8 @@ def sgl_per_token_group_quant_fp8(
         def can_use_v2() -> bool:
             if group_size not in (16, 32, 64, 128):
                 return False
+            if x.dtype not in (torch.float16, torch.bfloat16):
+                return False
             if masked_m is not None and not fuse_silu_and_mul:
                 return False
             return True
@@ -176,6 +231,8 @@ def sgl_per_token_group_quant_fp8(
                 return False
             if masked_m is not None or fuse_silu_and_mul:
                 return True
+            if enable_v2 is not None:
+                return bool(enable_v2)
             # Microbench on the target 16..64K token sweep shows v2 wins
             # consistently once the quantized matrix has at least ~4M elements.
             return x.numel() >= 4 * 1024 * 1024
@@ -221,6 +278,10 @@ def sgl_per_token_group_quant_fp8(
                 masked_m,
             )
         else:
+            if fuse_silu_and_mul or masked_m is not None:
+                raise ValueError(
+                    "fuse_silu_and_mul and masked_m are only supported by quant v2"
+                )
             per_token_group_quant_fp8(
                 x, x_q, x_s, group_size, eps, fp8_min, fp8_max, scale_ue8m0
             )
@@ -458,6 +519,8 @@ def quant_weight_ue8m0(
 
 def quant_weight_ue8m0_packed(
     weight_dequant: torch.Tensor,
+    *,
+    cuda_device: Optional[int] = None,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """Quantize source weights once to FP8 with packed UE8M0 scales.
 
@@ -488,12 +551,16 @@ def quant_weight_ue8m0_packed(
         scale_chunks.append(chunk_s)
 
     out_s = torch.cat(scale_chunks, dim=0)
-    return out_w, _transform_scale_ue8m0(out_s, mn=out_w.shape[-2])
+    return out_w, _transform_scale_ue8m0(
+        out_s, mn=out_w.shape[-2], cuda_device=cuda_device
+    )
 
 
 def requant_weight_ue8m0(
     weight: torch.Tensor,
     weight_scale_inv: torch.Tensor,
+    *,
+    cuda_device: Optional[int] = None,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     weight_block_size = [128, 128]
 
@@ -507,7 +574,7 @@ def requant_weight_ue8m0(
         weight_dequant=weight_dequant,
         weight_block_size=weight_block_size,
     )
-    out_s = _transform_scale_ue8m0(out_s, mn=out_w.shape[-2])
+    out_s = _transform_scale_ue8m0(out_s, mn=out_w.shape[-2], cuda_device=cuda_device)
     return out_w, out_s
 
 

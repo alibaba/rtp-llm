@@ -16,6 +16,8 @@ from typing import Optional, Tuple
 import torch
 from torch.distributed import ProcessGroup
 
+from rtp_llm.device.cuda_capability import current_device_is_sm120
+
 
 def _configure_deepep_nccl_root() -> None:
     """Pin EP_NCCL_ROOT_DIR to the NCCL library that is actually loaded.
@@ -285,6 +287,9 @@ class DeepEPWrapper:
         Returns:
             True if DeepEP is supported, False otherwise
         """
+        # DeepEP wheels lack SM120 kernels; SM120 uses collective EP executors.
+        if current_device_is_sm120():
+            return False
         try:
             import deep_ep
 
@@ -549,10 +554,7 @@ def init_deepep_wrapper(
     """
 
     if not DeepEPWrapper.supported():
-        logging.warning(
-            "DeepEP is not supported on this device, skipping initialization"
-        )
-        return
+        raise RuntimeError("DeepEP was requested but is not supported on this device")
 
     enable_cuda_graph = (
         engine_config.hw_kernel_config.enable_cuda_graph

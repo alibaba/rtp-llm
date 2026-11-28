@@ -17,6 +17,16 @@ cc_library(
 )
 
 cc_library(
+    name = "sm120_moe_strategy_policy",
+    hdrs = ["Sm120MoeStrategyPolicy.h"],
+    copts = copts(),
+    deps = [
+        "//rtp_llm/cpp/config:role_types",
+    ],
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
     name = "normal_engine",
     hdrs = glob([
         "*.h",
@@ -41,6 +51,7 @@ cc_library(
         "//conditions:default": [],
     }),
     deps = [
+        ":sm120_moe_strategy_policy",
         "//rtp_llm/cpp/distribute:cpu_tp_broadcaster",
         ":pipeline_types",
         "//rtp_llm/cpp/cache:cache",

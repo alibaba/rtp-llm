@@ -110,6 +110,9 @@ class BackendManager(object):
         self._distributed_server.validate_pp_partition_consistency(
             engine_config.parallelism_config
         )
+        self._distributed_server.validate_moe_ep_consistency(
+            engine_config, model_config.expert_num
+        )
         # Generation-prefill is a secondary runner owned only by the normalized
         # PDFUSION language-model process. Validate its cross-option capacity
         # after EngineConfig has applied the implicit VIT role and ModelFactory

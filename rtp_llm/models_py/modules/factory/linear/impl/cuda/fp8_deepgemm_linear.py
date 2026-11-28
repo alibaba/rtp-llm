@@ -94,7 +94,9 @@ class CudaFp8DeepGEMMLinear(LinearBase):
             logger.error(error_msg)
             raise ValueError(error_msg)
         # e8m0 load not need reshape
-        if is_deep_gemm_e8m0_used():
+        if is_deep_gemm_e8m0_used(
+            self.weight.device if self.weight.is_cuda else None
+        ):
             self.N, self.K = self.weight.shape
             self.scale_N, self.scale_K = self.weight_scales.shape
         else:
@@ -126,6 +128,15 @@ class CudaFp8DeepGEMMLinear(LinearBase):
             error_msg = f"Weight scale dtype must be float32 or int32, got {self.weight_scales.dtype}"
             logger.error(error_msg)
             raise ValueError(error_msg)
+        if self.weight_scales.dtype == torch.int32:
+            if self.K % 128 != 0:
+                error_msg = f"DeepGEMM UE8M0 FP8 linear requires K divisible by 128, got K={self.K}"
+                logger.error(error_msg)
+                raise ValueError(error_msg)
+            if self.N % 8 != 0:
+                error_msg = f"DeepGEMM UE8M0 FP8 linear requires N divisible by 8 (16-byte BF16 output alignment), got N={self.N}"
+                logger.error(error_msg)
+                raise ValueError(error_msg)
         # Check bias
         if self.bias is not None:
             if self.bias.dim() != 1 and self.bias.dim() != 2:
@@ -276,6 +287,9 @@ class CudaFp8DeepGEMMLinear(LinearBase):
                 input_scales.fill_(0x7F7F7F7F)
 
         else:
+            # Forced/auto v2 quantizer issues 16-byte vector loads when M*K >= 4M.
+            if input.data_ptr() % 16 != 0:
+                input = input.clone()
             # Quantize x to FP8
             input_fp8, input_scales = sgl_per_token_group_quant_fp8(
                 input,
@@ -341,6 +355,7 @@ class CudaFp8DeepGEMMLinear(LinearBase):
             or gate_up.shape[-1] != 2 * self.K
             or self.K % 512 != 0
             or not gate_up.is_contiguous()
+            or gate_up.data_ptr() % 16 != 0
         ):
             return None
         input_fp8, input_scales = sgl_per_token_group_quant_fp8(

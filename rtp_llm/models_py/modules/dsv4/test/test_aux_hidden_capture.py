@@ -93,6 +93,18 @@ class AuxHiddenCaptureTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             transformer.set_aux_hidden_capture_layer_ids((4,))
 
+    def test_overflow_does_not_replace_shared_hidden_storage(self) -> None:
+        transformer = _capture_harness(token_capacity=2, row_width=3)
+        transformer.set_aux_hidden_capture_layer_ids((1,))
+        shared = transformer._mtp_hidden_buffer
+        with self.assertRaisesRegex(AssertionError, "_mtp_hidden_buffer overflow"):
+            transformer.capture_aux_hidden(1, torch.ones(4, 4, 3))
+        self.assertIs(transformer._mtp_hidden_buffer, shared)
+        self.assertTrue(torch.isnan(shared).all())
+        transformer.capture_aux_hidden(1, torch.ones(2, 4, 3))
+        self.assertIs(transformer._mtp_hidden_buffer, shared)
+        torch.testing.assert_close(shared, torch.ones_like(shared))
+
 
 if __name__ == "__main__":
     unittest.main()

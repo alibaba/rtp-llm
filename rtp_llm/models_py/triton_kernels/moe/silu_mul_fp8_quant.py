@@ -44,6 +44,7 @@ Router weight is NOT folded in here — it's applied by the downstream
 from __future__ import annotations
 
 import os
+from contextlib import nullcontext
 from typing import Optional, Tuple
 
 import torch
@@ -71,8 +72,8 @@ def _silu_mul_fp8_quant_packed_kernel(
 ):
     N_2: tl.constexpr = N // 2
 
-    pid_pack = tl.program_id(0).to(tl.int64)  # which packed-int32 column (= 4 groups)
-    pid_m = tl.program_id(1).to(tl.int64)  # which BLOCK_M row tile
+    pid_m = tl.program_id(0).to(tl.int64)  # which BLOCK_M row tile
+    pid_pack = tl.program_id(1).to(tl.int64)  # which packed-int32 column (= 4 groups)
     m_offset = pid_m * BLOCK_M
 
     if m_offset >= M:
@@ -162,8 +163,8 @@ def _silu_mul_fp8_quant_packed_split_kernel(
     BLOCK_M: tl.constexpr,
     HAS_CLAMP: tl.constexpr,
 ):
-    pid_pack = tl.program_id(0).to(tl.int64)
-    pid_m = tl.program_id(1).to(tl.int64)
+    pid_m = tl.program_id(0).to(tl.int64)
+    pid_pack = tl.program_id(1).to(tl.int64)
     m_offset = pid_m * BLOCK_M
 
     if m_offset >= M:
@@ -172,7 +173,6 @@ def _silu_mul_fp8_quant_packed_split_kernel(
     offs_m = tl.arange(0, BLOCK_M).to(tl.int64)
     offs_n = tl.arange(0, GROUP_SIZE)
     row_mask = (m_offset + offs_m) < M
-
     gate_base = (m_offset + offs_m[:, None]) * gate_stride_m
     up_base = (m_offset + offs_m[:, None]) * up_stride_m
     out_base = (m_offset + offs_m[:, None]) * output_q_stride_m
@@ -280,31 +280,33 @@ def silu_mul_fp8_quant_packed(
         output_scale_packed = output_scale
 
     BLOCK_M = 8
-    grid = (num_packed_groups, (M + BLOCK_M - 1) // BLOCK_M)
+    grid = ((M + BLOCK_M - 1) // BLOCK_M, num_packed_groups)
 
     num_warps = max(4, group_size // 32)
     num_stages = 2
 
     has_clamp = clamp_limit > 0
-    _silu_mul_fp8_quant_packed_kernel[grid](
-        gate_up,
-        output_q,
-        output_scale_packed,
-        M,
-        gate_up.stride(0),
-        output_q.stride(0),
-        output_scale_packed.stride(1),
-        clamp_limit if has_clamp else 0.0,
-        N=N,
-        NUM_GROUPS=num_groups_per_row,
-        fp8_min=fp8_min,
-        fp8_max=fp8_max,
-        GROUP_SIZE=group_size,
-        BLOCK_M=BLOCK_M,
-        HAS_CLAMP=has_clamp,
-        num_warps=num_warps,
-        num_stages=num_stages,
-    )
+    dev_ctx = torch.cuda.device(gate_up.device) if gate_up.is_cuda else nullcontext()
+    with dev_ctx:
+        _silu_mul_fp8_quant_packed_kernel[grid](
+            gate_up,
+            output_q,
+            output_scale_packed,
+            M,
+            gate_up.stride(0),
+            output_q.stride(0),
+            output_scale_packed.stride(1),
+            clamp_limit if has_clamp else 0.0,
+            N=N,
+            NUM_GROUPS=num_groups_per_row,
+            fp8_min=fp8_min,
+            fp8_max=fp8_max,
+            GROUP_SIZE=group_size,
+            BLOCK_M=BLOCK_M,
+            HAS_CLAMP=has_clamp,
+            num_warps=num_warps,
+            num_stages=num_stages,
+        )
 
     return output_q, output_scale_packed
 
@@ -317,12 +319,9 @@ def silu_mul_fp8_quant_packed_from_parts(
     output_q: Optional[torch.Tensor] = None,
     output_scale: Optional[torch.Tensor] = None,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
-    """Same fused activation+quant path as :func:`silu_mul_fp8_quant_packed`,
-    but reads gate/up from two contiguous BF16 GEMM outputs.
-    """
     assert gate.dim() == 2 and up.dim() == 2
     assert gate.shape == up.shape, f"gate/up shape mismatch: {gate.shape} vs {up.shape}"
-    assert gate.is_contiguous() and up.is_contiguous(), "gate/up must be contiguous"
+    assert gate.stride(1) == 1 and up.stride(1) == 1, "gate/up columns must be dense"
     assert gate.dtype == torch.bfloat16 and up.dtype == torch.bfloat16
 
     M, N_2 = gate.shape
@@ -359,29 +358,31 @@ def silu_mul_fp8_quant_packed_from_parts(
         return output_q, output_scale_packed
 
     BLOCK_M = 8
-    grid = (num_packed_groups, (M + BLOCK_M - 1) // BLOCK_M)
+    grid = ((M + BLOCK_M - 1) // BLOCK_M, num_packed_groups)
     has_clamp = clamp_limit > 0
-    _silu_mul_fp8_quant_packed_split_kernel[grid](
-        gate,
-        up,
-        output_q,
-        output_scale_packed,
-        M,
-        gate.stride(0),
-        up.stride(0),
-        output_q.stride(0),
-        output_scale_packed.stride(1),
-        clamp_limit if has_clamp else 0.0,
-        N_2=N_2,
-        NUM_GROUPS=num_groups_per_row,
-        fp8_min=fp8_min,
-        fp8_max=fp8_max,
-        GROUP_SIZE=group_size,
-        BLOCK_M=BLOCK_M,
-        HAS_CLAMP=has_clamp,
-        num_warps=max(4, group_size // 32),
-        num_stages=2,
-    )
+    dev_ctx = torch.cuda.device(gate.device) if gate.is_cuda else nullcontext()
+    with dev_ctx:
+        _silu_mul_fp8_quant_packed_split_kernel[grid](
+            gate,
+            up,
+            output_q,
+            output_scale_packed,
+            M,
+            gate.stride(0),
+            up.stride(0),
+            output_q.stride(0),
+            output_scale_packed.stride(1),
+            clamp_limit if has_clamp else 0.0,
+            N_2=N_2,
+            NUM_GROUPS=num_groups_per_row,
+            fp8_min=fp8_min,
+            fp8_max=fp8_max,
+            GROUP_SIZE=group_size,
+            BLOCK_M=BLOCK_M,
+            HAS_CLAMP=has_clamp,
+            num_warps=max(4, group_size // 32),
+            num_stages=2,
+        )
 
     return output_q, output_scale_packed
 
@@ -486,17 +487,19 @@ def silu_mul_fp8_quant_packed_g32(
     # overhead dominates below ~4M elements.
     legacy = m * n < 4 * 1024 * 1024
     apply_clamp = clamp_limit is not None and clamp_limit > 0.0
-    _silu_mul_fp8_quant_packed_g32_kernel[(m, triton.cdiv(n, 1024))](
-        gate_up,
-        quant,
-        scales,
-        scales.stride(1),
-        legacy,
-        N=n,
-        APPLY_CLAMP=apply_clamp,
-        CLAMP_LIMIT=float(clamp_limit) if apply_clamp else 0.0,
-        BLOCK_N=1024,
-        num_warps=8,
-        enable_fp_fusion=False,
-    )
+    dev_ctx = torch.cuda.device(gate_up.device) if gate_up.is_cuda else nullcontext()
+    with dev_ctx:
+        _silu_mul_fp8_quant_packed_g32_kernel[(m, triton.cdiv(n, 1024))](
+            gate_up,
+            quant,
+            scales,
+            scales.stride(1),
+            legacy,
+            N=n,
+            APPLY_CLAMP=apply_clamp,
+            CLAMP_LIMIT=float(clamp_limit) if apply_clamp else 0.0,
+            BLOCK_N=1024,
+            num_warps=8,
+            enable_fp_fusion=False,
+        )
     return quant, scales

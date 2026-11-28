@@ -7,13 +7,14 @@ import torch
 import torch.nn as nn
 
 from rtp_llm.models_py.kernels.cuda.deepgemm_wrapper import is_deep_gemm_e8m0_used
+from rtp_llm.models_py.modules.factory.fused_moe.defs.fused_moe import MoeWorkspace
 from rtp_llm.models_py.modules.factory.fused_moe.utils.fp8_fp4.expert import Expert
 from rtp_llm.models_py.modules.factory.fused_moe.utils.fp8_fp4.shared_expert import (
-    _SHARED_EXPERT_WORKSPACE_CACHE,
     FusedSharedExpertExecutor,
     FusedSharedExpertFastPath,
     SequentialSharedExpertExecutor,
     W13SharedExpert,
+    _run_shared_expert,
     combine_routed_and_shared,
 )
 from rtp_llm.models_py.triton_kernels.moe.shared_expert import (
@@ -189,24 +190,34 @@ def _fake_fp8_gemm_nt(a, b, output, *args, **kwargs) -> None:
 
 class TestSharedExpertExecutor(unittest.TestCase):
     @staticmethod
-    def _prepare_only_shared(inter: int = 256, dim: int = 256) -> nn.Module:
+    def _tma_scale(rows: int, k: int, device: str | torch.device = "cpu") -> torch.Tensor:
+        packed_k = (k // 128 + 3) // 4
+        aligned = ((rows + 3) // 4) * 4
+        storage = torch.empty((packed_k, aligned), dtype=torch.int32, device=device)
+        return storage.as_strided((rows, packed_k), (1, aligned)).fill_(0x7F7F7F7F)
+
+    @classmethod
+    def _prepare_only_shared(
+        cls, inter: int = 256, dim: int = 256, device: str | torch.device = "cpu"
+    ) -> nn.Module:
         shared = nn.Module()
         shared.w13 = mock.Mock(
-            weight=torch.empty((2 * inter, dim)),
-            weight_scales=torch.empty((2 * inter, 1)),
+            weight=torch.empty((2 * inter, dim), dtype=torch.float8_e4m3fn, device=device),
+            weight_scales=cls._tma_scale(2 * inter, dim, device=device),
         )
         shared.w2 = mock.Mock(
-            weight=torch.empty((dim, inter)),
-            weight_scales=torch.empty((dim, 1)),
+            weight=torch.empty((dim, inter), dtype=torch.float8_e4m3fn, device=device),
+            weight_scales=cls._tma_scale(dim, inter, device=device),
         )
         return shared
 
-    def test_fast_path_prepare_infers_inter_dim(self):
-        fast_path = FusedSharedExpertFastPath(dim=256, inter_dim=None)
+    def test_fast_path_prepare_infers_inter_dim_and_syncs_dim(self):
+        fast_path = FusedSharedExpertFastPath(dim=128, inter_dim=None)
 
-        fast_path.prepare(self._prepare_only_shared(inter=256))
+        fast_path.prepare(self._prepare_only_shared(inter=256, dim=256))
 
         self.assertEqual(fast_path.inter_dim, 256)
+        self.assertEqual(fast_path.dim, 256)
 
     def test_fast_path_prepare_uses_weight_inter_dim(self):
         fast_path = FusedSharedExpertFastPath(dim=256, inter_dim=128)
@@ -215,23 +226,112 @@ class TestSharedExpertExecutor(unittest.TestCase):
 
         self.assertEqual(fast_path.inter_dim, 256)
 
+    def test_fast_path_prepare_rejects_malformed_w2_or_strides(self):
+        fast_path = FusedSharedExpertFastPath(dim=256, inter_dim=256)
+        bad_w2_shape = self._prepare_only_shared()
+        bad_w2_shape.w2.weight = torch.empty((256, 128), dtype=torch.float8_e4m3fn)
+        with self.assertRaisesRegex(RuntimeError, "w2 weight shape mismatch"):
+            fast_path.prepare(bad_w2_shape)
+
+        bad_w2_dtype = self._prepare_only_shared()
+        bad_w2_dtype.w2.weight = torch.empty((256, 256), dtype=torch.bfloat16)
+        with self.assertRaisesRegex(RuntimeError, "float8_e4m3fn"):
+            fast_path.prepare(bad_w2_dtype)
+
+        bad_stride = self._prepare_only_shared(dim=640, inter=256)
+        bad_stride.w13.weight_scales = torch.empty((512, 2), dtype=torch.int32)
+        with self.assertRaisesRegex(RuntimeError, "TMA-aligned"):
+            fast_path.prepare(bad_stride)
+
+        bad_k = self._prepare_only_shared(dim=256, inter=192)
+        with self.assertRaisesRegex(RuntimeError, "divisible by 128"):
+            fast_path.prepare(bad_k)
+
+    def test_soft_prepare_allows_non_ue8m0_unless_strict(self):
+        shared = nn.Module()
+        shared.w13 = mock.Mock(
+            weight=torch.empty((512, 256), dtype=torch.float8_e4m3fn),
+            weight_scales=torch.ones((4, 2), dtype=torch.float32),
+        )
+        shared.w2 = mock.Mock(
+            weight=torch.empty((256, 256), dtype=torch.float8_e4m3fn),
+            weight_scales=torch.ones((2, 2), dtype=torch.float32),
+        )
+        executor = SequentialSharedExpertExecutor(
+            FusedSharedExpertFastPath(dim=256, inter_dim=256)
+        )
+        with _env("MOE_STRICT_FUSED", "0"):
+            executor.prepare(shared)
+        with _env("MOE_STRICT_FUSED", "1"):
+            with self.assertRaisesRegex(RuntimeError, "int32"):
+                executor.prepare(shared)
+
+    def test_fp32_block_w13_shared_expert_allowed_under_strict_fused(self):
+        fake_w13 = nn.Linear(256, 512, bias=False)
+        fake_w13.weight = nn.Parameter(
+            torch.empty((512, 256), dtype=torch.float8_e4m3fn), requires_grad=False
+        )
+        fake_w13.weight_scales = torch.ones((4, 2), dtype=torch.float32)
+        fake_w2 = nn.Linear(256, 256, bias=False)
+        fake_w2.weight = nn.Parameter(
+            torch.empty((256, 256), dtype=torch.float8_e4m3fn), requires_grad=False
+        )
+        fake_w2.weight_scales = torch.ones((2, 2), dtype=torch.float32)
+        with mock.patch(
+            "rtp_llm.models_py.modules.factory.fused_moe.utils.fp8_fp4.shared_expert.create_fp8_linear",
+            side_effect=[fake_w13, fake_w2],
+        ):
+            shared = W13SharedExpert(
+                256,
+                256,
+                {
+                    "w13_w": fake_w13.weight,
+                    "w13_s": fake_w13.weight_scales,
+                    "w2_w": fake_w2.weight,
+                    "w2_s": fake_w2.weight_scales,
+                },
+            )
+        executor = SequentialSharedExpertExecutor(
+            FusedSharedExpertFastPath(dim=256, inter_dim=256)
+        )
+        with _env("MOE_STRICT_FUSED", "1"):
+            executor.prepare(shared)
+            expected = torch.full((3, 256), 2.5, dtype=torch.bfloat16)
+            with mock.patch.object(
+                shared, "forward", return_value=expected
+            ) as mock_fwd:
+                got = _run_shared_expert(
+                    shared, torch.zeros((3, 256), dtype=torch.bfloat16), executor._fast_path
+                )
+        mock_fwd.assert_called_once()
+        self.assertEqual(got.dtype, torch.float32)
+        torch.testing.assert_close(got, expected.float(), rtol=0, atol=0)
+
     def test_workspace_views_are_shared_and_invalidated_on_growth(self):
-        _SHARED_EXPERT_WORKSPACE_CACHE.clear()
-        self.addCleanup(_SHARED_EXPERT_WORKSPACE_CACHE.clear)
+        ws = MoeWorkspace()
         first = FusedSharedExpertFastPath(
             max_tokens_per_rank=4,
             dim=128,
             inter_dim=128,
+            moe_workspace=ws,
         )
         second = FusedSharedExpertFastPath(
             max_tokens_per_rank=4,
             dim=128,
             inter_dim=128,
+            moe_workspace=ws,
         )
         grower = FusedSharedExpertFastPath(
             max_tokens_per_rank=9,
             dim=128,
             inter_dim=128,
+            moe_workspace=ws,
+        )
+        isolated = FusedSharedExpertFastPath(
+            max_tokens_per_rank=4,
+            dim=128,
+            inter_dim=128,
+            moe_workspace=MoeWorkspace(),
         )
         x3 = torch.empty((3, 128), dtype=torch.bfloat16)
 
@@ -251,6 +351,12 @@ class TestSharedExpertExecutor(unittest.TestCase):
             second_workspace = second._ensure_workspace(x3)
             self.assertIs(second_workspace, workspace)
             self.assertIs(second._workspace_views(second_workspace, 3), views)
+            isolated_workspace = isolated._ensure_workspace(x3)
+            self.assertIsNot(isolated_workspace, workspace)
+            self.assertNotEqual(
+                isolated_workspace.out_bf16.untyped_storage().data_ptr(),
+                workspace.out_bf16.untyped_storage().data_ptr(),
+            )
             self.assertEqual(tuple(views.x_fp8.shape), (3, 128))
             self.assertEqual(tuple(views.x_scale.shape), (3, 1))
             self.assertEqual(tuple(views.gate_up_bf16.shape), (3, 256))
@@ -267,12 +373,13 @@ class TestSharedExpertExecutor(unittest.TestCase):
             self.assertEqual(grown_workspace.views, {})
             self.assertIs(workspace.x_fp8, old_x_fp8)
             self.assertEqual(workspace.capacity, 4)
-            self.assertIs(first._workspace, workspace)
+            self.assertEqual(ws._retired_graph_buffers, [])
 
             first_grown = first._ensure_workspace(
                 torch.empty((9, 128), dtype=torch.bfloat16)
             )
             self.assertIs(first_grown, grown_workspace)
+            self.assertIs(first._ensure_workspace(x3), grown_workspace)
             refreshed = first._workspace_views(first_grown, 3)
             self.assertIsNot(refreshed, views)
             self.assertIs(refreshed.x_fp8._base, grown_workspace.x_fp8)
@@ -387,6 +494,30 @@ class TestSharedExpertExecutor(unittest.TestCase):
         self.assertLess(calc_diff(got, ref), 0.0011)
 
     @unittest.skipIf(not torch.cuda.is_available(), "CUDA required")
+    def test_can_run_rejects_non_contiguous_and_strict_executor_runs_nonempty(self):
+        shared, split_ref = _make_shared_expert(swiglu_limit=1.0)
+        x_noncontig = torch.randn((4, 512), device="cuda", dtype=torch.bfloat16)[:, :256]
+        self.assertFalse(x_noncontig.is_contiguous())
+        self.assertFalse(FusedSharedExpertFastPath.can_run(shared, x_noncontig))
+
+        x = torch.randn((4, 256), device="cuda", dtype=torch.bfloat16)
+        executor = SequentialSharedExpertExecutor(
+            FusedSharedExpertExecutor(
+                max_tokens_per_rank=16, dim=256, inter_dim=256, swiglu_limit=1.0
+            )
+        )
+        with _env("MOE_STRICT_FUSED", "1"):
+            executor.prepare(shared)
+            with mock.patch(
+                "rtp_llm.models_py.kernels.cuda.deepgemm_wrapper.fp8_gemm_nt",
+                side_effect=_fake_fp8_gemm_nt,
+            ):
+                executor.start(shared, x)
+                got = executor.finish()
+                ref = _split_reference(split_ref, x, 1.0)
+        self.assertLess(calc_diff(got, ref), 0.0011)
+
+    @unittest.skipIf(not torch.cuda.is_available(), "CUDA required")
     def test_strict_fused_requires_prepared_w13(self):
         _, shared = _make_shared_expert()
         executor = FusedSharedExpertExecutor(
@@ -396,6 +527,45 @@ class TestSharedExpertExecutor(unittest.TestCase):
         )
         with self.assertRaisesRegex(RuntimeError, "loader-prepared w13"):
             executor.prepare(shared)
+
+    def test_multi_instance_cache_serialization_shares_largest_workspace(self):
+        ws = MoeWorkspace()
+        first = FusedSharedExpertFastPath(
+            max_tokens_per_rank=4, dim=256, inter_dim=256, moe_workspace=ws
+        )
+        second = FusedSharedExpertFastPath(
+            max_tokens_per_rank=8, dim=256, inter_dim=256, moe_workspace=ws
+        )
+        third = FusedSharedExpertFastPath(
+            max_tokens_per_rank=4, dim=256, inter_dim=256, moe_workspace=ws
+        )
+        with mock.patch.object(
+            FusedSharedExpertFastPath,
+            "_tma_aligned_rows",
+            side_effect=lambda rows, _el: ((rows + 3) // 4) * 4,
+        ):
+            ws_small = first._ensure_workspace(torch.empty((4, 256), dtype=torch.bfloat16))
+            ws_large = second._ensure_workspace(torch.empty((8, 256), dtype=torch.bfloat16))
+            self.assertIsNot(ws_small, ws_large)
+            self.assertEqual(ws_large.capacity, 8)
+            self.assertIs(
+                first._ensure_workspace(torch.empty((5, 256), dtype=torch.bfloat16)),
+                ws_large,
+            )
+            self.assertIs(
+                third._ensure_workspace(torch.empty((4, 256), dtype=torch.bfloat16)),
+                ws_large,
+            )
+            with mock.patch.object(ws, "is_graph_context", return_value=True):
+                ws_graph_small = first._ensure_workspace(
+                    torch.empty((4, 256), dtype=torch.bfloat16)
+                )
+                ws_graph_large = second._ensure_workspace(
+                    torch.empty((8, 256), dtype=torch.bfloat16)
+                )
+            self.assertIsNot(ws_graph_small, ws_large)
+            self.assertIsNot(ws_graph_small, ws_graph_large)
+            self.assertIn(ws_graph_small, ws._retired_graph_buffers)
 
 
 if __name__ == "__main__":

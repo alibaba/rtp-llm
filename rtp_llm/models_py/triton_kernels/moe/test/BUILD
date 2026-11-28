@@ -1,7 +1,7 @@
 load("//rtp_llm/models_py/test:defs.bzl", "models_py_test")
 
 load("//rtp_llm/test/utils:cuda13_sm100_test.bzl", "cuda13_sm100_py_test")
-load("//rtp_llm/models_py/modules/dsv4/test:defs.bzl", "dsv4_sm100_py_test")
+load("//rtp_llm/models_py/modules/dsv4/test:defs.bzl", "dsv4_sm100_py_test", "dsv4_sm120_py_test")
 load("@arch_config//:arch_select.bzl", "requirement")
 
 requirement([
@@ -171,5 +171,16 @@ models_py_test(
     gpu = "RTX_5000_PRO_CU13",
     deps = [
         ":small_moe_test_support",
+    ],
+)
+
+dsv4_sm120_py_test(
+    name = "test_sm120_ep_kernels",
+    deps = [
+        "//rtp_llm/models_py/triton_kernels:moe",
+    ] + [
+        ":numpy",
+        ":torch",
+        ":triton",
     ],
 )

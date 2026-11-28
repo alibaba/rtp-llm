@@ -260,12 +260,41 @@ py_library(
     ]),
 )
 
+filegroup(
+    name = "device_type_source",
+    srcs = ["device/device_type.py"],
+    visibility = ["//visibility:public"],
+)
+
+py_library(
+    name = "device_type",
+    srcs = ["device/device_type.py"],
+    visibility = ["//visibility:public"],
+    deps = [":torch"],
+)
+
+py_library(
+    name = "cuda_capability",
+    srcs = ["device/cuda_capability.py"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":device_type",
+        ":torch",
+    ],
+)
+
 py_library(
     name = "device",
-    srcs = glob([
-        "device/**/*.py",
-    ]),
+    srcs = glob(
+        ["device/**/*.py"],
+        exclude = [
+            "device/cuda_capability.py",
+            "device/device_type.py",
+        ],
+    ),
     deps = [
+        ":cuda_capability",
+        ":device_type",
         ":torch",
         ":psutil",
         ":utils",
@@ -407,6 +436,8 @@ py_library(
         "config/**/*.py",
     ]),
     deps = [
+        ":cuda_capability",
+        ":device_type",
         "//rtp_llm/distribute:distribute",
         "//rtp_llm/models_py/distributed:rank_layout",
         ":multimodal"

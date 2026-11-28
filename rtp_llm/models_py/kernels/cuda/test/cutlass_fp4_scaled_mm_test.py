@@ -6,7 +6,9 @@ from rtp_llm.models_py.kernels.cuda.fp4_kernel import (
 )
 from flashinfer import fp4_quantize
 
-skip_condition = torch.cuda.get_device_capability() < (10, 0)
+from rtp_llm.models_py.utils.arch import is_sm10x
+
+skip_condition = not (torch.cuda.is_available() and is_sm10x())
 
 DTYPES = [torch.float16, torch.bfloat16]
 # m, n, k

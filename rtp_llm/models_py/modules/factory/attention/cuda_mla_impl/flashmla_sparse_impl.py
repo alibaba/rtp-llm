@@ -546,9 +546,6 @@ class SparseMlaImpl(MlaImplBase):
         the captured schedule tensor address stable, so replay updates it in
         place instead of replacing the tensor object.
         """
-        # Other architectures use the legacy/shape-probing indexer entry.
-        if not is_sm10x():
-            return
         if not (
             _is_multi_token_decode(attn_inputs)
             or not bool(getattr(attn_inputs, "is_prefill", False))
@@ -558,8 +555,6 @@ class SparseMlaImpl(MlaImplBase):
             import deep_gemm
         except Exception:
             return
-        if not hasattr(deep_gemm, "get_paged_mqa_logits_metadata"):
-            return
 
         if _is_multi_token_decode(attn_inputs):
             lengths = self.fmha_params.expanded_seq_lens
@@ -568,12 +563,32 @@ class SparseMlaImpl(MlaImplBase):
         if not isinstance(lengths, torch.Tensor) or lengths.numel() == 0:
             return
         from rtp_llm.models_py.modules.base.cuda.indexer_op import (
+            _can_use_deepgemm_paged_mqa,
             _get_paged_mqa_logits_metadata_compat,
         )
 
-        new_schedule = _get_paged_mqa_logits_metadata_compat(
-            lengths, self.seq_size_per_block, deep_gemm.get_num_sms()
-        )
+        # Other architectures use the legacy/shape-probing indexer entry.
+        if not is_sm10x(lengths.device if lengths.is_cuda else None):
+            return
+        if not (
+            hasattr(deep_gemm, "get_legacy_paged_mqa_logits_metadata")
+            or hasattr(deep_gemm, "get_paged_mqa_logits_metadata")
+        ):
+            return
+        if lengths.is_cuda and not _can_use_deepgemm_paged_mqa(
+            lengths, self.seq_size_per_block
+        ):
+            return
+
+        if lengths.is_cuda:
+            with torch.cuda.device(lengths.device):
+                new_schedule = _get_paged_mqa_logits_metadata_compat(
+                    lengths, self.seq_size_per_block, deep_gemm.get_num_sms()
+                )
+        else:
+            new_schedule = _get_paged_mqa_logits_metadata_compat(
+                lengths, self.seq_size_per_block, deep_gemm.get_num_sms()
+            )
 
         current = getattr(self.fmha_params, "schedule_metadata", None)
         has_current = False

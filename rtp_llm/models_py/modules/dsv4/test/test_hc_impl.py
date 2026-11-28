@@ -257,6 +257,28 @@ class TestHCImpl(unittest.TestCase):
         # in-place and fresh-buffer results must be bit-identical
         torch.testing.assert_close(out_alias, out_fresh, atol=0, rtol=0)
 
+    def test_splitk_accumulation_envelope(self) -> None:
+        splits, k_dim = 4, 28672
+        g = torch.Generator().manual_seed(5)
+        x = torch.randn(64, k_dim, generator=g).to(torch.bfloat16).float()
+        fn = (torch.randn(24, k_dim, generator=g) * 0.02).float()
+        ref = x @ fn.t()
+        exact = (x.double() @ fn.t().double()).float()
+        chunk = k_dim // splits
+        partials = [
+            x[:, i * chunk : (i + 1) * chunk] @ fn[:, i * chunk : (i + 1) * chunk].t()
+            for i in range(splits)
+        ]
+        cand = partials[0]
+        for p in partials[1:]:
+            cand = cand + p
+        div = (cand - ref).abs().max().item()
+        self.assertGreater(div, 0.0)
+        self.assertLessEqual(div, 5e-3)
+        err_ref = (ref - exact).abs().max().item()
+        err_cand = (cand - exact).abs().max().item()
+        self.assertLessEqual(err_cand, 2.0 * max(err_ref, 1e-12))
+
 
 if __name__ == "__main__":
     unittest.main()

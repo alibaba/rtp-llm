@@ -6,6 +6,13 @@ import torch
 import triton
 import triton.language as tl
 
+from rtp_llm.models_py.utils.arch import (
+    _canonical_cuda_device,
+    _is_explicit_non_cuda_device,
+    is_cuda,
+    is_sm10x,
+    is_sm12x,
+)
 from rtp_llm.utils.module_util import has_module, resolve_symbol
 
 __all__ = [
@@ -89,10 +96,18 @@ def has_deep_gemm() -> bool:
 
 
 @functools.cache
-def is_deep_gemm_e8m0_used() -> bool:
-    # Blackwell SM100 and SM120 DeepGEMM kernels consume packed UE8M0 scales.
-    # SM120 support requires the vLLM-pinned DeepGEMM build (a6b593d or newer).
-    return torch.cuda.get_device_capability()[0] in (10, 12)
+def _is_deep_gemm_e8m0_used_for_device(device_idx: int) -> bool:
+    return is_sm10x(device_idx) or is_sm12x(device_idx)
+
+
+def is_deep_gemm_e8m0_used(device_id=None) -> bool:
+    """Whether DeepGEMM kernels on this device expect packed UE8M0 scales."""
+    if _is_explicit_non_cuda_device(device_id) or not is_cuda():
+        return False
+    return _is_deep_gemm_e8m0_used_for_device(_canonical_cuda_device(device_id))
+
+
+is_deep_gemm_e8m0_used.cache_clear = _is_deep_gemm_e8m0_used_for_device.cache_clear
 
 
 @contextmanager
@@ -174,8 +189,9 @@ def _lazy_init_deep_gemm(symbols: List[str]) -> None:
     ):
         # already initialized
         return
-    if not has_deep_gemm():
-        # deep_gemm is not available
+    if not has_deep_gemm() or not torch.cuda.is_available():
+        # deep_gemm 2.8.2 calls cudaGetDevice at import time and raises
+        # cudaErrorNoDevice on GPU-less CPU runners even when installed.
         return
 
     import deep_gemm
@@ -516,7 +532,7 @@ def m_grouped_fp8_gemm_nt_contiguous(
         disable_ue8m0_cast=(
             disable_ue8m0_cast
             if disable_ue8m0_cast is not None
-            else not is_deep_gemm_e8m0_used()
+            else not is_deep_gemm_e8m0_used(a[0].device)
         ),
     )
 
@@ -529,7 +545,7 @@ def maybe_pack_ue8m0_scale(
     # 2. sf.scalar_type() == torch::kFloat
     # 3. not disable_ue8m0_cast
     # 4. num_groups > 1
-    arch_major, _ = torch.cuda.get_device_capability()
+    arch_major, _ = torch.cuda.get_device_capability(x.device)
     if arch_major not in (10, 12):
         return scale
     if scale.dtype != torch.float32:
@@ -543,7 +559,8 @@ def maybe_pack_ue8m0_scale(
     if gran_mn != 1 and gran_mn != 128:
         return scale
 
-    return pack_ue8m0_kernel_launcher(scale, gran_mn)
+    with torch.cuda.device(x.device):
+        return pack_ue8m0_kernel_launcher(scale, gran_mn)
 
 
 def m_grouped_fp8_gemm_nt_masked(
@@ -574,7 +591,7 @@ def m_grouped_fp8_gemm_nt_masked(
     disable_ue8m0_cast = (
         disable_ue8m0_cast
         if disable_ue8m0_cast is not None
-        else not is_deep_gemm_e8m0_used()
+        else not is_deep_gemm_e8m0_used(a[0].device)
     )
 
     a = (a[0], maybe_pack_ue8m0_scale(a[0], a[1], disable_ue8m0_cast))
@@ -679,22 +696,17 @@ def _require_sm100_packed_scale_for_fp8_fp4(
 ) -> None:
     if not torch.cuda.is_available():
         return
-    arch_major, _ = torch.cuda.get_device_capability()
-    if arch_major != 10 or not is_deep_gemm_e8m0_used():
+    arch_major, _ = torch.cuda.get_device_capability(a[0].device)
+    if arch_major not in (10, 12):
         return
     if a[1].dtype != torch.int32 or b[1].dtype != torch.int32:
         raise RuntimeError(
-            "SM100 FP8xFP4 DeepGEMM calls require prepacked int32 scales; "
-            f"got a_scale={a[1].dtype}, b_scale={b[1].dtype}"
+            "SM100/SM120 FP8xFP4 DeepGEMM calls require prepacked int32 "
+            f"scales; got a_scale={a[1].dtype}, b_scale={b[1].dtype}"
         )
 
 
 # --- FP8 activation × FP4 weight (UE8M0 block-scale) ---
-#
-# DeepGEMM's fp8_fp4 family consumes packed-int8 FP4 weights (2 FP4/byte)
-# with UE8M0 block-32 scale along K, matching the DeepSeek-native FP4
-# recipe shipped by V3.2/V4 routed experts. Activation is FP8 e4m3fn with
-# per-token block-128 UE8M0 scale. SM100 only.
 
 
 def fp8_fp4_gemm_nt(
@@ -725,7 +737,7 @@ def fp8_fp4_gemm_nt(
         disable_ue8m0_cast=(
             disable_ue8m0_cast
             if disable_ue8m0_cast is not None
-            else not is_deep_gemm_e8m0_used()
+            else not is_deep_gemm_e8m0_used(a[0].device)
         ),
     )
 
@@ -765,7 +777,7 @@ def m_grouped_fp8_fp4_gemm_nt_contiguous(
         disable_ue8m0_cast=(
             disable_ue8m0_cast
             if disable_ue8m0_cast is not None
-            else not is_deep_gemm_e8m0_used()
+            else not is_deep_gemm_e8m0_used(a[0].device)
         ),
         use_psum_layout=use_psum_layout,
         expected_m_for_psum_layout=expected_m_for_psum_layout,
@@ -803,7 +815,7 @@ def m_grouped_fp8_fp4_gemm_nt_masked(
         disable_ue8m0_cast=(
             disable_ue8m0_cast
             if disable_ue8m0_cast is not None
-            else not is_deep_gemm_e8m0_used()
+            else not is_deep_gemm_e8m0_used(a[0].device)
         ),
     )
 

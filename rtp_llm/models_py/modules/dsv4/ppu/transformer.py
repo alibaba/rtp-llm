@@ -22,6 +22,7 @@ from rtp_llm.models_py.modules.dsv4.ppu.block import Block
 from rtp_llm.models_py.modules.dsv4.cp import CPContext, build_cp_context
 from rtp_llm.models_py.modules.dsv4.ppu.hc.factory import build_hc_head
 from rtp_llm.models_py.modules.dsv4.ppu.tp_norm import tp_gather_hidden, tp_rms_norm
+from rtp_llm.models_py.modules.factory.fused_moe.defs.fused_moe import MoeWorkspace
 from rtp_llm.models_py.modules.factory.fused_moe.utils.fp8_fp4.chunked_layer import (
     synchronized_moe_chunk_plan,
 )
@@ -33,15 +34,21 @@ def _build_block(
     layer_weights: Optional[Dict[str, torch.Tensor]] = None,
     platform_provider: object = None,
     commit_only: bool = False,
+    moe_workspace: Optional[MoeWorkspace] = None,
 ) -> Block:
     if platform_provider is None:
         raise ValueError("PPU block requires an instance-owned provider")
     else:
         provider = platform_provider
+    block_kwargs = _block_kwargs(layer_id, args, layer_weights, commit_only=commit_only)
+    # PPU Block does not accept physical MoE-topology kwargs.
+    for name in ("moe_tp_size", "moe_tp_rank", "moe_cp_enabled", "moe_cp_size"):
+        block_kwargs.pop(name, None)
     return provider.build_block(
         Block,
-        **_block_kwargs(layer_id, args, layer_weights, commit_only=commit_only),
+        **block_kwargs,
         platform_provider=provider,
+        moe_workspace=moe_workspace,
     )
 
 class V4Transformer(_BaseV4Transformer):
@@ -110,6 +117,7 @@ class V4Transformer(_BaseV4Transformer):
                         args.dim,
                     )
 
+        self._moe_workspace = MoeWorkspace()
         self.layers = nn.ModuleList(
             [
                 _build_block(
@@ -118,6 +126,7 @@ class V4Transformer(_BaseV4Transformer):
                     layer_weights=mw.weights[i],
                     platform_provider=self.platform_provider,
                     commit_only=self.commit_only,
+                    moe_workspace=self._moe_workspace,
                 )
                 for i in range(args.n_layers)
             ]

@@ -1830,11 +1830,18 @@ def _generate_mhc_prenorm_warmup_specs(
     return tuple((split, reps_by_split[split]) for split in sorted(reps_by_split))
 
 
-def _fp8_mqa_logits_available() -> bool:
+def _fp8_mqa_logits_available(device: Optional[torch.device] = None) -> bool:
     try:
-        import deep_gemm
+        from rtp_llm.models_py.modules.dsv4.fp8._indexer_score import (
+            supports_mqa_logits,
+        )
 
-        return hasattr(deep_gemm, "fp8_mqa_logits")
+        target = (
+            torch.device("cuda", torch.cuda.current_device())
+            if device is None and torch.cuda.is_available()
+            else device
+        )
+        return target is not None and supports_mqa_logits(target)
     except Exception:
         return False
 
@@ -2168,7 +2175,7 @@ def warmup_fp8_mqa_logits_jit(
     device = torch.device(device)
     if not _is_cuda_device(device) or not shapes:
         return
-    if not _fp8_mqa_logits_available():
+    if not _fp8_mqa_logits_available(device):
         return
     _assert_not_capturing()
 
@@ -2624,22 +2631,37 @@ def _launch_dummy_fp8_mqa_logits(
     seq_len = max(1, block_q)
     seq_len_kv = 256
 
-    q = torch.zeros(
-        (seq_len, num_heads, head_dim), dtype=torch.float8_e4m3fn, device=device
-    )
-    k = torch.zeros((seq_len_kv, head_dim), dtype=torch.float8_e4m3fn, device=device)
-    k_scale = torch.ones((seq_len_kv,), dtype=torch.float32, device=device)
-    weights = torch.zeros((seq_len, num_heads), dtype=torch.float32, device=device)
-    ks = torch.zeros((seq_len,), dtype=torch.int32, device=device)
-    ke = torch.full((seq_len,), seq_len_kv, dtype=torch.int32, device=device)
+    with torch.cuda.device(device):
+        q = torch.zeros(
+            (seq_len, num_heads, head_dim), dtype=torch.float8_e4m3fn, device=device
+        )
+        k = torch.zeros((seq_len_kv, head_dim), dtype=torch.float8_e4m3fn, device=device)
+        k_scale = torch.ones((seq_len_kv,), dtype=torch.float32, device=device)
+        weights = torch.zeros((seq_len, num_heads), dtype=torch.float32, device=device)
+        ks = torch.zeros((seq_len,), dtype=torch.int32, device=device)
+        ke = torch.full((seq_len,), seq_len_kv, dtype=torch.int32, device=device)
 
-    logits = deep_gemm.fp8_mqa_logits(
-        q,
-        (k, k_scale),
-        weights,
-        ks,
-        ke,
-        False,
-        0,
-    )
-    del q, k, k_scale, weights, ks, ke, logits
+        from rtp_llm.models_py.modules.dsv4.fp8._indexer_score import (
+            fp8_paged_mqa_uses_2d_context_lens,
+        )
+
+        if fp8_paged_mqa_uses_2d_context_lens(deep_gemm):
+            logits = deep_gemm.fp8_mqa_logits(
+                q,
+                (k, k_scale),
+                weights,
+                ks,
+                ke,
+                False,
+                0,
+            )
+        else:
+            logits = deep_gemm.fp8_mqa_logits(
+                q,
+                (k, k_scale),
+                weights,
+                ks,
+                ke,
+                False,
+            )
+        del q, k, k_scale, weights, ks, ke, logits

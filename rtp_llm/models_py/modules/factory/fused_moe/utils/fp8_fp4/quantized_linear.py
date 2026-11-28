@@ -31,6 +31,7 @@ from rtp_llm.models_py.kernels.cuda.quant_layouts import (
     FP8_BLOCK,
     dequantize_fp4_weight,
     dequantize_fp8_weight,
+    is_e8m0_scale,
     prepare_fp4_weight_scale_for_deepgemm,
 )
 
@@ -42,7 +43,7 @@ MXFP8_BLOCK = 32
 def is_mxfp8_scale(weight: torch.Tensor, scale: torch.Tensor) -> bool:
     return (
         scale.dim() == 2
-        and scale.dtype == torch.float8_e8m0fnu
+        and is_e8m0_scale(scale)
         and weight.dim() == 2
         and tuple(scale.shape)
         == (
@@ -59,12 +60,28 @@ def create_fp8_linear(weight: torch.Tensor, scale: torch.Tensor):
     if is_mxfp8_scale(weight, scale):
         return Mxfp8Linear(weight, scale)
 
-    if scale.dtype == torch.float8_e8m0fnu:
-        from deep_gemm.utils.layout import get_mn_major_tma_aligned_packed_ue8m0_tensor
-
+    quant_config = _FP8_BLOCK_CONFIG
+    if is_e8m0_scale(scale):
+        if weight.dim() != 2:
+            raise ValueError(f"FP8 weight must be 2D, got {weight.dim()}D")
         if scale.dim() != 2:
             raise ValueError(f"FP8 scale must be 2D, got {scale.dim()}D")
-        row_count = scale.shape[0] * FP8_BLOCK
+        if weight.shape[1] % FP8_BLOCK != 0:
+            raise ValueError(
+                f"FP8 K dimension must be divisible by {FP8_BLOCK}, got {weight.shape[1]}"
+            )
+        expected_scale_shape = (
+            (weight.shape[0] + FP8_BLOCK - 1) // FP8_BLOCK,
+            weight.shape[1] // FP8_BLOCK,
+        )
+        if tuple(scale.shape) != expected_scale_shape:
+            raise ValueError(
+                f"FP8 UE8M0 scale shape mismatch: expected {expected_scale_shape}, "
+                f"got {tuple(scale.shape)}"
+            )
+        from deep_gemm.utils.layout import get_mn_major_tma_aligned_packed_ue8m0_tensor
+
+        row_count = weight.shape[0]
         row_index = torch.arange(row_count, device=scale.device) // FP8_BLOCK
         scale = get_mn_major_tma_aligned_packed_ue8m0_tensor(
             scale.float().index_select(-2, row_index)
@@ -74,7 +91,7 @@ def create_fp8_linear(weight: torch.Tensor, scale: torch.Tensor):
         local_weights,
         "weight",
         "scale",
-        quant_config=_FP8_BLOCK_CONFIG,
+        quant_config=quant_config,
     )
 
 

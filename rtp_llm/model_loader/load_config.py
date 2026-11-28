@@ -65,6 +65,27 @@ class LoadConfig(BaseModel):
     use_swizzleA: bool = False
     force_cpu_load_weights: bool = False
     moe_pure_tp_preshard: bool = False
+    target_device: Optional[str] = None
+
+    @staticmethod
+    def canonicalize_target_device(
+        target_device: Optional[Union[str, torch.device]],
+    ) -> Optional[str]:
+        if target_device is None:
+            return None
+        dev = torch.device(target_device)
+        if dev.type == "cuda":
+            idx = torch.cuda.current_device() if dev.index is None else dev.index
+            return f"cuda:{idx}"
+        return str(dev)
+
+    def with_target_device(
+        self, target_device: Optional[Union[str, torch.device]]
+    ) -> "LoadConfig":
+        canonical = self.canonicalize_target_device(target_device)
+        if canonical == self.target_device:
+            return self
+        return self.model_copy(update={"target_device": canonical})
 
     @field_validator("database", "compute_dtype", "quant_algo")
     @classmethod

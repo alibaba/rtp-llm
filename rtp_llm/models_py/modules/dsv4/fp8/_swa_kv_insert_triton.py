@@ -41,13 +41,26 @@ def _trap_invalid_kv_access(TRAP_INVALID_KV_ACCESS: tl.constexpr) -> None:
         )
 
 
-@triton.jit(do_not_specialize=["num_tokens", "block_stride", "num_cache_blocks"])
+@triton.jit(
+    do_not_specialize=[
+        "num_tokens",
+        "block_stride",
+        "num_cache_blocks",
+        "prefix_width",
+        "tokens_per_request",
+    ]
+)
 def _quantize_and_insert_k_kernel(
     # Inputs
     k_ptr,  # [num_tokens, 512] bf16
     slot_mapping_ptr,  # [num_tokens] int64; -1 = skip
     # Output (in-place)
     k_cache_ptr,  # [num_blocks, block_size, 584] uint8 (3D)
+    prefix_cache_ptr,
+    prefix_slots_ptr,
+    prefix_lens_ptr,
+    prefix_block_stride,
+    prefix_num_blocks,
     # Dimensions / constexprs
     num_tokens,
     input_dim: tl.constexpr,  # 512
@@ -62,6 +75,10 @@ def _quantize_and_insert_k_kernel(
     fp8_max: tl.constexpr,  # 448.0
     n_quant_blocks: tl.constexpr,  # 8 (7 real + 1 padding tile-loop iter)
     TRAP_INVALID_KV_ACCESS: tl.constexpr,
+    COPY_PREFIX: tl.constexpr,
+    prefix_block_size: tl.constexpr,
+    prefix_width,
+    tokens_per_request,
 ):
     """One program per token. Block layout per pool block:
     [0, cache_block_size * 576)             — token data (NoPE+RoPE interleaved)
@@ -70,6 +87,10 @@ def _quantize_and_insert_k_kernel(
     [..., block_stride)                      — TMA padding
     """
     pid = tl.program_id(0).to(tl.int64)
+    if COPY_PREFIX:
+        position = pid
+        request = tl.program_id(1).to(tl.int64)
+        pid += request * tokens_per_request
     if pid >= num_tokens:
         return
 
@@ -94,6 +115,44 @@ def _quantize_and_insert_k_kernel(
     token_scale_ptr = (
         cache_block_ptr + cache_block_size * token_data_size + pos_in_block * scale_dim
     )
+
+    if COPY_PREFIX:
+        prefix_len = tl.load(prefix_lens_ptr + request)
+        if position < prefix_len:
+            source_slot = tl.load(
+                prefix_slots_ptr + request * prefix_width + position,
+                mask=position < prefix_width,
+                other=-1,
+            ).to(tl.int64)
+            valid = (source_slot >= 0) & (
+                source_slot < prefix_num_blocks * prefix_block_size
+            )
+            if (source_slot != -1) & ~valid:
+                _trap_invalid_kv_access(TRAP_INVALID_KV_ACCESS)
+            source_block = tl.maximum(source_slot, 0) // prefix_block_size
+            source_position = tl.maximum(source_slot, 0) % prefix_block_size
+            source_ptr = prefix_cache_ptr + source_block * prefix_block_stride.to(
+                tl.int64
+            )
+            data_offsets = tl.arange(0, 1024)
+            data_mask = data_offsets < token_data_size
+            data = tl.load(
+                source_ptr + source_position * token_data_size + data_offsets,
+                mask=data_mask & valid,
+                other=0,
+            )
+            tl.store(token_data_ptr + data_offsets, data, mask=data_mask)
+            scale_offsets = tl.arange(0, 8)
+            scales = tl.load(
+                source_ptr
+                + prefix_block_size * token_data_size
+                + source_position * scale_dim
+                + scale_offsets,
+                mask=valid,
+                other=0,
+            )
+            tl.store(token_scale_ptr + scale_offsets, scales)
+            return
 
     token_fp8_ptr = token_data_ptr
     token_bf16_ptr = token_data_ptr + fp8_dim
@@ -155,6 +214,10 @@ def quantize_and_insert_k_cache(
     k: torch.Tensor,  # [num_tokens, 512] bf16
     k_cache: torch.Tensor,  # [num_blocks, block_size, 584] uint8
     slot_mapping: torch.Tensor,  # [num_tokens] int64; -1 = skip
+    *,
+    prefix_cache: torch.Tensor | None = None,
+    prefix_slot_mapping: torch.Tensor | None = None,
+    prefix_gather_lens: torch.Tensor | None = None,
 ) -> None:
     """One-launch quantize-and-write into the FP8 SWA pool.
 
@@ -167,6 +230,12 @@ def quantize_and_insert_k_cache(
     Slots with value ``-1`` are skipped. The caller decides which logical
     blocks are writable by passing a per-token slot mapping; sparse positive
     block-table entries are written just like contiguous tail entries.
+
+    A prefill workspace may copy its cached prefix directly from another
+    packed pool. Re-quantizing decoded FP8 values can change scale/mantissa
+    encodings and therefore the native FP8 attention rounding. Prefix tables
+    describe B requests in a flattened [B, M, 512] input; only fresh rows
+    are quantized. The two cache allocations must not alias.
     """
     assert (
         k.dim() == 2 and k.shape[1] == _INPUT_DIM
@@ -187,26 +256,67 @@ def quantize_and_insert_k_cache(
 
     block_size = int(k_cache.shape[1])
     block_stride = int(k_cache.stride(0))  # bytes per block (TMA-padded)
+    copy_prefix = prefix_cache is not None
+    prefix_block_size = prefix_width = tokens_per_request = 1
+    prefix_block_stride = prefix_num_blocks = 0
+    if copy_prefix:
+        assert prefix_slot_mapping is not None and prefix_gather_lens is not None
+        assert prefix_cache.ndim == 3 and prefix_cache.shape[-1] == 584
+        assert prefix_cache.dtype == torch.uint8 and prefix_cache.device == k.device
+        assert prefix_cache.stride(1) == 584 and prefix_cache.stride(2) == 1
+        assert (
+            prefix_cache.untyped_storage().data_ptr()
+            != k_cache.untyped_storage().data_ptr()
+        ), "prefix source and destination must not alias"
+        assert prefix_slot_mapping.ndim == 2 and prefix_slot_mapping.is_contiguous()
+        batch, prefix_width = prefix_slot_mapping.shape
+        assert batch > 0 and num_tokens % batch == 0
+        assert (
+            prefix_gather_lens.shape == (batch,) and prefix_gather_lens.is_contiguous()
+        )
+        for table in (prefix_slot_mapping, prefix_gather_lens):
+            assert table.device == k.device and table.dtype in (
+                torch.int32,
+                torch.int64,
+            )
+        tokens_per_request = num_tokens // batch
+        assert prefix_width <= tokens_per_request
+        prefix_block_size = int(prefix_cache.shape[1])
+        prefix_block_stride = int(prefix_cache.stride(0))
+        prefix_num_blocks = int(prefix_cache.shape[0])
+    else:
+        assert prefix_slot_mapping is None and prefix_gather_lens is None
 
-    grid = (num_tokens,)
-    _quantize_and_insert_k_kernel[grid](
-        k,
-        slot_mapping,
-        k_cache,
-        num_tokens,
-        input_dim=_INPUT_DIM,
-        fp8_dim=_TOKEN_FP8_DIM,
-        bf16_dim=_TOKEN_BF16_DIM,
-        scale_dim=_TOKEN_SCALE_DIM,
-        quant_block=_QUANT_BLOCK_SIZE,
-        cache_block_size=block_size,
-        token_data_size=_TOKEN_DATA_SIZE,
-        block_stride=block_stride,
-        num_cache_blocks=int(k_cache.shape[0]),
-        fp8_max=_FP8_MAX,
-        n_quant_blocks=8,
-        TRAP_INVALID_KV_ACCESS=True,
-    )
+    # Request coordinates avoid runtime division without specializing on length.
+    grid = (tokens_per_request, batch) if copy_prefix else (num_tokens,)
+    with torch.cuda.device(k_cache.device):
+        _quantize_and_insert_k_kernel[grid](
+            k,
+            slot_mapping,
+            k_cache,
+            prefix_cache,
+            prefix_slot_mapping,
+            prefix_gather_lens,
+            prefix_block_stride,
+            prefix_num_blocks,
+            num_tokens,
+            input_dim=_INPUT_DIM,
+            fp8_dim=_TOKEN_FP8_DIM,
+            bf16_dim=_TOKEN_BF16_DIM,
+            scale_dim=_TOKEN_SCALE_DIM,
+            quant_block=_QUANT_BLOCK_SIZE,
+            cache_block_size=block_size,
+            token_data_size=_TOKEN_DATA_SIZE,
+            block_stride=block_stride,
+            num_cache_blocks=int(k_cache.shape[0]),
+            fp8_max=_FP8_MAX,
+            n_quant_blocks=8,
+            TRAP_INVALID_KV_ACCESS=True,
+            COPY_PREFIX=copy_prefix,
+            prefix_block_size=prefix_block_size,
+            prefix_width=prefix_width,
+            tokens_per_request=tokens_per_request,
+        )
 
 
 def quantize_and_insert_k_cache_cp_byte_sliced(

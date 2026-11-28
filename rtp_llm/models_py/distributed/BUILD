@@ -15,6 +15,7 @@ py_library(
         "flashinfer_all_reduce.py",
         "flashinfer_ipc_all_reduce.py",
         "all_reduce.py",
+        "ordered_reduce_scatter.py",
         "rocm_rccl.py",
         "symm_mem.py",
     ],
@@ -32,6 +33,7 @@ py_library(
     srcs = ["deepep_wrapper.py"],
     deps = [
         ":collective_torch",
+        "//rtp_llm:cuda_capability",
         "//rtp_llm:torch",
     ] + select({
         "@//:using_cuda13_x86": ["//rtp_llm/models_py:deep_ep"],

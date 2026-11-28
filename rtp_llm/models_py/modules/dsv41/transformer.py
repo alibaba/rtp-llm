@@ -24,6 +24,7 @@ from rtp_llm.models_py.modules.dsv41.bounded_replay import (
 )
 from rtp_llm.models_py.modules.dsv41.cp import CPContext, build_cp_context
 from rtp_llm.models_py.modules.dsv41.hc import build_hc_head
+from rtp_llm.models_py.modules.factory.fused_moe.defs.fused_moe import MoeWorkspace
 
 
 @dataclass
@@ -174,11 +175,13 @@ def _build_block(
     layer_weights: Optional[Dict[str, torch.Tensor]] = None,
     commit_only: bool = False,
     shared_attention: Optional[Dict] = None,
+    moe_workspace: Optional[MoeWorkspace] = None,
 ) -> Block:
     return Block(
         **_block_kwargs(layer_id, args, layer_weights, commit_only=commit_only),
         v41_config=args.v41_config,
         shared_attention=shared_attention,
+        moe_workspace=moe_workspace,
     )
 
 
@@ -215,6 +218,7 @@ class V4Transformer(nn.Module):
 
         gw = mw.global_weights
         shared_attention = {}
+        self._moe_workspace = MoeWorkspace()
         self.layers = nn.ModuleList(
             [
                 _build_block(
@@ -223,6 +227,7 @@ class V4Transformer(nn.Module):
                     layer_weights=mw.weights[i],
                     commit_only=self.commit_only,
                     shared_attention=shared_attention,
+                    moe_workspace=self._moe_workspace,
                 )
                 for i in range(args.n_layers)
             ]

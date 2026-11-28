@@ -21,6 +21,7 @@ import importlib
 import sys
 import types
 import unittest
+from unittest.mock import patch
 
 import torch
 
@@ -354,20 +355,20 @@ class DecodeTopkLengthPlumbingTest(unittest.TestCase):
             module = importlib.import_module(
                 "rtp_llm.models_py.modules.dsv4.fp8.decode.fp8_sparse_attn_decode_op"
             )
-            module._FLASH_MLA_AVAILABLE = True
-            op = module.SparseAttnV4DecodeFp8Op(
-                n_heads=2, head_dim=HEAD_DIM, softmax_scale=HEAD_DIM**-0.5
-            )
-            fn(op, calls)
+            with patch.object(module, "_load_flash_mla", return_value=True):
+                op = module.SparseAttnV4DecodeFp8Op(
+                    n_heads=2, head_dim=HEAD_DIM, softmax_scale=HEAD_DIM**-0.5
+                )
+                fn(op, calls)
         finally:
             if old is None:
                 sys.modules.pop("flash_mla", None)
             else:
                 sys.modules["flash_mla"] = old
-        if old_flash_mla_legacy is None:
-            sys.modules.pop("flash_mla_legacy", None)
-        else:
-            sys.modules["flash_mla_legacy"] = old_flash_mla_legacy
+            if old_flash_mla_legacy is None:
+                sys.modules.pop("flash_mla_legacy", None)
+            else:
+                sys.modules["flash_mla_legacy"] = old_flash_mla_legacy
         return calls
 
     def test_dual_paged_forwards_both_lengths(self) -> None:

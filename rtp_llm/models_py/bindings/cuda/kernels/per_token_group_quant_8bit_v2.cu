@@ -1,9 +1,11 @@
 // Adapt from https://github.com/sgl-project/sglang/blob/main/sgl-kernel/csrc/gemm/per_token_group_quant_8bit_v2.cu
 #include "per_token_group_quant_8bit_v2.h"
 #include <ATen/cuda/CUDAContext.h>
+#include <c10/cuda/CUDAGuard.h>
 #include <c10/util/Float8_e4m3fn.h>
 
 #include <cmath>
+#include <cstdint>
 #include <limits>
 // #include <flashinfer/vec_dtypes.cuh>
 // #include "utils.h"
@@ -225,7 +227,11 @@ struct MaskedLayoutScheduler {
 
         const int64_t hidden_dim_group_idx = blockIdx.x * SUBWARPS_PER_BLOCK + subwarp_id;
 
-        const int curr_expert_token_num = masked_m[expert_idx];
+        const int raw_expert_token_num = masked_m[expert_idx];
+        const int curr_expert_token_num =
+            raw_expert_token_num < 0 ?
+                0 :
+                (raw_expert_token_num > num_tokens_per_expert ? num_tokens_per_expert : raw_expert_token_num);
 
         for (int token_idx = token_idx_start; token_idx < curr_expert_token_num;
              token_idx += TOKEN_DIM_BLOCK_NUM_PER_EXPERT) {
@@ -331,13 +337,13 @@ __global__ void per_token_group_quant_8bit_kernel(const T* __restrict__ input,
                 scale_output = output_s + offset_num_groups;
             }
 
-            // can speed up if too slow
             if constexpr (IS_COLUMN_MAJOR and SCALE_UE8M0) {
                 const int remainder_num_groups = hidden_dim_num_groups % num_elems_per_pack;
-                if ((remainder_num_groups != 0) and (hidden_dim_group_idx == hidden_dim_num_groups - 1)
-                    and (lane_id < num_elems_per_pack - remainder_num_groups)) {
-                    const int shift         = 1 + lane_id;
-                    *(scale_output + shift) = 0;
+                if ((remainder_num_groups != 0) and (hidden_dim_group_idx == hidden_dim_num_groups - 1)) {
+                    const int pad_bytes = num_elems_per_pack - remainder_num_groups;
+                    for (int shift = 1 + static_cast<int>(lane_id); shift <= pad_bytes; shift += THREADS_PER_SUBWARP) {
+                        *(scale_output + shift) = 0;
+                    }
                 }
             }
 
@@ -453,6 +459,18 @@ void sgl_per_token_group_quant_8bit_v2(
     CHECK_INPUT(input);
     CHECK_INPUT(output_q);
     TORCH_CHECK(input.numel() > 0);
+    TORCH_CHECK(output_q.device() == input.device() && output_s.device() == input.device(),
+                "input, output_q, and output_s must be on the same CUDA device");
+    if (masked_m.has_value()) {
+        TORCH_CHECK(masked_m->is_cuda() && masked_m->device() == input.device(),
+                    "masked_m must be on the same CUDA device as input");
+        TORCH_CHECK(masked_m->scalar_type() == torch::kInt32 && masked_m->is_contiguous(),
+                    "masked_m must be a contiguous int32 tensor");
+    }
+    TORCH_CHECK(reinterpret_cast<uintptr_t>(input.data_ptr()) % 16 == 0,
+                "per_token_group_quant_8bit_v2 input must be 16-byte aligned");
+    TORCH_CHECK(reinterpret_cast<uintptr_t>(output_q.data_ptr()) % 16 == 0,
+                "per_token_group_quant_8bit_v2 output_q must be 16-byte aligned");
 
     CHECK_EQ(input.numel() % group_size, 0);
     const int64_t num_groups_64 = input.numel() / group_size / (fuse_silu_and_mul ? 2 : 1);
@@ -464,15 +482,24 @@ void sgl_per_token_group_quant_8bit_v2(
 
     const int num_local_experts = masked_layout ? input.size(0) : 1;
 
-    cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+    const c10::cuda::CUDAGuard device_guard(input.device());
+    cudaStream_t               stream = at::cuda::getCurrentCUDAStream(input.device().index());
 
     auto dst_type = output_q.scalar_type();
 
-    const bool is_column_major       = output_s.stride(-2) < output_s.stride(-1);
-    const int  hidden_dim_num_groups = static_cast<int>(output_q.size(-1)) / group_size;
-    const int  num_tokens_per_expert = static_cast<int>(output_q.size(-2));
-    const int  scale_expert_stride   = masked_layout ? static_cast<int>(output_s.stride(0)) : 0;
-    const int  scale_hidden_stride   = static_cast<int>(output_s.stride(-1));
+    const bool is_column_major = output_s.stride(-2) < output_s.stride(-1);
+    TORCH_CHECK(!fuse_silu_and_mul || (is_column_major && scale_ue8m0),
+                "per_token_group_quant_8bit_v2 fuse_silu_and_mul requires column-major UE8M0 scales");
+    if (masked_layout) {
+        TORCH_CHECK(is_column_major && scale_ue8m0 && fuse_silu_and_mul && input.dim() == 3 && masked_m->dim() == 1
+                        && masked_m->size(0) == input.size(0),
+                    "per_token_group_quant_8bit_v2 masked_m requires 3D input, 1D masked_m, fused SiLU+mul, "
+                    "and column-major UE8M0 scales");
+    }
+    const int hidden_dim_num_groups = static_cast<int>(output_q.size(-1)) / group_size;
+    const int num_tokens_per_expert = static_cast<int>(output_q.size(-2));
+    const int scale_expert_stride   = masked_layout ? static_cast<int>(output_s.stride(0)) : 0;
+    const int scale_hidden_stride   = static_cast<int>(output_s.stride(-1));
 
     if (preserve_silu_mul_rounding) {
         TORCH_CHECK(fuse_silu_and_mul && !masked_layout && scale_ue8m0 && is_column_major,

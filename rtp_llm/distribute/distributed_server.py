@@ -7,7 +7,7 @@ import socket
 import time
 from dataclasses import dataclass
 from datetime import timedelta
-from typing import Any, Dict, List, NamedTuple, Optional
+from typing import Any, Dict, List, NamedTuple, Optional, Sequence
 
 from torch.distributed import TCPStore
 
@@ -19,8 +19,197 @@ from rtp_llm.config.py_config_modules import (
     ServerConfig,
 )
 from rtp_llm.distribute.worker_info import WorkerInfo
-from rtp_llm.models_py.distributed.rank_layout import Coord, RankLayout
+from rtp_llm.models_py.distributed.rank_layout import Coord, Group, RankLayout
 from rtp_llm.ops import NcclCommConfig, ParallelismConfig
+
+
+@dataclass(frozen=True)
+class MoeEpRuntimeSnapshot:
+    """Rank-local CUDA capability and resolved MoE EP transport snapshot."""
+
+    world_rank: int
+    role_type: int
+    pp_size: int
+    dp_size: int
+    tp_size: int
+    ep_size: int
+    cuda_capability: Optional[tuple[int, int]]
+    is_sm120: bool
+    moe_strategy: str
+    use_deepep_moe: bool
+    use_deepep_low_latency: bool
+    use_deepep_internode: bool
+    use_mori_ep: bool
+    use_all_gather: bool
+    deepep_supported: bool
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "world_rank": int(self.world_rank),
+            "role_type": int(self.role_type),
+            "pp_size": int(self.pp_size),
+            "dp_size": int(self.dp_size),
+            "tp_size": int(self.tp_size),
+            "ep_size": int(self.ep_size),
+            "cuda_capability": (
+                list(self.cuda_capability) if self.cuda_capability is not None else None
+            ),
+            "is_sm120": bool(self.is_sm120),
+            "moe_strategy": str(self.moe_strategy),
+            "use_deepep_moe": bool(self.use_deepep_moe),
+            "use_deepep_low_latency": bool(self.use_deepep_low_latency),
+            "use_deepep_internode": bool(self.use_deepep_internode),
+            "use_mori_ep": bool(self.use_mori_ep),
+            "use_all_gather": bool(self.use_all_gather),
+            "deepep_supported": bool(self.deepep_supported),
+        }
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "MoeEpRuntimeSnapshot":
+        cap = data.get("cuda_capability")
+        return cls(
+            world_rank=int(data["world_rank"]),
+            role_type=int(data["role_type"]),
+            pp_size=int(data["pp_size"]),
+            dp_size=int(data["dp_size"]),
+            tp_size=int(data["tp_size"]),
+            ep_size=int(data["ep_size"]),
+            cuda_capability=(int(cap[0]), int(cap[1])) if cap is not None else None,
+            is_sm120=bool(data["is_sm120"]),
+            moe_strategy=str(data["moe_strategy"]),
+            use_deepep_moe=bool(data["use_deepep_moe"]),
+            use_deepep_low_latency=bool(data["use_deepep_low_latency"]),
+            use_deepep_internode=bool(data["use_deepep_internode"]),
+            use_mori_ep=bool(data["use_mori_ep"]),
+            use_all_gather=bool(data["use_all_gather"]),
+            deepep_supported=bool(data["deepep_supported"]),
+        )
+
+
+def _get_mega_moe_strategies() -> frozenset[str]:
+    try:
+        from rtp_llm.config.mega_moe import MEGA_MOE_STRATEGIES
+
+        return frozenset(MEGA_MOE_STRATEGIES)
+    except ImportError:
+        return frozenset(
+            {
+                "mega_moe",
+                "mega_moe_se",
+                "mega_moe_fp8",
+                "mega_moe_fp8_se",
+                "mega_moe_fused",
+            }
+        )
+
+
+def validate_moe_ep_snapshots(snapshots: Sequence[MoeEpRuntimeSnapshot]) -> None:
+    """Validate MoE EP capability and transport consistency across ranks."""
+    if not snapshots:
+        return
+
+    topo_ref = snapshots[0]
+    for s in snapshots[1:]:
+        if (
+            s.role_type,
+            s.pp_size,
+            s.dp_size,
+            s.tp_size,
+            s.ep_size,
+        ) != (
+            topo_ref.role_type,
+            topo_ref.pp_size,
+            topo_ref.dp_size,
+            topo_ref.tp_size,
+            topo_ref.ep_size,
+        ):
+            raise ValueError(
+                "WORLD topology mismatch across EP ranks: "
+                f"rank {topo_ref.world_rank}={(topo_ref.role_type, topo_ref.pp_size, topo_ref.dp_size, topo_ref.tp_size, topo_ref.ep_size)} "
+                f"vs rank {s.world_rank}={(s.role_type, s.pp_size, s.dp_size, s.tp_size, s.ep_size)}"
+            )
+
+    world_only_strategy = any(
+        s.moe_strategy in ("sm120_a2a_decode", "sm120_fused_moe") or s.use_mori_ep
+        for s in snapshots
+    )
+    if topo_ref.ep_size <= 1 and not world_only_strategy:
+        return
+
+    pp_size = int(topo_ref.pp_size)
+    dp_size = int(topo_ref.dp_size)
+    tp_size = int(topo_ref.tp_size)
+    if world_only_strategy and pp_size != 1:
+        raise ValueError(
+            "WORLD-scoped EP transport (sm120_a2a_decode/sm120_fused_moe/use_mori_ep) "
+            f"requires pp_size=1, got pp_size={pp_size}"
+        )
+
+    if len(snapshots) != pp_size * dp_size * tp_size:
+        groups = [list(range(len(snapshots)))]
+    elif world_only_strategy:
+        groups = [list(range(len(snapshots)))]
+    else:
+        groups = RankLayout(
+            len(snapshots), pp_size=pp_size, dp_size=dp_size, tp_size=tp_size
+        ).groups(Group.STAGE)
+
+    by_rank = {s.world_rank: s for s in snapshots}
+    mega_strategies = _get_mega_moe_strategies()
+    for group_idx, member_ranks in enumerate(groups):
+        group_snaps = [by_rank[r] for r in member_ranks]
+        ref = group_snaps[0]
+        ref_key = (
+            ref.is_sm120,
+            ref.moe_strategy,
+            ref.use_deepep_moe,
+            ref.use_deepep_low_latency,
+            ref.use_deepep_internode,
+            ref.use_mori_ep,
+            ref.use_all_gather,
+        )
+        mismatched = [
+            s
+            for s in group_snaps[1:]
+            if (
+                s.is_sm120,
+                s.moe_strategy,
+                s.use_deepep_moe,
+                s.use_deepep_low_latency,
+                s.use_deepep_internode,
+                s.use_mori_ep,
+                s.use_all_gather,
+            )
+            != ref_key
+        ]
+        if mismatched:
+            details = ", ".join(
+                f"rank {s.world_rank}: cap={s.cuda_capability}, sm120={s.is_sm120}, "
+                f"strategy={s.moe_strategy}, deepep={s.use_deepep_moe}, "
+                f"ll={s.use_deepep_low_latency}, internode={s.use_deepep_internode}, "
+                f"mori={s.use_mori_ep}, all_gather={s.use_all_gather}, "
+                f"deepep_ok={s.deepep_supported}"
+                for s in group_snaps
+            )
+            raise ValueError(
+                f"MoE EP transport/capability mismatch across EP group {group_idx}: {details}"
+            )
+        unsupported = [
+            s
+            for s in group_snaps
+            if s.use_deepep_moe
+            and not s.use_all_gather
+            and s.moe_strategy not in mega_strategies
+            and not s.deepep_supported
+        ]
+        if unsupported:
+            bad = ", ".join(
+                f"rank {s.world_rank} (cap={s.cuda_capability}, strategy={s.moe_strategy})"
+                for s in unsupported
+            )
+            raise ValueError(
+                f"DeepEP was requested (use_deepep_moe=True) on unsupported ranks: {bad}"
+            )
 
 
 @dataclass
@@ -212,6 +401,7 @@ class DistributedServer(object):
 
     REGISTRY_RANK_ADDRESS_KEY = "registry_rank_address_"
     PP_PARTITION_SNAPSHOT_KEY = "pp_partition_snapshot_"
+    MOE_EP_SNAPSHOT_KEY = "moe_ep_runtime_rank_"
 
     def __init__(
         self,
@@ -331,18 +521,14 @@ class DistributedServer(object):
 
         world_rank = int(parallelism_config.world_rank)
         world_size = int(parallelism_config.world_size)
-        snapshot = [
-            int(count) for count in parallelism_config.pp_stage_layer_counts
-        ]
+        snapshot = [int(count) for count in parallelism_config.pp_stage_layer_counts]
         self.safe_store_set(
             self.PP_PARTITION_SNAPSHOT_KEY + str(world_rank), json.dumps(snapshot)
         )
 
         snapshots = []
         for rank in range(world_size):
-            payload = self.safe_store_get(
-                self.PP_PARTITION_SNAPSHOT_KEY + str(rank)
-            )
+            payload = self.safe_store_get(self.PP_PARTITION_SNAPSHOT_KEY + str(rank))
             if not payload:
                 raise RuntimeError(
                     "timed out waiting for PP partition snapshot from "
@@ -350,6 +536,74 @@ class DistributedServer(object):
                 )
             snapshots.append(json.loads(payload))
         validate_pp_partition_snapshots(snapshots)
+
+    def validate_moe_ep_consistency(self, engine_config: Any, expert_num: int) -> None:
+        """Validate rank CUDA capabilities and MoE EP flags through TCPStore before DeepEP/NCCL."""
+        pc = engine_config.parallelism_config
+        world_size = int(pc.world_size)
+        if world_size <= 1 or int(expert_num) <= 0:
+            return
+
+        from rtp_llm.device.cuda_capability import (
+            SM120_CAPABILITY,
+            device_cuda_capability,
+        )
+
+        cap = device_cuda_capability()
+        moe = engine_config.moe_config
+        raw_strategy = getattr(moe, "moe_strategy", "auto")
+        moe_strategy = (
+            raw_strategy.strip() if isinstance(raw_strategy, str) else ""
+        ) or "auto"
+        requires_deepep = (
+            bool(moe.use_deepep_moe)
+            and not bool(moe.use_all_gather)
+            and moe_strategy not in _get_mega_moe_strategies()
+        )
+        if requires_deepep:
+            from rtp_llm.models_py.distributed.deepep_wrapper import DeepEPWrapper
+
+            deepep_supported = bool(DeepEPWrapper.supported())
+        else:
+            deepep_supported = False
+        local_snapshot = MoeEpRuntimeSnapshot(
+            world_rank=int(pc.world_rank),
+            role_type=int(pc.role_type),
+            pp_size=int(pc.pp_size),
+            dp_size=int(pc.dp_size),
+            tp_size=int(pc.tp_size),
+            ep_size=int(pc.ep_size),
+            cuda_capability=cap,
+            is_sm120=(cap == SM120_CAPABILITY),
+            moe_strategy=moe_strategy,
+            use_deepep_moe=bool(moe.use_deepep_moe),
+            use_deepep_low_latency=bool(moe.use_deepep_low_latency),
+            use_deepep_internode=bool(moe.use_deepep_internode),
+            use_mori_ep=bool(moe.use_mori_ep),
+            use_all_gather=bool(moe.use_all_gather),
+            deepep_supported=deepep_supported,
+        )
+        world_rank = int(pc.world_rank)
+        self.safe_store_set(
+            self.MOE_EP_SNAPSHOT_KEY + str(world_rank),
+            json.dumps(local_snapshot.to_dict()),
+        )
+
+        snapshots: List[MoeEpRuntimeSnapshot] = []
+        for rank in range(world_size):
+            payload = self.safe_store_get(self.MOE_EP_SNAPSHOT_KEY + str(rank))
+            if not payload:
+                raise RuntimeError(
+                    "timed out waiting for MoE EP runtime snapshot from "
+                    f"world_rank={rank}"
+                )
+            try:
+                snapshots.append(MoeEpRuntimeSnapshot.from_dict(json.loads(payload)))
+            except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+                raise ValueError(
+                    f"malformed MoE EP runtime snapshot from world_rank={rank}: {exc}"
+                ) from exc
+        validate_moe_ep_snapshots(snapshots)
 
     def safe_store_set(self, key: str, value: str) -> None:
         if not isinstance(value, str):

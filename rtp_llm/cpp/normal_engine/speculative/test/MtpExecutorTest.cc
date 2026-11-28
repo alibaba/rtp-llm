@@ -5225,4 +5225,42 @@ TEST_F(MtpCacheSnapshotCapacityTest, FullAndReplayGroupsNeedNoProposalReserve) {
     EXPECT_TRUE(MtpExecutor::hasLinearCacheSnapshotCapacity({stream}, config, types, 1, 1, 4));
 }
 
+TEST_F(MtpExecutorTest, testIsPrefillPhaseStreamMatchesPrepareStreamsRouting) {
+    MtpExecutorTestConfig test_config;
+    test_config.role_type = RoleType::PDFUSION;
+    auto components       = createMtpExecutorComponents(test_config);
+
+    auto ctx_stream = createContextStream(
+        components.model_config, components.runtime_config, components.resource_context, {0, 1}, 1);
+    EXPECT_TRUE(MtpExecutor::isPrefillPhaseStream(ctx_stream));
+
+    auto prefill_only = createContextStream(
+        components.model_config, components.runtime_config, components.resource_context, {0, 1}, 0);
+    prefill_only->setIsContextStream(false);
+    EXPECT_TRUE(MtpExecutor::isPrefillPhaseStream(prefill_only));
+
+    StreamSpecUpdateInfo initial{
+        torch::tensor({{1}}, torch::kInt32), 1, torch::tensor({2}, torch::kInt32), torch::ones({1, 2}), torch::ones({1, 4})};
+    auto decode_stream = createDecodeStream(
+        components.model_config, components.runtime_config, components.resource_context, {0, 1, 2}, initial);
+    EXPECT_FALSE(MtpExecutor::isPrefillPhaseStream(decode_stream));
+
+    auto snapshot_with_context_flag = createDecodeStream(
+        components.model_config, components.runtime_config, components.resource_context, {0, 1, 2}, initial);
+    snapshot_with_context_flag->setIsContextStream(true);
+    const auto&                         cache = components.executor->cache_manager_->cacheConfig();
+    GenerateStream::MtpAsyncDeviceState state;
+    state.next_kv_cache_block_id_gpu =
+        torch::ones({cache.groupNums(), 1, 2}, torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA));
+    state.next_kv_cache_kernel_block_id_gpu = state.next_kv_cache_block_id_gpu.clone();
+    state.accept_tokens_gpu                 = torch::tensor({{1}}, torch::kInt32).cuda();
+    state.accept_len_gpu                    = torch::tensor({1}, torch::kInt32).cuda();
+    state.next_seq_len_gpu                  = torch::tensor({4}, torch::kInt32).cuda();
+    state.propose_tokens_gpu                = torch::tensor({{1}}, torch::kInt32).cuda();
+    state.last_hidden_states_gpu            = torch::ones({1, 2}).cuda();
+    snapshot_with_context_flag->setMtpAsyncDeviceState(std::move(state));
+    ASSERT_TRUE(snapshot_with_context_flag->hasMtpCacheSnapshot());
+    EXPECT_FALSE(MtpExecutor::isPrefillPhaseStream(snapshot_with_context_flag));
+}
+
 }  // namespace rtp_llm
