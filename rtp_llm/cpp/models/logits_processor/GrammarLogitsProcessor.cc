@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cstddef>
+#include <cstring>
 #include <deque>
 #include <limits>
 #include <memory>
@@ -185,6 +186,115 @@ public:
 
             setDeviceMaskState(std::move(state_or.value()));
             return applyState(logits, device_mask_state_, eos_token_id);
+        } catch (const std::bad_alloc& e) {
+            setDeviceMaskState(finished(accepted_token_len));
+            return detail::grammarMaskBuildError("decode", e);
+        } catch (const c10::Error& e) {
+            setDeviceMaskState(finished(accepted_token_len));
+            return detail::grammarMaskBuildError("decode", e);
+        }
+    }
+
+    ErrorInfo extractBatchEntry(RtpGrammarMatcher&                      matcher,
+                                int64_t                                 accepted_token_len,
+                                int64_t                                 eos_token_id,
+                                int32_t                                 grammar_vocab_size,
+                                size_t                                  logits_vocab_size,
+                                int32_t*                                bitmask_dst,
+                                size_t                                  bitmask_dst_words,
+                                GrammarLogitsProcessor::BatchMaskEntry& out_entry) {
+        out_entry = {};
+        try {
+            if (device_mask_state_.token_len == accepted_token_len) {
+                switch (device_mask_state_.mode) {
+                    case DeviceMaskMode::FINISHED:
+                        return ErrorInfo::OkStatus();
+                    case DeviceMaskMode::TERMINATED:
+                        if (eos_token_id < 0 || static_cast<size_t>(eos_token_id) >= logits_vocab_size) {
+                            return ErrorInfo(ErrorCode::GRAMMAR_EOS_OUT_OF_VOCAB,
+                                             "grammar decode: eos_token_id (" + std::to_string(eos_token_id)
+                                                 + ") out of logits vocab (vocab=" + std::to_string(logits_vocab_size)
+                                                 + ")");
+                        }
+                        out_entry.action         = GrammarLogitsProcessor::BatchMaskAction::FORCE_TOKEN;
+                        out_entry.force_token_id = eos_token_id;
+                        return ErrorInfo::OkStatus();
+                    case DeviceMaskMode::MASK: {
+                        const int32_t cached_vocab = device_mask_state_.grammar_vocab_size;
+                        if (!device_mask_state_.mask_required) {
+                            if (static_cast<size_t>(cached_vocab) < logits_vocab_size) {
+                                out_entry.action             = GrammarLogitsProcessor::BatchMaskAction::TAIL_ONLY;
+                                out_entry.grammar_vocab_size = cached_vocab;
+                            }
+                            return ErrorInfo::OkStatus();
+                        }
+                        const int32_t words = (cached_vocab + 31) / 32;
+                        RTP_LLM_CHECK(bitmask_dst != nullptr && bitmask_dst_words >= static_cast<size_t>(words));
+                        std::memcpy(bitmask_dst,
+                                    device_mask_state_.packed_allow_mask_cpu.data_ptr<int32_t>(),
+                                    static_cast<size_t>(words) * sizeof(int32_t));
+                        out_entry.action             = GrammarLogitsProcessor::BatchMaskAction::BITMASK_AND_TAIL;
+                        out_entry.grammar_vocab_size = cached_vocab;
+                        out_entry.bitmask_words      = words;
+                        return ErrorInfo::OkStatus();
+                    }
+                }
+            }
+
+            if (matcher.finished()) {
+                setDeviceMaskState(finished(accepted_token_len));
+                return ErrorInfo::OkStatus();
+            }
+            auto terminated = matcher.isTerminated();
+            if (!terminated.ok()) {
+                setDeviceMaskState(finished(accepted_token_len));
+                return terminated.status();
+            }
+            if (terminated.value()) {
+                if (eos_token_id < 0 || static_cast<size_t>(eos_token_id) >= logits_vocab_size) {
+                    return ErrorInfo(ErrorCode::GRAMMAR_EOS_OUT_OF_VOCAB,
+                                     "grammar decode: eos_token_id (" + std::to_string(eos_token_id)
+                                         + ") out of logits vocab (vocab=" + std::to_string(logits_vocab_size) + ")");
+                }
+                DeviceMaskState term_state;
+                term_state.token_len = accepted_token_len;
+                term_state.mode      = DeviceMaskMode::TERMINATED;
+                setDeviceMaskState(std::move(term_state));
+                out_entry.action         = GrammarLogitsProcessor::BatchMaskAction::FORCE_TOKEN;
+                out_entry.force_token_id = eos_token_id;
+                return ErrorInfo::OkStatus();
+            }
+
+            const int32_t words = (grammar_vocab_size + 31) / 32;
+            RTP_LLM_CHECK(bitmask_dst != nullptr && bitmask_dst_words >= static_cast<size_t>(words));
+            int64_t  dl_shape[2];
+            DLTensor dl     = makeSingleRowBitmaskView(bitmask_dst, words, dl_shape);
+            auto     filled = matcher.fillBitmask(&dl, 0);
+            if (!filled.ok()) {
+                setDeviceMaskState(finished(accepted_token_len));
+                return filled.status();
+            }
+
+            if (!filled.value()) {
+                DeviceMaskState no_mask_state;
+                no_mask_state.token_len          = accepted_token_len;
+                no_mask_state.mode               = DeviceMaskMode::MASK;
+                no_mask_state.mask_required      = false;
+                no_mask_state.grammar_vocab_size = grammar_vocab_size;
+                setDeviceMaskState(std::move(no_mask_state));
+                if (static_cast<size_t>(grammar_vocab_size) < logits_vocab_size) {
+                    out_entry.action             = GrammarLogitsProcessor::BatchMaskAction::TAIL_ONLY;
+                    out_entry.grammar_vocab_size = grammar_vocab_size;
+                }
+            } else {
+                // Reset any prior step's device_mask_state_ without allocating a per-stream
+                // pinned buffer; the caller stages bitmask_dst directly in one shared batch buffer.
+                setDeviceMaskState(DeviceMaskState{});
+                out_entry.action             = GrammarLogitsProcessor::BatchMaskAction::BITMASK_AND_TAIL;
+                out_entry.grammar_vocab_size = grammar_vocab_size;
+                out_entry.bitmask_words      = words;
+            }
+            return ErrorInfo::OkStatus();
         } catch (const std::bad_alloc& e) {
             setDeviceMaskState(finished(accepted_token_len));
             return detail::grammarMaskBuildError("decode", e);
@@ -385,10 +495,13 @@ private:
             runtimeApplyPackedMaskLogits(logits, mask, mask_vocab_size);
         }
         if (mask_vocab_size < logits_vocab_size) {
+            const float fill_val = (logits.scalar_type() == torch::kFloat16 || logits.scalar_type() == torch::kBFloat16) ?
+                                       -std::numeric_limits<float>::infinity() :
+                                       BaseLogitsProcessor::neg_inf;
             logits
                 .narrow(
                     0, static_cast<int64_t>(mask_vocab_size), static_cast<int64_t>(logits_vocab_size - mask_vocab_size))
-                .fill_(BaseLogitsProcessor::neg_inf);
+                .fill_(fill_val);
         }
         return ErrorInfo::OkStatus();
     }
@@ -399,7 +512,10 @@ private:
                              "grammar decode: eos_token_id (" + std::to_string(token_id)
                                  + ") out of logits vocab (vocab=" + std::to_string(logits.size(0)) + ")");
         }
-        logits.fill_(BaseLogitsProcessor::neg_inf);
+        const float fill_val = (logits.scalar_type() == torch::kFloat16 || logits.scalar_type() == torch::kBFloat16) ?
+                                   -std::numeric_limits<float>::infinity() :
+                                   BaseLogitsProcessor::neg_inf;
+        logits.fill_(fill_val);
         logits[token_id] = 0.0f;
         return ErrorInfo::OkStatus();
     }
@@ -452,6 +568,50 @@ GrammarLogitsProcessor::process(const SamplerInputs& inputs, size_t start_idx, s
     }
     auto error = decode_mask_builder_->apply(
         logits_row, *matcher_, committed_output_len_, eos_token_id_, grammar_vocab_size_or.value());
+    if (error.hasError()) {
+        return error;
+    }
+    return std::nullopt;
+}
+
+std::optional<ErrorInfo> GrammarLogitsProcessor::prepareBatchMaskEntry(const SamplerInputs& inputs,
+                                                                       size_t               row_idx,
+                                                                       int32_t*             bitmask_dst,
+                                                                       size_t               bitmask_dst_words,
+                                                                       BatchMaskEntry&      out_entry) {
+    out_entry = {};
+    if (!matcher_) {
+        return std::nullopt;
+    }
+    if (inputs.finished_mask.defined()) {
+        const auto* finished = inputs.finished_mask.data_ptr<bool>();
+        if (finished[row_idx]) {
+            return std::nullopt;
+        }
+    }
+
+    std::lock_guard<std::mutex> lock(state_mutex_);
+    const auto logits_row =
+        inputs.logits.defined() && inputs.logits.dim() >= 1 && static_cast<int64_t>(row_idx) < inputs.logits.size(0) ?
+            inputs.logits[static_cast<int64_t>(row_idx)] :
+            torch::Tensor();
+    if (!logits_row.defined() || logits_row.dim() != 1 || logits_row.stride(0) != 1) {
+        return ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "grammar logits processor requires contiguous 1D logits rows");
+    }
+    const size_t logits_vocab_size = static_cast<size_t>(logits_row.size(0));
+    auto         grammar_vocab_size_or = validateVocabSize(*matcher_, logits_vocab_size, "decode");
+    if (!grammar_vocab_size_or.ok()) {
+        matcher_->markFinished();
+        return grammar_vocab_size_or.status();
+    }
+    auto error = decode_mask_builder_->extractBatchEntry(*matcher_,
+                                                         committed_output_len_,
+                                                         eos_token_id_,
+                                                         grammar_vocab_size_or.value(),
+                                                         logits_vocab_size,
+                                                         bitmask_dst,
+                                                         bitmask_dst_words,
+                                                         out_entry);
     if (error.hasError()) {
         return error;
     }

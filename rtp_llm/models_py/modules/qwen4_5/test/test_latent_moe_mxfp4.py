@@ -4370,6 +4370,151 @@ def test_r14_mxfp4_u64_scatter_fast_situ_glu_and_hc(device: torch.device) -> Non
     print("  PASS test_r14_mxfp4_u64_scatter_fast_situ_glu_and_hc")
 
 
+def test_r15_prequant_fp8_u64_scatter_and_shared_no_event_query(device: torch.device) -> None:
+    """Verify R15-M0 TP4 prequant_fp8 u64 scatter, 0 cudaEventQuery shared overlap, and M=48/64 TGV."""
+    print("\n[R15] Testing TP4 prequant_fp8 u64 masked scatter, 0 cudaEventQuery overlap & M=48/64 TGV...")
+    from rtp_llm.models_py.modules.qwen4_5 import attention as qwen_attn, mxfp4_ops
+    from rtp_llm.models_py.modules.qwen4_5.activation import (
+        bf16_linear_tgv_or_torch,
+        select_sm10x_bf16_tgv_tactic,
+    )
+
+    dev_idx = int(device.index) if device.index is not None else 0
+
+    # 1. Selective M=48/64 TGV dispatch rules + parity + zero cutlass_80
+    assert select_sm10x_bf16_tgv_tactic(48, 2560, 5120, 11) == 9
+    assert select_sm10x_bf16_tgv_tactic(48, 5120, 5120, 11) == 9
+    assert select_sm10x_bf16_tgv_tactic(48, 5120, 6400, 11) == 9
+    assert select_sm10x_bf16_tgv_tactic(48, 5120, 7680, 11) == 9
+    assert select_sm10x_bf16_tgv_tactic(48, 5120, 2560, 11) == 6
+    assert select_sm10x_bf16_tgv_tactic(48, 5120, 5760, 11) is None
+    assert select_sm10x_bf16_tgv_tactic(48, 5120, 5768, 11) is None
+    assert select_sm10x_bf16_tgv_tactic(64, 5120, 2560, 11) == 8
+    assert select_sm10x_bf16_tgv_tactic(64, 5120, 5120, 11) is None
+    assert qwen_attn._select_bf16_tgv_tactic(48, 5120, 4608, 11) is None
+    assert qwen_attn._select_bf16_tgv_tactic(48, 5120, 5184, 11) == 9
+    assert qwen_attn._select_bf16_tgv_tactic(48, 5120, 2560, 11) == 6
+    assert qwen_attn._select_bf16_tgv_tactic(64, 5120, 2560, 11) is None
+    assert qwen_attn._select_bf16_tgv_tactic(64, 5120, 5184, 11) is None
+
+    for M_t, K_t, N_t in ((48, 2560, 5120), (48, 5120, 6400), (64, 5120, 2560)):
+        xt = torch.randn((M_t, K_t), dtype=torch.bfloat16, device=device) * 0.2
+        wt = torch.randn((N_t, K_t), dtype=torch.bfloat16, device=device) * 0.02
+        yt = bf16_linear_tgv_or_torch(xt, wt)
+        ya = qwen_attn.dense_weight_bf16_or_tgv(xt, wt)
+        yr = F.linear(xt, wt)
+        assert _diff_stats(yt, yr)[2] >= 0.99999
+        assert _diff_stats(ya, yr)[2] >= 0.99999
+
+    # 2. TP4 prequant_fp8 u64 masked scatter vs odd-strided fallback + dup IDs + EP offset + CG
+    if has_deepgemm_fp8_fp4(dev_idx):
+        L_m, I_m, E_m = 2560, 2560, 32
+        w13_u8, w13_sc = quantize_mxfp4(
+            torch.randn((E_m, 2 * I_m, L_m), dtype=torch.bfloat16, device=device) * 0.02
+        )
+        w2_u8, w2_sc = quantize_mxfp4(
+            torch.randn((E_m, L_m, I_m), dtype=torch.bfloat16, device=device) * 0.02
+        )
+        mw_m = prepare_mxfp4_moe_weights(
+            w13_u8=w13_u8, w13_scale=w13_sc, w2_u8=w2_u8, w2_scale=w2_sc
+        )
+        del w13_u8, w13_sc, w2_u8, w2_sc
+
+        for M_fp8 in (16, 256, 512):
+            xm = torch.randn((M_fp8, L_m), dtype=torch.bfloat16, device=device) * 0.3
+            xq, xsc = per_token_group_quant_fp8_ue8m0(xm, scale_format="raw")
+            ids_m = torch.randint(0, E_m * 4, (M_fp8, 10), dtype=torch.int32, device=device)
+            ids_m[:8, 0] = 35
+            ids_m[:8, 1] = 35
+            ids_m[:8, 2] = -1
+            tw_m = torch.softmax(
+                torch.randn((M_fp8, 10), dtype=torch.float32, device=device), dim=-1
+            )
+
+            # Fast u64 path
+            y_u64 = mxfp4_ops.mxfp4_moe_deepgemm_masked(
+                None,
+                ids_m,
+                tw_m,
+                mw_m,
+                ep_start=E_m,
+                ep_size=4,
+                prequant_fp8=(xq, xsc),
+            )
+            # Odd-strided x_sc triggers _scatter_fp8_to_masked_kernel reference fallback
+            xsc_pad = torch.zeros((M_fp8, xsc.shape[1] + 1), dtype=xsc.dtype, device=device)
+            xsc_pad[:, :-1].copy_(xsc)
+            xsc_odd = xsc_pad[:, :-1]
+            y_fb = mxfp4_ops.mxfp4_moe_deepgemm_masked(
+                None,
+                ids_m,
+                tw_m,
+                mw_m,
+                ep_start=E_m,
+                ep_size=4,
+                prequant_fp8=(xq, xsc_odd),
+            )
+            assert torch.equal(y_u64, y_fb), f"M={M_fp8} prequant_fp8 u64 scatter != fallback"
+
+            if M_fp8 == 256:
+                g_m = torch.cuda.CUDAGraph()
+                with torch.cuda.graph(g_m):
+                    y_cg = mxfp4_ops.mxfp4_moe_deepgemm_masked(
+                        None,
+                        ids_m,
+                        tw_m,
+                        mw_m,
+                        ep_start=E_m,
+                        ep_size=4,
+                        prequant_fp8=(xq, xsc),
+                    )
+                g_m.replay()
+                torch.cuda.synchronize(device)
+                assert torch.equal(y_cg, y_u64)
+
+    # 3. Qwen4_5LatentMoE overlap emits 0 cudaEventQuery and 0 cutlass_80 kernels
+    moe_ov = Qwen4_5LatentMoE(
+        hidden_size=5120,
+        routed_expert_hidden_size=2560,
+        moe_intermediate_size=2560,
+        shared_expert_intermediate_size=1280,
+        num_experts=64,
+        num_experts_per_tok=10,
+        use_triton_mxfp4=True,
+        enable_shared_overlap=True,
+        dtype=torch.bfloat16,
+        device=device,
+    ).eval()
+    _init_latent_moe_weights(moe_ov, seed=915)
+    moe_ov.prepare_weights(prepare_deepgemm=has_deepgemm_fp8_fp4(dev_idx), prepare_flashinfer=False)
+    x_ov = torch.randn((1024, 5120), dtype=torch.bfloat16, device=device) * 0.25
+    y_ov = moe_ov(x_ov)
+    moe_ov.enable_shared_overlap = False
+    y_no_ov = moe_ov(x_ov)
+    moe_ov.enable_shared_overlap = True
+    assert _diff_stats(y_ov, y_no_ov)[2] >= 0.99999
+
+    torch.cuda.synchronize(device)
+    with torch.profiler.profile(
+        activities=[torch.profiler.ProfilerActivity.CPU, torch.profiler.ProfilerActivity.CUDA]
+    ) as prof:
+        for _ in range(2):
+            _ = moe_ov(x_ov)
+        torch.cuda.synchronize(device)
+    ev_queries = sum(
+        1 for ev in prof.events() if "cudaEventQuery" in (getattr(ev, "name", "") or "")
+    )
+    c80_cnt = sum(
+        1
+        for ev in prof.events()
+        if getattr(ev, "device_type", None) == torch.profiler.DeviceType.CUDA
+        and "cutlass_80" in (getattr(ev, "name", "") or "").lower()
+    )
+    assert ev_queries == 0, f"Expected 0 cudaEventQuery on shared overlap, got {ev_queries}"
+    assert c80_cnt == 0, f"Expected 0 cutlass_80 kernels, got {c80_cnt}"
+    print("  PASS test_r15_prequant_fp8_u64_scatter_and_shared_no_event_query")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Qwen 4.5-Flash LatentMoE & SM100 MXFP4 test suite")
     parser.add_argument("--distributed", action="store_true", help="Run multi-GPU FastAllReduce/TP/EP tests")
@@ -4441,6 +4586,7 @@ def main() -> int:
         test_r12_norm_router_and_prequant_scatter(device)
         test_r13_router_contig_skip_and_masked_tuning(device)
         test_r14_mxfp4_u64_scatter_fast_situ_glu_and_hc(device)
+        test_r15_prequant_fp8_u64_scatter_and_shared_no_event_query(device)
 
     if args.distributed:
         test_distributed_fast_comm_tp_ep(world_size=args.world_size)

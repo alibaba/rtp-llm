@@ -2905,4 +2905,79 @@ TEST_F(ChunkedPrefillBatchStreamProcessorTest, testMiddleChunkPreservesNormalDev
     EXPECT_EQ(toVec<int32_t>(plain_state.last_sample_token_gpu), (vector<int32_t>{43}));
 }
 
+TEST_F(ChunkedPrefillBatchStreamProcessorTest, testDecodeBatchSequenceLengthsSubOneNonMutating) {
+    autil::EnvGuard device_input_env("RTP_LLM_DEVICE_INPUT", "1");
+    auto            local_model_config              = model_config_;
+    local_model_config.has_positional_encoding      = false;
+    local_model_config.mm_model_config.mm_position_ids_style = PositionIdsStyle::DEFAULT;
+    NormalBatchStreamProcessor local_processor(
+        local_model_config, PDSepConfig{}, ProfilingDebugLoggingConfig{}, cache_config_, false);
+
+    auto s1 = makeRunningStream({1, 2, 3, 4});
+    auto s2 = makeRunningStream({5, 6, 7, 8, 9});
+    setKvCacheBlocks(s1, {0});
+    setKvCacheBlocks(s2, {1});
+
+    const auto cuda_i32 = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
+    s1->setNormalAsyncDeviceState(GenerateStream::NormalAsyncDeviceState{
+        .last_sample_token_gpu = torch::full({1}, 11, cuda_i32),
+        .next_seq_len_gpu      = torch::full({1}, 8, cuda_i32),
+        .last_real_seq_len     = 7,
+        .next_real_seq_len     = 8,
+    });
+    s2->setNormalAsyncDeviceState(GenerateStream::NormalAsyncDeviceState{
+        .last_sample_token_gpu = torch::full({1}, 22, cuda_i32),
+        .next_seq_len_gpu      = torch::full({1}, 15, cuda_i32),
+        .last_real_seq_len     = 14,
+        .next_real_seq_len     = 15,
+    });
+    // Mark streams as decode streams matching initialized normal device state.
+    s1->setIsContextStream(false);
+    s2->setIsContextStream(false);
+
+    TensorHolder holder;
+    auto         inputs = local_processor.gatherModelInput(StreamGroups({s1, s2}), holder);
+    ASSERT_TRUE(inputs.ok()) << inputs.status().ToString();
+    ASSERT_TRUE(inputs->sequence_lengths.is_cuda());
+    EXPECT_EQ(inputs->sequence_lengths.scalar_type(), torch::kInt32);
+    EXPECT_EQ(toVec<int32_t>(inputs->sequence_lengths), (vector<int32_t>{7, 14}));
+    EXPECT_EQ(toVec<int32_t>(inputs->combo_tokens), (vector<int32_t>{11, 22}));
+    // Original per-stream next_seq_len_gpu tensors must not be mutated in place.
+    EXPECT_EQ(toVec<int32_t>(s1->getNormalAsyncDeviceState().next_seq_len_gpu), (vector<int32_t>{8}));
+    EXPECT_EQ(toVec<int32_t>(s2->getNormalAsyncDeviceState().next_seq_len_gpu), (vector<int32_t>{15}));
+}
+
+TEST_F(ChunkedPrefillBatchStreamProcessorTest, testSamplerInputGathererSkipsHistoryWithoutPenalties) {
+    auto s1 = makeRunningStream({10, 11, 12});
+    auto s2 = makeRunningStream({20, 21, 22, 23});
+
+    GptModelOutputs model_output;
+    model_output.logits =
+        torch::zeros({2, static_cast<int64_t>(model_config_.vocab_size)},
+                     torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));
+
+    auto plain_status = processor_->gatherSamplerInput(StreamGroups({s1, s2}), GptModelInputs{}, model_output);
+    ASSERT_TRUE(plain_status.ok()) << plain_status.status().ToString();
+    const auto& plain_inputs = plain_status.value();
+    EXPECT_TRUE(plain_inputs.token_ids.is_cuda());
+    EXPECT_EQ(plain_inputs.token_ids.sizes(), (std::vector<int64_t>{2, 1}));
+    EXPECT_FALSE(plain_inputs.top_k.is_pinned());
+    EXPECT_FALSE(plain_inputs.top_p.is_pinned());
+    EXPECT_FALSE(plain_inputs.temperature.is_pinned());
+    EXPECT_FALSE(plain_inputs.do_sample.is_pinned());
+
+    auto pen_cfg                = std::make_shared<GenerateConfig>();
+    pen_cfg->repetition_penalty = 1.15f;
+    auto s3                     = makeRunningStream({30, 31, 32}, pen_cfg);
+    auto pen_status             = processor_->gatherSamplerInput(StreamGroups({s1, s3}), GptModelInputs{}, model_output);
+    ASSERT_TRUE(pen_status.ok()) << pen_status.status().ToString();
+    const auto& pen_inputs = pen_status.value();
+    EXPECT_TRUE(pen_inputs.token_ids.device().is_cpu());
+    EXPECT_EQ(pen_inputs.token_ids.size(0), 2);
+    EXPECT_EQ(pen_inputs.token_ids.size(1), static_cast<int64_t>(pen_inputs.step + 1));
+    EXPECT_EQ(pen_inputs.token_ids[0][0].item<int32_t>(), 10);
+    EXPECT_EQ(pen_inputs.token_ids[1][0].item<int32_t>(), 30);
+    EXPECT_EQ(pen_inputs.token_ids[1][2].item<int32_t>(), 32);
+}
+
 }  // namespace rtp_llm

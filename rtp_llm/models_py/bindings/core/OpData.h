@@ -306,6 +306,8 @@ struct GreedySamplingBuffers {
     torch::Tensor offset_host;
     torch::Tensor output_ids_ptrs_host;
     size_t        max_batch_size = 0;
+    torch::Tensor meta_host;
+    torch::Tensor meta_device;
 };
 
 struct GreedyParams {
@@ -333,7 +335,8 @@ struct GreedyParams {
     std::optional<torch::Tensor> do_sample;
 
     std::vector<at::Generator> generator;
-    GreedySamplingBuffers*     sampling_buffers = nullptr;
+    GreedySamplingBuffers*     sampling_buffers      = nullptr;
+    bool                       preserve_logits_probs = true;
 };
 
 struct GreedyOutput {

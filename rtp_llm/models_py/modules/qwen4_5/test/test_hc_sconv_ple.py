@@ -2129,6 +2129,129 @@ def test_r14_ple_add3_gather_l2_and_sconv_t8_unroll() -> None:
     print("  PASS: R14-D0 PLE add3/gather & ShortConv 8-step unroll parity + CG verified.")
 
 
+def test_r15_hc_nn_down_inject_and_zero_cutlass80() -> None:
+    """Verify single-copy NN fused HC down+inject weight, parity (M=1..128), CG, grad fallback, and zero cutlass_80."""
+    print("\n=== Test R15-M0 HC Single-Copy NN Down+Inject Layout ===")
+    device = torch.device("cuda:0")
+    torch.manual_seed(15)
+    H, HC, LR = 5120, 4, 128
+    hc = Qwen4_5HyperConnection(
+        hidden_size=H,
+        hc_count=HC,
+        hc_lowrank=LR,
+        prev_mix=True,
+        is_head=False,
+        dtype=torch.bfloat16,
+        device=device,
+    ).eval()
+
+    with torch.inference_mode():
+        w_t = hc._get_fused_down_inject_weight_t()
+        w_v = hc._get_fused_down_inject_weight()
+        assert tuple(w_t.shape) == (H * HC, 144) and w_t.is_contiguous()
+        assert tuple(w_v.shape) == (144, H * HC)
+        assert w_v.untyped_storage().data_ptr() == w_t.untyped_storage().data_ptr()
+
+        ws = HCStaticWorkspace()
+        for rows in (1, 16, 32, 48, 64, 96, 128):
+            res = torch.randn((rows, HC * H), dtype=torch.bfloat16, device=device) * 0.3
+            pl = torch.randn((rows, LR), dtype=torch.bfloat16, device=device) * 0.3
+            mixed_fast, _, inj_fast, lat_fast = hc.mix_with_latent(
+                res, prev_latent=pl, ws=ws
+            )
+
+            normed = grouped_gemma_rmsnorm_bias_triton(
+                res, hc.hc_norm_weight, hc.hc_norm_bias, HC, hc.eps
+            )
+            raw_ref = torch.nn.functional.linear(normed.float(), w_v.float())
+            gl_ref = torch.nn.functional.linear(
+                pl.float(), hc.input_mix_weight_up.float()
+            )
+            mix_ref, lat_ref, inj_ref = hc_mix_reduce_with_down_inject_triton(
+                gl_ref.bfloat16(),
+                normed,
+                raw_ref.bfloat16(),
+                LR,
+                HC,
+                has_latent=True,
+                has_inj=True,
+            )
+            for a, b, tag in (
+                (mixed_fast, mix_ref, "mixed"),
+                (inj_fast, inj_ref, "inj"),
+                (lat_fast, lat_ref, "latent"),
+            ):
+                assert a is not None and b is not None
+                cos = torch.nn.functional.cosine_similarity(
+                    a.float().reshape(-1), b.float().reshape(-1), dim=0
+                ).item()
+                assert cos >= 0.9999, f"rows={rows} {tag} cos={cos}"
+
+        # CUDA Graph capture + replay across SK (rows=48) and MM NN (rows=64, 96)
+        for rows in (48, 64, 96):
+            res_cg = torch.randn((rows, HC * H), dtype=torch.bfloat16, device=device) * 0.3
+            pl_cg = torch.randn((rows, LR), dtype=torch.bfloat16, device=device) * 0.3
+            ws_cg = HCStaticWorkspace()
+            m_ref, _, i_ref, l_ref = hc.mix_with_latent(res_cg, prev_latent=pl_cg, ws=ws_cg)
+            g = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(g):
+                m_out, _, i_out, l_out = hc.mix_with_latent(
+                    res_cg, prev_latent=pl_cg, ws=ws_cg
+                )
+            g.replay()
+            torch.cuda.synchronize(device)
+            assert torch.equal(m_out, m_ref)
+            assert torch.equal(i_out, i_ref)
+            assert torch.equal(l_out, l_ref)
+
+        # Verify zero cutlass_80 kernels across rows=48, 64, 96, 128
+        with torch.profiler.profile(
+            activities=[torch.profiler.ProfilerActivity.CUDA]
+        ) as prof:
+            for rows in (48, 64, 96, 128):
+                res_p = torch.randn((rows, HC * H), dtype=torch.bfloat16, device=device) * 0.3
+                pl_p = torch.randn((rows, LR), dtype=torch.bfloat16, device=device) * 0.3
+                _ = hc.mix_with_latent(res_p, prev_latent=pl_p, ws=ws)
+            torch.cuda.synchronize(device)
+        c80 = [
+            ev.name
+            for ev in prof.events()
+            if getattr(ev, "device_type", None) == torch.profiler.DeviceType.CUDA
+            and "cutlass_80" in (getattr(ev, "name", "") or "").lower()
+        ]
+        assert not c80, f"Unexpected cutlass_80 kernels in HC NN path: {c80[:5]}"
+
+    # Grad-enabled training fallback check
+    with torch.enable_grad():
+        hc_tr = Qwen4_5HyperConnection(
+            hidden_size=H,
+            hc_count=HC,
+            hc_lowrank=LR,
+            prev_mix=True,
+            is_head=False,
+            dtype=torch.bfloat16,
+            device=device,
+        ).train()
+        normed_tr = (
+            torch.randn((64, HC * H), dtype=torch.bfloat16, device=device) * 0.3
+        ).requires_grad_(True)
+        raw_tr = hc_tr._linear_from_t(
+            normed_tr, hc_tr._get_fused_down_inject_weight_t()
+        )
+        raw_tr.sum().backward()
+        assert (
+            normed_tr.grad is not None
+            and hc_tr.input_mix_weight_down.grad is not None
+            and hc_tr.block_inject_weight.grad is not None
+        )
+        pl_tr = torch.randn((48, LR), dtype=torch.bfloat16, device=device) * 0.3
+        res_tr = (
+            torch.randn((48, HC * H), dtype=torch.bfloat16, device=device) * 0.3
+        ).requires_grad_(True)
+        _ = hc_tr.mix_with_latent(res_tr, prev_latent=pl_tr)
+    print("  PASS: R15-M0 HC single-copy NN down+inject, CG, grad fallback, and zero cutlass_80.")
+
+
 def main() -> int:
     print(
         f"Device: {torch.cuda.get_device_name(0)} "
@@ -2150,6 +2273,7 @@ def main() -> int:
     test_r9_l2_swapped_hc_and_norm5120()
     test_r11_hc_up_mix_sk_1d_and_sconv_decode()
     test_r14_ple_add3_gather_l2_and_sconv_t8_unroll()
+    test_r15_hc_nn_down_inject_and_zero_cutlass80()
     run_benchmarks()
     print(f"\nALL TESTS & BENCHMARKS PASSED in {time.perf_counter() - t0:.2f}s!")
     return 0

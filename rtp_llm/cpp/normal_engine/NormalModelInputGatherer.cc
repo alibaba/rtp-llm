@@ -585,7 +585,7 @@ absl::Status NormalModelInputGatherer::processDecodeStreams(GptModelInputs&     
                 if (config_.has_engram) {
                     normal_engram_windows_gpu.push_back(state.engram_token_window_gpu);
                 }
-                normal_sequence_lengths_gpu.push_back((state.next_seq_len_gpu - 1).to(torch::kInt32).reshape({1}));
+                normal_sequence_lengths_gpu.push_back(state.next_seq_len_gpu.reshape({1}));
                 ctx.input_lengths[ctx.batch_idx] = stream->inputLength();
                 if (model_input.record_lengths) {
                     // A missing CPU mirror invalidates recording only. Live seqLength()
@@ -642,8 +642,18 @@ absl::Status NormalModelInputGatherer::processDecodeStreams(GptModelInputs&     
         if (config_.has_engram) {
             model_input.engram_token_windows = torch::cat(normal_engram_windows_gpu, 0);
         }
-        model_input.combo_tokens     = torch::cat(normal_combo_tokens_gpu, 0).to(torch::kInt32);
-        model_input.sequence_lengths = torch::cat(normal_sequence_lengths_gpu, 0).to(torch::kInt32);
+        auto combo_tokens = torch::cat(normal_combo_tokens_gpu, 0);
+        if (combo_tokens.scalar_type() != torch::kInt32) {
+            combo_tokens = combo_tokens.to(torch::kInt32);
+        }
+        model_input.combo_tokens = std::move(combo_tokens);
+
+        auto sequence_lengths = torch::cat(normal_sequence_lengths_gpu, 0);
+        if (sequence_lengths.scalar_type() != torch::kInt32) {
+            sequence_lengths = sequence_lengths.to(torch::kInt32);
+        }
+        sequence_lengths.sub_(1);
+        model_input.sequence_lengths = std::move(sequence_lengths);
     }
     return absl::OkStatus();
 }

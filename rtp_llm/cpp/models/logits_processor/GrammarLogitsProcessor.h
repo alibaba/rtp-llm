@@ -18,11 +18,30 @@ class RtpGrammarMatcher;
 
 class GrammarLogitsProcessor final: public BaseLogitsProcessor {
 public:
+    enum class BatchMaskAction : uint8_t {
+        SKIP = 0,
+        BITMASK_AND_TAIL,
+        TAIL_ONLY,
+        FORCE_TOKEN,
+    };
+
+    struct BatchMaskEntry {
+        BatchMaskAction action             = BatchMaskAction::SKIP;
+        int32_t         grammar_vocab_size = 0;
+        int64_t         force_token_id     = -1;
+        int32_t         bitmask_words      = 0;
+    };
+
     explicit GrammarLogitsProcessor(std::shared_ptr<RtpGrammarMatcher> matcher, int64_t eos_token_id = 0);
 
     ~GrammarLogitsProcessor() override;
 
     std::optional<ErrorInfo> process(const SamplerInputs& inputs, size_t start_idx, size_t finish_idx) override;
+    std::optional<ErrorInfo> prepareBatchMaskEntry(const SamplerInputs& inputs,
+                                                   size_t               row_idx,
+                                                   int32_t*             bitmask_dst,
+                                                   size_t               bitmask_dst_words,
+                                                   BatchMaskEntry&      out_entry);
     std::optional<ErrorInfo> updateStatus(const torch::Tensor& new_tokens, int32_t num_new_tokens) override;
     void                     updateMultiSeqStatus(const std::vector<int>& /*src_batch_indices*/) override {}
 

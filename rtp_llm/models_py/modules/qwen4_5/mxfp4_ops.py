@@ -3831,6 +3831,91 @@ def _quant_and_scatter_fp8_to_masked_kernel(
             )
 
 
+@triton.jit(
+    do_not_specialize=[
+        "M",
+        "e_lo",
+        "E_local",
+        "stride_xq",
+        "stride_xsc",
+        "stride_aqe",
+        "stride_aqm",
+        "stride_asce",
+        "stride_asck",
+    ]
+)
+def _scatter_fp8_tok_u64_masked_kernel(
+    xq_ptr,
+    xsc_ptr,
+    ids_ptr,
+    masked_m_ptr,
+    dst_pos_ptr,
+    aq_ptr,
+    asc_ptr,
+    M,
+    e_lo,
+    E_local,
+    stride_xq: tl.int64,
+    stride_xsc: tl.int64,
+    stride_aqe: tl.int64,
+    stride_aqm: tl.int64,
+    stride_asce: tl.int64,
+    stride_asck: tl.int64,
+    TOP_K: tl.constexpr,
+    TOP_K_PAD: tl.constexpr,
+    K_U64: tl.constexpr,
+    BLOCK_U64: tl.constexpr,
+    NUM_PACKS: tl.constexpr,
+    PACKS_PAD: tl.constexpr,
+):
+    m = tl.program_id(0).to(tl.int64)
+    if m >= M:
+        return
+    ids_row = ids_ptr + m * TOP_K
+    sk = tl.arange(0, TOP_K_PAD)
+    mk = sk < TOP_K
+    e_raw = tl.load(ids_row + sk, mask=mk, other=-1).to(tl.int32)
+    _assign_token_slots(
+        e_raw, mk, masked_m_ptr, dst_pos_ptr + m * TOP_K + sk, e_lo, E_local
+    )
+    tl.debug_barrier()
+    pos_chk = tl.load(dst_pos_ptr + m * TOP_K + sk, mask=mk, other=-1)
+    if tl.sum((pos_chk >= 0).to(tl.int32), axis=0) == 0:
+        return
+
+    xq_u64 = tl.cast(xq_ptr + m * stride_xq, tl.pointer_type(tl.uint64))
+    ou = tl.arange(0, BLOCK_U64)
+    mu = ou < K_U64
+    qv = tl.load(xq_u64 + ou, mask=mu, other=0)
+
+    sc_i32 = tl.cast(xsc_ptr + m * stride_xsc, tl.pointer_type(tl.int32))
+    op = tl.arange(0, PACKS_PAD)
+    mp = op < NUM_PACKS
+    pk = tl.load(sc_i32 + op, mask=mp, other=0)
+
+    for k in range(TOP_K):
+        ek = tl.load(ids_row + k).to(tl.int32) - e_lo
+        pk_slot = tl.load(dst_pos_ptr + m * TOP_K + k)
+        if (
+            pk_slot >= 0
+            and pk_slot.to(tl.int64) * stride_aqm < stride_aqe
+            and ek >= 0
+            and ek < E_local
+        ):
+            ek_s = ek.to(tl.int64)
+            pk_s = pk_slot.to(tl.int64)
+            dst_u64 = tl.cast(
+                aq_ptr + ek_s * stride_aqe + pk_s * stride_aqm,
+                tl.pointer_type(tl.uint64),
+            )
+            tl.store(dst_u64 + ou, qv, mask=mu)
+            tl.store(
+                asc_ptr + ek_s * stride_asce + op.to(tl.int64) * stride_asck + pk_s,
+                pk,
+                mask=mp,
+            )
+
+
 @triton.jit(do_not_specialize=["stride_q_row", "stride_sc_row", "stride_aqe", "stride_aqm", "stride_asce", "stride_asck"])
 def _scatter_fp8_to_masked_kernel(
     x_q_ptr,
@@ -4342,31 +4427,78 @@ def mxfp4_moe_deepgemm_masked(
         else:
             assert x is not None
             x_q, x_sc_raw = per_token_group_quant_fp8_ue8m0(x, scale_format="raw")
-        M_total = M * top_k
-        _scatter_fp8_to_masked_kernel[(M_total,)](
-            x_q.view(torch.uint8),
-            x_sc_raw,
-            ids_c,
-            masked_m,
-            a_fp8.view(torch.uint8),
-            a_scale,
-            dst_pos.view(-1),
-            M_total,
-            top_k,
-            L,
-            num_groups,
-            num_packs,
-            e_lo,
-            E_local,
-            x_q.stride(0),
-            x_sc_raw.stride(0),
-            a_fp8.stride(0),
-            a_fp8.stride(1),
-            a_scale.stride(0),
-            a_scale.stride(2),
-            BLOCK_K=512,
-            num_warps=4,
-        )
+        x_q_u8 = x_q.view(torch.uint8)
+        top_k_pad = max(16, triton.next_power_of_2(top_k))
+        if (
+            top_k <= 16
+            and L <= 4096
+            and (L & 7) == 0
+            and (num_groups & 3) == 0
+            and (x_q_u8.data_ptr() & 7) == 0
+            and x_q_u8.stride(1) == 1
+            and (M == 1 or (x_q_u8.stride(0) & 7) == 0)
+            and x_sc_raw.element_size() == 1
+            and (x_sc_raw.data_ptr() & 3) == 0
+            and x_sc_raw.stride(1) == 1
+            and (M == 1 or (x_sc_raw.stride(0) & 3) == 0)
+            and (a_fp8.data_ptr() & 7) == 0
+            and a_fp8.stride(2) == 1
+            and (a_fp8.stride(0) & 7) == 0
+            and (a_fp8.stride(1) & 7) == 0
+            and a_scale.stride(1) == 1
+        ):
+            k_u64 = L // 8
+            _scatter_fp8_tok_u64_masked_kernel[(M,)](
+                x_q_u8,
+                x_sc_raw,
+                ids_c,
+                masked_m,
+                dst_pos.view(-1),
+                a_fp8.view(torch.uint8),
+                a_scale,
+                M,
+                e_lo,
+                E_local,
+                x_q_u8.stride(0),
+                x_sc_raw.stride(0),
+                a_fp8.stride(0),
+                a_fp8.stride(1),
+                a_scale.stride(0),
+                a_scale.stride(2),
+                TOP_K=top_k,
+                TOP_K_PAD=top_k_pad,
+                K_U64=k_u64,
+                BLOCK_U64=max(16, triton.next_power_of_2(k_u64)),
+                NUM_PACKS=num_packs,
+                PACKS_PAD=max(16, triton.next_power_of_2(num_packs)),
+                num_warps=4 if M < 512 else 2,
+            )
+        else:
+            M_total = M * top_k
+            _scatter_fp8_to_masked_kernel[(M_total,)](
+                x_q_u8,
+                x_sc_raw,
+                ids_c,
+                masked_m,
+                a_fp8.view(torch.uint8),
+                a_scale,
+                dst_pos.view(-1),
+                M_total,
+                top_k,
+                L,
+                num_groups,
+                num_packs,
+                e_lo,
+                E_local,
+                x_q_u8.stride(0),
+                x_sc_raw.stride(0),
+                a_fp8.stride(0),
+                a_fp8.stride(1),
+                a_scale.stride(0),
+                a_scale.stride(2),
+                BLOCK_K=512,
+                num_warps=4,
+            )
         del x_q, x_sc_raw
 
     with _dg_jit_serialize("masked", int(w13_i8.shape[0]), int(w13_i8.shape[1]), int(a_fp8.shape[-1])):

@@ -858,6 +858,9 @@ def _hc_down_inject_sk_gemm_kernel(
     BLOCK_M: tl.constexpr,
     BLOCK_N: tl.constexpr,
     BLOCK_K: tl.constexpr,
+    STRIDE_BK: tl.constexpr = 1,
+    STRIDE_BN: tl.constexpr = 0,
+    N_LOAD: tl.constexpr = 0,
 ):
     """High-K Split-K GEMM writing FP32 partials [SPLIT_K, M, N] without splitKreduce."""
     pid_m = tl.program_id(0)
@@ -865,25 +868,50 @@ def _hc_down_inject_sk_gemm_kernel(
     pid_k = tl.program_id(2)
     rm = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
     rn = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
-    k_per_split = tl.cdiv(K, SPLIT_K)
-    k_start = pid_k * k_per_split
-    k_end = tl.minimum(k_start + k_per_split, K)
+    EXACT_K: tl.constexpr = (K % (SPLIT_K * BLOCK_K)) == 0
+    if EXACT_K:
+        k_per_split = K // SPLIT_K
+        k_start = pid_k * k_per_split
+        k_end = k_start + k_per_split
+    else:
+        k_per_split = tl.cdiv(K, SPLIT_K)
+        k_start = pid_k * k_per_split
+        k_end = tl.minimum(k_start + k_per_split, K)
     rk = k_start + tl.arange(0, BLOCK_K)
-    a_ptrs = A_ptr + rm[:, None] * K + rk[None, :]
-    b_ptrs = B_ptr + rn[None, :] * K + rk[:, None]
+    eff_stride_bn: tl.constexpr = K if STRIDE_BN <= 0 else STRIDE_BN
+    eff_n_load: tl.constexpr = N if N_LOAD <= 0 else N_LOAD
+    a_ptrs = A_ptr + rm[:, None].to(tl.int64) * K + rk[None, :]
+    b_ptrs = (
+        B_ptr
+        + rn[None, :].to(tl.int64) * eff_stride_bn
+        + rk[:, None].to(tl.int64) * STRIDE_BK
+    )
     acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
     m_mask = rm[:, None] < M
-    n_mask = rn[None, :] < N
-    for _ in range(k_start, k_end, BLOCK_K):
-        km = rk < k_end
-        a = tl.load(a_ptrs, mask=m_mask & km[None, :], other=0.0)
-        b = tl.load(b_ptrs, mask=km[:, None] & n_mask, other=0.0)
-        acc = tl.dot(a, b, acc)
-        rk += BLOCK_K
-        a_ptrs += BLOCK_K
-        b_ptrs += BLOCK_K
-    c_ptrs = C_ptr + pid_k * (M * N) + rm[:, None] * N + rn[None, :]
-    tl.store(c_ptrs, acc, mask=m_mask & n_mask)
+    nb_mask = rn[None, :] < eff_n_load
+    if EXACT_K:
+        for _ in range(k_start, k_end, BLOCK_K):
+            a = tl.load(a_ptrs, mask=m_mask, other=0.0)
+            b = tl.load(b_ptrs, mask=nb_mask, other=0.0)
+            acc = tl.dot(a, b, acc)
+            a_ptrs += BLOCK_K
+            b_ptrs += BLOCK_K * STRIDE_BK
+    else:
+        for _ in range(k_start, k_end, BLOCK_K):
+            km = rk < k_end
+            a = tl.load(a_ptrs, mask=m_mask & km[None, :], other=0.0)
+            b = tl.load(b_ptrs, mask=km[:, None] & nb_mask, other=0.0)
+            acc = tl.dot(a, b, acc)
+            rk += BLOCK_K
+            a_ptrs += BLOCK_K
+            b_ptrs += BLOCK_K * STRIDE_BK
+    c_ptrs = (
+        C_ptr
+        + pid_k.to(tl.int64) * (M * N)
+        + rm[:, None].to(tl.int64) * N
+        + rn[None, :]
+    )
+    tl.store(c_ptrs, acc, mask=m_mask & (rn[None, :] < N))
 
 
 @triton.jit(do_not_specialize=["M"])
@@ -2001,13 +2029,13 @@ def hc_mix_reduce_with_down_inject_triton(
     return out, latent, inject_w
 
 
-def _hc_sk_params(rows: int) -> Tuple[int, int, int, int, int]:
-    """Select (BLOCK_M, BLOCK_N, SPLIT_K, BLOCK_K, BLOCK_H) for K=20480, N=132."""
+def _hc_sk_params(rows: int) -> Tuple[int, int, int, int, int, int, int, int]:
+    """Select (BLOCK_M, BLOCK_N, SPLIT_K, BLOCK_K, BLOCK_H, num_warps, num_stages, bm_mix) for K=20480."""
     if rows <= 16:
-        return 16, 64, 80, 64, 32
+        return 16, 64, 80, 64, 32, 4, 3, 16
     if rows <= 32:
-        return 32, 32, 80, 64, 32
-    return 64, 64, 40, 64, 32
+        return 32, 64, 40, 64, 32, 8, 4, 16
+    return 64, 64, 40, 64, 32, 4, 3, 16
 
 
 def hc_down_inject_sk_and_mix_triton(
@@ -2022,7 +2050,6 @@ def hc_down_inject_sk_and_mix_triton(
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Eliminate cublasLt splitKreduce and fuse prev_latent up-proj + mix_reduce into one 1D epilogue kernel."""
     normed_c = normed if normed.is_contiguous() else normed.contiguous()
-    w_c = down_inject_weight if down_inject_weight.is_contiguous() else down_inject_weight.contiguous()
     up_c = up_weight if up_weight.is_contiguous() else up_weight.contiguous()
     pl_c = prev_latent if prev_latent.is_contiguous() else prev_latent.contiguous()
     prefix = normed_c.shape[:-1]
@@ -2031,18 +2058,40 @@ def hc_down_inject_sk_and_mix_triton(
     n_out = hc_lowrank + hc_count
     rows = normed_c.numel() // width
 
+    if (
+        down_inject_weight.ndim == 2
+        and int(down_inject_weight.shape[0]) == width
+        and int(down_inject_weight.shape[1]) >= n_out
+        and down_inject_weight.stride(1) == 1
+    ):
+        w_c = down_inject_weight
+        stride_bk = int(w_c.stride(0))
+        stride_bn = 1
+        n_load = int(w_c.shape[1])
+    else:
+        w_c = (
+            down_inject_weight
+            if down_inject_weight.is_contiguous()
+            else down_inject_weight.contiguous()
+        )
+        stride_bk = 1
+        stride_bn = int(w_c.stride(0))
+        n_load = n_out
+
     out = _hc_static_empty((*prefix, hidden_size), normed_c.dtype, normed_c.device, "out", ws=ws)
     latent = _hc_static_empty((*prefix, hc_lowrank), normed_c.dtype, normed_c.device, "latent", ws=ws)
     inject_w = _hc_static_empty((*prefix, hc_count), normed_c.dtype, normed_c.device, "inj", ws=ws)
     if rows == 0:
         return out, latent, inject_w
 
-    bm, bn, sk, bk, bh = _hc_sk_params(rows)
+    bm, bn, sk, bk, bh, nw, ns, bm_mix = _hc_sk_params(rows)
     part = _hc_static_empty((sk, rows, n_out), torch.float32, normed_c.device, "sk_part", ws=ws)
     dev_idx = normed_c.device.index if normed_c.device.index is not None else torch.cuda.current_device()
     n_2d = normed_c.view(rows, width)
 
-    ckey_gemm = (dev_idx, 39, normed_c.dtype, w_c.dtype, n_out, width, sk, bm, bn, bk, 4, 3)
+    ckey_gemm = (
+        dev_idx, 39, normed_c.dtype, w_c.dtype, n_out, width, sk, bm, bn, bk, stride_bk, stride_bn, n_load, nw, ns,
+    )
     triton_fast_launch(
         _HC_TRITON_CACHE,
         ckey_gemm,
@@ -2052,9 +2101,19 @@ def hc_down_inject_sk_and_mix_triton(
         sk,
         n_2d.data_ptr() | w_c.data_ptr() | part.data_ptr(),
         (n_2d, w_c, part, rows),
-        {"N": n_out, "K": width, "SPLIT_K": sk, "BLOCK_M": bm, "BLOCK_N": bn, "BLOCK_K": bk},
-        num_warps=4,
-        num_stages=3,
+        {
+            "N": n_out,
+            "K": width,
+            "SPLIT_K": sk,
+            "BLOCK_M": bm,
+            "BLOCK_N": bn,
+            "BLOCK_K": bk,
+            "STRIDE_BK": stride_bk,
+            "STRIDE_BN": stride_bn,
+            "N_LOAD": n_load,
+        },
+        num_warps=nw,
+        num_stages=ns,
     )
 
     block_sk = max(16, triton.next_power_of_2(sk))
@@ -2070,7 +2129,6 @@ def hc_down_inject_sk_and_mix_triton(
     )
     if can_fuse_up:
         pl_2d = pl_c.view(rows, hc_lowrank)
-        bm_mix = 16
         bk_mix = hc_lowrank
         ns_mix = 2
         nhb = triton.cdiv(hidden_size, bh)
@@ -2279,12 +2337,45 @@ class Qwen4_5HyperConnection(nn.Module):
         # Inference caches for padded/fused SM100-aligned [input_mix_weight_down; block_inject_weight]
         self._fused_down_inject_key: Optional[Tuple[int, int, int, int]] = None
         self._fused_down_inject_weight: Optional[torch.Tensor] = None
+        self._fused_down_inject_weight_t: Optional[torch.Tensor] = None
         self._padded_down_key: Optional[Tuple[int, int]] = None
         self._padded_down_weight: Optional[torch.Tensor] = None
         self._padded_inj_key: Optional[Tuple[int, int]] = None
         self._padded_inj_weight: Optional[torch.Tensor] = None
 
+    def _use_nn_fused_down_inject(self) -> bool:
+        """Use contiguous NN ``[width, aligned_n]`` cache only on real large widths (>= 4096)."""
+        return self.hidden_size >= 4096
+
+    def _get_fused_down_inject_weight_t(self) -> torch.Tensor:
+        """Return ``[width, aligned_n]`` fused down+inject weight (single NN copy for H>=4096)."""
+        if not self._use_nn_fused_down_inject():
+            return self._get_fused_down_inject_weight().t()
+        w_down = self.input_mix_weight_down
+        w_inj = self.block_inject_weight
+        assert w_down is not None and w_inj is not None
+        if torch.is_grad_enabled() and (w_down.requires_grad or w_inj.requires_grad):
+            w_cat = torch.cat([w_down, w_inj], dim=0)
+            pad_n = _aligned_hc_out_dim(int(w_cat.shape[0]), hidden_size=self.hidden_size) - int(w_cat.shape[0])
+            w_p = F.pad(w_cat, (0, 0, 0, pad_n)) if pad_n > 0 else w_cat
+            return w_p.t()
+        key = (w_down.data_ptr(), 0 if w_down.is_inference() else w_down._version, w_inj.data_ptr(), 0 if w_inj.is_inference() else w_inj._version)
+        if self._fused_down_inject_key != key or self._fused_down_inject_weight_t is None:
+            w_cat = torch.cat([w_down, w_inj], dim=0)
+            pad_n = _aligned_hc_out_dim(int(w_cat.shape[0]), hidden_size=self.hidden_size) - int(w_cat.shape[0])
+            w_p = F.pad(w_cat, (0, 0, 0, pad_n)) if pad_n > 0 else w_cat
+            w_t = w_p.t().contiguous()
+            del w_cat, w_p
+            self._fused_down_inject_weight_t = w_t
+            # Zero-copy view for callers/tests inspecting _get_fused_down_inject_weight().
+            self._fused_down_inject_weight = w_t.t()
+            self._fused_down_inject_key = key
+        return self._fused_down_inject_weight_t
+
     def _get_fused_down_inject_weight(self) -> torch.Tensor:
+        if self._use_nn_fused_down_inject():
+            w_t = self._get_fused_down_inject_weight_t()
+            return self._fused_down_inject_weight if self._fused_down_inject_weight is not None else w_t.t()
         w_down = self.input_mix_weight_down
         w_inj = self.block_inject_weight
         assert w_down is not None and w_inj is not None
@@ -2296,11 +2387,26 @@ class Qwen4_5HyperConnection(nn.Module):
         if self._fused_down_inject_key != key or self._fused_down_inject_weight is None:
             w_cat = torch.cat([w_down, w_inj], dim=0)
             pad_n = _aligned_hc_out_dim(int(w_cat.shape[0]), hidden_size=self.hidden_size) - int(w_cat.shape[0])
-            self._fused_down_inject_weight = (
-                F.pad(w_cat, (0, 0, 0, pad_n)).contiguous() if pad_n > 0 else w_cat.contiguous()
-            )
+            w_fused = F.pad(w_cat, (0, 0, 0, pad_n)).contiguous() if pad_n > 0 else w_cat.contiguous()
+            del w_cat
+            self._fused_down_inject_weight = w_fused
+            self._fused_down_inject_weight_t = w_fused.t()
             self._fused_down_inject_key = key
         return self._fused_down_inject_weight
+
+    @staticmethod
+    def _linear_from_t(x: torch.Tensor, w_t: torch.Tensor) -> torch.Tensor:
+        if x.is_cuda and not (
+            torch.is_grad_enabled() and (x.requires_grad or w_t.requires_grad)
+        ):
+            if w_t.is_contiguous():
+                k_dim = int(w_t.shape[0])
+                n_dim = int(w_t.shape[1])
+                x_2d = x.reshape(-1, k_dim)
+                if not x_2d.is_contiguous():
+                    x_2d = x_2d.contiguous()
+                return torch.mm(x_2d, w_t).reshape(*x.shape[:-1], n_dim)
+        return F.linear(x, w_t.t())
 
     def _get_padded_down_weight(self) -> torch.Tensor:
         w_down = self.input_mix_weight_down
@@ -2353,8 +2459,7 @@ class Qwen4_5HyperConnection(nn.Module):
                     "prev_latent must be provided when prev_mix=True and is_head=False"
                 )
             if self.emits_latent and self.use_combine:
-                w_fused = self._get_fused_down_inject_weight()
-                n_out = self.hc_lowrank + self.hc_count
+                w_t = self._get_fused_down_inject_weight_t()
                 width = self.hc_count * self.hidden_size
                 rows = normed.numel() // width
                 if (
@@ -2363,7 +2468,7 @@ class Qwen4_5HyperConnection(nn.Module):
                     and self.hc_lowrank == 128
                     and 0 < rows <= 48
                     and normed.dtype in (torch.bfloat16, torch.float16)
-                    and w_fused.dtype == normed.dtype
+                    and w_t.dtype == normed.dtype
                     and not (
                         torch.is_grad_enabled()
                         and (
@@ -2375,7 +2480,7 @@ class Qwen4_5HyperConnection(nn.Module):
                 ):
                     mixed, latent, inject_w = hc_down_inject_sk_and_mix_triton(
                         normed,
-                        w_fused[:n_out],
+                        w_t,
                         self.input_mix_weight_up,
                         prev_latent,
                         self.hc_lowrank,
@@ -2383,7 +2488,7 @@ class Qwen4_5HyperConnection(nn.Module):
                         ws=ws,
                     )
                     return mixed, residual, inject_w, latent
-                raw = F.linear(normed, w_fused)
+                raw = self._linear_from_t(normed, w_t)
             elif self.emits_latent:
                 raw = F.linear(normed, self._get_padded_down_weight())
             else:
@@ -2403,8 +2508,8 @@ class Qwen4_5HyperConnection(nn.Module):
 
         # 1. Down & inject projections (SM100-aligned fused GEMM when both exist)
         if self.emits_latent and self.use_combine:
-            w_fused = self._get_fused_down_inject_weight()
-            raw = F.linear(normed, w_fused)
+            w_t = self._get_fused_down_inject_weight_t()
+            raw = self._linear_from_t(normed, w_t)
             latent, inject_w = hc_down_inject_epilogue_triton(
                 raw, self.hc_lowrank, self.hc_count, ws=ws
             )

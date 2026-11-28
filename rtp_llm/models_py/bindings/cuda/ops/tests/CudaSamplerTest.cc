@@ -859,9 +859,6 @@ TEST_F(CudaSamplerTest, testTopPOneCategoricalPreservesPublicOutputsAndRngReserv
     }
 }
 
-
-
-
 TEST_F(CudaSamplerTest, testCompactGreedyOutputAcrossVocabulariesAndBatchSizes) {
     auto options = torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA);
     for (int64_t batch : {1, 2, 32, 33, 64}) {
@@ -1005,5 +1002,99 @@ TEST_F(CudaSamplerTest, testCompactOutputPreservesTokensProbabilitiesRngAndPenal
                 }
             }
         }
+    }
+}
+
+TEST_F(CudaSamplerTest, testDirectLastColPreserveLogitsFalseAndDoSampleLargeVocab) {
+    auto options = torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA);
+    torch::manual_seed(20261128);
+    constexpr int64_t batch = 128;
+    constexpr int64_t vocab = 248320;
+
+    auto logits      = torch::randn({batch, vocab}, options);
+    auto lengths     = torch::full({batch}, 64, torch::kInt32);
+    auto top_k       = torch::full({batch}, 20, torch::kInt32);
+    auto top_p       = torch::full({batch}, 0.95f, torch::kFloat32);
+    auto temperature = torch::full({batch}, 0.7f, torch::kFloat32);
+    auto do_sample =
+        torch::arange(batch, torch::kInt32).remainder(4).ne(0);  // mixed do_sample=true/false
+
+    auto make_generators = [&]() {
+        std::vector<at::Generator> gens;
+        gens.reserve(batch);
+        for (int64_t i = 0; i < batch; ++i) {
+            auto g = torch::make_generator<at::CUDAGeneratorImpl>();
+            g.set_current_seed(310000 + i);
+            gens.push_back(g);
+        }
+        return gens;
+    };
+
+    auto ref_tokens = torch::zeros({batch, 65}, torch::TensorOptions().dtype(torch::kInt32).pinned_memory(true));
+    auto ref_logits = logits.clone();
+    auto ref_gens   = make_generators();
+    auto ref_out    = execSampleGreedy(GreedyParams({ref_logits,
+                                                     lengths,
+                                                     lengths,
+                                                     ref_tokens,
+                                                     64,
+                                                     top_k,
+                                                     top_p,
+                                                     temperature,
+                                                     std::nullopt,
+                                                     std::nullopt,
+                                                     std::nullopt,
+                                                     std::nullopt,
+                                                     false,
+                                                     std::nullopt,
+                                                     std::nullopt,
+                                                     std::nullopt,
+                                                     do_sample,
+                                                     ref_gens,
+                                                     nullptr,
+                                                     true}));
+
+    GreedySamplingBuffers buffers;
+    auto                  pinned_i64 = torch::TensorOptions().dtype(torch::kInt64).pinned_memory(true);
+    auto                  pinned_u8  = torch::TensorOptions().dtype(torch::kUInt8).pinned_memory(true);
+    buffers.seed_host                = torch::empty({batch}, pinned_i64);
+    buffers.offset_host              = torch::empty({batch}, pinned_i64);
+    buffers.output_ids_ptrs_host     = torch::empty({batch}, pinned_i64);
+    buffers.meta_host                = torch::empty({batch * 256 + 4096}, pinned_u8);
+    buffers.max_batch_size           = batch;
+
+    auto cuda_col_tokens = torch::empty({batch, 1}, torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA));
+    auto test_logits     = logits.clone();
+    auto test_gens       = make_generators();
+    auto test_out        = execSampleGreedy(GreedyParams({test_logits,
+                                                      lengths,
+                                                      lengths,
+                                                      cuda_col_tokens,
+                                                      64,
+                                                      top_k,
+                                                      top_p,
+                                                      temperature,
+                                                      std::nullopt,
+                                                      std::nullopt,
+                                                      std::nullopt,
+                                                      std::nullopt,
+                                                      false,
+                                                      std::nullopt,
+                                                      std::nullopt,
+                                                      std::nullopt,
+                                                      do_sample,
+                                                      test_gens,
+                                                      &buffers,
+                                                      false}));
+    check_cuda_error();
+
+    EXPECT_TRUE(buffers.meta_device.defined() && buffers.meta_device.is_cuda());
+    ASSERT_TRUE(torch::equal(cuda_col_tokens.cpu().select(1, 0), ref_tokens.select(1, 64)));
+    ASSERT_EQ(ref_out.success.defined(), test_out.success.defined());
+    if (ref_out.success.defined()) {
+        ASSERT_TRUE(torch::equal(test_out.success.cpu(), ref_out.success.cpu()));
+    }
+    for (int64_t i = 0; i < batch; ++i) {
+        ASSERT_TRUE(torch::equal(test_gens[i].get_state(), ref_gens[i].get_state()));
     }
 }

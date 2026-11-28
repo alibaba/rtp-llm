@@ -37,3 +37,27 @@ TEST(TiledTemperatureTest, testTiledTemperatureMatchesNativeBitsAndUnalignedView
         }
     }
 }
+
+TEST(TiledTemperatureTest, testTiledTemperatureSupportsLargeBatchAndDoSampleMask) {
+    auto options = torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA);
+    auto stream  = at::cuda::getCurrentCUDAStream().stream();
+    torch::manual_seed(20261128);
+    constexpr int batch = 128;
+    constexpr int vocab = 248320;
+
+    auto actual       = torch::randn({batch, vocab}, options);
+    auto expected     = actual.clone();
+    auto temperatures = torch::empty({batch}, options).uniform_(0.25f, 1.75f);
+    auto do_sample    = torch::arange(batch, torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA))
+                         .remainder(3)
+                         .ne(0);
+
+    invokeBatchApplyTemperaturePenalty<float>(
+        expected.data_ptr<float>(), nullptr, temperatures.data_ptr<float>(), batch, vocab, vocab, stream);
+    expected = torch::where(do_sample.reshape({batch, 1}), expected, actual);
+
+    invokeTiledTemperaturePenalty(
+        actual.data_ptr<float>(), temperatures.data_ptr<float>(), batch, vocab, stream, do_sample.data_ptr<bool>());
+    check_cuda_error();
+    ASSERT_TRUE(torch::equal(actual.view(torch::kInt32), expected.view(torch::kInt32)));
+}

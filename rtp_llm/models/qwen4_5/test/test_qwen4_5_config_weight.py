@@ -571,19 +571,22 @@ class TestQwen4_5ConfigWeightKVCache(unittest.TestCase):
                 if r1.tag not in (GDN_SSM_STATE_TAG, GDN_CONV_STATE_TAG, GDN_CONSUMER_Q_CONV_TAG):
                     self.assertEqual(r4.shape, r1.shape)
 
-        # KVCacheSpecDescs reflect per-rank GDN sizing with REPLICATED transfer for 1:1 P_r->D_r
+        # KVCacheSpecDescs reflect per-rank GDN sizing with SHARDED_STATE for asymmetric P_tp>D_tp handoff
         mcfg = Qwen4_5.create_config(REF_CONFIG_PATH)
         descs = build_qwen4_5_kv_cache_spec_descs(mcfg, self.arch_cfg, tp_size=4)
         l0_by_tag = {d.tag: d for d in descs[0]}
         self.assertEqual(l0_by_tag[GDN_SSM_STATE_TAG].explicit_entry_count, 32)
         self.assertEqual(l0_by_tag[GDN_SSM_STATE_TAG].entry_elems, 64 * 64)
-        self.assertEqual(l0_by_tag[GDN_SSM_STATE_TAG].tp_transfer_mode, TpCacheTransferMode.REPLICATED)
+        self.assertEqual(l0_by_tag[GDN_SSM_STATE_TAG].tp_transfer_mode, TpCacheTransferMode.SHARDED_STATE)
         self.assertEqual(l0_by_tag[GDN_CONV_STATE_TAG].explicit_entry_count, 3)
         self.assertEqual(l0_by_tag[GDN_CONV_STATE_TAG].entry_elems, 3072)
-        self.assertEqual(l0_by_tag[GDN_CONV_STATE_TAG].tp_transfer_mode, TpCacheTransferMode.REPLICATED)
+        self.assertEqual(l0_by_tag[GDN_CONV_STATE_TAG].tp_transfer_mode, TpCacheTransferMode.SHARDED_STATE)
+        self.assertEqual(l0_by_tag[GDN_CONV_STATE_TAG].tp_state_q_elems, 512)
+        self.assertEqual(l0_by_tag[GDN_CONV_STATE_TAG].tp_state_k_elems, 512)
+        self.assertEqual(l0_by_tag[GDN_CONV_STATE_TAG].tp_state_v_elems, 2048)
         l21_by_tag = {d.tag: d for d in descs[21]}
         self.assertEqual(l21_by_tag[GDN_CONSUMER_Q_CONV_TAG].entry_elems, 512)
-        self.assertEqual(l21_by_tag[GDN_CONSUMER_Q_CONV_TAG].tp_transfer_mode, TpCacheTransferMode.REPLICATED)
+        self.assertEqual(l21_by_tag[GDN_CONSUMER_Q_CONV_TAG].tp_transfer_mode, TpCacheTransferMode.SHARDED_STATE)
         l3_full = [d for d in descs[3] if d.cache_type == KVCacheSpecType.MHA][0]
         self.assertEqual(l3_full.tp_transfer_mode, TpCacheTransferMode.MHA_HEADS)
 
@@ -1100,6 +1103,46 @@ class TestQwen4_5ConfigWeightKVCache(unittest.TestCase):
                     self.assertEqual(dp.entry_elems, dd.entry_elems)
                     self.assertEqual(dp.explicit_entry_count, dd.explicit_entry_count)
                     self.assertEqual(dp.tp_transfer_mode, dd.tp_transfer_mode)
+                    self.assertEqual(dp.tp_state_q_elems, dd.tp_state_q_elems)
+                    self.assertEqual(dp.tp_state_k_elems, dd.tp_state_k_elems)
+                    self.assertEqual(dp.tp_state_v_elems, dd.tp_state_v_elems)
+
+        # Asymmetric P_tp=4 (sp4_tp4_ep4) -> D_tp=2 (dp2_tpsp2_ep4) descriptor contract
+        from rtp_llm.models.qwen4_5.qwen4_5_kv_cache import (
+            GDN_CONSUMER_Q_CONV_TAG,
+            GDN_CONV_STATE_TAG,
+            GDN_SSM_STATE_TAG,
+        )
+        from rtp_llm.ops import TpCacheTransferMode
+
+        p4_specs = build_qwen4_5_kv_cache_spec_descs(
+            dummy_cfg, self.arch_cfg, parallel_mode="sp4_tp4_ep4", kv_dtype="fp8_e4m3", role_type=RoleType.PREFILL
+        )
+        d2_specs = build_qwen4_5_kv_cache_spec_descs(
+            dummy_cfg, self.arch_cfg, parallel_mode="dp2_tpsp2_ep4", kv_dtype="fp8_e4m3", role_type=RoleType.DECODE
+        )
+        sharded_tags = {GDN_SSM_STATE_TAG, GDN_CONV_STATE_TAG, GDN_CONSUMER_Q_CONV_TAG}
+        for lp, ld in zip(p4_specs, d2_specs):
+            by_p = {d.tag: d for d in lp}
+            by_d = {d.tag: d for d in ld}
+            self.assertEqual(set(by_p.keys()), set(by_d.keys()))
+            for tag, dp in by_p.items():
+                dd = by_d[tag]
+                if tag == GDN_SSM_STATE_TAG:
+                    self.assertEqual(dp.tp_transfer_mode, TpCacheTransferMode.SHARDED_STATE)
+                    self.assertEqual(dd.tp_transfer_mode, TpCacheTransferMode.SHARDED_STATE)
+                    self.assertEqual(dp.explicit_entry_count * 2, dd.explicit_entry_count)
+                elif tag == GDN_CONV_STATE_TAG:
+                    self.assertEqual(dd.tp_transfer_mode, TpCacheTransferMode.SHARDED_STATE)
+                    self.assertEqual(dp.entry_elems * 2, dd.entry_elems)
+                    self.assertEqual((dd.tp_state_q_elems, dd.tp_state_k_elems, dd.tp_state_v_elems), (1024, 1024, 4096))
+                elif tag == GDN_CONSUMER_Q_CONV_TAG:
+                    self.assertEqual(dd.tp_transfer_mode, TpCacheTransferMode.SHARDED_STATE)
+                    self.assertEqual(dp.entry_elems * 2, dd.entry_elems)
+                    self.assertEqual((dd.tp_state_q_elems, dd.tp_state_k_elems, dd.tp_state_v_elems), (0, 0, 0))
+                else:
+                    self.assertEqual(dp.entry_elems, dd.entry_elems)
+                    self.assertEqual(dp.explicit_entry_count, dd.explicit_entry_count)
 
 
 if __name__ == "__main__":

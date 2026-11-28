@@ -11,6 +11,8 @@
 
 #if USING_CUDA
 #include <ATen/cuda/CUDAContext.h>
+#include <c10/cuda/CUDAException.h>
+#include <c10/cuda/CUDAGuard.h>
 #include "ATen/ops/cat.h"
 #include "rtp_llm/models_py/bindings/common/kernels/batch_copy.h"
 #include "rtp_llm/models_py/bindings/common/kernels/copy_utils.h"
@@ -154,7 +156,143 @@ void launchPackedMaskLogits(const torch::Tensor& logits,
         throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
     }
 }
+
+template<typename Stream>
+void launchBatchGrammarMaskLogits(const torch::Tensor& logits,
+                                  const torch::Tensor& packed_buf,
+                                  int32_t              bitmask_header_words,
+                                  int32_t              active_rows,
+                                  int32_t              bitmask_row_stride,
+                                  Stream               stream) {
+    if (active_rows <= 0) {
+        return;
+    }
+    RTP_LLM_CHECK_WITH_INFO(logits.defined() && logits.dim() == 2 && logits.is_cuda(),
+                            "batch grammar mask requires defined 2D CUDA logits");
+    RTP_LLM_CHECK_WITH_INFO(packed_buf.defined() && packed_buf.dim() == 1 && packed_buf.is_cuda()
+                                && packed_buf.is_contiguous() && packed_buf.scalar_type() == torch::kInt32,
+                            "batch grammar mask requires contiguous 1D CUDA int32 packed buffer");
+    RTP_LLM_CHECK_WITH_INFO(logits.device() == packed_buf.device(),
+                            "batch grammar mask logits and packed buffer must be on the same device");
+    const int64_t logits_rows    = logits.size(0);
+    const int64_t logits_columns = logits.size(1);
+    const int64_t logits_stride  = logits.stride(0);
+    RTP_LLM_CHECK_WITH_INFO(logits.stride(1) == 1 && logits_stride >= logits_columns,
+                            "batch grammar mask logits rows must be contiguous in vocab dimension");
+    RTP_LLM_CHECK_WITH_INFO(packed_buf.numel() >= static_cast<int64_t>(active_rows) * 3,
+                            "batch grammar mask packed buffer smaller than metadata header");
+    RTP_LLM_CHECK_WITH_INFO(logits_rows <= std::numeric_limits<int>::max()
+                                && logits_stride <= std::numeric_limits<int>::max()
+                                && logits_columns <= std::numeric_limits<int>::max(),
+                            "batch grammar mask dimensions exceed int32 limits");
+
+    if (logits.scalar_type() == torch::kFloat32) {
+        invokeBatchGrammarMaskLogits<float>(logits.data_ptr<float>(),
+                                            packed_buf.data_ptr<int32_t>(),
+                                            bitmask_header_words,
+                                            active_rows,
+                                            static_cast<int>(logits_rows),
+                                            static_cast<int>(logits_stride),
+                                            static_cast<int>(logits_columns),
+                                            bitmask_row_stride,
+                                            stream);
+    } else if (logits.scalar_type() == torch::kFloat16) {
+        invokeBatchGrammarMaskLogits<half>(reinterpret_cast<half*>(logits.data_ptr<at::Half>()),
+                                           packed_buf.data_ptr<int32_t>(),
+                                           bitmask_header_words,
+                                           active_rows,
+                                           static_cast<int>(logits_rows),
+                                           static_cast<int>(logits_stride),
+                                           static_cast<int>(logits_columns),
+                                           bitmask_row_stride,
+                                           stream);
+    } else if (logits.scalar_type() == torch::kBFloat16) {
+        invokeBatchGrammarMaskLogits<__nv_bfloat16>(reinterpret_cast<__nv_bfloat16*>(logits.data_ptr<at::BFloat16>()),
+                                                    packed_buf.data_ptr<int32_t>(),
+                                                    bitmask_header_words,
+                                                    active_rows,
+                                                    static_cast<int>(logits_rows),
+                                                    static_cast<int>(logits_stride),
+                                                    static_cast<int>(logits_columns),
+                                                    bitmask_row_stride,
+                                                    stream);
+    } else {
+        throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
+    }
+}
 #endif
+
+void applyBatchGrammarMaskLogitsCpuFallback(const torch::Tensor& logits,
+                                            const torch::Tensor& packed_buf,
+                                            int32_t              bitmask_header_words,
+                                            int32_t              active_rows,
+                                            int32_t              bitmask_row_stride) {
+    if (active_rows <= 0) {
+        return;
+    }
+    RTP_LLM_CHECK_WITH_INFO(logits.defined() && logits.dim() == 2,
+                            "batch grammar mask CPU fallback requires defined 2D logits");
+    RTP_LLM_CHECK_WITH_INFO(packed_buf.defined() && packed_buf.dim() == 1
+                                && packed_buf.scalar_type() == torch::kInt32,
+                            "batch grammar mask CPU fallback requires 1D int32 packed buffer");
+    auto logits_cpu = contiguousCpuTensor(logits);
+    auto buf_cpu    = contiguousCpuTensor(packed_buf);
+
+    const int64_t logits_rows    = logits_cpu.size(0);
+    const int64_t logits_columns = logits_cpu.size(1);
+    const auto*   buf            = buf_cpu.data_ptr<int32_t>();
+    RTP_LLM_CHECK_WITH_INFO(buf_cpu.numel() >= static_cast<int64_t>(active_rows) * 3,
+                            "batch grammar mask CPU buffer smaller than header");
+
+    AT_DISPATCH_FLOATING_TYPES_AND2(
+        at::ScalarType::Half, at::ScalarType::BFloat16, logits_cpu.scalar_type(), "batchGrammarMaskCpuFallback", [&] {
+            auto*      logits_data = logits_cpu.data_ptr<scalar_t>();
+            const auto neg_val =
+                (std::is_same_v<scalar_t, at::Half> || std::is_same_v<scalar_t, at::BFloat16>) ?
+                    static_cast<scalar_t>(-std::numeric_limits<float>::infinity()) :
+                    static_cast<scalar_t>(-std::numeric_limits<float>::max());
+            const auto zero_val = static_cast<scalar_t>(0.0f);
+            for (int32_t c = 0; c < active_rows; ++c) {
+                const int32_t row = buf[c];
+                if (row < 0 || row >= logits_rows) {
+                    continue;
+                }
+                const int32_t mode        = buf[active_rows + c];
+                const int32_t vocab_limit = buf[2 * active_rows + c];
+                auto*         row_data    = logits_data + static_cast<int64_t>(row) * logits_columns;
+                if (mode >= 0) {
+                    std::fill_n(row_data, logits_columns, neg_val);
+                    if (mode < logits_columns) {
+                        row_data[mode] = zero_val;
+                    }
+                } else if (mode == -1) {
+                    for (int64_t col = std::max<int64_t>(0, vocab_limit); col < logits_columns; ++col) {
+                        row_data[col] = neg_val;
+                    }
+                } else {
+                    const int32_t mask_row = -2 - mode;
+                    const int32_t* mask_row_ptr =
+                        buf + bitmask_header_words + static_cast<int64_t>(mask_row) * bitmask_row_stride;
+                    const int64_t limit = std::min<int64_t>(vocab_limit, logits_columns);
+                    for (int64_t col = 0; col < limit; ++col) {
+                        const int64_t word_idx = col >> 5;
+                        const uint32_t word =
+                            word_idx < bitmask_row_stride ? static_cast<uint32_t>(mask_row_ptr[word_idx]) : 0u;
+                        if ((word & (1u << (col & 31))) == 0u) {
+                            row_data[col] = neg_val;
+                        }
+                    }
+                    for (int64_t col = limit; col < logits_columns; ++col) {
+                        row_data[col] = neg_val;
+                    }
+                }
+            }
+        });
+
+    if (logits.data_ptr() != logits_cpu.data_ptr()) {
+        logits.copy_(logits_cpu, /*non_blocking=*/false);
+    }
+}
 
 void applyPackedMaskLogitsCpuFallback(const torch::Tensor& logits,
                                       const torch::Tensor& packed_allow_mask,
@@ -341,6 +479,51 @@ void runtimeApplyPackedMaskLogits(const torch::Tensor& logits,
     runtimeApplyPackedMaskLogits(logits, packed_allow_mask, torch::Tensor{}, vocab_size);
 }
 
+void runtimeApplyBatchGrammarMaskLogits(const torch::Tensor& logits,
+                                        const torch::Tensor& packed_buf_host,
+                                        const torch::Tensor& packed_buf_device,
+                                        int32_t              total_ints,
+                                        int32_t              bitmask_header_words,
+                                        int32_t              active_rows,
+                                        int32_t              bitmask_row_stride) {
+    if (active_rows <= 0) {
+        return;
+    }
+    RTP_LLM_CHECK_WITH_INFO(packed_buf_host.defined() && packed_buf_host.dim() == 1
+                                && packed_buf_host.scalar_type() == torch::kInt32 && packed_buf_host.is_contiguous()
+                                && packed_buf_host.numel() >= total_ints && total_ints >= active_rows * 3,
+                            "batch grammar mask host buffer invalid");
+    if (logits.device().is_cpu()) {
+        applyBatchGrammarMaskLogitsCpuFallback(logits,
+                                               packed_buf_host.narrow(0, 0, total_ints),
+                                               bitmask_header_words,
+                                               active_rows,
+                                               bitmask_row_stride);
+        return;
+    }
+    c10::cuda::CUDAGuard device_guard(logits.device());
+    auto                stream = at::cuda::getCurrentCUDAStream(logits.device().index()).stream();
+    torch::Tensor       gpu_buf;
+    if (packed_buf_device.defined()) {
+        RTP_LLM_CHECK_WITH_INFO(packed_buf_device.dim() == 1 && packed_buf_device.is_cuda()
+                                    && packed_buf_device.is_contiguous()
+                                    && packed_buf_device.scalar_type() == torch::kInt32
+                                    && packed_buf_device.device() == logits.device()
+                                    && packed_buf_device.numel() >= total_ints,
+                                "batch grammar mask device buffer invalid");
+        C10_CUDA_CHECK(cudaMemcpyAsync(packed_buf_device.data_ptr<int32_t>(),
+                                       packed_buf_host.data_ptr<int32_t>(),
+                                       static_cast<size_t>(total_ints) * sizeof(int32_t),
+                                       cudaMemcpyHostToDevice,
+                                       stream));
+        gpu_buf = packed_buf_device.narrow(0, 0, total_ints);
+    } else {
+        gpu_buf = packed_buf_host.narrow(0, 0, total_ints).to(logits.device(), /*non_blocking=*/true).contiguous();
+    }
+    launchBatchGrammarMaskLogits(
+        logits, gpu_buf, bitmask_header_words, active_rows, bitmask_row_stride, stream);
+}
+
 #else  // ROCm / non-CUDA
 
 // ============================================================
@@ -420,6 +603,28 @@ void runtimeApplyPackedMaskLogits(const torch::Tensor& logits,
                                   const torch::Tensor& packed_allow_mask,
                                   size_t               vocab_size) {
     runtimeApplyPackedMaskLogits(logits, packed_allow_mask, torch::Tensor{}, vocab_size);
+}
+
+void runtimeApplyBatchGrammarMaskLogits(const torch::Tensor& logits,
+                                        const torch::Tensor& packed_buf_host,
+                                        const torch::Tensor& packed_buf_device,
+                                        int32_t              total_ints,
+                                        int32_t              bitmask_header_words,
+                                        int32_t              active_rows,
+                                        int32_t              bitmask_row_stride) {
+    (void)packed_buf_device;
+    if (active_rows <= 0) {
+        return;
+    }
+    RTP_LLM_CHECK_WITH_INFO(packed_buf_host.defined() && packed_buf_host.dim() == 1
+                                && packed_buf_host.scalar_type() == torch::kInt32 && packed_buf_host.is_contiguous()
+                                && packed_buf_host.numel() >= total_ints && total_ints >= active_rows * 3,
+                            "batch grammar mask host buffer invalid");
+    applyBatchGrammarMaskLogitsCpuFallback(logits,
+                                           packed_buf_host.narrow(0, 0, total_ints),
+                                           bitmask_header_words,
+                                           active_rows,
+                                           bitmask_row_stride);
 }
 
 #endif  // USING_CUDA

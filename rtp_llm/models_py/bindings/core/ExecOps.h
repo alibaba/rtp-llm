@@ -90,6 +90,13 @@ void runtimeApplyPackedMaskLogits(const torch::Tensor& logits,
 void runtimeApplyPackedMaskLogits(const torch::Tensor& logits,
                                   const torch::Tensor& packed_allow_mask,
                                   size_t               vocab_size);
+void runtimeApplyBatchGrammarMaskLogits(const torch::Tensor& logits,
+                                        const torch::Tensor& packed_buf_host,
+                                        const torch::Tensor& packed_buf_device,
+                                        int32_t              total_ints,
+                                        int32_t              bitmask_header_words,
+                                        int32_t              active_rows,
+                                        int32_t              bitmask_row_stride);
 
 void execNoBlockCopy(const CopyParams& params);
 void execBatchCopy(const BatchCopyParams& params);

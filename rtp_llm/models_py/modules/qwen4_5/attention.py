@@ -109,7 +109,7 @@ def _select_bf16_tgv_tactic(
         elif 4096 <= k_dim <= 6144:
             if n_dim <= 3072:
                 tactic = 6
-            elif 4096 < n_dim <= 5376:
+            elif 5120 <= n_dim <= 5376:
                 tactic = 9
     elif n_dim <= 8192:
         if m_rows <= 8:

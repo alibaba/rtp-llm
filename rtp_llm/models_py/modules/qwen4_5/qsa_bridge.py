@@ -3822,6 +3822,7 @@ if _HAS_TRITON:
         IS_FP8: tl.constexpr,
         HAS_SCALE: tl.constexpr,
         FP8_QK: tl.constexpr,
+        FP8_PV: tl.constexpr = False,
         SUB_G: tl.constexpr = 1,
     ):
         """Sequential D=256 (2x128) split-KV decode/verify kernel eliminating register spills."""
@@ -3907,24 +3908,38 @@ if _HAS_TRITON:
                 nxt = tl.maximum(mx, tl.max(logits, 1))
                 rescale = tl.where(nxt == float("-inf"), 0.0, tl.exp(mx - nxt))
                 prob = tl.where(valid[None, :], tl.exp(logits - nxt[:, None]), 0.0)
-                v_base = k_base + stride_kkv
-                if IS_FP8 and HAS_SCALE:
-                    sc_v = tl.load(sc_base + stride_sckv, mask=valid, other=1.0).to(tl.float32)
-                    prob_v = (prob * sc_v[None, :]).to(tl.bfloat16)
-                else:
-                    prob_v = prob.to(tl.bfloat16)
-                v0 = tl.load(v_base + r128[None, :], mask=valid[:, None], other=0.0)
-                if IS_FP8:
-                    v0 = v0.to(tl.bfloat16)
-                acc0 = acc0 * rescale[:, None]
-                acc0 = tl.dot(prob_v, v0, acc0)
-                v1 = tl.load(v_base + 128 + r128[None, :], mask=valid[:, None], other=0.0)
-                if IS_FP8:
-                    v1 = v1.to(tl.bfloat16)
-                acc1 = acc1 * rescale[:, None]
-                acc1 = tl.dot(prob_v, v1, acc1)
                 z = z * rescale + tl.sum(prob, 1)
                 mx = nxt
+                v_base = k_base + stride_kkv
+                if IS_FP8 and FP8_PV:
+                    if HAS_SCALE:
+                        sc_v = tl.load(sc_base + stride_sckv, mask=valid, other=1.0).to(tl.float32)
+                        p_scaled = prob * sc_v[None, :]
+                    else:
+                        p_scaled = prob
+                    p_row_max = tl.maximum(tl.max(p_scaled, axis=1), 1e-12)
+                    p_sc = p_row_max / 448.0
+                    p_f8 = (p_scaled / p_sc[:, None]).to(tl.float8e4nv)
+                    v0 = tl.load(v_base + r128[None, :], mask=valid[:, None], other=0.0)
+                    acc0 = acc0 * rescale[:, None] + tl.dot(p_f8, v0) * p_sc[:, None]
+                    v1 = tl.load(v_base + 128 + r128[None, :], mask=valid[:, None], other=0.0)
+                    acc1 = acc1 * rescale[:, None] + tl.dot(p_f8, v1) * p_sc[:, None]
+                else:
+                    if IS_FP8 and HAS_SCALE:
+                        sc_v = tl.load(sc_base + stride_sckv, mask=valid, other=1.0).to(tl.float32)
+                        prob_v = (prob * sc_v[None, :]).to(tl.bfloat16)
+                    else:
+                        prob_v = prob.to(tl.bfloat16)
+                    v0 = tl.load(v_base + r128[None, :], mask=valid[:, None], other=0.0)
+                    if IS_FP8:
+                        v0 = v0.to(tl.bfloat16)
+                    acc0 = acc0 * rescale[:, None]
+                    acc0 = tl.dot(prob_v, v0, acc0)
+                    v1 = tl.load(v_base + 128 + r128[None, :], mask=valid[:, None], other=0.0)
+                    if IS_FP8:
+                        v1 = v1.to(tl.bfloat16)
+                    acc1 = acc1 * rescale[:, None]
+                    acc1 = tl.dot(prob_v, v1, acc1)
 
         if NUM_SPLITS == 1:
             inv_z = tl.where(z > 0, 1.0 / z, 0.0)[:, None]
@@ -4699,14 +4714,17 @@ def qsa_sparse_paged_decode_attention(
         else:
             if K >= 512 and D == 256:
                 kt, nw = 128, 4
-                if m_ctas <= 16:
+                if m_ctas <= 32:
                     target_sp, stg = 16, 1
-                elif m_ctas <= 64:
-                    target_sp, stg = 4, 1
+                elif m_ctas <= 96:
+                    target_sp, stg = 8, 1
                 elif m_ctas <= 128:
-                    target_sp, stg = 2, 1
+                    if S > 1:
+                        target_sp, stg = 2, 2
+                    else:
+                        target_sp, stg = (8 if m_rows == 16 else 2), 1
                 elif m_ctas <= 512:
-                    target_sp, stg = (1 if m_rows == 32 else 4), 1
+                    target_sp, stg = 1, 1
                 else:
                     target_sp, stg = 2, 2
             elif m_ctas <= 16:
@@ -4731,7 +4749,8 @@ def qsa_sparse_paged_decode_attention(
         dummy_sc = sc_hnd if has_scale and sc_hnd is not None else kv_hnd
         dummy_gate = output_gate if with_gate and output_gate is not None else out
 
-        use_dsplit = D == 256 and m_rows == 32 and kt >= 64
+        use_dsplit = D == 256 and kt >= 64 and (is_fp8 or m_rows == 32)
+        fp8_pv = is_fp8 and m_rows == 16
         if splits == 1:
             p_out = p_m = p_z = out
         else:
@@ -4766,7 +4785,7 @@ def qsa_sparse_paged_decode_attention(
                 q_c.device.index, 213, q_c.dtype, kv_hnd.dtype, dummy_sc.dtype,
                 kv_block_table.dtype, kv_lens_2d.dtype, sel_c.dtype, p_out.dtype, dummy_gate.dtype,
                 split_stride_specs, kv_heads, q_per_kv, m_rows, page_size, float(D**-0.5),
-                kt, splits, split_with_gate, is_fp8, has_scale, is_fp8, sub_g, nw, stg,
+                kt, splits, split_with_gate, is_fp8, has_scale, is_fp8, fp8_pv, sub_g, nw, stg,
             )
             triton_fast_launch(
                 _QSA_TRITON_CACHE, ck_split, _qsa_gqa_paged_split_tc_dsplit_kernel,
@@ -4774,7 +4793,7 @@ def qsa_sparse_paged_decode_attention(
                 {
                     "HK": kv_heads, "G": q_per_kv, "M_ROWS": m_rows, "PAGE_SIZE": page_size,
                     "SCALE": D**-0.5, "KT": kt, "NUM_SPLITS": splits, "WITH_GATE": split_with_gate,
-                    "IS_FP8": is_fp8, "HAS_SCALE": has_scale, "FP8_QK": is_fp8, "SUB_G": sub_g,
+                    "IS_FP8": is_fp8, "HAS_SCALE": has_scale, "FP8_QK": is_fp8, "FP8_PV": fp8_pv, "SUB_G": sub_g,
                 },
                 num_warps=nw, num_stages=stg,
             )

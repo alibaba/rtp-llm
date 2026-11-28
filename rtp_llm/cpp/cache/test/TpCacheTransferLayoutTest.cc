@@ -248,5 +248,70 @@ TEST(LinearTpCacheLayoutTest, RejectsSizeOverflow) {
     EXPECT_THROW(linearTpCacheSlices(64, 16, 16, 48, max, 1, 0), std::overflow_error);
 }
 
+TEST(ShardedStateTpCacheLayoutTest, ReassemblesGdnSsmAndThreeSegmentConvForP4ToD2) {
+    // 1. GDN SSM [64, 64, 64] FP32 on D_tp=2 assembled from 2 prefill TP=4 peers ([32, 64, 64] each)
+    TpCacheTransferLayout ssm_layout;
+    ssm_layout.mode = TpCacheTransferMode::SHARDED_STATE;
+    EXPECT_TRUE(ssm_layout.needsReassembly(1));
+    const TpCacheTransferTopology p4_to_d2{2, 2, 1, 1};
+    EXPECT_TRUE(tpCachePeerOwnsPayload(TpCacheTransferMode::SHARDED_STATE, 1, p4_to_d2, 0));
+    EXPECT_TRUE(tpCachePeerOwnsPayload(TpCacheTransferMode::SHARDED_STATE, 1, p4_to_d2, 1));
+
+    const size_t                     ssm_dst_bytes = 64 * 64 * 64 * 4;
+    std::vector<TpCacheTransferPlan> ssm_plans;
+    for (size_t peer = 0; peer < 2; ++peer) {
+        auto plan = ssm_layout.plan(ssm_dst_bytes, 0, 1, p4_to_d2, peer);
+        EXPECT_EQ(plan.source_bytes, ssm_dst_bytes / 2);
+        EXPECT_EQ(plan.destination_bytes, ssm_dst_bytes);
+        ASSERT_EQ(plan.slices.size(), 1u);
+        EXPECT_EQ(plan.slices[0].source_offset, 0u);
+        EXPECT_EQ(plan.slices[0].destination_offset, peer * (ssm_dst_bytes / 2));
+        EXPECT_EQ(plan.slices[0].bytes, ssm_dst_bytes / 2);
+        ssm_plans.push_back(std::move(plan));
+    }
+    EXPECT_NO_THROW(validateCompleteTransfer(ssm_plans));
+
+    // 2. GDN Conv [2*1024 + 4096, 3] BF16 on D_tp=2 assembled from P_tp=4 ([Q0,K0,V0] + [Q1,K1,V1])
+    TpCacheTransferLayout conv_layout;
+    conv_layout.mode         = TpCacheTransferMode::SHARDED_STATE;
+    conv_layout.q_row_bytes  = 16;
+    conv_layout.k_row_bytes  = 16;
+    conv_layout.v_row_bytes  = 64;
+    conv_layout.history_rows = 1;
+    const size_t conv_bytes  = 96;
+    std::vector<std::vector<uint8_t>> conv_sources(2, std::vector<uint8_t>(conv_bytes / 2));
+    for (size_t peer = 0; peer < 2; ++peer) {
+        std::fill_n(conv_sources[peer].data(), 8, static_cast<uint8_t>(10 + peer));        // Q_p
+        std::fill_n(conv_sources[peer].data() + 8, 8, static_cast<uint8_t>(20 + peer));    // K_p
+        std::fill_n(conv_sources[peer].data() + 16, 32, static_cast<uint8_t>(30 + peer));  // V_p
+    }
+    std::vector<uint8_t>             conv_actual(conv_bytes, 0xff);
+    std::vector<TpCacheTransferPlan> conv_plans;
+    for (size_t peer = 0; peer < 2; ++peer) {
+        auto plan = conv_layout.plan(conv_bytes, 0, 1, p4_to_d2, peer);
+        ASSERT_EQ(plan.slices.size(), 3u);
+        for (const auto& s : plan.slices) {
+            std::memcpy(conv_actual.data() + s.destination_offset, conv_sources[peer].data() + s.source_offset, s.bytes);
+        }
+        conv_plans.push_back(std::move(plan));
+    }
+    EXPECT_NO_THROW(validateCompleteTransfer(conv_plans));
+    std::vector<uint8_t> conv_expected(conv_bytes);
+    std::fill_n(conv_expected.data() + 0, 8, 10);
+    std::fill_n(conv_expected.data() + 8, 8, 11);
+    std::fill_n(conv_expected.data() + 16, 8, 20);
+    std::fill_n(conv_expected.data() + 24, 8, 21);
+    std::fill_n(conv_expected.data() + 32, 32, 30);
+    std::fill_n(conv_expected.data() + 64, 32, 31);
+    EXPECT_EQ(conv_actual, conv_expected);
+
+    // 3. Rejects invalid segment sum / non-zero v_bytes / MHA D_tp=2 two-head ownership check
+    EXPECT_THROW(conv_layout.plan(conv_bytes, 1, 1, p4_to_d2, 0), std::invalid_argument);
+    EXPECT_THROW(conv_layout.plan(conv_bytes + 8, 0, 1, p4_to_d2, 0), std::invalid_argument);
+    EXPECT_THROW(TpCacheTransferPlan::shardedState(15, 16, 64, 2, 0), std::invalid_argument);
+    EXPECT_TRUE(tpCachePeerOwnsPayload(TpCacheTransferMode::MHA_HEADS, 2, p4_to_d2, 0));
+    EXPECT_TRUE(tpCachePeerOwnsPayload(TpCacheTransferMode::MHA_HEADS, 2, p4_to_d2, 1));
+}
+
 }  // namespace
 }  // namespace rtp_llm

@@ -443,6 +443,62 @@ TEST_F(ExecOpsTest, testRuntimeApplyPackedMaskLogitsCopiesBackToNonContiguousInp
     }
 }
 
+TEST_F(ExecOpsTest, testRuntimeApplyPackedMaskLogitsBatchGrammarMixedModes) {
+    constexpr int64_t logits_rows  = 4;
+    constexpr int64_t logits_vocab = 70;
+    constexpr int32_t active_rows  = 3;
+    constexpr int32_t header_words = 32;
+    constexpr int32_t bitmask_stride = 2;
+    constexpr int32_t total_ints     = header_words + bitmask_stride;
+
+    auto host_buf = torch::zeros({total_ints}, torch::TensorOptions(torch::kInt32).pinned_memory(true));
+    auto* ptr     = host_buf.data_ptr<int32_t>();
+    // Row 0 -> BITMASK_AND_TAIL (vocab_limit=35, allows token 1 and token 33)
+    // Row 2 -> TAIL_ONLY (vocab_limit=40)
+    // Row 3 -> FORCE_TOKEN (eos=5)
+    ptr[0] = 0;
+    ptr[1] = 2;
+    ptr[2] = 3;
+    ptr[3] = -2;
+    ptr[4] = -1;
+    ptr[5] = 5;
+    ptr[6] = 35;
+    ptr[7] = 40;
+    ptr[8] = 0;
+    ptr[header_words + 0] = (1 << 1);
+    ptr[header_words + 1] = (1 << 1) | (1 << 5);  // token 33 allowed, token 37 >= 35 must still be masked!
+
+    auto dev_buf = torch::empty({total_ints}, torch::TensorOptions(torch::kInt32).device(torch::kCUDA));
+
+    for (const auto dtype : {torch::kFloat32, torch::kFloat16, torch::kBFloat16}) {
+        auto logits = torch::full({logits_rows, logits_vocab}, 1.5f, torch::TensorOptions(dtype).device(torch::kCUDA));
+        ASSERT_NO_THROW(runtimeApplyBatchGrammarMaskLogits(
+            logits, host_buf, dev_buf, total_ints, header_words, active_rows, bitmask_stride));
+        runtimeSyncAndCheck();
+
+        auto cpu = logits.to(torch::kFloat32).cpu().contiguous();
+        for (int64_t c = 0; c < logits_vocab; ++c) {
+            const bool r0_allowed = (c == 1 || c == 33);
+            if (r0_allowed) {
+                EXPECT_FLOAT_EQ(cpu[0][c].item<float>(), 1.5f);
+            } else {
+                EXPECT_LT(cpu[0][c].item<float>(), -60000.0f);
+            }
+            EXPECT_FLOAT_EQ(cpu[1][c].item<float>(), 1.5f);  // untouched row
+            if (c < 40) {
+                EXPECT_FLOAT_EQ(cpu[2][c].item<float>(), 1.5f);
+            } else {
+                EXPECT_LT(cpu[2][c].item<float>(), -60000.0f);
+            }
+            if (c == 5) {
+                EXPECT_FLOAT_EQ(cpu[3][c].item<float>(), 0.0f);
+            } else {
+                EXPECT_LT(cpu[3][c].item<float>(), -60000.0f);
+            }
+        }
+    }
+}
+
 TEST_F(ExecOpsTest, testWriteCacheStorePublishesOnlyCurrentGroupBlockPerRequest) {
     auto store = std::make_shared<MockCacheStore>();
     auto inputs = makePyCacheStoreInputs(/*base tokens per block=*/2, /*key count=*/4);

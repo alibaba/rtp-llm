@@ -804,6 +804,10 @@ def _make_opaque_state_desc(
     dtype_str: str,
     *,
     pool_policy: Optional[DecodeOpaqueStatePoolPolicy] = None,
+    tp_transfer_mode: Optional[Any] = None,
+    tp_state_q_elems: int = 0,
+    tp_state_k_elems: int = 0,
+    tp_state_v_elems: int = 0,
 ) -> Any:
     """Create an EXPLICIT ``OPAQUE_STATE`` ``KVCacheSpecDesc`` (FULL on Prefill, rolling on Decode)."""
     dtype_map = {
@@ -845,7 +849,13 @@ def _make_opaque_state_desc(
         tail = CacheTailPolicyDesc()
         tail.active_tail_blocks = 0
         desc.tail = tail
-    desc.tp_transfer_mode = TpCacheTransferMode.REPLICATED
+    desc.tp_transfer_mode = (
+        TpCacheTransferMode.REPLICATED if tp_transfer_mode is None else tp_transfer_mode
+    )
+    if tp_state_q_elems > 0 or tp_state_k_elems > 0 or tp_state_v_elems > 0:
+        desc.tp_state_q_elems = int(tp_state_q_elems)
+        desc.tp_state_k_elems = int(tp_state_k_elems)
+        desc.tp_state_v_elems = int(tp_state_v_elems)
     return desc
 
 
@@ -979,9 +989,31 @@ def build_qwen4_5_kv_cache_spec_descs(
                         entry_count=ssm_heads,
                         dtype_str="F32",
                         pool_policy=pool_policy,
+                        tp_transfer_mode=TpCacheTransferMode.SHARDED_STATE,
                     )
                 )
-                if lp.has_gdn_conv:
+            if lp.has_gdn_conv:
+                if lp.is_sharing_consumer:
+                    # YoCo consumer only keeps Q-conv [k_dim, k-1=3] (both YoCo ON and OFF).
+                    descs.append(
+                        _make_opaque_state_desc(
+                            tag=GDN_CONSUMER_Q_CONV_TAG,
+                            entry_elems=lp.gdn_conv_channels,
+                            entry_count=lp.gdn_conv_state_len,
+                            dtype_str="BF16",
+                            pool_policy=pool_policy,
+                            tp_transfer_mode=TpCacheTransferMode.SHARDED_STATE,
+                        )
+                    )
+                else:
+                    assert lp.ssm_state_shape is not None
+                    ssm_heads, _, ssm_v = lp.ssm_state_shape
+                    v_dim = ssm_heads * ssm_v
+                    k_dim = (lp.gdn_conv_channels - v_dim) // 2
+                    if k_dim <= 0 or (2 * k_dim + v_dim) != lp.gdn_conv_channels:
+                        raise ValueError(
+                            f"Invalid GDN conv channels={lp.gdn_conv_channels} for v_dim={v_dim}"
+                        )
                     descs.append(
                         _make_opaque_state_desc(
                             tag=GDN_CONV_STATE_TAG,
@@ -989,19 +1021,12 @@ def build_qwen4_5_kv_cache_spec_descs(
                             entry_count=lp.gdn_conv_state_len,
                             dtype_str="BF16",
                             pool_policy=pool_policy,
+                            tp_transfer_mode=TpCacheTransferMode.SHARDED_STATE,
+                            tp_state_q_elems=k_dim,
+                            tp_state_k_elems=k_dim,
+                            tp_state_v_elems=v_dim,
                         )
                     )
-            elif lp.has_gdn_conv:
-                # YoCo decode consumer: no SSM state, only Q-conv [2048, k-1=3]
-                descs.append(
-                    _make_opaque_state_desc(
-                        tag=GDN_CONSUMER_Q_CONV_TAG,
-                        entry_elems=lp.gdn_conv_channels,
-                        entry_count=lp.gdn_conv_state_len,
-                        dtype_str="BF16",
-                        pool_policy=pool_policy,
-                    )
-                )
 
         for reg in lp.opaque_regions:
             if reg.tag == PLE_NGRAM_CTX_TAG:

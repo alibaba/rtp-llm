@@ -5,6 +5,7 @@
 
 #if USING_CUDA
 #include <ATen/cuda/CUDAContext.h>
+#include <c10/cuda/CUDAException.h>
 #include <c10/cuda/CUDAGuard.h>
 #include "rtp_llm/models_py/bindings/cuda/cuda_host_utils.h"
 #include "rtp_llm/models_py/bindings/common/kernels/sampling_penalty_kernels.h"
@@ -17,6 +18,7 @@
 #include "rtp_llm/models_py/bindings/cuda/kernels/sampling/softmax_host.h"
 #include "rtp_llm/models_py/bindings/cuda/kernels/speculative_sampling/sampling_host.h"
 #include <cstddef>
+#include <cstring>
 #include <random>
 #include <memory>
 #endif
@@ -129,54 +131,36 @@ using SamplerT = float;
 
 namespace {
 
-torch::Tensor getSamplingHostBufferSlice(const torch::Tensor& buffer, int64_t batch_size, const char* buffer_name) {
-    RTP_LLM_CHECK_WITH_INFO(buffer.defined(), "%s is not initialized", buffer_name);
-    RTP_LLM_CHECK_WITH_INFO(buffer.device().is_cpu(), "%s must be a CPU tensor", buffer_name);
-    RTP_LLM_CHECK_WITH_INFO(buffer.scalar_type() == torch::kInt64, "%s must be an int64 tensor", buffer_name);
-    RTP_LLM_CHECK_WITH_INFO(buffer.numel() >= batch_size,
-                            "%s capacity [%ld] is smaller than batch size [%ld]",
-                            buffer_name,
-                            buffer.numel(),
-                            batch_size);
-    return buffer.narrow(0, 0, batch_size);
-}
+struct StagedSamplingParams {
+    torch::Tensor meta_device;
+    torch::Tensor device_tokens;
 
-std::pair<torch::Tensor, torch::Tensor> makeSamplingSeedOffsetTensors(const std::vector<at::Generator>& generators,
-                                                                      int64_t                           batch_size,
-                                                                      int                               increment,
-                                                                      GreedySamplingBuffers* sampling_buffers) {
-    RTP_LLM_CHECK_WITH_INFO(generators.size() >= static_cast<size_t>(batch_size),
-                            "sampling generators size [%lu] is smaller than batch size [%ld]",
-                            generators.size(),
-                            batch_size);
-    const bool    use_persistent_buffers = sampling_buffers != nullptr;
-    auto          options                = torch::TensorOptions().dtype(torch::kInt64).pinned_memory(true);
-    torch::Tensor seed_h;
-    torch::Tensor offset_h;
-    if (use_persistent_buffers) {
-        seed_h   = getSamplingHostBufferSlice(sampling_buffers->seed_host, batch_size, "sampling seed buffer");
-        offset_h = getSamplingHostBufferSlice(sampling_buffers->offset_host, batch_size, "sampling offset buffer");
-    } else {
-        seed_h   = torch::empty({batch_size}, options);
-        offset_h = torch::empty({batch_size}, options);
-    }
-    auto seed_ptr = seed_h.data_ptr<int64_t>();
-    auto off_ptr  = offset_h.data_ptr<int64_t>();
+    bool has_not_do_sample   = false;
+    bool need_do_sample      = false;
+    bool need_temp           = false;
+    bool has_rep_penalties   = false;
+    bool has_ngram           = false;
+    bool need_renorm_probs   = false;
+    bool all_top_k_one       = false;
+    bool all_top_k_no_limit  = false;
+    bool exact_top_p_one     = false;
+    bool all_top_p_one       = false;
+    bool use_argmax_fastpath = false;
 
-    for (int64_t i = 0; i < batch_size; ++i) {
-        // Undefined generator entries intentionally use PyTorch's default CUDA generator.
-        auto generator      = (i < static_cast<int64_t>(generators.size()) && generators[i].defined()) ?
-                                  std::make_optional(generators[i]) :
-                                  std::nullopt;
-        auto [seed, offset] = get_seed_and_offset(increment, generator);
-        seed_ptr[i]         = static_cast<int64_t>(seed);
-        off_ptr[i]          = static_cast<int64_t>(offset);
-    }
-
-    auto seed_d   = seed_h.to(torch::kCUDA, /*non_blocking=*/use_persistent_buffers).contiguous();
-    auto offset_d = offset_h.to(torch::kCUDA, /*non_blocking=*/use_persistent_buffers).contiguous();
-    return {seed_d, offset_d};
-}
+    torch::Tensor do_sample_gpu;
+    torch::Tensor temperature_gpu;
+    torch::Tensor repetition_penalty_gpu;
+    torch::Tensor presence_penalty_gpu;
+    torch::Tensor frequency_penalty_gpu;
+    torch::Tensor rep_sequence_lengths_gpu;
+    torch::Tensor no_repeat_ngram_size_gpu;
+    torch::Tensor output_ids_ptrs_gpu;
+    torch::Tensor sequence_last_indexes_gpu;
+    torch::Tensor seed_gpu;
+    torch::Tensor offset_gpu;
+    torch::Tensor top_k_gpu;
+    torch::Tensor top_p_gpu;
+};
 
 bool canUseCompactSamplerOutput(const GreedyParams& params) {
     return params.token_ids.is_cuda() && params.token_ids.is_contiguous() && params.token_ids.dim() == 2
@@ -184,130 +168,369 @@ bool canUseCompactSamplerOutput(const GreedyParams& params) {
            && params.token_ids.size(0) > 1 && params.token_ids.size(1) > 1;
 }
 
-void processLogits(const GreedyParams& params, const torch::Tensor& device_tokens, torch::Tensor& transposed_tokens) {
+StagedSamplingParams prepareStagedSamplingParams(const GreedyParams&  params,
+                                                 const torch::Tensor& device_tokens) {
+    StagedSamplingParams staged;
+    const int64_t        batch_size         = params.logits.size(0);
+    const int64_t        decoder_batch_size = params.sequence_lengths.size(0);
+    const int64_t        step               = params.step;
+    const auto           cur_device         = params.logits.device();
+    auto                 cur_stream         = at::cuda::getCurrentCUDAStream().stream();
+
+    auto ensure_cpu_contig = [](const torch::Tensor& t) -> torch::Tensor {
+        return (t.is_cpu() && t.is_contiguous()) ? t : t.cpu().contiguous();
+    };
+
+    torch::Tensor do_sample_cpu;
+    if (params.do_sample.has_value() && params.do_sample.value().defined()) {
+        do_sample_cpu            = ensure_cpu_contig(params.do_sample.value());
+        const auto* do_sample_ptr = do_sample_cpu.data_ptr<bool>();
+        for (int64_t i = 0; i < batch_size; ++i) {
+            if (do_sample_ptr[i]) {
+                staged.need_do_sample = true;
+            } else {
+                staged.has_not_do_sample = true;
+            }
+        }
+    } else {
+        staged.need_do_sample = true;
+    }
+
+    torch::Tensor temp_cpu;
+    torch::Tensor rep_cpu, pres_cpu, freq_cpu, input_len_cpu, seq_len_cpu, ngram_cpu;
+    if (staged.need_do_sample) {
+        temp_cpu             = ensure_cpu_contig(params.temperature);
+        const auto* temp_ptr = temp_cpu.data_ptr<float>();
+        staged.need_temp     = std::any_of(temp_ptr, temp_ptr + batch_size, [](float t) { return t != 1.0f; });
+
+        if (params.repetition_penalty.has_value()) {
+            RTP_LLM_CHECK(params.presence_penalty.has_value() && params.frequency_penalty.has_value());
+            rep_cpu                  = ensure_cpu_contig(params.repetition_penalty.value());
+            pres_cpu                 = ensure_cpu_contig(params.presence_penalty.value());
+            freq_cpu                 = ensure_cpu_contig(params.frequency_penalty.value());
+            const auto* rep_ptr      = rep_cpu.data_ptr<float>();
+            const auto* pres_ptr     = pres_cpu.data_ptr<float>();
+            const auto* freq_ptr     = freq_cpu.data_ptr<float>();
+            staged.has_rep_penalties =
+                std::any_of(rep_ptr, rep_ptr + batch_size, [](float t) { return t != 1.0f; })
+                || std::any_of(pres_ptr, pres_ptr + batch_size, [](float t) { return t != 0.0f; })
+                || std::any_of(freq_ptr, freq_ptr + batch_size, [](float t) { return t != 0.0f; });
+            if (staged.has_rep_penalties) {
+                staged.device_tokens = device_tokens;
+                input_len_cpu        = ensure_cpu_contig(params.input_lengths);
+                if (decoder_batch_size > 0) {
+                    seq_len_cpu = ensure_cpu_contig(params.sequence_lengths);
+                }
+            }
+        }
+
+        if (decoder_batch_size > 0 && params.no_repeat_ngram_size.has_value()) {
+            ngram_cpu             = ensure_cpu_contig(params.no_repeat_ngram_size.value());
+            const auto* ngram_ptr = ngram_cpu.data_ptr<int32_t>();
+            staged.has_ngram =
+                std::any_of(ngram_ptr, ngram_ptr + decoder_batch_size, [](int32_t s) { return s != 0; });
+            if (staged.has_ngram && !seq_len_cpu.defined()) {
+                seq_len_cpu = ensure_cpu_contig(params.sequence_lengths);
+            }
+        }
+    }
+
+    const auto  top_k_cpu = ensure_cpu_contig(params.top_k);
+    const auto  top_p_cpu = ensure_cpu_contig(params.top_p);
+    const auto* top_k_ptr = top_k_cpu.data_ptr<int32_t>();
+    const auto* top_p_ptr = top_p_cpu.data_ptr<float>();
+
+    staged.all_top_k_one = std::all_of(top_k_ptr, top_k_ptr + batch_size, [](int32_t t) { return t == 1; });
+    staged.use_argmax_fastpath =
+        staged.all_top_k_one && !params.output_all_probs.has_value() && !params.cum_log_probs.has_value();
+
+    const bool need_flashinfer = !staged.use_argmax_fastpath;
+    const bool has_output_all_probs =
+        (params.output_all_probs.has_value() && params.output_all_probs.value().defined())
+        || params.cum_log_probs.has_value();
+    staged.need_renorm_probs = has_output_all_probs && !params.return_original_all_probs;
+
+    bool need_seed_offset_gpu = false;
+    bool need_top_k_gpu       = false;
+    bool need_top_p_gpu       = false;
+    if (need_flashinfer) {
+        staged.all_top_k_no_limit =
+            std::all_of(top_k_ptr, top_k_ptr + batch_size, [](int32_t t) { return t <= 0; });
+        staged.all_top_p_one   = true;
+        staged.exact_top_p_one = true;
+        for (int64_t i = 0; i < batch_size; ++i) {
+            const float p_norm = std::abs(top_p_ptr[i]) < 1e-7f ? 1.0f : top_p_ptr[i];
+            if (std::abs(p_norm - 1.0f) >= 1e-7f) {
+                staged.all_top_p_one = false;
+            }
+            if (p_norm != 1.0f) {
+                staged.exact_top_p_one = false;
+            }
+        }
+
+        if (staged.all_top_k_one) {
+            need_top_k_gpu = staged.need_renorm_probs;
+        } else if (staged.all_top_k_no_limit) {
+            need_seed_offset_gpu = true;
+            need_top_p_gpu       = !staged.exact_top_p_one;
+        } else {
+            need_seed_offset_gpu = true;
+            need_top_k_gpu       = true;
+            need_top_p_gpu       = !staged.all_top_p_one;
+        }
+    }
+
+    const bool need_do_sample_gpu =
+        staged.need_do_sample && staged.has_not_do_sample
+        && (staged.need_temp || staged.has_rep_penalties || staged.has_ngram);
+
+    struct SliceSpec {
+        int64_t offset = -1;
+        int64_t count  = 0;
+        int64_t bytes  = 0;
+    };
+    auto    align64     = [](int64_t n) -> int64_t { return (n + 63) & ~int64_t(63); };
+    int64_t total_bytes = 0;
+    auto    reserve     = [&](bool needed, int64_t count, size_t elem_size) -> SliceSpec {
+        if (!needed || count <= 0) {
+            return {};
+        }
+        SliceSpec spec;
+        spec.offset = total_bytes;
+        spec.count  = count;
+        spec.bytes  = count * static_cast<int64_t>(elem_size);
+        total_bytes += align64(spec.bytes);
+        return spec;
+    };
+
+    const auto do_sample_spec = reserve(need_do_sample_gpu, batch_size, sizeof(bool));
+    const auto temp_spec      = reserve(staged.need_temp, batch_size, sizeof(float));
+    const auto rep_spec       = reserve(staged.has_rep_penalties, batch_size, sizeof(float));
+    const auto pres_spec      = reserve(staged.has_rep_penalties, batch_size, sizeof(float));
+    const auto freq_spec      = reserve(staged.has_rep_penalties, batch_size, sizeof(float));
+    const auto rep_seql_spec  = reserve(staged.has_rep_penalties, batch_size, sizeof(int32_t));
+    const auto ngram_spec     = reserve(staged.has_ngram, decoder_batch_size, sizeof(int32_t));
+    const auto out_ptrs_spec  = reserve(staged.has_ngram, decoder_batch_size, sizeof(int64_t));
+    const auto seq_last_spec  = reserve(staged.has_ngram, decoder_batch_size, sizeof(int32_t));
+    const auto seed_spec      = reserve(need_seed_offset_gpu, batch_size, sizeof(int64_t));
+    const auto offset_spec    = reserve(need_seed_offset_gpu, batch_size, sizeof(int64_t));
+    const auto top_k_spec     = reserve(need_top_k_gpu, batch_size, sizeof(int32_t));
+    const auto top_p_spec     = reserve(need_top_p_gpu, batch_size, sizeof(float));
+
+    if (need_flashinfer && !need_seed_offset_gpu) {
+        RTP_LLM_CHECK_WITH_INFO(params.generator.size() >= static_cast<size_t>(batch_size),
+                                "sampling generators size [%lu] is smaller than batch size [%ld]",
+                                params.generator.size(),
+                                batch_size);
+        constexpr int kMaxSamplingRounds = 32;
+        for (int64_t i = 0; i < batch_size; ++i) {
+            auto generator = params.generator[i].defined() ? std::make_optional(params.generator[i]) : std::nullopt;
+            (void)get_seed_and_offset(kMaxSamplingRounds, generator);
+        }
+    }
+
+    if (total_bytes == 0) {
+        return staged;
+    }
+
+    const bool use_persistent_meta =
+        params.sampling_buffers != nullptr && params.sampling_buffers->meta_host.defined()
+        && params.sampling_buffers->meta_host.device().is_cpu()
+        && params.sampling_buffers->meta_host.scalar_type() == torch::kUInt8
+        && params.sampling_buffers->meta_host.is_contiguous()
+        && params.sampling_buffers->meta_host.numel() >= total_bytes;
+
+    std::vector<uint8_t> pageable_host;
+    uint8_t*             host_ptr = nullptr;
+    if (use_persistent_meta) {
+        if (!params.sampling_buffers->meta_device.defined()
+            || params.sampling_buffers->meta_device.device() != cur_device
+            || params.sampling_buffers->meta_device.scalar_type() != torch::kUInt8
+            || !params.sampling_buffers->meta_device.is_contiguous()
+            || params.sampling_buffers->meta_device.numel() < params.sampling_buffers->meta_host.numel()) {
+            params.sampling_buffers->meta_device =
+                torch::empty({params.sampling_buffers->meta_host.numel()},
+                             torch::TensorOptions().dtype(torch::kUInt8).device(cur_device));
+        }
+        host_ptr           = params.sampling_buffers->meta_host.data_ptr<uint8_t>();
+        staged.meta_device = params.sampling_buffers->meta_device;
+    } else {
+        pageable_host.resize(static_cast<size_t>(total_bytes));
+        host_ptr           = pageable_host.data();
+        staged.meta_device = torch::empty({total_bytes}, torch::TensorOptions().dtype(torch::kUInt8).device(cur_device));
+    }
+
+    auto copy_slice = [&](const SliceSpec& spec, const void* src) {
+        if (spec.offset >= 0 && spec.bytes > 0) {
+            std::memcpy(host_ptr + spec.offset, src, static_cast<size_t>(spec.bytes));
+        }
+    };
+
+    if (do_sample_spec.offset >= 0) {
+        copy_slice(do_sample_spec, do_sample_cpu.data_ptr<bool>());
+    }
+    if (temp_spec.offset >= 0) {
+        copy_slice(temp_spec, temp_cpu.data_ptr<float>());
+    }
+    if (rep_spec.offset >= 0) {
+        copy_slice(rep_spec, rep_cpu.data_ptr<float>());
+        copy_slice(pres_spec, pres_cpu.data_ptr<float>());
+        copy_slice(freq_spec, freq_cpu.data_ptr<float>());
+        const auto*   in_len_ptr  = input_len_cpu.data_ptr<int32_t>();
+        const auto*   seq_len_ptr = decoder_batch_size > 0 ? seq_len_cpu.data_ptr<int32_t>() : nullptr;
+        auto*         dst         = reinterpret_cast<int32_t*>(host_ptr + rep_seql_spec.offset);
+        const int64_t dec_n       = std::min<int64_t>(decoder_batch_size, batch_size);
+        if (dec_n > 0) {
+            std::memcpy(dst, seq_len_ptr, static_cast<size_t>(dec_n) * sizeof(int32_t));
+        }
+        if (batch_size > dec_n) {
+            std::memcpy(dst + dec_n, in_len_ptr + dec_n, static_cast<size_t>(batch_size - dec_n) * sizeof(int32_t));
+        }
+    }
+    if (ngram_spec.offset >= 0) {
+        copy_slice(ngram_spec, ngram_cpu.data_ptr<int32_t>());
+        auto*       ptrs_dst    = reinterpret_cast<int64_t*>(host_ptr + out_ptrs_spec.offset);
+        auto*       last_dst    = reinterpret_cast<int32_t*>(host_ptr + seq_last_spec.offset);
+        const auto* seq_len_ptr = seq_len_cpu.data_ptr<int32_t>();
+        const auto* base_ptr    = device_tokens.data_ptr<int32_t>();
+        for (int64_t i = 0; i < decoder_batch_size; ++i) {
+            ptrs_dst[i] = reinterpret_cast<int64_t>(base_ptr + i * (step + 1));
+            last_dst[i] = seq_len_ptr[i] - 1;
+        }
+    }
+    if (seed_spec.offset >= 0) {
+        RTP_LLM_CHECK_WITH_INFO(params.generator.size() >= static_cast<size_t>(batch_size),
+                                "sampling generators size [%lu] is smaller than batch size [%ld]",
+                                params.generator.size(),
+                                batch_size);
+        constexpr int kMaxSamplingRounds = 32;
+        auto*         seed_dst           = reinterpret_cast<int64_t*>(host_ptr + seed_spec.offset);
+        auto*         off_dst            = reinterpret_cast<int64_t*>(host_ptr + offset_spec.offset);
+        for (int64_t i = 0; i < batch_size; ++i) {
+            auto generator      = params.generator[i].defined() ? std::make_optional(params.generator[i]) : std::nullopt;
+            auto [seed, offset] = get_seed_and_offset(kMaxSamplingRounds, generator);
+            seed_dst[i]         = static_cast<int64_t>(seed);
+            off_dst[i]          = static_cast<int64_t>(offset);
+        }
+    }
+    if (top_k_spec.offset >= 0) {
+        auto* dst = reinterpret_cast<int32_t*>(host_ptr + top_k_spec.offset);
+        if (!staged.all_top_k_one && !staged.all_top_k_no_limit) {
+            for (int64_t i = 0; i < batch_size; ++i) {
+                dst[i] = top_k_ptr[i] <= 0 ? (1 << 30) : top_k_ptr[i];
+            }
+        } else {
+            copy_slice(top_k_spec, top_k_ptr);
+        }
+    }
+    if (top_p_spec.offset >= 0) {
+        auto* dst = reinterpret_cast<float*>(host_ptr + top_p_spec.offset);
+        for (int64_t i = 0; i < batch_size; ++i) {
+            dst[i] = std::abs(top_p_ptr[i]) < 1e-7f ? 1.0f : top_p_ptr[i];
+        }
+    }
+
+    at::cuda::CUDAGuard device_guard(cur_device);
+    C10_CUDA_CHECK(cudaMemcpyAsync(staged.meta_device.data_ptr<uint8_t>(),
+                                   host_ptr,
+                                   static_cast<size_t>(total_bytes),
+                                   cudaMemcpyHostToDevice,
+                                   cur_stream));
+
+    auto bind_view = [&](const SliceSpec& spec, torch::ScalarType dtype) -> torch::Tensor {
+        if (spec.offset < 0 || spec.count <= 0) {
+            return torch::Tensor();
+        }
+        return staged.meta_device.slice(0, spec.offset, spec.offset + spec.bytes).view(dtype);
+    };
+    staged.do_sample_gpu             = bind_view(do_sample_spec, torch::kBool);
+    staged.temperature_gpu           = bind_view(temp_spec, torch::kFloat32);
+    staged.repetition_penalty_gpu    = bind_view(rep_spec, torch::kFloat32);
+    staged.presence_penalty_gpu      = bind_view(pres_spec, torch::kFloat32);
+    staged.frequency_penalty_gpu     = bind_view(freq_spec, torch::kFloat32);
+    staged.rep_sequence_lengths_gpu  = bind_view(rep_seql_spec, torch::kInt32);
+    staged.no_repeat_ngram_size_gpu  = bind_view(ngram_spec, torch::kInt32);
+    staged.output_ids_ptrs_gpu       = bind_view(out_ptrs_spec, torch::kInt64);
+    staged.sequence_last_indexes_gpu = bind_view(seq_last_spec, torch::kInt32);
+    staged.seed_gpu                  = bind_view(seed_spec, torch::kInt64);
+    staged.offset_gpu                = bind_view(offset_spec, torch::kInt64);
+    staged.top_k_gpu                 = bind_view(top_k_spec, torch::kInt32);
+    staged.top_p_gpu                 = bind_view(top_p_spec, torch::kFloat32);
+
+    return staged;
+}
+
+void processLogits(const GreedyParams& params, const StagedSamplingParams& staged, torch::Tensor& transposed_tokens) {
     const auto vocab_size_padded  = params.logits.size(1);
     const auto decoder_batch_size = params.sequence_lengths.size(0);
     const auto batch_size         = params.logits.size(0);
     const auto step               = params.step;
     auto       cur_stream         = at::cuda::getCurrentCUDAStream().stream();
 
-    if (std::any_of(params.temperature.data_ptr<float>(),
-                    params.temperature.data_ptr<float>() + batch_size,
-                    [&](auto t) { return t != 1.0f; })) {
-        auto temperature_gpu = params.temperature.to(torch::kCUDA, true);
-        applySamplerTemperature(params.logits, temperature_gpu, cur_stream);
+    if (staged.need_temp) {
+        applySamplerTemperature(params.logits, staged.temperature_gpu, cur_stream, staged.do_sample_gpu);
     }
 
-    if (params.repetition_penalty.has_value()) {
-        RTP_LLM_CHECK(params.presence_penalty.has_value() && params.frequency_penalty.has_value());
-        const auto& repetition_penalty = params.repetition_penalty.value();
-        const auto& presence_penalty   = params.presence_penalty.value();
-        const auto& frequency_penalty  = params.frequency_penalty.value();
-        if (std::any_of(repetition_penalty.data_ptr<float>(),
-                        repetition_penalty.data_ptr<float>() + batch_size,
-                        [&](auto t) { return t != 1.0f; })
-            || std::any_of(presence_penalty.data_ptr<float>(),
-                           presence_penalty.data_ptr<float>() + batch_size,
-                           [&](auto t) { return t != 0.0f; })
-            || std::any_of(frequency_penalty.data_ptr<float>(),
-                           frequency_penalty.data_ptr<float>() + batch_size,
-                           [&](auto t) { return t != 0.0f; })) {
-            // Only history-dependent penalties need a full transposed token buffer.
-            if (!transposed_tokens.defined()) {
-                transposed_tokens = device_tokens.transpose(0, 1).contiguous();
-            }
-            // Build sequence_lengths: clone input_lengths, then overwrite first decoder_batch_size entries
-            auto sequence_lengths_gpu = params.input_lengths.to(torch::kCUDA, true);
-            if (decoder_batch_size > 0) {
-                auto dst_slice = sequence_lengths_gpu.slice(0, 0, decoder_batch_size);
-                dst_slice.copy_(params.sequence_lengths.to(torch::kCUDA, true), true);
-            }
-            auto penalty_ws = torch::zeros({(int64_t)batch_size, (int64_t)vocab_size_padded},
-                                           torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA));
-            auto repetition_penalty_gpu = repetition_penalty.to(torch::kCUDA, true);
-            auto presence_penalty_gpu   = presence_penalty.to(torch::kCUDA, true);
-            auto frequency_penalty_gpu  = frequency_penalty.to(torch::kCUDA, true);
-            invokeBatchApplyRepetitionPenalty(params.logits.data_ptr<float>(),
-                                              penalty_ws.data_ptr<int32_t>(),
-                                              repetition_penalty_gpu.data_ptr<float>(),
-                                              presence_penalty_gpu.data_ptr<float>(),
-                                              frequency_penalty_gpu.data_ptr<float>(),
-                                              transposed_tokens.data_ptr<int32_t>(),
-                                              batch_size,
-                                              batch_size,  // local_batch_size
-                                              vocab_size_padded,
-                                              sequence_lengths_gpu.data_ptr<int32_t>(),
-                                              step + 1,  // max_input_length
-                                              step + 1,  // step
-                                              cur_stream);
-            // NOTE: here step is max_len - 1
+    if (staged.has_rep_penalties) {
+        if (!transposed_tokens.defined()) {
+            transposed_tokens = staged.device_tokens.transpose(0, 1).contiguous();
         }
+        auto penalty_ws = torch::zeros({(int64_t)batch_size, (int64_t)vocab_size_padded},
+                                       torch::TensorOptions().dtype(torch::kInt32).device(params.logits.device()));
+        invokeBatchApplyRepetitionPenalty(params.logits.data_ptr<float>(),
+                                          penalty_ws.data_ptr<int32_t>(),
+                                          staged.repetition_penalty_gpu.data_ptr<float>(),
+                                          staged.presence_penalty_gpu.data_ptr<float>(),
+                                          staged.frequency_penalty_gpu.data_ptr<float>(),
+                                          transposed_tokens.data_ptr<int32_t>(),
+                                          batch_size,
+                                          batch_size,  // local_batch_size
+                                          vocab_size_padded,
+                                          staged.rep_sequence_lengths_gpu.data_ptr<int32_t>(),
+                                          step + 1,  // max_input_length
+                                          step + 1,  // step
+                                          cur_stream);
     }
 
-    if (decoder_batch_size && params.no_repeat_ngram_size.has_value()) {
-        const auto& no_repeat_ngram_size = params.no_repeat_ngram_size.value();
-        if (any_of(no_repeat_ngram_size.data_ptr<int32_t>(),
-                   no_repeat_ngram_size.data_ptr<int32_t>() + decoder_batch_size,
-                   [](auto s) { return s != 0; })) {
-            auto no_repeat_ngram_size_gpu = no_repeat_ngram_size.to(torch::kCUDA, true);
-            // Build array of pointers to each batch's token ids
-            const bool    use_persistent_buffers = params.sampling_buffers != nullptr;
-            torch::Tensor output_ids_ptrs;
-            if (use_persistent_buffers) {
-                output_ids_ptrs = getSamplingHostBufferSlice(params.sampling_buffers->output_ids_ptrs_host,
-                                                             decoder_batch_size,
-                                                             "sampling output ids ptrs buffer");
-            } else {
-                output_ids_ptrs = torch::empty({(int64_t)decoder_batch_size},
-                                               torch::TensorOptions().dtype(torch::kInt64).pinned_memory(true));
-            }
-            for (int64_t i = 0; i < (int64_t)decoder_batch_size; i++) {
-                output_ids_ptrs.data_ptr<int64_t>()[i] = (int64_t)(device_tokens.data_ptr<int32_t>() + i * (step + 1));
-            }
-            auto output_ids_ptrs_gpu = output_ids_ptrs.to(torch::kCUDA, use_persistent_buffers);
-            // SamplerInputs stores real sequence lengths, while the imported
-            // TensorRT-LLM no-repeat kernel still expects the last valid
-            // token index and adds one internally.
-            auto sequence_last_indexes_gpu = params.sequence_lengths.to(torch::kCUDA, true).sub(1);
-
-            tensorrt_llm::kernels::invokeBanRepeatNgram(params.logits.data_ptr<float>(),
-                                                        (int32_t const**)(output_ids_ptrs_gpu.data_ptr()),
-                                                        nullptr,  // finished_buf
-                                                        nullptr,  // parent_ids_buf
-                                                        nullptr,  // batch_slot
-                                                        sequence_last_indexes_gpu.data_ptr<int32_t>(),
-                                                        decoder_batch_size,
-                                                        1,  // beam_width
-                                                        step + 1,
-                                                        no_repeat_ngram_size_gpu.data_ptr<int32_t>(),
-                                                        vocab_size_padded,
-                                                        step + 1,
-                                                        cur_stream);
-        }
+    if (staged.has_ngram) {
+        tensorrt_llm::kernels::invokeBanRepeatNgram(params.logits.data_ptr<float>(),
+                                                    (int32_t const**)(staged.output_ids_ptrs_gpu.data_ptr()),
+                                                    nullptr,  // finished_buf
+                                                    nullptr,  // parent_ids_buf
+                                                    nullptr,  // batch_slot
+                                                    staged.sequence_last_indexes_gpu.data_ptr<int32_t>(),
+                                                    decoder_batch_size,
+                                                    1,  // beam_width
+                                                    step + 1,
+                                                    staged.no_repeat_ngram_size_gpu.data_ptr<int32_t>(),
+                                                    vocab_size_padded,
+                                                    step + 1,
+                                                    cur_stream);
     }
 }
 
 }  // anonymous namespace
 
-static GreedyOutput flashinferSampleGreedy(const GreedyParams& params, const torch::Tensor& samples_t) {
+static GreedyOutput flashinferSampleGreedy(const GreedyParams&         params,
+                                           const StagedSamplingParams& staged,
+                                           const torch::Tensor&        samples_t) {
     const auto batch_size = params.logits.size(0);
     auto       cur_stream = at::cuda::getCurrentCUDAStream().stream();
 
     // [batch_size, vocab_size] — compute softmax probabilities.
-    // Copy result back to logits to preserve the in-place behavior of the original kernel,
-    // since callers may reuse the logits tensor across iterations.
-    auto probs_t = samplerSoftmaxInplace(params.logits);
+    // Callers reusing logits pass preserve_logits_probs=true; Sampler::forward skips
+    // the 127 MB D2D logits.copy_(probs) when logits are not inspected afterwards.
+    auto probs_t =
+        params.preserve_logits_probs ? samplerSoftmaxInplace(params.logits) : torch::softmax(params.logits, -1);
     auto success = torch::empty({(int64_t)batch_size}, torch::TensorOptions().dtype(torch::kBool).device(torch::kCUDA));
 
-    constexpr bool deterministic       = true;
-    constexpr int  max_sampling_rounds = 32;
-    auto [seed_t, offset_t] =
-        makeSamplingSeedOffsetTensors(params.generator, batch_size, max_sampling_rounds, params.sampling_buffers);
-
-    torch::Tensor success_t = success;
-    torch::Tensor top_k_t   = params.top_k;
-    torch::Tensor top_p_t   = params.top_p;
-    torch::Tensor output_all_probs_t;
+    constexpr bool       deterministic = true;
+    torch::Tensor        success_t     = success;
+    const torch::Tensor& seed_t        = staged.seed_gpu;
+    const torch::Tensor& offset_t      = staged.offset_gpu;
+    const torch::Tensor& top_k_t       = staged.top_k_gpu;
+    const torch::Tensor& top_p_t       = staged.top_p_gpu;
+    torch::Tensor        output_all_probs_t;
     if (params.output_all_probs.has_value()) {
         output_all_probs_t = params.output_all_probs.value();
     }
@@ -320,31 +543,17 @@ static GreedyOutput flashinferSampleGreedy(const GreedyParams& params, const tor
     const bool need_full_sampling_probs = output_all_probs_t.defined() && output_width < probs_t.size(1);
     auto       sampling_probs_t         = need_full_sampling_probs ? torch::zeros_like(probs_t) : output_all_probs_t;
 
-    // top_k/top_p are CPU tensors with int32/float32 dtype
-    auto top_k_ptr = params.top_k.data_ptr<int32_t>();
-    auto top_p_ptr = params.top_p.data_ptr<float>();
+    const bool need_renorm_probs = staged.need_renorm_probs;
 
-    std::transform(top_p_ptr, top_p_ptr + batch_size, top_p_ptr, [&](auto t) { return std::abs(t) < 1e-7 ? 1.0 : t; });
-
-    const bool need_renorm_probs  = sampling_probs_t.defined() && !params.return_original_all_probs;
-    const bool all_top_k_one      = std::all_of(top_k_ptr, top_k_ptr + batch_size, [](auto t) { return t == 1; });
-    const bool all_top_k_no_limit = std::all_of(top_k_ptr, top_k_ptr + batch_size, [](auto t) { return t <= 0; });
-    const bool all_top_p_one =
-        std::all_of(top_p_ptr, top_p_ptr + batch_size, [](auto t) { return std::abs(t - 1.0f) < 1e-7; });
-
-    if (all_top_k_one) {
+    if (staged.all_top_k_one) {
         torch::Tensor selected_tokens = torch::argmax(probs_t, -1, /*keepdim=*/false);
         samples_t.copy_(selected_tokens, true);
         success = torch::Tensor();  // mark as undefined — all succeeded
         if (need_renorm_probs) {
             top_k_renorm_probs(probs_t, sampling_probs_t, top_k_t, 0, (int64_t)cur_stream);
         }
-    } else if (all_top_k_no_limit) {
-        const bool exact_top_p_one = std::all_of(top_p_ptr, top_p_ptr + batch_size, [](auto t) { return t == 1.0f; });
-        if (exact_top_p_one) {
-            // The unfiltered case needs no nucleus threshold search. Preserve
-            // the existing per-request Philox reservation above (32), the
-            // logits/probability outputs and every filtered/greedy fallback.
+    } else if (staged.all_top_k_no_limit) {
+        if (staged.exact_top_p_one) {
             sampling_from_probs(probs_t,
                                 samples_t,
                                 success_t,
@@ -370,21 +579,14 @@ static GreedyOutput flashinferSampleGreedy(const GreedyParams& params, const tor
                                       (int64_t)cur_stream);
         }
         if (need_renorm_probs) {
-            if (exact_top_p_one) {
-                // Softmax probabilities are nonnegative and have positive row
-                // sums. Renormalize explicitly; returning the original softmax
-                // would change the distribution consumed by rejection sampling.
+            if (staged.exact_top_p_one) {
                 torch::div_out(sampling_probs_t, probs_t, probs_t.sum(-1, /*keepdim=*/true));
             } else {
                 top_p_renorm_probs(probs_t, sampling_probs_t, top_p_t, 1.0, (int64_t)cur_stream);
             }
         }
     } else {
-        // top_k<=0 means "no limit" in RTP config. The combined FlashInfer
-        // kernel takes a top_k array, so normalize mixed batches after the
-        // pure top-p route has been selected.
-        std::transform(top_k_ptr, top_k_ptr + batch_size, top_k_ptr, [](auto t) { return t <= 0 ? 1 << 30 : t; });
-        if (all_top_p_one) {
+        if (staged.all_top_p_one) {
             top_k_sampling_from_probs(probs_t,
                                       samples_t,
                                       success_t,
@@ -417,7 +619,6 @@ static GreedyOutput flashinferSampleGreedy(const GreedyParams& params, const tor
                                             (int64_t)cur_stream);
             if (need_renorm_probs) {
                 torch::Tensor temp_t = torch::zeros_like(sampling_probs_t);
-                /** Joint sampling applies top-p to the original distribution; return the same support. */
                 top_p_renorm_probs(probs_t, temp_t, top_p_t, 1.0, (int64_t)cur_stream);
                 top_k_renorm_probs(temp_t, sampling_probs_t, top_k_t, 0, (int64_t)cur_stream);
             }
@@ -441,51 +642,53 @@ static GreedyOutput flashinferSampleGreedy(const GreedyParams& params, const tor
 }
 
 GreedyOutput sampleGreedy(const GreedyParams& params) {
-    auto device_tokens = params.token_ids.to(torch::kCUDA, true);
-    // Compact output staging depends only on the token buffer layout. Build
-    // transposed history lazily when a repetition/presence/frequency penalty consumes it.
+    const bool direct_last_col =
+        params.token_ids.is_cuda() && params.token_ids.dim() == 2 && params.token_ids.size(1) == 1
+        && params.token_ids.stride(0) == 1 && params.token_ids.scalar_type() == torch::kInt32;
+    auto device_tokens = direct_last_col ? params.token_ids : params.token_ids.to(torch::kCUDA, true);
     auto transposed_tokens =
-        canUseCompactSamplerOutput(params) ? torch::Tensor() : device_tokens.transpose(0, 1).contiguous();
+        (direct_last_col || canUseCompactSamplerOutput(params)) ? torch::Tensor() :
+                                                                  device_tokens.transpose(0, 1).contiguous();
 
-    const auto batch_size        = params.logits.size(0);
-    bool       has_not_do_sample = params.do_sample.has_value()
-                                   && std::any_of(params.do_sample.value().data_ptr<bool>(),
-                                                  params.do_sample.value().data_ptr<bool>() + batch_size,
-                                                  [&](auto t) { return !t; });
-    bool       need_do_sample    = (!params.do_sample.has_value())
-                                   || std::any_of(params.do_sample.value().data_ptr<bool>(),
-                                                  params.do_sample.value().data_ptr<bool>() + batch_size,
-                                                  [&](auto t) { return t; });
-    if (need_do_sample) {
-        torch::Tensor selected_logits;
-        torch::Tensor mask_tensor;
-        if (has_not_do_sample) {
-            auto do_sample_gpu = params.do_sample.value().to(torch::kCUDA, true);
-            mask_tensor        = do_sample_gpu.reshape({(int64_t)batch_size, 1}).logical_not();
-            selected_logits    = params.logits.masked_select(mask_tensor);
+    auto staged = prepareStagedSamplingParams(params, device_tokens);
+
+    if (staged.need_do_sample) {
+        const bool need_logits_restore =
+            staged.has_not_do_sample
+            && (staged.has_rep_penalties || staged.has_ngram
+                || (staged.need_temp
+                    && !(params.logits.scalar_type() == torch::kFloat32 && params.logits.size(1) == 248320
+                         && params.logits.is_contiguous() && params.logits.size(0) <= 65535)));
+        torch::Tensor saved_logits;
+        torch::Tensor do_sample_mask;
+        if (need_logits_restore) {
+            auto do_sample_gpu =
+                staged.do_sample_gpu.defined() ? staged.do_sample_gpu : params.do_sample.value().to(torch::kCUDA, true);
+            do_sample_mask = do_sample_gpu.reshape({params.logits.size(0), 1});
+            saved_logits   = params.logits.clone();
         }
-        processLogits(params, device_tokens, transposed_tokens);
-        if (has_not_do_sample) {
-            params.logits.masked_scatter_(mask_tensor, selected_logits);
+        processLogits(params, staged, transposed_tokens);
+        if (need_logits_restore) {
+            params.logits.copy_(torch::where(do_sample_mask, params.logits, saved_logits), true);
         }
     }
 
     // Preserve the initial output slot, including unsuccessful-sample behavior.
-    auto         samples_t = transposed_tokens.defined() ? transposed_tokens.select(0, transposed_tokens.size(0) - 1) :
-                                                           device_tokens.select(1, device_tokens.size(1) - 1).contiguous();
+    auto samples_t = direct_last_col ?
+                         params.token_ids.select(1, 0) :
+                         (transposed_tokens.defined() ?
+                              transposed_tokens.select(0, transposed_tokens.size(0) - 1) :
+                              device_tokens.select(1, device_tokens.size(1) - 1).contiguous());
     GreedyOutput output;
-    // fast path for topk = 1
-    // TODO: Support output_all_probs and cum_log_probs in this fast path.
-    auto top_k_ptr = params.top_k.data_ptr<int32_t>();
-    if (std::all_of(top_k_ptr, top_k_ptr + batch_size, [&](auto t) { return t == 1; })
-        && !params.output_all_probs.has_value() && !params.cum_log_probs.has_value()) {
+    if (staged.use_argmax_fastpath) {
         samples_t.copy_(torch::argmax(params.logits, -1, /*keepdim=*/false), true);
     } else {
-        output = flashinferSampleGreedy(params, samples_t);
+        output = flashinferSampleGreedy(params, staged, samples_t);
     }
 
-    // Sampling only changes the output column; every history prefix stays in place.
-    params.token_ids.select(1, params.token_ids.size(1) - 1).copy_(samples_t, true);
+    if (!direct_last_col) {
+        params.token_ids.select(1, params.token_ids.size(1) - 1).copy_(samples_t, true);
+    }
     check_cuda_error();
     return output;
 }

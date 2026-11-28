@@ -1,8 +1,11 @@
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <cstring>
+#include <functional>
 #include <future>
 #include <mutex>
 #include <optional>
@@ -11,6 +14,8 @@
 #include <unordered_map>
 #include <utility>
 #include <vector>
+
+#include <cuda_runtime.h>
 
 #include "autil/EnvUtil.h"
 #include "autil/Scope.h"
@@ -1834,6 +1839,25 @@ TEST(DecodeRpcServerTest, EmptyTableOrMissingCacheKeysYieldNoLoad) {
                     .empty());
 }
 
+class NonRdmaTestMemoryUtil: public MemoryUtil {
+public:
+    bool regUserMr(void*, uint64_t, bool, uint64_t) override {
+        return true;
+    }
+    bool deregUserMr(void*, bool) override {
+        return true;
+    }
+    bool isMemoryMr(void*, uint64_t, bool, bool) override {
+        return false;
+    }
+    bool findMemoryMr(void*, void*, uint64_t, bool, bool) override {
+        return false;
+    }
+    bool isRdmaMode() override {
+        return false;
+    }
+};
+
 class RoutingCacheStore: public NormalCacheStore {
 public:
     struct LoadCall {
@@ -1841,19 +1865,32 @@ public:
         std::vector<std::shared_ptr<RequestBlockBuffer>> buffers;
     };
 
+    using PayloadFiller =
+        std::function<void(const std::string& peer, const std::string& key, void* dst, uint32_t len, bool gpu_mem)>;
+
     RoutingCacheStore() {
         /** The base destructor stops this registry even when transport was never initialized. */
         request_block_buffer_store_ = std::make_shared<RequestBlockBufferStore>(nullptr);
+        memory_util_                = std::make_shared<NonRdmaTestMemoryUtil>();
     }
 
-    void load(const std::shared_ptr<RequestBlockBuffer>&,
-              CacheStoreLoadDoneCallback callback,
-              const std::string&,
+    const std::shared_ptr<MemoryUtil>& getMemoryUtil() const override {
+        return memory_util_;
+    }
+
+    void load(const std::shared_ptr<RequestBlockBuffer>& buffer,
+              CacheStoreLoadDoneCallback                 callback,
+              const std::string&                         ip,
               uint32_t,
               uint32_t,
               uint32_t,
               int,
               int) override {
+        if (payload_filler && buffer) {
+            for (const auto& [key, block] : buffer->getBlocks()) {
+                payload_filler(ip, key, block->addr.get(), block->len, block->gpu_mem);
+            }
+        }
         callback(true, CacheStoreErrorCode::None);
     }
 
@@ -1876,6 +1913,10 @@ public:
     }
 
     std::vector<LoadCall> calls;
+    PayloadFiller         payload_filler;
+
+private:
+    std::shared_ptr<MemoryUtil> memory_util_;
 };
 
 class DecodeRpcLoadRoutingTest: public DeviceTestBase {
@@ -2111,6 +2152,246 @@ TEST_F(DecodeRpcLoadRoutingTest, SingleStageReceiverUsesPrefillStagesWithoutRela
     request.add_tagged_group_block_ids()->set_tag("other-stage");
     EXPECT_ANY_THROW(server_.RemoteLoad(&context, &request, &response));
     EXPECT_TRUE(store_->calls.empty());
+}
+
+TEST_F(DecodeRpcLoadRoutingTest, TypedTpReassemblesHybridShardedStateAndMhaForPrefill4ToDecode2) {
+    auto build_state_desc = [](const std::string& tag,
+                               DataType           dtype,
+                               uint32_t           entry_elems,
+                               uint32_t           explicit_entries,
+                               TpCacheTransferMode mode,
+                               uint32_t           q_elems = 0,
+                               uint32_t           k_elems = 0,
+                               uint32_t           v_elems = 0) {
+        KVCacheSpecDesc desc;
+        desc.tag                  = tag;
+        desc.cache_type           = KVCacheSpecType::OpaqueState;
+        desc.is_state_cache       = true;
+        desc.dtype                = dtype;
+        desc.entry_dtype          = dtype;
+        desc.entry_elems          = entry_elems;
+        desc.explicit_entry_count = explicit_entries;
+        desc.tp_transfer_mode     = mode;
+        desc.tp_state_q_elems     = q_elems;
+        desc.tp_state_k_elems     = k_elems;
+        desc.tp_state_v_elems     = v_elems;
+        return desc;
+    };
+
+    SpecBuildContext ssm_ctx;
+    ssm_ctx.seq_size_per_block      = 4;
+    ssm_ctx.kernel_tokens_per_block = 4;
+
+    AttentionConfigs full_attn_cfg;
+    full_attn_cfg.kv_head_num      = 4;
+    full_attn_cfg.size_per_head    = 8;
+    full_attn_cfg.tokens_per_block = 4;
+    ParallelismConfig decode_pc;
+    decode_pc.tp_size = 2;
+    decode_pc.tp_rank = 1;
+    KVCacheSpecDesc full_desc;
+    full_desc.tag              = "full";
+    full_desc.cache_type       = KVCacheSpecType::MultiHeadAttention;
+    full_desc.dtype            = DataType::TYPE_FP16;
+    full_desc.tp_transfer_mode = TpCacheTransferMode::MHA_HEADS;
+    SpecBuildContext full_ctx;
+    full_ctx.dtype              = DataType::TYPE_FP16;
+    full_ctx.seq_size_per_block = 4;
+    full_ctx.attn_config        = &full_attn_cfg;
+    full_ctx.parallelism_config = &decode_pc;
+
+    auto ssm_spec  = SpecBuilder::build(
+        build_state_desc("gdn_ssm_state", DataType::TYPE_FP32, 8, 2, TpCacheTransferMode::SHARDED_STATE), ssm_ctx);
+    auto conv_spec = SpecBuilder::build(
+        build_state_desc("gdn_conv_state", DataType::TYPE_BF16, 8, 3, TpCacheTransferMode::SHARDED_STATE, 2, 2, 4),
+        ssm_ctx);
+    auto qconv_spec = SpecBuilder::build(
+        build_state_desc("gdn_consumer_q_conv", DataType::TYPE_BF16, 4, 3, TpCacheTransferMode::SHARDED_STATE),
+        ssm_ctx);
+    auto rep_spec = SpecBuilder::build(
+        build_state_desc("ffn_output_sconv", DataType::TYPE_BF16, 4, 3, TpCacheTransferMode::REPLICATED), ssm_ctx);
+    auto full_spec = SpecBuilder::build(full_desc, full_ctx);
+
+    CacheConfig config;
+    config.dtype                         = DataType::TYPE_FP16;
+    config.layer_num                     = 2;
+    config.seq_size_per_block            = 4;
+    config.model_has_multiple_cache_groups = true;
+    config.fromGroupedSpecs(
+        {ssm_spec, conv_spec, qconv_spec, rep_spec, full_spec},
+        {{0}, {0}, {0}, {0}, {1}},
+        {CacheGroupType::LINEAR, CacheGroupType::LINEAR, CacheGroupType::LINEAR, CacheGroupType::LINEAR, CacheGroupType::FULL},
+        {"gdn_ssm_state", "gdn_conv_state", "gdn_consumer_q_conv", "ffn_output_sconv", "full"});
+    config.use_opaque_kv_cache_store = true;
+    config.finalizeBlockNums(6, RuntimeConfig{});
+
+    ASSERT_TRUE(initReceiver(/*pipeline=*/false, config));
+    auto& pc   = server_.maga_init_params_.parallelism_config;
+    pc.pp_size = 1;
+    pc.pp_rank = 0;
+    pc.tp_size = 2;
+    pc.tp_rank = 1;
+    pc.world_size = 2;
+    pc.world_rank = 1;
+    pc.pp_stage_layer_counts = {2};
+    server_.maga_init_params_.model_config_.num_layers = 2;
+    server_.maga_init_params_.model_config_.attn_config.kv_head_num = 4;
+    server_.resource_.workers = {"decode-0:1:2", "decode-1:1:2"};
+
+    GroupBlockIds gids;
+    for (const auto& tag : {"gdn_ssm_state", "gdn_conv_state", "gdn_consumer_q_conv", "ffn_output_sconv", "full"}) {
+        gids.tag_to_index_.emplace(tag, gids.rows_.size());
+        auto row = std::make_shared<BlockIds>();
+        row->assign({2});
+        gids.rows_.push_back(std::move(row));
+    }
+    const auto load_ctx = makeLoadContext(
+        "p4_d2_req",
+        {"prefill-0:1:2", "prefill-1:1:2", "prefill-2:1:2", "prefill-3:1:2"},
+        {101},
+        gids,
+        /*prefill_cp_size=*/1);
+    const auto req_d1 = server_.constructRemoteLoadRequest(
+        load_ctx, /*index=*/1, {"prefill-0:1:2", "prefill-1:1:2", "prefill-2:1:2", "prefill-3:1:2"});
+    ASSERT_EQ(req_d1.partition_count(), 1);
+    ASSERT_EQ(req_d1.peer_addrs_size(), 2);
+    EXPECT_EQ(req_d1.peer_addrs(0), "prefill-2:1:2");
+    EXPECT_EQ(req_d1.peer_addrs(1), "prefill-3:1:2");
+
+    // Pre-poison destination device blocks with 0xAA to prove no stale/unwritten gap survives.
+    for (const auto& [tag, layer] : std::vector<std::pair<std::string, int>>{
+             {"gdn_ssm_state", 0}, {"gdn_conv_state", 0}, {"gdn_consumer_q_conv", 0}, {"ffn_output_sconv", 0}, {"full", 1}}) {
+        const auto parts = cache_manager_->convertIndexToBuffer(layer, tag, 2);
+        ASSERT_EQ(parts.size(), 1u);
+        ASSERT_TRUE(parts[0].is_cuda);
+        ASSERT_EQ(cudaMemset(parts[0].addr, 0xAA, parts[0].size_bytes), cudaSuccess);
+    }
+
+    auto make_fill_bytes = [](uint8_t base, uint32_t len) {
+        std::vector<uint8_t> out(len);
+        for (uint32_t i = 0; i < len; ++i) {
+            out[i] = static_cast<uint8_t>((base + i) & 0xFF);
+        }
+        return out;
+    };
+
+    const std::string key_ssm   = "kv_" + makeCacheKey(17, "101", 0, "gdn_ssm_state");
+    const std::string key_conv  = "kv_" + makeCacheKey(17, "101", 0, "gdn_conv_state");
+    const std::string key_qconv = "kv_" + makeCacheKey(17, "101", 0, "gdn_consumer_q_conv");
+    const std::string key_rep   = "kv_" + makeCacheKey(17, "101", 0, "ffn_output_sconv");
+    const std::string key_full  = "kv_" + makeCacheKey(17, "101", 1, "full");
+
+    store_->payload_filler = [&](const std::string& peer, const std::string& key, void* dst, uint32_t len, bool gpu_mem) {
+        const uint8_t peer_base = peer == "prefill-2" ? 0x10 : (peer == "prefill-3" ? 0x70 : 0xF0);
+        const uint8_t tag_bias  = key == key_ssm ? 0 : (key == key_conv ? 3 : (key == key_qconv ? 5 : (key == key_rep ? 7 : 9)));
+        auto          src       = make_fill_bytes(static_cast<uint8_t>(peer_base + tag_bias), len);
+        if (gpu_mem) {
+            ASSERT_EQ(cudaMemcpy(dst, src.data(), len, cudaMemcpyHostToDevice), cudaSuccess);
+        } else {
+            std::memcpy(dst, src.data(), len);
+        }
+    };
+
+    grpc::ServerContext     context;
+    BroadcastLoadResponsePB response;
+    ASSERT_TRUE(server_.RemoteLoad(&context, &req_d1, &response).ok());
+    ASSERT_EQ(response.error_info().error_code(), ErrorCodePB::NONE_ERROR);
+    EXPECT_EQ(response.loaded_cache_block_count(), 1);
+    ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+
+    auto read_device = [&](int layer, const std::string& tag) {
+        const auto           parts = cache_manager_->convertIndexToBuffer(layer, tag, 2);
+        std::vector<uint8_t> out(parts[0].size_bytes, 0);
+        EXPECT_EQ(cudaMemcpy(out.data(), parts[0].addr, out.size(), cudaMemcpyDeviceToHost), cudaSuccess);
+        return out;
+    };
+
+    // 1. gdn_ssm_state (64B total): [32B from p2 | 32B from p3]
+    {
+        const auto got = read_device(0, "gdn_ssm_state");
+        const auto p2  = make_fill_bytes(0x10 + 0, 32);
+        const auto p3  = make_fill_bytes(0x70 + 0, 32);
+        ASSERT_EQ(got.size(), 64u);
+        EXPECT_TRUE(std::equal(p2.begin(), p2.end(), got.begin()));
+        EXPECT_TRUE(std::equal(p3.begin(), p3.end(), got.begin() + 32));
+    }
+    // 2. gdn_conv_state (48B total, 3 segments Q=12B/K=12B/V=24B -> peer src=24B [6,6,12]):
+    //    dst = [Q_p2(6) | Q_p3(6) | K_p2(6) | K_p3(6) | V_p2(12) | V_p3(12)]
+    {
+        const auto got = read_device(0, "gdn_conv_state");
+        const auto p2  = make_fill_bytes(0x10 + 3, 24);
+        const auto p3  = make_fill_bytes(0x70 + 3, 24);
+        std::vector<uint8_t> expected;
+        expected.insert(expected.end(), p2.begin(), p2.begin() + 6);
+        expected.insert(expected.end(), p3.begin(), p3.begin() + 6);
+        expected.insert(expected.end(), p2.begin() + 6, p2.begin() + 12);
+        expected.insert(expected.end(), p3.begin() + 6, p3.begin() + 12);
+        expected.insert(expected.end(), p2.begin() + 12, p2.begin() + 24);
+        expected.insert(expected.end(), p3.begin() + 12, p3.begin() + 24);
+        EXPECT_EQ(got, expected);
+    }
+    // 3. gdn_consumer_q_conv (24B total): [12B from p2 | 12B from p3]
+    {
+        const auto got = read_device(0, "gdn_consumer_q_conv");
+        const auto p2  = make_fill_bytes(0x10 + 5, 12);
+        const auto p3  = make_fill_bytes(0x70 + 5, 12);
+        ASSERT_EQ(got.size(), 24u);
+        EXPECT_TRUE(std::equal(p2.begin(), p2.end(), got.begin()));
+        EXPECT_TRUE(std::equal(p3.begin(), p3.end(), got.begin() + 12));
+    }
+    // 4. ffn_output_sconv (REPLICATED, 24B): loaded exclusively from p2 (local peer 0)
+    {
+        const auto got = read_device(0, "ffn_output_sconv");
+        const auto p2  = make_fill_bytes(0x10 + 7, 24);
+        EXPECT_EQ(got, p2);
+    }
+    // 5. full (MHA_HEADS local_heads=2, 4 tokens * 2 heads * 8 * 2B * KV=2 -> K=128B, V=128B; peer src=128B [K=64B, V=64B]):
+    //    dst = [K_h0(p2,64B) | K_h1(p3,64B) | V_h0(p2,64B) | V_h1(p3,64B)]
+    {
+        const auto got = read_device(1, "full");
+        const auto p2  = make_fill_bytes(0x10 + 9, 128);
+        const auto p3  = make_fill_bytes(0x70 + 9, 128);
+        std::vector<uint8_t> expected;
+        expected.insert(expected.end(), p2.begin(), p2.begin() + 64);
+        expected.insert(expected.end(), p3.begin(), p3.begin() + 64);
+        expected.insert(expected.end(), p2.begin() + 64, p2.begin() + 128);
+        expected.insert(expected.end(), p3.begin() + 64, p3.begin() + 128);
+        EXPECT_EQ(got, expected);
+    }
+
+    // Also verify PP stage-routing (remote_stage_peer_groups) routes d_rank=1 onto prefill-2/3 identically.
+    store_->calls.clear();
+    ASSERT_EQ(cudaMemset(cache_manager_->convertIndexToBuffer(0, "gdn_conv_state", 2)[0].addr, 0x55, 48), cudaSuccess);
+    BroadcastLoadRequestPB stage_req = req_d1;
+    stage_req.clear_peer_addrs();
+    auto* g0 = stage_req.add_stage_peer_groups();
+    g0->set_layer_begin(0);
+    g0->set_layer_count(2);
+    g0->set_is_last_stage(true);
+    for (const auto* addr : {"prefill-0:1:2", "prefill-1:1:2", "prefill-2:1:2", "prefill-3:1:2"}) {
+        g0->add_peer_addrs(addr);
+    }
+    response.Clear();
+    ASSERT_TRUE(server_.RemoteLoad(&context, &stage_req, &response).ok());
+    ASSERT_EQ(response.error_info().error_code(), ErrorCodePB::NONE_ERROR);
+    ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+    {
+        const auto got = read_device(0, "gdn_conv_state");
+        const auto p2  = make_fill_bytes(0x10 + 3, 24);
+        const auto p3  = make_fill_bytes(0x70 + 3, 24);
+        std::vector<uint8_t> expected;
+        expected.insert(expected.end(), p2.begin(), p2.begin() + 6);
+        expected.insert(expected.end(), p3.begin(), p3.begin() + 6);
+        expected.insert(expected.end(), p2.begin() + 6, p2.begin() + 12);
+        expected.insert(expected.end(), p3.begin() + 6, p3.begin() + 12);
+        expected.insert(expected.end(), p2.begin() + 12, p2.begin() + 24);
+        expected.insert(expected.end(), p3.begin() + 12, p3.begin() + 24);
+        EXPECT_EQ(got, expected);
+    }
+    // Note: constructRemoteLoadRequest for P_tp == D_tp (2->2) selects 1 peer => typed_tp disabled, direct load.
+    const auto req_eq = server_.constructRemoteLoadRequest(load_ctx, /*index=*/1, {"prefill-0:1:2", "prefill-1:1:2"});
+    EXPECT_EQ(req_eq.peer_addrs_size(), 1);
+    EXPECT_EQ(req_eq.peer_addrs(0), "prefill-1:1:2");
 }
 
 namespace {

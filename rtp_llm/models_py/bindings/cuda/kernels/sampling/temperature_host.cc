@@ -5,16 +5,20 @@
 namespace rtp_llm {
 namespace {
 bool canUseTiledTemperature(const torch::Tensor& logits) {
-    return logits.size(0) > 0 && logits.size(0) <= 32 && logits.size(1) == 248320 && logits.is_contiguous()
-           && sampler::isSm120();
+    return logits.size(0) > 0 && logits.size(0) <= 65535 && logits.size(1) == 248320 && logits.is_contiguous();
 }
 }  // namespace
 
-void applySamplerTemperature(const torch::Tensor& logits, const torch::Tensor& temperatures, cudaStream_t stream) {
+void applySamplerTemperature(const torch::Tensor& logits,
+                             const torch::Tensor& temperatures,
+                             cudaStream_t         stream,
+                             const torch::Tensor& do_sample) {
     const auto batch = logits.size(0);
     const auto vocab = logits.size(1);
     if (canUseTiledTemperature(logits)) {
-        invokeTiledTemperaturePenalty(logits.data_ptr<float>(), temperatures.data_ptr<float>(), batch, vocab, stream);
+        const bool* do_sample_ptr = do_sample.defined() ? do_sample.data_ptr<bool>() : nullptr;
+        invokeTiledTemperaturePenalty(
+            logits.data_ptr<float>(), temperatures.data_ptr<float>(), batch, vocab, stream, do_sample_ptr);
     } else {
         invokeBatchApplyTemperaturePenalty(
             logits.data_ptr<float>(), (float*)nullptr, temperatures.data_ptr<float>(), batch, vocab, vocab, stream);

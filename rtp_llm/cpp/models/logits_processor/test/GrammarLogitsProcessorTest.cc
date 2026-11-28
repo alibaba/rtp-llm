@@ -4,6 +4,7 @@
 #include "rtp_llm/cpp/engine_base/grammar/RtpGrammarMatcher.h"
 #include "rtp_llm/cpp/engine_base/grammar/XGrammarBackend.h"
 #include "rtp_llm/cpp/models/logits_processor/BitmaskUtils.h"
+#include "rtp_llm/cpp/models/logits_processor/LogitsProcessorStates.h"
 #include "rtp_llm/cpp/models/logits_processor/SpecLogitsProcessor.h"
 #include "rtp_llm/cpp/utils/ErrorCode.h"
 
@@ -877,6 +878,144 @@ TEST(GrammarLogitsProcessorTest, RapidTwentyStepUpdatesReusePinnedPoolWithoutSyn
         expectTokenAllowed(values, allowed);
         expectTokenMasked(values, allowed == 'a' ? 'b' : 'a');
     }
+}
+
+TEST(GrammarLogitsProcessorTest, BatchProcessMixedModesMatchesSequentialAndReusesScratchPool) {
+    auto backend = makeBackend(/*terminate_without_stop_token=*/true, /*vocab_size=*/128);
+    ASSERT_TRUE(backend);
+
+    constexpr int64_t kLogitsVocab = 160;
+    constexpr int64_t kBatchSize   = 5;
+    auto p0 = makeProcessor(backend, "[0-9]+a");
+    auto p1 = makeProcessorFromKey(backend, {"structural_tag", makeUnboundedAnyTextStructuralTag()});
+    auto p2 = makeProcessorFromKey(backend, {"regex", "a"}, /*eos_token_id=*/kEos);
+    auto p3 = makeProcessor(backend, "a");
+    auto p4 = makeProcessorFromKey(backend, {"regex", "a"}, /*eos_token_id=*/999);
+    ASSERT_TRUE(p0.proc && p1.proc && p2.proc && p3.proc && p4.proc);
+
+    auto tok_a = torch::tensor({static_cast<int32_t>(kA)}, torch::kInt32).reshape({1, 1});
+    ASSERT_FALSE(p2->updateStatus(tok_a, 1).has_value());
+    ASSERT_FALSE(p4->updateStatus(tok_a, 1).has_value());
+
+    LogitsProcessorStates states;
+    states.insert(p0.proc, 0, 1);
+    states.insert(p1.proc, 1, 2);
+    states.insert(p2.proc, 2, 3);
+    states.insert(p3.proc, 3, 4);
+    states.insert(p4.proc, 4, 5);
+
+    BatchGrammarScratchPool pool;
+    for (const auto dtype : {torch::kFloat32, torch::kFloat16, torch::kBFloat16}) {
+        auto batched_logits = torch::zeros({kBatchSize, kLogitsVocab}, torch::TensorOptions(dtype).device(torch::kCUDA));
+        auto seq_logits     = batched_logits.clone();
+
+        auto make_inputs = [&](torch::Tensor l) {
+            SamplerInputs in{};
+            in.logits        = std::move(l);
+            in.batch_size    = kBatchSize;
+            in.vocab_size    = kLogitsVocab;
+            in.finished_mask = torch::tensor({false, false, false, true, false}, torch::kBool);
+            return in;
+        };
+
+        std::vector<std::optional<ErrorInfo>> errs;
+        {
+            ScopedCudaSyncErrorMode sync_guard(c10::cuda::SyncDebugMode::L_ERROR);
+            errs = states.batchProcess(make_inputs(batched_logits), &pool);
+        }
+        EXPECT_FALSE(errs[0].has_value());
+        EXPECT_FALSE(errs[1].has_value());
+        EXPECT_FALSE(errs[2].has_value());
+        EXPECT_FALSE(errs[3].has_value());
+        ASSERT_TRUE(errs[4].has_value());
+        EXPECT_EQ(errs[4]->code(), ErrorCode::GRAMMAR_EOS_OUT_OF_VOCAB);
+
+        auto seq_in = make_inputs(seq_logits);
+        EXPECT_FALSE(p0->process(seq_in, 0, 1).has_value());
+        EXPECT_FALSE(p1->process(seq_in, 1, 2).has_value());
+        EXPECT_FALSE(p2->process(seq_in, 2, 3).has_value());
+        EXPECT_FALSE(p3->process(seq_in, 3, 4).has_value());
+        EXPECT_TRUE(p4->process(seq_in, 4, 5).has_value());
+
+        EXPECT_TRUE(torch::equal(batched_logits.cpu(), seq_logits.cpu()));
+    }
+
+    // 20 rapid batched steps reuse scratch pool without sync or overwrite race.
+    std::vector<ProcessorBundle> p_multi;
+    LogitsProcessorStates        multi_states;
+    for (int i = 0; i < 8; ++i) {
+        p_multi.push_back(makeProcessor(backend, "[0-9]+a"));
+        multi_states.insert(p_multi.back().proc, static_cast<size_t>(i), static_cast<size_t>(i + 1));
+    }
+    auto tok_5  = torch::tensor({static_cast<int32_t>('5')}, torch::kInt32).reshape({1, 1});
+    auto logits = torch::zeros({20, 8, kLogitsVocab}, torch::TensorOptions(torch::kFloat32).device(torch::kCUDA));
+    {
+        ScopedCudaSyncErrorMode sync_guard(c10::cuda::SyncDebugMode::L_ERROR);
+        for (int step = 0; step < 20; ++step) {
+            SamplerInputs in{};
+            in.logits     = logits.select(0, step);
+            in.batch_size = 8;
+            in.vocab_size = kLogitsVocab;
+            auto step_errs = multi_states.batchProcess(in, &pool);
+            for (const auto& e : step_errs) {
+                ASSERT_FALSE(e.has_value());
+            }
+            for (auto& pb : p_multi) {
+                ASSERT_FALSE(pb->updateStatus(tok_5, 1).has_value());
+            }
+        }
+    }
+    auto logits_cpu = logits.cpu();
+    for (int step = 0; step < 20; ++step) {
+        for (int row = 0; row < 8; ++row) {
+            EXPECT_FLOAT_EQ(logits_cpu[step][row]['5'].item<float>(), 0.0f);
+            EXPECT_LT(logits_cpu[step][row][kB].item<float>(), -1e20f);
+            EXPECT_LT(logits_cpu[step][row][150].item<float>(), -1e20f);
+        }
+    }
+}
+
+TEST(GrammarLogitsProcessorTest, BatchProcessPreservesOrderWithOtherProcessorsOnSameRow) {
+    class BiasZeroProcessor final: public BaseLogitsProcessor {
+    public:
+        std::optional<ErrorInfo> process(const SamplerInputs& inputs, size_t start_idx, size_t finish_idx) override {
+            for (size_t r = start_idx; r < finish_idx; ++r) {
+                inputs.logits[static_cast<int64_t>(r)][kA].fill_(3.0f);
+            }
+            return std::nullopt;
+        }
+        void                     updateMultiSeqStatus(const std::vector<int>&) override {}
+        std::optional<ErrorInfo> updateStatus(const torch::Tensor&, int32_t) override {
+            return std::nullopt;
+        }
+    };
+
+    auto backend = makeBackend(/*terminate_without_stop_token=*/true, /*vocab_size=*/128);
+    ASSERT_TRUE(backend);
+    auto g0    = makeProcessor(backend, "a");
+    auto g1    = makeProcessor(backend, "b");
+    auto other = std::make_shared<BiasZeroProcessor>();
+
+    LogitsProcessorStates states;
+    states.insert(g0.proc, 0, 1);
+    states.insert(other, 0, 1);
+    states.insert(g1.proc, 1, 2);
+
+    auto logits = torch::zeros({2, 128}, torch::TensorOptions(torch::kFloat32).device(torch::kCUDA));
+    SamplerInputs in{};
+    in.logits     = logits;
+    in.batch_size = 2;
+    in.vocab_size = 128;
+
+    BatchGrammarScratchPool pool;
+    auto errs = states.batchProcess(in, &pool);
+    EXPECT_FALSE(errs[0].has_value());
+    EXPECT_FALSE(errs[1].has_value());
+    auto cpu = logits.cpu();
+    EXPECT_FLOAT_EQ(cpu[0][kA].item<float>(), 3.0f);
+    EXPECT_LT(cpu[0][kB].item<float>(), -1e20f);
+    EXPECT_FLOAT_EQ(cpu[1][kB].item<float>(), 0.0f);
+    EXPECT_LT(cpu[1][kA].item<float>(), -1e20f);
 }
 #endif  // USING_CUDA
 

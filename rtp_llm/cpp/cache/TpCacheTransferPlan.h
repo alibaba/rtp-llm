@@ -4,6 +4,8 @@
 #include "rtp_llm/cpp/cache/MhaTpCacheLayout.h"
 #include <algorithm>
 #include <cstdint>
+#include <limits>
+#include <stdexcept>
 #include <vector>
 #include <utility>
 
@@ -11,10 +13,11 @@ namespace rtp_llm {
 
 // LEGACY preserves transport behavior for descriptors that have not opted in.
 enum class TpCacheTransferMode : int8_t {
-    LEGACY     = 0,
-    REPLICATED = 1,
-    MHA_HEADS  = 2,
-    LINEAR_QKV = 3,
+    LEGACY        = 0,
+    REPLICATED    = 1,
+    MHA_HEADS     = 2,
+    LINEAR_QKV    = 3,
+    SHARDED_STATE = 4,
 };
 
 struct TpCacheTransferTopology {
@@ -35,16 +38,15 @@ inline bool tpCachePeerOwnsPayload(TpCacheTransferMode            mode,
     if (!topology.supportsTypedTransfer() || peer >= topology.peers) {
         throw std::invalid_argument("unsupported typed TP topology or peer");
     }
-    if (mode == TpCacheTransferMode::LINEAR_QKV) {
+    if (mode == TpCacheTransferMode::LINEAR_QKV || mode == TpCacheTransferMode::SHARDED_STATE) {
         return true;
     }
     if (mode == TpCacheTransferMode::MHA_HEADS) {
-        if (local_heads == 2 && topology.decode_tp == 1
-            && (topology.peers == 2 || topology.peers == 4 || topology.peers == 8)) {
+        if (local_heads == 2 && (topology.peers == 2 || (topology.decode_tp == 1 && (topology.peers == 4 || topology.peers == 8)))) {
             return mhaTpPeerOwnsHead(topology.peers, 2, peer);
         }
         if (local_heads != 1) {
-            throw std::invalid_argument("typed TP MHA handoff requires one local head or D1 with two heads");
+            throw std::invalid_argument("typed TP MHA handoff requires one local head or two heads split across peers");
         }
     } else if (mode != TpCacheTransferMode::REPLICATED) {
         throw std::invalid_argument("typed TP handoff requires an explicit cache transfer layout");
@@ -77,6 +79,38 @@ struct TpCacheTransferPlan {
         return {(k_bytes + v_bytes) / heads, k_bytes + v_bytes, heads, head, std::move(slices)};
     }
 
+    static TpCacheTransferPlan shardedState(size_t seg0_bytes,
+                                             size_t seg1_bytes,
+                                             size_t seg2_bytes,
+                                             size_t peers,
+                                             size_t peer) {
+        if (!peers || peer >= peers) {
+            throw std::invalid_argument("invalid typed sharded state peer topology");
+        }
+        constexpr size_t max_bytes = std::numeric_limits<size_t>::max();
+        if (seg0_bytes > max_bytes - seg1_bytes || seg0_bytes + seg1_bytes > max_bytes - seg2_bytes) {
+            throw std::overflow_error("typed sharded state byte size overflow");
+        }
+        const size_t dst_bytes = seg0_bytes + seg1_bytes + seg2_bytes;
+        if (!dst_bytes || (seg0_bytes % peers) || (seg1_bytes % peers) || (seg2_bytes % peers)) {
+            throw std::invalid_argument("typed sharded state segments must be non-empty and divisible by peers");
+        }
+        std::vector<LinearTpCacheSlice> slices;
+        slices.reserve(3);
+        size_t src_off  = 0;
+        size_t dst_base = 0;
+        for (const size_t seg : {seg0_bytes, seg1_bytes, seg2_bytes}) {
+            if (!seg) {
+                continue;
+            }
+            const size_t chunk = seg / peers;
+            slices.push_back({src_off, dst_base + peer * chunk, chunk});
+            src_off += chunk;
+            dst_base += seg;
+        }
+        return {dst_bytes / peers, dst_bytes, peers, peer, std::move(slices)};
+    }
+
     void validateSlices() const {
         if (!source_bytes || !destination_bytes || !part_count || part_id >= part_count || slices.empty()) {
             throw std::invalid_argument("invalid typed TP transfer plan");
@@ -103,7 +137,8 @@ struct TpCacheTransferLayout {
     size_t              value_heads  = 0;
 
     bool needsReassembly(size_t local_heads) const {
-        return mode == TpCacheTransferMode::LINEAR_QKV || (mode == TpCacheTransferMode::MHA_HEADS && local_heads > 1);
+        return mode == TpCacheTransferMode::LINEAR_QKV || mode == TpCacheTransferMode::SHARDED_STATE
+               || (mode == TpCacheTransferMode::MHA_HEADS && local_heads > 1);
     }
 
     TpCacheTransferPlan plan(size_t                         k_bytes,
@@ -125,6 +160,22 @@ struct TpCacheTransferLayout {
                 throw std::invalid_argument("typed linear TP history does not match its payload");
             }
             return result;
+        }
+        if (mode == TpCacheTransferMode::SHARDED_STATE) {
+            if (v_bytes != 0 || kernel_pages != 1) {
+                throw std::invalid_argument("typed sharded state requires single-part opaque payload");
+            }
+            if (q_row_bytes == 0 && k_row_bytes == 0 && v_row_bytes == 0) {
+                return TpCacheTransferPlan::shardedState(k_bytes, 0, 0, topology.peers, peer);
+            }
+            constexpr size_t max_bytes = std::numeric_limits<size_t>::max();
+            if (q_row_bytes > max_bytes - k_row_bytes || q_row_bytes + k_row_bytes > max_bytes - v_row_bytes) {
+                throw std::overflow_error("typed sharded state layout size overflow");
+            }
+            if (q_row_bytes + k_row_bytes + v_row_bytes != k_bytes) {
+                throw std::invalid_argument("typed sharded state segments do not match payload bytes");
+            }
+            return TpCacheTransferPlan::shardedState(q_row_bytes, k_row_bytes, v_row_bytes, topology.peers, peer);
         }
         if (mode == TpCacheTransferMode::MHA_HEADS && local_heads == 2) {
             return TpCacheTransferPlan::mha(

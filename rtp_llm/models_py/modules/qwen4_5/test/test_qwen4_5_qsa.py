@@ -4425,6 +4425,101 @@ class Qwen4_5QSATest(unittest.TestCase):
         )
         self.assertTrue(torch.equal(res_rs, x_sp))
 
+    @torch.no_grad()
+    def test_r15_qsa_fp8_pv_dsplit_high_concurrency_parity_and_cg(self) -> None:
+        if not torch.cuda.is_available():
+            self.skipTest("CUDA required")
+        dev = torch.device("cuda:0")
+        from rtp_llm.models_py.modules.qwen4_5.qsa_bridge import (
+            _qsa_gqa_paged_merge_kernel,
+            _qsa_gqa_paged_split_tc_dsplit_kernel,
+            _view_mha_kv_and_scale_hnd,
+        )
+
+        torch.manual_seed(1515)
+        D = 256
+        page_size = 128
+        for B, S, H_q, K, kv_len in [
+            (64, 1, 8, 512, 2048),
+            (64, 1, 8, 2051, 4096),
+            (96, 1, 16, 2051, 4096),
+            (64, 4, 8, 2051, 4096),
+            (64, 1, 32, 2051, 4096),
+        ]:
+            blocks_per_req = kv_len // page_size
+            num_blocks = B * blocks_per_req + 4
+            q = torch.randn((B, H_q, S, D), device=dev, dtype=torch.bfloat16)
+            kv_pool = torch.randn((num_blocks, 2, 1, page_size, D), device=dev, dtype=torch.bfloat16).to(
+                torch.float8_e4m3fn
+            )
+            kv_scale = torch.rand((num_blocks, 2, 1, page_size), device=dev, dtype=torch.float32) * 0.5 + 0.5
+            bt = torch.arange(1, 1 + B * blocks_per_req, device=dev, dtype=torch.int32).view(B, blocks_per_req)
+            kv_lens = torch.full((B, S), kv_len, device=dev, dtype=torch.int32)
+            sel = torch.randint(0, kv_len, (B, S, K), device=dev, dtype=torch.int32)
+            gate = torch.randn((B, S, H_q, D), device=dev, dtype=torch.bfloat16)
+
+            out = qsa_sparse_paged_decode_attention(
+                q,
+                kv_pool,
+                bt,
+                kv_lens,
+                sel,
+                page_size=page_size,
+                kv_heads=1,
+                head_dim=D,
+                kv_scale=kv_scale,
+                output_gate=gate,
+                is_cuda_graph=(S == 1 and B == 64),
+            )
+            self.assertEqual(tuple(out.shape), (B, H_q, S, D))
+
+            # Compare directly against non-FP8_PV BF16-V dsplit reference on identical inputs.
+            kv_hnd, sc_hnd = _view_mha_kv_and_scale_hnd(
+                kv_pool, kv_scale, kv_heads=1, page_size=page_size, head_dim=D
+            )
+            m_rows = 32 if (16 < H_q <= 32) else 16
+            sp_ref = 4
+            p_out = torch.empty((B, S, H_q, sp_ref, D), dtype=torch.float32, device=dev)
+            p_m = torch.empty((B, S, H_q, sp_ref), dtype=torch.float32, device=dev)
+            p_z = torch.empty((B, S, H_q, sp_ref), dtype=torch.float32, device=dev)
+            ref = torch.empty((B, S, H_q, D), dtype=torch.bfloat16, device=dev).transpose(1, 2)
+            _qsa_gqa_paged_split_tc_dsplit_kernel[(B * S, sp_ref, 1)](
+                q, kv_hnd, sc_hnd, bt, kv_lens, sel, p_out, p_m, p_z, gate,
+                q.stride(0), q.stride(1), q.stride(2),
+                kv_hnd.stride(0), kv_hnd.stride(1), kv_hnd.stride(2), kv_hnd.stride(3),
+                sc_hnd.stride(0), sc_hnd.stride(1), sc_hnd.stride(2), sc_hnd.stride(3),
+                bt.stride(0), bt.stride(1), kv_lens.stride(0), kv_lens.stride(1),
+                sel.stride(0), sel.stride(1), ref.stride(0), ref.stride(1), ref.stride(2),
+                S, K, bt.shape[1], kv_hnd.shape[0],
+                HK=1, G=H_q, M_ROWS=m_rows, PAGE_SIZE=page_size, SCALE=D**-0.5,
+                KT=128, NUM_SPLITS=sp_ref, WITH_GATE=False,
+                IS_FP8=True, HAS_SCALE=True, FP8_QK=True, FP8_PV=False, SUB_G=1,
+                num_warps=4, num_stages=2,
+            )
+            _qsa_gqa_paged_merge_kernel[(B * S * H_q, 1, 1)](
+                p_out, p_m, p_z, ref, gate,
+                ref.stride(0), ref.stride(1), ref.stride(2), S,
+                HQ=H_q, D=D, NUM_SPLITS=sp_ref, SP_PAD=sp_ref, WITH_GATE=True, num_warps=4,
+            )
+            self.assertGreaterEqual(_cosine(out, ref), 0.999)
+
+            if B == 64 and S == 1 and H_q == 8 and K == 2051:
+                for _ in range(2):
+                    qsa_sparse_paged_decode_attention(
+                        q, kv_pool, bt, kv_lens, sel,
+                        page_size=page_size, kv_heads=1, head_dim=D,
+                        kv_scale=kv_scale, output_gate=gate, is_cuda_graph=True,
+                    )
+                g = torch.cuda.CUDAGraph()
+                with torch.cuda.graph(g):
+                    out_cg = qsa_sparse_paged_decode_attention(
+                        q, kv_pool, bt, kv_lens, sel,
+                        page_size=page_size, kv_heads=1, head_dim=D,
+                        kv_scale=kv_scale, output_gate=gate, is_cuda_graph=True,
+                    )
+                g.replay()
+                self.assertGreaterEqual(_cosine(out, out_cg), 0.9999)
+
 def _r7_sp2_nccl_cg_worker(
     rank: int,
     world_size: int,

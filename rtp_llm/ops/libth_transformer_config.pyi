@@ -1001,6 +1001,7 @@ class TpCacheTransferMode:
     REPLICATED: typing.ClassVar[TpCacheTransferMode]
     MHA_HEADS: typing.ClassVar[TpCacheTransferMode]
     LINEAR_QKV: typing.ClassVar[TpCacheTransferMode]
+    SHARDED_STATE: typing.ClassVar[TpCacheTransferMode]
 
 class CpPrefillSliceLayout:
     NONE: typing.ClassVar[CpPrefillSliceLayout]
@@ -1036,6 +1037,9 @@ class CacheCpPolicyDesc:
 
 class KVCacheSpecDesc:
     tp_transfer_mode: TpCacheTransferMode
+    tp_state_q_elems: int
+    tp_state_k_elems: int
+    tp_state_v_elems: int
     tag: str
     cache_type: KVCacheSpecType
     dtype: DataType

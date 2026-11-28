@@ -273,5 +273,58 @@ TEST(CacheTopologyTest, DerivesReverseMembershipFromLayers) {
     EXPECT_ANY_THROW(CacheTopology::create({makeGroup("full"), makeGroup("full")}, {{0, {"full"}}}));
 }
 
+TEST(CacheTopologyTest, ResolvesShardedOpaqueStateSegmentsAndPreservesOnClone) {
+    SpecBuildContext context;
+    context.seq_size_per_block      = 128;
+    context.kernel_tokens_per_block = 128;
+
+    KVCacheSpecDesc ssm_desc;
+    ssm_desc.tag                  = "gdn_ssm_state";
+    ssm_desc.cache_type           = KVCacheSpecType::OpaqueState;
+    ssm_desc.is_state_cache       = true;
+    ssm_desc.dtype                = DataType::TYPE_FP32;
+    ssm_desc.entry_dtype          = DataType::TYPE_FP32;
+    ssm_desc.entry_elems          = 4096;
+    ssm_desc.explicit_entry_count = 64;
+    ssm_desc.tp_transfer_mode     = TpCacheTransferMode::SHARDED_STATE;
+    const auto ssm_spec           = SpecBuilder::build(ssm_desc, context);
+    EXPECT_EQ(ssm_spec->tp_transfer.mode, TpCacheTransferMode::SHARDED_STATE);
+    EXPECT_EQ(ssm_spec->tp_transfer.q_row_bytes, 0u);
+    EXPECT_EQ(ssm_spec->tp_transfer.k_row_bytes, 0u);
+    EXPECT_EQ(ssm_spec->tp_transfer.v_row_bytes, 0u);
+    auto ssm_plan = ssm_spec->tp_transfer.plan(
+        ssm_spec->k_block_size_bytes(), ssm_spec->v_block_size_bytes(), 1, {2, 2, 1, 1}, 1);
+    ssm_plan.validateSlices();
+    EXPECT_EQ(ssm_plan.source_bytes, 64u * 4096u * 4u / 2u);
+    EXPECT_EQ(ssm_plan.destination_bytes, 64u * 4096u * 4u);
+
+    KVCacheSpecDesc conv_desc;
+    conv_desc.tag                  = "gdn_conv_state";
+    conv_desc.cache_type           = KVCacheSpecType::OpaqueState;
+    conv_desc.is_state_cache       = true;
+    conv_desc.dtype                = DataType::TYPE_BF16;
+    conv_desc.entry_dtype          = DataType::TYPE_BF16;
+    conv_desc.entry_elems          = 6144;
+    conv_desc.explicit_entry_count = 3;
+    conv_desc.tp_transfer_mode     = TpCacheTransferMode::SHARDED_STATE;
+    conv_desc.tp_state_q_elems     = 1024;
+    conv_desc.tp_state_k_elems     = 1024;
+    conv_desc.tp_state_v_elems     = 4096;
+    const auto conv_spec           = SpecBuilder::build(conv_desc, context);
+    EXPECT_EQ(conv_spec->tp_transfer.mode, TpCacheTransferMode::SHARDED_STATE);
+    EXPECT_EQ(conv_spec->tp_transfer.q_row_bytes, 1024u * 3u * 2u);
+    EXPECT_EQ(conv_spec->tp_transfer.k_row_bytes, 1024u * 3u * 2u);
+    EXPECT_EQ(conv_spec->tp_transfer.v_row_bytes, 4096u * 3u * 2u);
+    EXPECT_EQ(conv_spec->clone()->fingerprint(), conv_spec->fingerprint());
+
+    auto bad_sum             = conv_desc;
+    bad_sum.tp_state_v_elems = 4097;
+    EXPECT_ANY_THROW(SpecBuilder::build(bad_sum, context));
+
+    auto bad_mode             = conv_desc;
+    bad_mode.tp_transfer_mode = TpCacheTransferMode::REPLICATED;
+    EXPECT_ANY_THROW(SpecBuilder::build(bad_mode, context));
+}
+
 }  // namespace
 }  // namespace rtp_llm

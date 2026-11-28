@@ -31,12 +31,18 @@ KVCacheSpecPtr SpecBuilder::build(const KVCacheSpecDesc& desc, const SpecBuildCo
         mode == TpCacheTransferMode::LEGACY
             || (mode == TpCacheTransferMode::LINEAR_QKV && desc.cache_type == KVCacheSpecType::LinearAttention)
             || (mode == TpCacheTransferMode::MHA_HEADS && desc.cache_type == KVCacheSpecType::MultiHeadAttention)
+            || (mode == TpCacheTransferMode::SHARDED_STATE && desc.cache_type == KVCacheSpecType::OpaqueState)
             || (mode == TpCacheTransferMode::REPLICATED
                 && (desc.cache_type == KVCacheSpecType::OpaqueKV || desc.cache_type == KVCacheSpecType::OpaqueState)),
         "invalid cache TP transfer mode: tag=%s cache_type=%d mode=%d",
         desc.tag.c_str(),
         static_cast<int>(desc.cache_type),
         static_cast<int>(mode));
+    RTP_LLM_CHECK_WITH_INFO(
+        (desc.tp_state_q_elems == 0 && desc.tp_state_k_elems == 0 && desc.tp_state_v_elems == 0)
+            || (mode == TpCacheTransferMode::SHARDED_STATE && desc.cache_type == KVCacheSpecType::OpaqueState),
+        "tp_state_*_elems requires SHARDED_STATE OpaqueState spec: tag=%s",
+        desc.tag.c_str());
     spec->tp_transfer.mode = mode;
     return spec;
 }

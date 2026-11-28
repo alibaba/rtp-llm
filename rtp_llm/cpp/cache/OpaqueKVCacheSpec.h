@@ -359,6 +359,29 @@ struct FixedStateCacheSpec: public OpaqueKVCacheSpec {
                         payload,
                         stride,
                         isPrefillCpSliced(desc, ctx) && cpPrefillSliceBlockStride(desc));
+        if (desc.tp_transfer_mode == TpCacheTransferMode::SHARDED_STATE) {
+            RTP_LLM_CHECK_WITH_INFO(stride == payload,
+                                    "SHARDED_STATE FixedStateCacheSpec tag=%s requires unpadded stride=%zu == payload=%zu",
+                                    desc.tag.c_str(),
+                                    stride,
+                                    payload);
+            const uint64_t seg_sum = static_cast<uint64_t>(desc.tp_state_q_elems)
+                                     + static_cast<uint64_t>(desc.tp_state_k_elems)
+                                     + static_cast<uint64_t>(desc.tp_state_v_elems);
+            if (seg_sum > 0) {
+                RTP_LLM_CHECK_WITH_INFO(seg_sum == static_cast<uint64_t>(desc.entry_elems),
+                                        "SHARDED_STATE tag=%s tp_state segment elems sum %llu != entry_elems %u",
+                                        desc.tag.c_str(),
+                                        static_cast<unsigned long long>(seg_sum),
+                                        desc.entry_elems);
+                const size_t row_bytes     = static_cast<size_t>(entries) * getTypeSize(desc.entry_dtype);
+                spec->tp_transfer.mode     = TpCacheTransferMode::SHARDED_STATE;
+                spec->tp_transfer.q_row_bytes  = static_cast<size_t>(desc.tp_state_q_elems) * row_bytes;
+                spec->tp_transfer.k_row_bytes  = static_cast<size_t>(desc.tp_state_k_elems) * row_bytes;
+                spec->tp_transfer.v_row_bytes  = static_cast<size_t>(desc.tp_state_v_elems) * row_bytes;
+                spec->tp_transfer.history_rows = 1;
+            }
+        }
         return spec;
     }
 

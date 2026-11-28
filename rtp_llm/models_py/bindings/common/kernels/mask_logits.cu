@@ -222,6 +222,150 @@ template void invokePackedMaskLogits<__nv_bfloat16>(__nv_bfloat16* logits_batch,
                                                     const int    bitmask_row_stride,
                                                     const int    bitmask_words,
                                                     cudaStream_t stream);
+template<typename T>
+__device__ T ZeroLogitValue() {
+    return 0.0f;
+}
+
+template<>
+__device__ __half ZeroLogitValue<__half>() {
+    return __float2half(0.0f);
+}
+
+template<>
+__device__ __nv_bfloat16 ZeroLogitValue<__nv_bfloat16>() {
+    return __float2bfloat16(0.0f);
+}
+
+template<typename T>
+__global__ void batch_grammar_mask_logits(T* __restrict__ logits_batch,
+                                          const int32_t* __restrict__ packed_buf,
+                                          const int bitmask_header_words,
+                                          const int active_rows,
+                                          const int logits_rows,
+                                          const int logits_row_stride,
+                                          const int vocab_size,
+                                          const int bitmask_row_stride) {
+    const int compact_row = static_cast<int>(blockIdx.y);
+    if (compact_row >= active_rows) {
+        return;
+    }
+
+    const int logits_row = __ldg(packed_buf + compact_row);
+    if (logits_row < 0 || logits_row >= logits_rows) {
+        return;
+    }
+
+    const int mode        = __ldg(packed_buf + active_rows + compact_row);
+    const int vocab_limit = __ldg(packed_buf + 2 * active_rows + compact_row);
+    const int block_base  = static_cast<int>(blockIdx.x) * 1024;
+    T* __restrict__ logits_row_ptr =
+        logits_batch + static_cast<int64_t>(logits_row) * static_cast<int64_t>(logits_row_stride);
+    const T neg_val = MaskedLogitValue<T>();
+
+    if (mode == -1) {
+        if (block_base + 1024 <= vocab_limit) {
+            return;
+        }
+#pragma unroll
+        for (int iter = 0; iter < 4; ++iter) {
+            const int col = block_base + iter * 256 + static_cast<int>(threadIdx.x);
+            if (col >= vocab_limit && col < vocab_size) {
+                logits_row_ptr[col] = neg_val;
+            }
+        }
+        return;
+    }
+
+    if (mode >= 0) {
+        const T zero_val = ZeroLogitValue<T>();
+#pragma unroll
+        for (int iter = 0; iter < 4; ++iter) {
+            const int col = block_base + iter * 256 + static_cast<int>(threadIdx.x);
+            if (col < vocab_size) {
+                logits_row_ptr[col] = (col == mode) ? zero_val : neg_val;
+            }
+        }
+        return;
+    }
+
+    const int mask_row = -2 - mode;
+    const int32_t* __restrict__ mask_row_ptr =
+        packed_buf + bitmask_header_words + static_cast<int64_t>(mask_row) * static_cast<int64_t>(bitmask_row_stride);
+    const int warp_id = static_cast<int>(threadIdx.x) >> 5;
+    const int lane    = static_cast<int>(threadIdx.x) & 31;
+
+#pragma unroll
+    for (int iter = 0; iter < 4; ++iter) {
+        const int word_base_col = block_base + iter * 256 + warp_id * 32;
+        if (word_base_col >= vocab_size) {
+            break;
+        }
+        const int word_idx = word_base_col >> 5;
+        uint32_t  word     = 0u;
+        if (word_base_col < vocab_limit && word_idx < bitmask_row_stride) {
+            word = static_cast<uint32_t>(__ldg(mask_row_ptr + word_idx));
+        }
+        if (word == 0xFFFFFFFFu && word_base_col + 31 < vocab_limit && word_base_col + 31 < vocab_size) {
+            continue;
+        }
+        const int col = word_base_col + lane;
+        if (col < vocab_size) {
+            const bool allowed = (col < vocab_limit) && ((word & (1u << lane)) != 0u);
+            if (!allowed) {
+                logits_row_ptr[col] = neg_val;
+            }
+        }
+    }
+}
+
+template<typename T>
+void invokeBatchGrammarMaskLogits(T* logits_batch,
+                                  const int32_t* __restrict__ packed_buf,
+                                  const int    bitmask_header_words,
+                                  const int    active_rows,
+                                  const int    logits_rows,
+                                  const int    logits_row_stride,
+                                  const int    vocab_size,
+                                  const int    bitmask_row_stride,
+                                  cudaStream_t stream) {
+    if (active_rows <= 0 || vocab_size <= 0) {
+        return;
+    }
+    const dim3 block(256, 1);
+    const dim3 grid(static_cast<unsigned int>((vocab_size + 1023) / 1024), static_cast<unsigned int>(active_rows));
+    batch_grammar_mask_logits<T><<<grid, block, 0, stream>>>(
+        logits_batch, packed_buf, bitmask_header_words, active_rows, logits_rows, logits_row_stride, vocab_size, bitmask_row_stride);
+    check_cuda_error();
+}
+
+template void invokeBatchGrammarMaskLogits<float>(float* logits_batch,
+                                                  const int32_t* __restrict__ packed_buf,
+                                                  const int    bitmask_header_words,
+                                                  const int    active_rows,
+                                                  const int    logits_rows,
+                                                  const int    logits_row_stride,
+                                                  const int    vocab_size,
+                                                  const int    bitmask_row_stride,
+                                                  cudaStream_t stream);
+template void invokeBatchGrammarMaskLogits<half>(half* logits_batch,
+                                                 const int32_t* __restrict__ packed_buf,
+                                                 const int    bitmask_header_words,
+                                                 const int    active_rows,
+                                                 const int    logits_rows,
+                                                 const int    logits_row_stride,
+                                                 const int    vocab_size,
+                                                 const int    bitmask_row_stride,
+                                                 cudaStream_t stream);
+template void invokeBatchGrammarMaskLogits<__nv_bfloat16>(__nv_bfloat16* logits_batch,
+                                                          const int32_t* __restrict__ packed_buf,
+                                                          const int    bitmask_header_words,
+                                                          const int    active_rows,
+                                                          const int    logits_rows,
+                                                          const int    logits_row_stride,
+                                                          const int    vocab_size,
+                                                          const int    bitmask_row_stride,
+                                                          cudaStream_t stream);
 #endif
 
 }  // namespace rtp_llm

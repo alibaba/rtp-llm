@@ -27,9 +27,12 @@ namespace rtp_llm {
 // (Apache-2.0). Preserve RTP's reciprocal epsilon, multiplication and FTZ
 // compilation unit; do not substitute vLLM's different temperature formula.
 template<bool Vectorized>
-__global__ void samplerTiledTemperature(float* logits, const float* temperatures, int vocab) {
+__global__ void samplerTiledTemperature(float* logits, const float* temperatures, const bool* do_sample, int vocab) {
     __shared__ float inverse;
     const int        row = blockIdx.x;
+    if (do_sample != nullptr && !do_sample[row]) {
+        return;
+    }
     if (threadIdx.x == 0)
         inverse = 1.0f / (temperatures[row] + 1e-6f);
     __syncthreads();
@@ -56,13 +59,13 @@ __global__ void samplerTiledTemperature(float* logits, const float* temperatures
 }
 
 void invokeTiledTemperaturePenalty(
-    float* logits, const float* temperatures, int batch_size, int vocab, cudaStream_t stream) {
-    assert(batch_size > 0 && batch_size <= 32 && vocab == 248320);
+    float* logits, const float* temperatures, int batch_size, int vocab, cudaStream_t stream, const bool* do_sample) {
+    assert(batch_size > 0 && vocab == 248320);
     const dim3 grid(batch_size, (vocab + 4095) / 4096);
     if (reinterpret_cast<uintptr_t>(logits) % 16 == 0)
-        samplerTiledTemperature<true><<<grid, 256, 0, stream>>>(logits, temperatures, vocab);
+        samplerTiledTemperature<true><<<grid, 256, 0, stream>>>(logits, temperatures, do_sample, vocab);
     else
-        samplerTiledTemperature<false><<<grid, 256, 0, stream>>>(logits, temperatures, vocab);
+        samplerTiledTemperature<false><<<grid, 256, 0, stream>>>(logits, temperatures, do_sample, vocab);
 }
 
 template<typename T>

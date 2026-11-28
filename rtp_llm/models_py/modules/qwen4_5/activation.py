@@ -119,6 +119,13 @@ def select_sm10x_bf16_tgv_tactic(
             tactic = 7
         else:
             tactic = 8
+    elif M <= 48:
+        if N <= 2560:
+            tactic = 6 if K >= 4096 else 8
+        elif 2560 <= K <= 6144 and (5120 <= N <= 5376 or N in (6400, 7680)):
+            tactic = 9
+        else:
+            return None
     elif M <= 64 and N <= 2560:
         tactic = 8
     else:

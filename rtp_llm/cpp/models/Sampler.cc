@@ -15,6 +15,7 @@ namespace rtp_llm {
 
 Sampler::Sampler(const SamplerInitParams& params):
     fixed_max_batch_size_(params.max_batch_size > 0 && params.fixed_max_batch_size),
+    batch_grammar_pool_(std::make_shared<BatchGrammarScratchPool>()),
     copy_stream_(cuda_graph::graphGetStreamFromPool(false)) {
     if (params.max_batch_size > 0) {
         allocateGreedySamplingBuffers(params.max_batch_size);
@@ -25,12 +26,15 @@ void Sampler::allocateGreedySamplingBuffers(size_t max_batch_size) {
     waitGreedySamplingBufferEvents();
     max_batch_size_ = max_batch_size;
     auto pinned_i64 = torch::TensorOptions().dtype(torch::kInt64).pinned_memory(true);
+    auto pinned_u8  = torch::TensorOptions().dtype(torch::kUInt8).pinned_memory(true);
     for (auto& slot : greedy_sampling_buffer_slots_) {
         auto& buffers                = slot.buffers;
         buffers.seed_host            = torch::empty({(int64_t)max_batch_size_}, pinned_i64);
         buffers.offset_host          = torch::empty({(int64_t)max_batch_size_}, pinned_i64);
         buffers.output_ids_ptrs_host = torch::empty({(int64_t)max_batch_size_}, pinned_i64);
         buffers.max_batch_size       = max_batch_size_;
+        buffers.meta_host            = torch::empty({(int64_t)max_batch_size_ * 256 + 4096}, pinned_u8);
+        buffers.meta_device          = torch::Tensor();
         slot.ready_event.reset();
     }
 }
@@ -119,29 +123,43 @@ SamplerOutput Sampler::forward(const SamplerInputs& inputs) {
     // allocate output tensors
     // Keep success on CUDA to avoid a blocking D2H copy: the GPU sampling kernel writes success
     // directly, and callers that need CPU access should call .cpu() explicitly.
-    auto all_success =
-        torch::empty({(int64_t)inputs.batch_size}, torch::TensorOptions().dtype(torch::kBool).device(torch::kCUDA));
+    torch::Tensor all_success;
+    auto          ensure_all_success = [&]() -> torch::Tensor& {
+        if (!all_success.defined()) {
+            all_success = torch::empty({(int64_t)inputs.batch_size},
+                                       torch::TensorOptions().dtype(torch::kBool).device(torch::kCUDA));
+        }
+        return all_success;
+    };
     auto all_beam_indices =
         has_num_beams ? torch::empty({(int64_t)inputs.batch_size_out}, torch::kInt32) : torch::Tensor();
-#if USING_ROCM || (defined(USE_PPU) && USE_PPU)
-    // ROCm: hipMemcpyAsync from pageable memory is truly async, and
-    // Tensor::record_stream() rejects at::hip streams.
-    // PPU can reject the asynchronous token ID copy on the dedicated stream.
-    auto inputs_token_ids_cuda = inputs.token_ids.to(torch::kCUDA);
-#else
     torch::Tensor inputs_token_ids_cuda;
-    {
-        auto main_stream     = cuda_graph::graphGetCurrentStream();
-        auto copy_done_event = cuda_graph::makeGraphEvent();
-        {
-            cuda_graph::GraphStreamGuard guard(copy_stream_);
+    if (inputs.token_ids.is_cuda() && !has_num_beams && !requires_independent_output) {
+        inputs_token_ids_cuda = inputs.token_ids;
+    } else if (inputs.token_ids.is_cuda()) {
+        inputs_token_ids_cuda = inputs.token_ids;
+    } else {
+#if USING_ROCM || (defined(USE_PPU) && USE_PPU)
+        // ROCm: hipMemcpyAsync from pageable memory is truly async, and
+        // Tensor::record_stream() rejects at::hip streams.
+        // PPU can reject the asynchronous token ID copy on the dedicated stream.
+        inputs_token_ids_cuda = inputs.token_ids.to(torch::kCUDA);
+#else
+        if (inputs.token_ids.numel() <= 16384) {
             inputs_token_ids_cuda = inputs.token_ids.to(torch::kCUDA, /*non_blocking=*/true);
-            copy_done_event.record(copy_stream_);
+        } else {
+            auto main_stream     = cuda_graph::graphGetCurrentStream();
+            auto copy_done_event = cuda_graph::makeGraphEvent();
+            {
+                cuda_graph::GraphStreamGuard guard(copy_stream_);
+                inputs_token_ids_cuda = inputs.token_ids.to(torch::kCUDA, /*non_blocking=*/true);
+                copy_done_event.record(copy_stream_);
+            }
+            copy_done_event.block(main_stream);
+            inputs_token_ids_cuda.record_stream(main_stream);
         }
-        copy_done_event.block(main_stream);
-        inputs_token_ids_cuda.record_stream(main_stream);
-    }
 #endif
+    }
 
     auto all_token_ids_out     = requires_independent_output ?
                                      torch::empty({(int64_t)inputs.batch_size_out, (int64_t)max_seq_len},
@@ -185,7 +203,6 @@ SamplerOutput Sampler::forward(const SamplerInputs& inputs) {
         const auto batch_size_out   = beam_batch_size * cur_num_beams_out;
         const auto to_batch_idx_out = from_batch_idx_out + batch_size_out;
 
-        auto success           = all_success.narrow(0, from_batch_idx_in, batch_size_in);
         auto logits            = inputs.logits.narrow(0, from_batch_idx_in, batch_size_in);
         auto token_ids_in      = inputs_token_ids_cuda.narrow(0, from_batch_idx_in, batch_size_in);
         auto token_ids_out     = all_token_ids_out.narrow(0, from_batch_idx_out, batch_size_out);
@@ -195,7 +212,8 @@ SamplerOutput Sampler::forward(const SamplerInputs& inputs) {
         auto cum_log_probs_out = mayNarrow(all_cum_log_probs_out, from_batch_idx_out, batch_size_out);
 
         if (cur_num_beams_in == 1 && cur_num_beams_out == 1) {
-            const auto decoder_batch_size = (int64_t)inputs.sequence_lengths.size(0);
+            const bool is_single_full_group = (from_batch_idx_in == 0 && to_batch_idx_in == inputs.batch_size);
+            const auto decoder_batch_size   = (int64_t)inputs.sequence_lengths.size(0);
             auto       sequence_lengths_in =
                 (int64_t)from_batch_idx_in < decoder_batch_size ?
                           inputs.sequence_lengths.narrow(
@@ -226,7 +244,8 @@ SamplerOutput Sampler::forward(const SamplerInputs& inputs) {
                 greedy_sampling_buffers.offset_host.narrow(0, from_batch_idx_in, batch_size_in),
                 greedy_sampling_buffers.output_ids_ptrs_host.narrow(0, from_batch_idx_in, batch_size_in),
                 batch_size_in};
-            GreedySamplingBuffers* greedy_sampling_buffer_ptr = &greedy_sampling_buffer_slice;
+            GreedySamplingBuffers* greedy_sampling_buffer_ptr =
+                is_single_full_group ? &greedy_sampling_buffers : &greedy_sampling_buffer_slice;
 
             RTP_LLM_PROFILE_SCOPE("sampler.forward.execSampleGreedy");
             auto greedy_output = execSampleGreedy(
@@ -248,11 +267,17 @@ SamplerOutput Sampler::forward(const SamplerInputs& inputs) {
                  frequency_penalty,
                  do_sample,
                  generator,
-                 greedy_sampling_buffer_ptr});
-            if (greedy_output.success.defined()) {
-                success.copy_(greedy_output.success);
+                 greedy_sampling_buffer_ptr,
+                 /*preserve_logits_probs=*/true});
+            if (is_single_full_group && greedy_output.success.defined()) {
+                all_success = std::move(greedy_output.success);
             } else {
-                success.fill_(true);
+                auto success = ensure_all_success().narrow(0, from_batch_idx_in, batch_size_in);
+                if (greedy_output.success.defined()) {
+                    success.copy_(greedy_output.success);
+                } else {
+                    success.fill_(true);
+                }
             }
             // execSampleGreedy updates token_ids_in in place. Mixed beam transitions use a
             // separate output tensor even when the aggregate input/output row counts match.
@@ -310,7 +335,7 @@ SamplerOutput Sampler::forward(const SamplerInputs& inputs) {
             }
             beam_indices.reshape({(int64_t)beam_batch_size, (int64_t)cur_num_beams_out}).copy_(output.beam_indices);
 
-            success.fill_(true);
+            ensure_all_success().narrow(0, from_batch_idx_in, batch_size_in).fill_(true);
         }
 
         // prepare for next sampling
@@ -328,7 +353,7 @@ SamplerOutput Sampler::forward(const SamplerInputs& inputs) {
 
 std::vector<std::optional<ErrorInfo>> Sampler::preprocessLogits(const SamplerInputs& inputs) {
     if (inputs.logits_processor_states_ptr != nullptr) {
-        return inputs.logits_processor_states_ptr->batchProcess(inputs);
+        return inputs.logits_processor_states_ptr->batchProcess(inputs, batch_grammar_pool_.get());
     }
     return {};
 }

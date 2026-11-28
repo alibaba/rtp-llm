@@ -45,6 +45,7 @@ private:
     size_t                                                           greedy_sampling_buffer_index_ = 0;
     GreedySamplingBufferSlot*                                        current_greedy_sampling_slot_ = nullptr;
     std::array<GreedySamplingBufferSlot, kGreedySamplingBufferSlots> greedy_sampling_buffer_slots_;
+    std::shared_ptr<BatchGrammarScratchPool>                         batch_grammar_pool_;
     std::atomic<bool>                                                forward_in_progress_{false};
     cuda_graph::GraphStream                                          copy_stream_;
 };

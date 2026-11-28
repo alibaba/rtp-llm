@@ -741,6 +741,480 @@ class TestQwen4_5PDServing(unittest.TestCase):
         self.assertEqual(pd_tokens, ny_tokens)
         self.assertEqual(yoco_diff, 0.0)
 
+    @torch.no_grad()
+    def test_06_asymmetric_p_tp4_to_d_tp2_pd_disagg_end_to_end(self) -> None:
+        """End-to-end P(sp4_tp4_ep4) -> C++ TpCacheTransferMode reassembly -> D(dp2_tpsp2_ep4) PD serving."""
+        import socket
+        import torch.multiprocessing as mp
+        from rtp_llm.models.qwen4_5.qwen4_5_kv_cache import (
+            FFN_OUTPUT_SCONV_TAG,
+            GDN_CONSUMER_Q_CONV_TAG,
+            GDN_CONV_STATE_TAG,
+            GDN_SSM_STATE_TAG,
+            build_qwen4_5_kv_cache_spec_descs,
+        )
+        from rtp_llm.ops import RoleType, TpCacheTransferMode
+
+        def _free_port() -> int:
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                s.bind(("127.0.0.1", 0))
+                return int(s.getsockname()[1])
+
+        tok = SimpleByteTokenizer(
+            self.cfg.vocab_size,
+            bos_id=self.cfg.bos_token_id,
+            eos_id=self.cfg.eos_token_id,
+        )
+        prompts = [
+            tok.encode("Qwen4.5 P_tp=4 to D_tp=2 PD check!"),
+            tok.encode("Ragged asymmetric TP handoff seq2!"),
+        ]
+        in_lens = [len(p) for p in prompts]
+        max_new = 6
+        tpb = 16
+        seed = 5454
+
+        # 1. Verify C++ descriptor transfer contracts for P(tp4) -> D(tp2)
+        mcfg = SimpleNamespace(
+            qwen4_5_arch_config=self.cfg,
+            attn_config=SimpleNamespace(tokens_per_block=tpb, kernel_tokens_per_block=tpb),
+            gen_num_per_cycle=0,
+        )
+        p_descs = build_qwen4_5_kv_cache_spec_descs(
+            mcfg, self.cfg, parallel_mode="sp4_tp4_ep4", kv_dtype="fp8_e4m3", enable_yoco_decode=True, role_type=RoleType.PREFILL
+        )
+        d_descs = build_qwen4_5_kv_cache_spec_descs(
+            mcfg, self.cfg, parallel_mode="dp2_tpsp2_ep4", kv_dtype="fp8_e4m3", enable_yoco_decode=True, role_type=RoleType.DECODE
+        )
+        d_desc_map: dict[tuple[int, str], object] = {
+            (lid, str(d.tag)): d for lid, layer_list in enumerate(d_descs) for d in layer_list
+        }
+        p_desc_map: dict[tuple[int, str], object] = {
+            (lid, str(d.tag)): d for lid, layer_list in enumerate(p_descs) for d in layer_list
+        }
+        self.assertEqual(d_desc_map[(0, GDN_SSM_STATE_TAG)].tp_transfer_mode, TpCacheTransferMode.SHARDED_STATE)
+        self.assertEqual(d_desc_map[(0, GDN_CONV_STATE_TAG)].tp_transfer_mode, TpCacheTransferMode.SHARDED_STATE)
+        self.assertEqual(d_desc_map[(5, GDN_CONSUMER_Q_CONV_TAG)].tp_transfer_mode, TpCacheTransferMode.SHARDED_STATE)
+        self.assertEqual(d_desc_map[(0, FFN_OUTPUT_SCONV_TAG)].tp_transfer_mode, TpCacheTransferMode.REPLICATED)
+        self.assertEqual(d_desc_map[(3, FULL_ATTN_KV_TAG)].tp_transfer_mode, TpCacheTransferMode.MHA_HEADS)
+
+        # 2. Single-rank FP8 unified reference sequence (teacher-forced targets & logits)
+        ref_causal = Qwen4_5ForCausalLM(
+            self.cfg, dtype=torch.bfloat16, kv_dtype="fp8_e4m3", device=self.dev0
+        )
+        ref_causal.init_synthetic_weights(seed=seed, ple_mode="gpu_full")
+        _stabilize_router_margins(ref_causal)
+        ref_causal.prepare_weights()
+        ref_rtp = Qwen4_5RTPModel.from_causal_lm(ref_causal)
+        ref_plan = build_qwen4_5_kv_cache_plan(self.cfg, kv_dtype="fp8_e4m3", enable_yoco_decode=True)
+        ref_kv = LocalKVCache(
+            ref_plan,
+            tokens_per_block=tpb,
+            num_blocks_per_tag={t: 64 for t in QWEN4_5_CACHE_TAGS},
+            device=self.dev0,
+            dtype=torch.bfloat16,
+            kv_dtype=torch.float8_e4m3fn,
+        )
+        ref_rtp.kv_cache = ref_kv
+        ref_tables = build_block_tables_for_requests(ref_kv, [ln + max_new for ln in in_lens])
+        flat_ids = torch.tensor([t for seq in prompts for t in seq], dtype=torch.int64, device=self.dev0)
+        ref_p = ref_rtp.forward(
+            LocalPyModelInputs(
+                input_ids=flat_ids,
+                attention_inputs=make_tagged_attention_inputs(
+                    ref_tables,
+                    is_prefill=True,
+                    input_lengths=in_lens,
+                    sequence_lengths=in_lens,
+                    prefix_lengths=[0, 0],
+                    device=self.dev0,
+                ),
+            ),
+            enable_yoco_decode=True,
+        )
+        last_idx = [in_lens[0] - 1, in_lens[0] + in_lens[1] - 1]
+        ref_lg0 = ref_rtp.compute_logits(ref_p.hidden_states[torch.tensor(last_idx, dtype=torch.long, device=self.dev0)])
+        ref_cur = torch.argmax(ref_lg0, dim=-1).tolist()
+        ref_step_inputs: list[list[int]] = [list(ref_cur)]
+        ref_tokens = [[int(t)] for t in ref_cur]
+        ref_logits = [ref_lg0.detach().cpu()]
+        cur_lens = list(in_lens)
+        for _ in range(max_new - 1):
+            d_out = ref_rtp.forward(
+                LocalPyModelInputs(
+                    input_ids=torch.tensor(ref_cur, dtype=torch.int64, device=self.dev0),
+                    attention_inputs=make_tagged_attention_inputs(
+                        ref_tables,
+                        is_prefill=False,
+                        input_lengths=[1, 1],
+                        sequence_lengths=cur_lens,
+                        prefix_lengths=[0, 0],
+                        device=self.dev0,
+                    ),
+                ),
+                enable_yoco_decode=True,
+            )
+            lg = ref_rtp.compute_logits(d_out.hidden_states)
+            ref_logits.append(lg.detach().cpu())
+            ref_cur = torch.argmax(lg, dim=-1).tolist()
+            ref_step_inputs.append(list(ref_cur))
+            for b in range(2):
+                ref_tokens[b].append(int(ref_cur[b]))
+                cur_lens[b] += 1
+        del ref_causal, ref_rtp, ref_kv
+        torch.cuda.empty_cache()
+
+        ctx = mp.get_context("spawn")
+        with tempfile.TemporaryDirectory() as tmpdir:
+            for mode_name, yoco_flag in (("yoco", True), ("noyoco", False)):
+                p_descs_m = build_qwen4_5_kv_cache_spec_descs(
+                    mcfg, self.cfg, parallel_mode="sp4_tp4_ep4", kv_dtype="fp8_e4m3", enable_yoco_decode=yoco_flag, role_type=RoleType.PREFILL
+                )
+                d_descs_m = build_qwen4_5_kv_cache_spec_descs(
+                    mcfg, self.cfg, parallel_mode="dp2_tpsp2_ep4", kv_dtype="fp8_e4m3", enable_yoco_decode=yoco_flag, role_type=RoleType.DECODE
+                )
+                p_map_m = {(lid, str(d.tag)): d for lid, layer_list in enumerate(p_descs_m) for d in layer_list}
+                d_map_m = {(lid, str(d.tag)): d for lid, layer_list in enumerate(d_descs_m) for d in layer_list}
+
+                # 3. Run P_tp=4 (sp4_tp4_ep4) Prefill and publish per-rank CacheStore buffers
+                p_port = _free_port()
+                err_q = ctx.Queue()
+                p_procs = [
+                    ctx.Process(
+                        target=_p4_d2_gloo_worker,
+                        args=(r, "prefill", self.cfg, prompts, ref_step_inputs, max_new, tpb, seed, yoco_flag, p_port, tmpdir, err_q),
+                    )
+                    for r in range(4)
+                ]
+                for pr in p_procs:
+                    pr.start()
+                for pr in p_procs:
+                    pr.join(timeout=120)
+                while not err_q.empty():
+                    raise RuntimeError(f"Prefill({mode_name}) worker failed: {err_q.get()}")
+                self.assertTrue(all(pr.exitcode == 0 for pr in p_procs))
+
+                p_rank_data = [torch.load(os.path.join(tmpdir, f"prefill_r{r}.pt"), map_location="cpu") for r in range(4)]
+
+                # 4. Reassemble P_tp=4 -> D_tp=2 according to C++ TpCacheTransferMode + segments
+                def _reassemble_sharded_state(desc, p_desc, b0: torch.Tensor, b1: torch.Tensor) -> torch.Tensor:
+                    self.assertEqual(desc.tp_transfer_mode, TpCacheTransferMode.SHARDED_STATE)
+                    qe, ke, ve = int(desc.tp_state_q_elems), int(desc.tp_state_k_elems), int(desc.tp_state_v_elems)
+                    if qe == 0 and ke == 0 and ve == 0:
+                        return torch.cat([b0, b1], dim=-1)
+                    pq, pk, pv = int(p_desc.tp_state_q_elems), int(p_desc.tp_state_k_elems), int(p_desc.tp_state_v_elems)
+                    self.assertEqual(pq * 2, qe)
+                    self.assertEqual(pk * 2, ke)
+                    self.assertEqual(pv * 2, ve)
+                    tot_b = b0.shape[1]
+                    qb = tot_b * pq // (pq + pk + pv)
+                    kb = tot_b * pk // (pq + pk + pv)
+                    vb = tot_b - qb - kb
+                    return torch.cat(
+                        [
+                            b0[:, :qb],
+                            b1[:, :qb],
+                            b0[:, qb : qb + kb],
+                            b1[:, qb : qb + kb],
+                            b0[:, qb + kb : qb + kb + vb],
+                            b1[:, qb + kb : qb + kb + vb],
+                        ],
+                        dim=-1,
+                    )
+
+                for d_tp_rank in range(2):
+                    p0_d = p_rank_data[d_tp_rank * 2]
+                    p1_d = p_rank_data[d_tp_rank * 2 + 1]
+                    reassembled_payload: dict[tuple[int, str], torch.Tensor] = {}
+                    reassembled_scales: dict[tuple[int, str], tuple[torch.Tensor, torch.Tensor]] = {}
+                    for (lid, tag), (blk_ids, ten0) in p0_d["published"].items():
+                        ten1 = p1_d["published"][(lid, tag)][1]
+                        if tag == "linear":
+                            cnv_tag = GDN_CONV_STATE_TAG if (lid, GDN_CONV_STATE_TAG) in p_map_m else GDN_CONSUMER_Q_CONV_TAG
+                            p_ssm = p_map_m[(lid, GDN_SSM_STATE_TAG)]
+                            p_cnv = p_map_m[(lid, cnv_tag)]
+                            d_ssm = d_map_m[(lid, GDN_SSM_STATE_TAG)]
+                            d_cnv = d_map_m[(lid, cnv_tag)]
+                            p_ssm_bytes = int(p_ssm.entry_elems) * int(p_ssm.explicit_entry_count) * 4
+                            p_cnv_bytes = int(p_cnv.entry_elems) * int(p_cnv.explicit_entry_count) * 2
+                            b0 = ten0.contiguous().view(torch.uint8).reshape(len(blk_ids), -1)
+                            b1 = ten1.contiguous().view(torch.uint8).reshape(len(blk_ids), -1)
+                            merged_ssm = _reassemble_sharded_state(d_ssm, p_ssm, b0[:, :p_ssm_bytes], b1[:, :p_ssm_bytes])
+                            merged_cnv = _reassemble_sharded_state(
+                                d_cnv, p_cnv, b0[:, p_ssm_bytes : p_ssm_bytes + p_cnv_bytes], b1[:, p_ssm_bytes : p_ssm_bytes + p_cnv_bytes]
+                            )
+                            merged = torch.cat([merged_ssm, merged_cnv], dim=-1)
+                            d_ssm_bytes = int(d_ssm.entry_elems) * int(d_ssm.explicit_entry_count) * 4
+                            d_cnv_bytes = int(d_cnv.entry_elems) * int(d_cnv.explicit_entry_count) * 2
+                            self.assertEqual(merged.shape[1], d_ssm_bytes + d_cnv_bytes)
+                            full_bytes = ten0.shape[1] * 4
+                            if merged.shape[1] < full_bytes:
+                                merged = torch.cat(
+                                    [merged, torch.zeros((len(blk_ids), full_bytes - merged.shape[1]), dtype=torch.uint8)],
+                                    dim=-1,
+                                )
+                            reassembled_payload[(lid, tag)] = merged.contiguous().view(torch.float32)
+                            continue
+
+                        desc = d_map_m[(lid, tag)]
+                        p_desc = p_map_m[(lid, tag)]
+                        mode = desc.tp_transfer_mode
+                        if mode == TpCacheTransferMode.SHARDED_STATE:
+                            b0 = ten0.contiguous().view(torch.uint8).reshape(len(blk_ids), -1)
+                            b1 = ten1.contiguous().view(torch.uint8).reshape(len(blk_ids), -1)
+                            merged_b = _reassemble_sharded_state(desc, p_desc, b0, b1)
+                            out_ten = merged_b.contiguous().view(ten0.dtype)
+                            out_ten = out_ten.reshape(len(blk_ids), int(desc.entry_elems), int(desc.explicit_entry_count))
+                            reassembled_payload[(lid, tag)] = out_ten
+                        elif mode == TpCacheTransferMode.MHA_HEADS:
+                            self.assertEqual(tuple(ten0.shape), tuple(ten1.shape))
+                            reassembled_payload[(lid, tag)] = ten0.clone()
+                        elif mode == TpCacheTransferMode.REPLICATED:
+                            self.assertTrue(torch.equal(ten0, ten1), f"Replicated tag ({lid}, {tag}) mismatch between peers")
+                            reassembled_payload[(lid, tag)] = ten0.clone()
+                        else:
+                            raise AssertionError(f"Unexpected transfer mode {mode} for ({lid}, {tag})")
+
+                    for lid, (sc_blks, sc0) in p0_d["scales"].items():
+                        reassembled_scales[(lid, FULL_ATTN_KV_TAG)] = (sc_blks, sc0.clone())
+
+                    torch.save(
+                        {
+                            "tables": p0_d["tables"],
+                            "published": {k: (p0_d["published"][k][0], v) for k, v in reassembled_payload.items()},
+                            "scales": reassembled_scales,
+                            "first_toks": p0_d["first_toks"],
+                            "first_logits": p0_d["first_logits"],
+                        },
+                        os.path.join(tmpdir, f"decode_tp{d_tp_rank}.pt"),
+                    )
+
+                # 5. Run D_tp=2 (dp2_tpsp2_ep4) Decode (plus unified D_tp=2 parity reference inside rank)
+                d_port = _free_port()
+                d_procs = [
+                    ctx.Process(
+                        target=_p4_d2_gloo_worker,
+                        args=(r, "decode", self.cfg, prompts, ref_step_inputs, max_new, tpb, seed, yoco_flag, d_port, tmpdir, err_q),
+                    )
+                    for r in range(4)
+                ]
+                for pr in d_procs:
+                    pr.start()
+                for pr in d_procs:
+                    pr.join(timeout=120)
+                while not err_q.empty():
+                    raise RuntimeError(f"Decode({mode_name}) worker failed: {err_q.get()}")
+                self.assertTrue(all(pr.exitcode == 0 for pr in d_procs))
+                os.replace(os.path.join(tmpdir, "decode_out.pt"), os.path.join(tmpdir, f"decode_{mode_name}.pt"))
+
+            res_y = torch.load(os.path.join(tmpdir, "decode_yoco.pt"), map_location="cpu")
+            res_n = torch.load(os.path.join(tmpdir, "decode_noyoco.pt"), map_location="cpu")
+            pd_tokens = res_y["tokens"]
+            pd_logits = res_y["logits"]
+            uni_tokens = res_y["uni_tokens"]
+            uni_logits = res_y["uni_logits"]
+            ny_tokens = res_n["tokens"]
+            ny_logits = res_n["logits"]
+
+            total = len(prompts) * max_new
+            matched_uni = sum(int(pd_tokens[b][s] == uni_tokens[b][s]) for b in range(2) for s in range(max_new))
+            min_cos_tp1 = min(_cos_sim(pd_logits[s], ref_logits[s]) for s in range(max_new))
+            min_cos_uni = min(_cos_sim(pd_logits[s], uni_logits[s]) for s in range(max_new))
+            yoco_diff = max(float((pd_logits[s].float() - ny_logits[s].float()).abs().max().item()) for s in range(max_new))
+            print(
+                f"[PD P_tp=4 -> D_tp=2 Asymmetric FP8 KV B=2x{max_new}] "
+                f"vs_D_tp2_uni={matched_uni}/{total} (min_cos={min_cos_uni:.6f}), "
+                f"vs_TP1_ref_min_cos={min_cos_tp1:.6f}, YoCo_ON_vs_OFF={yoco_diff:.6f}"
+            )
+            self.assertGreater(min_cos_tp1, 0.999)
+            self.assertGreater(min_cos_uni, 0.999)
+            self.assertEqual(pd_tokens, uni_tokens)
+            self.assertEqual(pd_tokens, ny_tokens)
+            self.assertEqual(yoco_diff, 0.0)
+
+
+@torch.no_grad()
+def _p4_d2_gloo_worker(
+    rank: int,
+    role: str,
+    cfg,
+    prompts: list[list[int]],
+    ref_step_inputs: list[list[int]],
+    max_new: int,
+    tpb: int,
+    seed: int,
+    enable_yoco: bool,
+    port: int,
+    tmpdir: str,
+    err_q,
+) -> None:
+    try:
+        os.environ["MASTER_ADDR"] = "127.0.0.1"
+        os.environ["MASTER_PORT"] = str(port)
+        dist.init_process_group("gloo", rank=rank, world_size=4)
+        try:
+            dev = torch.device("cuda:0")
+            torch.cuda.set_device(dev)
+            if role == "prefill":
+                pmode = "sp4_tp4_ep4"
+                g0 = dist.new_group([0, 1, 2, 3])
+                tp_r, dp_r = rank, 0
+                kw = dict(
+                    parallel_mode=pmode, tp_size=4, tp_rank=rank, tp_group=g0,
+                    sp_size=4, sp_rank=rank, sp_group=g0, ep_size=4, ep_rank=rank, ep_group=g0,
+                )
+            else:
+                pmode = "dp2_tpsp2_ep4"
+                tp_groups = [dist.new_group([0, 1]), dist.new_group([2, 3])]
+                dp_groups = [dist.new_group([0, 2]), dist.new_group([1, 3])]
+                ep_group = dist.new_group([0, 1, 2, 3])
+                dp_r, tp_r = rank // 2, rank % 2
+                kw = dict(
+                    parallel_mode=pmode, dp_size=2, dp_rank=dp_r, dp_group=dp_groups[tp_r],
+                    tp_size=2, tp_rank=tp_r, tp_group=tp_groups[dp_r],
+                    sp_size=2, sp_rank=tp_r, sp_group=tp_groups[dp_r], ep_size=4, ep_rank=rank, ep_group=ep_group,
+                )
+
+            m = Qwen4_5ForCausalLM(cfg, dtype=torch.bfloat16, kv_dtype="fp8_e4m3", device=dev, **kw)
+            m.init_synthetic_weights(seed=seed, ple_mode="gpu_sharded")
+            _stabilize_router_margins(m)
+            m.prepare_weights()
+            rtp = Qwen4_5RTPModel.from_causal_lm(m)
+            plan = build_qwen4_5_kv_cache_plan(cfg, parallel_mode=pmode, kv_dtype="fp8_e4m3", enable_yoco_decode=enable_yoco)
+            in_lens = [len(p) for p in prompts]
+
+            if role == "prefill":
+                p_kv = LocalKVCache(
+                    plan, tokens_per_block=tpb, num_blocks_per_tag={t: 64 for t in QWEN4_5_CACHE_TAGS},
+                    device=dev, dtype=torch.bfloat16, kv_dtype=torch.float8_e4m3fn,
+                )
+                rtp.kv_cache = p_kv
+                p_tables = build_block_tables_for_requests(p_kv, in_lens)
+                writer = LocalMemoryCacheStoreWriter(record_payload=True)
+                flat_ids = torch.tensor([t for seq in prompts for t in seq], dtype=torch.int64, device=dev)
+                p_out = rtp.forward(
+                    LocalPyModelInputs(
+                        input_ids=flat_ids,
+                        attention_inputs=make_tagged_attention_inputs(
+                            p_tables, is_prefill=True, input_lengths=in_lens, sequence_lengths=in_lens,
+                            prefix_lengths=[0, 0], device=dev, cache_store_writer=writer,
+                        ),
+                    ),
+                    enable_yoco_decode=enable_yoco,
+                )
+                last_idx = [in_lens[0] - 1, in_lens[0] + in_lens[1] - 1]
+                first_lg = rtp.compute_logits(p_out.hidden_states[torch.tensor(last_idx, dtype=torch.long, device=dev)])
+                scales = {}
+                for lid in range(p_kv.layer_count()):
+                    if FULL_ATTN_KV_TAG in p_kv.layer_caches[lid]:
+                        c = p_kv.get_layer_cache(lid, FULL_ATTN_KV_TAG)
+                        if c.kv_scale_base is not None:
+                            blks = writer.published[(lid, FULL_ATTN_KV_TAG)][0]
+                            idx_t = torch.tensor(blks, dtype=torch.long, device=dev)
+                            scales[lid] = (blks, c.kv_scale_base.index_select(0, idx_t).detach().cpu())
+                torch.save(
+                    {
+                        "tables": p_tables,
+                        "published": {k: (blks, v.cpu()) for k, (blks, v) in writer.published.items()},
+                        "scales": scales,
+                        "first_toks": torch.argmax(first_lg, dim=-1).tolist(),
+                        "first_logits": first_lg.detach().cpu(),
+                    },
+                    os.path.join(tmpdir, f"prefill_r{rank}.pt"),
+                )
+            else:
+                bundle = torch.load(os.path.join(tmpdir, f"decode_tp{tp_r}.pt"), map_location="cpu")
+
+                # 1) Unified D_tp=2 baseline on exact same teacher-forced step tokens
+                u_kv = LocalKVCache(
+                    plan, tokens_per_block=tpb, num_blocks_per_tag={t: 64 for t in QWEN4_5_CACHE_TAGS},
+                    device=dev, dtype=torch.bfloat16, kv_dtype=torch.float8_e4m3fn,
+                )
+                rtp.kv_cache = u_kv
+                u_tables = build_block_tables_for_requests(u_kv, [ln + max_new for ln in in_lens])
+                flat_ids = torch.tensor([t for seq in prompts for t in seq], dtype=torch.int64, device=dev)
+                u_p = rtp.forward(
+                    LocalPyModelInputs(
+                        input_ids=flat_ids,
+                        attention_inputs=make_tagged_attention_inputs(
+                            u_tables, is_prefill=True, input_lengths=in_lens, sequence_lengths=in_lens,
+                            prefix_lengths=[0, 0], device=dev,
+                        ),
+                    ),
+                    enable_yoco_decode=enable_yoco,
+                )
+                last_idx = [in_lens[0] - 1, in_lens[0] + in_lens[1] - 1]
+                u_lg0 = rtp.compute_logits(u_p.hidden_states[torch.tensor(last_idx, dtype=torch.long, device=dev)])
+                uni_tokens = [[int(t)] for t in torch.argmax(u_lg0, dim=-1).tolist()]
+                uni_logits = [u_lg0.detach().cpu()]
+                cur_lens = list(in_lens)
+                for step_i in range(max_new - 1):
+                    u_attn = make_tagged_attention_inputs(
+                        u_tables, is_prefill=False, input_lengths=[1, 1], sequence_lengths=cur_lens,
+                        prefix_lengths=[0, 0], device=dev,
+                    )
+                    u_out = rtp.forward(
+                        LocalPyModelInputs(input_ids=torch.tensor(ref_step_inputs[step_i], dtype=torch.int64, device=dev), attention_inputs=u_attn),
+                        enable_yoco_decode=enable_yoco,
+                    )
+                    ulg = rtp.compute_logits(u_out.hidden_states)
+                    uni_logits.append(ulg.detach().cpu())
+                    utoks = torch.argmax(ulg, dim=-1).tolist()
+                    for b in range(2):
+                        uni_tokens[b].append(int(utoks[b]))
+                        cur_lens[b] += 1
+
+                # 2) PD Disaggregated D_tp=2 decode from reassembled P_tp=4 CacheStore state
+                d_kv = LocalKVCache(
+                    plan, tokens_per_block=tpb, num_blocks_per_tag={t: 64 for t in QWEN4_5_CACHE_TAGS},
+                    device=dev, dtype=torch.bfloat16, kv_dtype=torch.float8_e4m3fn,
+                )
+                rtp.kv_cache = d_kv
+                d_tables = transfer_published_blocks_to_decode(
+                    bundle["published"], bundle["tables"], d_kv, [ln + max_new for ln in in_lens]
+                )
+                for (lid, tag), (src_blks, sc_ten) in bundle["scales"].items():
+                    dst_c = d_kv.get_layer_cache(lid, tag)
+                    assert dst_c.kv_scale_base is not None
+                    s_rows, d_rows = bundle["tables"][tag], d_tables[tag]
+                    id_map = {int(sb): int(db) for sr, dr in zip(s_rows, d_rows) for sb, db in zip(sr, dr)}
+                    sc_dev = sc_ten.to(dev)
+                    for i_b, sb in enumerate(src_blks):
+                        if sb in id_map:
+                            dst_c.kv_scale_base[id_map[sb]].copy_(sc_dev[i_b])
+
+                gen_tokens = [[int(t)] for t in bundle["first_toks"]]
+                step_logits = [bundle["first_logits"]]
+                cur_lens = list(in_lens)
+                for step_i in range(max_new - 1):
+                    d_attn = make_tagged_attention_inputs(
+                        d_tables, is_prefill=False, input_lengths=[1, 1], sequence_lengths=cur_lens,
+                        prefix_lengths=[0, 0], device=dev,
+                    )
+                    d_out = rtp.forward(
+                        LocalPyModelInputs(input_ids=torch.tensor(ref_step_inputs[step_i], dtype=torch.int64, device=dev), attention_inputs=d_attn),
+                        enable_yoco_decode=enable_yoco,
+                    )
+                    lg = rtp.compute_logits(d_out.hidden_states)
+                    step_logits.append(lg.detach().cpu())
+                    cur_toks = torch.argmax(lg, dim=-1).tolist()
+                    for b in range(2):
+                        gen_tokens[b].append(int(cur_toks[b]))
+                        cur_lens[b] += 1
+
+                if rank == 0:
+                    torch.save(
+                        {"tokens": gen_tokens, "logits": step_logits, "uni_tokens": uni_tokens, "uni_logits": uni_logits},
+                        os.path.join(tmpdir, "decode_out.pt"),
+                    )
+            dist.barrier()
+        finally:
+            dist.destroy_process_group()
+    except BaseException as exc:
+        import traceback
+        err_q.put((rank, f"{exc!r}\n{traceback.format_exc()}"))
+        raise
+
 
 @torch.no_grad()
 def run_two_process_nccl_pd_test() -> None:
