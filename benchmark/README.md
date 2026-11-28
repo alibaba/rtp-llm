@@ -29,3 +29,66 @@ test vllm-0.2.6 whl and rtp-llm
 
 
 more test data are on the way!
+
+### Topology-derived KV candidate schedule
+
+`topology_kv_candidate_schedule.py` is an opt-in CUDA screening benchmark for
+long-context decode attention. It does not change RTP-LLM serving behavior.
+
+The benchmark builds rectangular, request-local candidate rows from KV block
+metadata:
+
+- sink blocks keep early attention-sink evidence,
+- local blocks keep the newest causal context,
+- high-drift blocks keep topology-style witness blocks where K centroids move
+  sharply between neighboring blocks.
+
+The CUDA benchmark compares PyTorch dense SDPA decode attention against a
+selected-token decode path that builds topology-derived candidate token indices,
+gathers candidate K/V rows, and runs SDPA over only those selected tokens.
+Sparse timing includes candidate K/V gather and SDPA only; topology schedule
+construction runs once before the timed loops and is not included in speedup.
+Report the result as a benchmark signal only; end-to-end model speedup still
+requires integration with the runtime sparse MLA or indexer path and
+model-quality validation.
+
+The CPU scheduling and correctness regressions are part of the non-manual Bazel
+test set. Run them from the repository root with
+`bazel test //benchmark:topology_kv_candidate_schedule_cpu_test` or
+`python -m unittest benchmark.test_topology_kv_candidate_schedule`.
+
+The CPU target remains enabled under `--config=rocm`. Because every assertion
+uses CPU tensors, that configuration resolves the CPU Torch wheel for this
+target instead of adding an unnecessary ROCm runtime dependency. Verify the
+ROCm-configured target with
+`bazel test //benchmark:topology_kv_candidate_schedule_cpu_test --config=rocm`.
+
+The longer CUDA performance smoke remains opt-in so it does not add timing work
+to routine CI. Run it explicitly with
+`bazel test //benchmark:topology_kv_candidate_schedule_cuda_test --config=cuda12`.
+
+```bash
+python benchmark/topology_kv_candidate_schedule.py \
+  --seq-len 16384 \
+  --selected-tokens 128 256 512 1024 \
+  --heads 16 \
+  --head-dim 64 \
+  --rounds 60 \
+  --warmup 20 \
+  --device cuda
+```
+
+Omit `--device` to use `auto`, which selects CUDA when available and CPU
+otherwise.
+
+Example WSL output on an RTX 4060 Laptop GPU, matching the script's Markdown
+table format with one leading pipe per row:
+
+```text
+| seq_len | selected_tokens | dense_sdpa_ms | sparse_selected_ms | speedup |
+| ---: | ---: | ---: | ---: | ---: |
+| 16384 | 128 | 0.2816 | 0.0514 | 5.48x |
+| 16384 | 256 | 0.2827 | 0.0489 | 5.78x |
+| 16384 | 512 | 0.2814 | 0.0752 | 3.74x |
+| 16384 | 1024 | 0.2833 | 0.1298 | 2.18x |
+```
