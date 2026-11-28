@@ -1,6 +1,12 @@
 ### ReuseCache
 In multi-turn conversation scenarios, multiple prompts often share common prefixes. The KV cache corresponding to these prefix tokens is identical, and reusing KV cache can reduce computation time for these repeated parts, lowering First Token Latency. Enable KV cache reuse by setting the environment variable `REUSE_CACHE=1`. The startup logs will show "reuse_cache: True" when enabled.
 The environment variable `SEQ_SIZE_PER_BLOCK` specifies the number of sequences corresponding to each KV cache block.
+
+For DynamicNTK RoPE, prefix tokens alone do not identify a cached key beyond the
+original context length: its rotation also depends on the request length. Requests
+within the original limit can share prefix blocks. Longer requests still use their
+own KV cache, but do not read or publish blocks for reuse by other requests.
+
 **Note: ReuseCache cannot currently use flash attention due to mismatched lengths between Q and KV, requiring `--reuse_cache true` to be added in the CMD**
 
 ``` python

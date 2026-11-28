@@ -329,6 +329,10 @@ CacheConfig createConfigFromDescs(const ModelConfig&       model_config,
     config.global_layer_begin      = range.begin;
     config.cache_min_replay_tokens = std::max(1, model_config.cache_min_replay_tokens);
     config.cache_key_hash_seed     = model_config.cache_key_hash_seed;
+    const auto& rope               = model_config.attn_config.rope_config;
+    if (rope.style == RopeStyle::DynamicNTK) {
+        config.length_independent_rope_limit = rope.max_pos;
+    }
 
     const auto& cp = parallelism_config.prefill_cp_config;
     config.local_kv_cache_sharded =

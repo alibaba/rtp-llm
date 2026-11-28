@@ -1217,6 +1217,15 @@ void StreamCacheResource::reportMallocRetry() const {
 }
 
 bool StreamCacheResource::reuseCache() const {
+    if (resource_context_.cache_manager) {
+        const auto limit = resource_context_.cache_manager->cacheConfig().length_independent_rope_limit;
+        // A short prefill and a long prefill can have identical prefix tokens
+        // but different rotated keys. Gate both cross-request lookup and
+        // publication, including a short request that grew during decode.
+        if (limit > 0 && std::max(stream_->inputLength(), stream_->seqLength()) > limit) {
+            return false;
+        }
+    }
     // AND logic: global REUSE_CACHE=1 AND per-request reuse_cache both must be true.
     // Per-request field flows frontend → FlexLB → engine via protobuf.
     return !stream_->generateConfig()->isPrefillOnly() && resource_context_.reuse_cache

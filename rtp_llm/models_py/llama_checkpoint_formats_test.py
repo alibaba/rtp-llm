@@ -93,6 +93,20 @@ def write_meta_source(root):
 
 
 class LlamaCheckpointFormatsTest(unittest.TestCase):
+    def test_dynamic_ntk_uses_training_length_before_extended_context_limit(self):
+        from rtp_llm.models.llama import Llama
+
+        hf = dict(num_attention_heads=2, hidden_size=8, num_hidden_layers=1,
+                  vocab_size=8, intermediate_size=16, max_position_embeddings=128)
+        with tempfile.TemporaryDirectory() as root:
+            for extra, expected in (({}, 128), ({"original_max_position_embeddings": 32}, 32)):
+                with self.subTest(expected=expected):
+                    hf["rope_scaling"] = {"rope_type": "dynamic", "factor": 4, **extra}
+                    (Path(root) / "config.json").write_text(json.dumps(hf))
+                    rope = Llama._create_config(root).attn_config.rope_config
+                    self.assertEqual(rope.max_pos, expected)
+                    self.assertEqual(rope.scale, 4)
+
     def test_fp8_ft_adapters_preserve_row_and_block_calibration(self):
         from safetensors.torch import save_file
 

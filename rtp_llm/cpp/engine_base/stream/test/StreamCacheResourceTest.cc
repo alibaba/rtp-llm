@@ -1587,6 +1587,29 @@ TEST_F(StreamCacheResourceTest, testAllocateResource) {
 //     stream_->releaseResource();
 // }
 
+TEST_F(StreamCacheResourceTest, DynamicNtkDoesNotExchangeLengthDependentPrefixBlocks) {
+    auto config                          = init_config();
+    config.length_independent_rope_limit = 4;
+    prepareResourceWithCacheConfig(config, {1, 2, 3, 4}, true, RoleType::PDFUSION);
+    auto& resource = stream_->streamCacheResource();
+    stream_->generate_input_->generate_config->reuse_cache = true;
+    EXPECT_TRUE(resource.reuseCache());
+    stream_->setSeqLength(5);
+    EXPECT_FALSE(resource.reuseCache());
+    EXPECT_FALSE(resource.enableCacheLookup());
+    EXPECT_EQ(resource.insertTarget(), Tier::NONE);
+}
+
+TEST_F(StreamCacheResourceTest, LongDynamicNtkPrefillDoesNotLookUpAShortRequestsPrefix) {
+    auto config                          = init_config();
+    config.length_independent_rope_limit = 4;
+    prepareResourceWithCacheConfig(config, {1, 2, 3, 4, 5}, true, RoleType::PDFUSION);
+    auto& resource = stream_->streamCacheResource();
+    stream_->generate_input_->generate_config->reuse_cache = true;
+    EXPECT_FALSE(resource.enableCacheLookup());
+    EXPECT_EQ(resource.insertTarget(), Tier::NONE);
+}
+
 TEST_F(StreamCacheResourceTest, testStreamCacheResourceReuseCacheMethod) {
     // engine=true, query=true -> true
     prepareResource(true);

@@ -94,8 +94,9 @@ class Llama(BaseModel):
             elif rope_type == "dynamic":
                 config.attn_config.rope_config.style = 3
                 config.attn_config.rope_config.scale = rope_scaling["factor"]
-                config.attn_config.rope_config.max_pos = config_json.get(
-                    "max_position_embeddings", 2048
+                config.attn_config.rope_config.max_pos = rope_scaling.get(
+                    "original_max_position_embeddings",
+                    config_json.get("max_position_embeddings", 2048),
                 )
             elif rope_type == "yarn":
                 config.attn_config.rope_config.style = 5
