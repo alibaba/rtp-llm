@@ -231,7 +231,7 @@
                 }
             },
             "result": {
-                "response": "<think>我们分析句子：\"当前，我国社会主义事业正在</think>{\"人物\": [], \"组织\": [\"我国\"], \"地点\": [], \"其他实体\": [\"社会主义事业\", \"两个文明建设\"]}</think>{\"人物\": [], \"组织\": [], \"地点\": [], \"其他实体\": [\"社会主义事业\", \"两个文明建设\"]}<｜end▁of▁sentence｜>",
+                "response": "<think>我们分析句子：\"当前，我国社会主义事业正在</think>{\"人物\": [], \"组织\": [\"我国\"], \"地点\": [], \"其他实体\": [\"社会主义事业\", \"两个文明建设\"]}</think>{\"人物\": [], \"组织\": [], \"地点\": [], \"其他实体\": [\"我国\", \"社会主义事业\", \"两个文明建设\"]}<｜end▁of▁sentence｜>",
                 "generated_ids": [
                     128821,
                     1300,
@@ -294,6 +294,9 @@
                     22935,
                     3362,
                     20584,
+                    5892,
+                    1760,
+                    582,
                     9865,
                     9486,
                     1760,
@@ -367,6 +370,9 @@
                     22935,
                     3362,
                     20584,
+                    5892,
+                    1760,
+                    582,
                     9865,
                     9486,
                     1760,
@@ -442,6 +448,9 @@
                     22935,
                     3362,
                     20584,
+                    5892,
+                    1760,
+                    582,
                     9865,
                     9486,
                     1760,
@@ -463,7 +472,7 @@
                     "generate_think_token_num": 43
                 },
                 "reasoning_content": "我们分析句子：\"当前，我国社会主义事业正在</think>{\"人物\": [], \"组织\": [\"我国\"], \"地点\": [], \"其他实体\": [\"社会主义事业\", \"两个文明建设\"]}",
-                "content": "{\"人物\": [], \"组织\": [], \"地点\": [], \"其他实体\": [\"社会主义事业\", \"两个文明建设\"]}",
+                "content": "{\"人物\": [], \"组织\": [], \"地点\": [], \"其他实体\": [\"我国\", \"社会主义事业\", \"两个文明建设\"]}",
                 "aux_info": null,
                 "finish_reason": 0,
                 "json_content": true,
@@ -1715,7 +1724,7 @@
                 "messages": [
                     {
                         "role": "system",
-                        "content": "You are a helpful assistant."
+                        "content": "You are a helpful assistant.\n请将下列气象站记录转换为 JSON。使用记录中的字段名和层级，逐字保留字符串值、单位和标点，只返回记录包含的字段。\ncity：北京\nweather：晴\ntemperature：15°C\nhumidity：30%\nwind：北风 3级\nupdate_time：2025-04-07 10:00"
                     },
                     {
                         "role": "user",
@@ -1804,7 +1813,7 @@
                 "messages": [
                     {
                         "role": "system",
-                        "content": "You are a helpful assistant."
+                        "content": "You are a helpful assistant.\n请将下列气象站记录转换为 JSON。使用记录中的字段名和层级，逐字保留字符串值、单位和标点，只返回记录包含的字段。\ncity：北京\nweather：晴\ntemperature：15°C\nhumidity：30%\nwind：北风3级\nupdate_time：2025-04-05 14:00"
                     },
                     {
                         "role": "user",
@@ -1894,7 +1903,7 @@
                 "messages": [
                     {
                         "role": "system",
-                        "content": "You are a helpful assistant."
+                        "content": "You are a helpful assistant.\n请将下列气象站记录转换为 JSON。使用记录中的字段名和层级，逐字保留字符串值、单位和标点，只返回记录包含的字段。\nlocation：北京\nweather：\n  temperature：15°C\n  condition：多云\n  humidity：45%\n  wind：北风 3级\ntimestamp：2025-04-07 10:00:00"
                     },
                     {
                         "role": "user",
@@ -1984,7 +1993,7 @@
                 "messages": [
                     {
                         "role": "system",
-                        "content": "You are a helpful assistant."
+                        "content": "You are a helpful assistant.\n请将下列气象站记录转换为 JSON。使用记录中的字段名和层级，逐字保留字符串值、单位和标点，只返回记录包含的字段。\nadvice：天气较冷，建议穿着厚外套、毛衣等保暖衣物。\ncity：北京\ndate：2025-04-17\nweather：晴转多云，伴有轻度霾，气温10℃~22℃，南风2-3级"
                     },
                     {
                         "role": "user",
@@ -2102,7 +2111,7 @@
                 "messages": [
                     {
                         "role": "system",
-                        "content": "You are a helpful assistant."
+                        "content": "You are a helpful assistant.\n请将下列气象站记录转换为 JSON。使用记录中的字段名和层级，逐字保留字符串值、单位和标点，只返回记录包含的字段。\nadvice：北京当前天气晴朗，气温25°C，湿度40%，北风3级。\ncity：北京\ndate：2025-04-05\nweather：晴"
                     },
                     {
                         "role": "user",
