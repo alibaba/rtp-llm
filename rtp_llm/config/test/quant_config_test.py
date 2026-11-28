@@ -3,7 +3,12 @@ import os
 import tempfile
 import unittest
 
-from rtp_llm.config.quant_config import ModelOptFp4Config, QuantizationConfig
+from rtp_llm.config.quant_config import (
+    Fp8BlockWiseQuantConfig,
+    Fp8PerTensorQuantConfig,
+    ModelOptFp4Config,
+    QuantizationConfig,
+)
 
 
 class QuantConfigTest(unittest.TestCase):
@@ -14,6 +19,77 @@ class QuantConfigTest(unittest.TestCase):
             ) as writer:
                 json.dump(config_json, writer)
             return QuantizationConfig.load_from_ckpt(checkpoint_path)
+
+    def test_fp8_weight_block_size_preserves_valid_configs(self):
+        for weight_block in ([64, 64], [128, 128], [128]):
+            with self.subTest(weight_block=weight_block):
+                config = self._load_config(
+                    {
+                        "quantization_config": {
+                            "quant_method": "fp8",
+                            "weight_block_size": weight_block,
+                        }
+                    }
+                )
+                self.assertIsInstance(config, Fp8BlockWiseQuantConfig)
+                self.assertEqual(config.bits, 8)
+                self.assertEqual(config.group_size(), weight_block[0])
+                self.assertTrue(config.is_quanted())
+
+    def test_fp8_without_weight_block_size_remains_per_tensor(self):
+        config = self._load_config({"quantization_config": {"quant_method": "fp8"}})
+        self.assertIsInstance(config, Fp8PerTensorQuantConfig)
+        self.assertEqual(config.group_size(), 0)
+        self.assertTrue(config.is_quanted())
+
+    def test_invalid_fp8_weight_block_size_raises_value_error(self):
+        invalid_cases = (
+            None,
+            128,
+            "128",
+            {},
+            [],
+            [0, 0],
+            [-128, -128],
+            [True, True],
+            [False, False],
+            [128.0, 128.0],
+            ["128", "128"],
+            [None, None],
+            [128, 64],
+            [128, True],
+            [128, 128.0],
+        )
+        for weight_block in invalid_cases:
+            with self.subTest(weight_block=weight_block):
+                with self.assertRaisesRegex(ValueError, "weight_block_size"):
+                    self._load_config(
+                        {
+                            "quantization_config": {
+                                "quant_method": "fp8",
+                                "weight_block_size": weight_block,
+                            }
+                        }
+                    )
+
+    def test_nested_fp8_weight_block_size_is_validated(self):
+        for weight_block, valid in (([128, 128], True), ([], False)):
+            with self.subTest(weight_block=weight_block):
+                config_json = {
+                    "text_config": {
+                        "quantization_config": {
+                            "quant_method": "fp8",
+                            "weight_block_size": weight_block,
+                        }
+                    }
+                }
+                if valid:
+                    config = self._load_config(config_json)
+                    self.assertIsInstance(config, Fp8BlockWiseQuantConfig)
+                    self.assertEqual(config.group_size(), 128)
+                else:
+                    with self.assertRaisesRegex(ValueError, "weight_block_size"):
+                        self._load_config(config_json)
 
     @staticmethod
     def _grouped_modelopt_config():
