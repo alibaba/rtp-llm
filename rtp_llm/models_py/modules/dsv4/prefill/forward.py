@@ -129,6 +129,7 @@ except Exception:  # pragma: no cover
     tl = None
     _TRITON_AVAILABLE = False
 
+from rtp_llm.models_py.distributed.collective_torch import clear_grow_only_buffers
 from rtp_llm.models_py.modules.dsv4 import _profiler
 from rtp_llm.models_py.modules.dsv4 import prefill_workspace as _prefill_ws_mod
 from rtp_llm.models_py.modules.dsv4.cp import (
@@ -521,7 +522,9 @@ def forward_layers(
         )
         ws_is_real = isinstance(ws, _prefill_ws_mod.PrefillWorkspace)
         if ws_is_real:
-            ws.reuse_layer_out_scratch = True
+            small_local = int(input_ids.size(0)) <= 8192
+            ws.enable_scratch_cache = small_local
+            ws.reuse_layer_out_scratch = small_local
 
     # Build + propagate CP context once per prefill step. Under CP the
     # caller hands us a per-rank chunk slice (T_local = chunk_length),
@@ -943,6 +946,9 @@ def forward_layers(
                                 f"for layer {layer_idx}; got {len(layer_caches)}"
                             )
                         write_cache_store_impl(layer_caches[0])
+    except Exception:
+        clear_grow_only_buffers()
+        raise
     finally:
         if ws_is_real:
             for _layer in v4.layers:

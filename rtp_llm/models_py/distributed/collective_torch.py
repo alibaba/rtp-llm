@@ -7,7 +7,7 @@ import os
 import re
 import threading
 from datetime import timedelta
-from typing import Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 import torch
 import torch.distributed
@@ -42,6 +42,8 @@ _GROW_ONLY_BUFFER_LOCK = threading.Lock()
 # Maps (dev_key, slot_key) -> [buffer_u8, realloc_gen].
 _GROW_ONLY_BUFFERS: Dict[Tuple[Tuple[str, Optional[int]], str], List[Any]] = {}
 _GROW_ONLY_CLEAR_EPOCH: int = 0
+_GROW_ONLY_MAX_CACHE_BYTES: int = 512 << 20
+_GROW_ONLY_MAX_TOTAL_BYTES: int = 1024 << 20
 
 
 def _normalize_buffer_device_key(
@@ -77,15 +79,34 @@ def acquire_grow_only_u8_holder(
     cache_key = (dev_key, slot_key)
     with _GROW_ONLY_BUFFER_LOCK:
         holder = _GROW_ONLY_BUFFERS.get(cache_key)
+        if holder is not None and holder[0].numel() >= nbytes:
+            return holder[0][:nbytes], holder, int(holder[1])
+
+        aligned_cap = (nbytes + 15) & ~15
+        other_bytes = sum(
+            int(h[0].numel())
+            for k, h in _GROW_ONLY_BUFFERS.items()
+            if k[0] == dev_key and k != cache_key
+        )
+        if (
+            aligned_cap > _GROW_ONLY_MAX_CACHE_BYTES
+            or other_bytes + aligned_cap > _GROW_ONLY_MAX_TOTAL_BYTES
+        ):
+            # Keep oversized/over-budget buffers ephemeral so rare warmup or
+            # max-context calls do not pin multi-GiB HBM process-wide.
+            buf = torch.empty(aligned_cap, device=dev, dtype=torch.uint8)
+            return buf[:nbytes], None, -1
+
         if holder is None:
-            aligned_cap = (nbytes + 15) & ~15
             buf = torch.empty(aligned_cap, device=dev, dtype=torch.uint8)
             holder = [buf, 1]
             _GROW_ONLY_BUFFERS[cache_key] = holder
-        elif holder[0].numel() < nbytes:
-            aligned_cap = (nbytes + 15) & ~15
-            holder[0] = torch.empty(aligned_cap, device=dev, dtype=torch.uint8)
+        else:
+            # Drop the previous storage before allocating the larger replacement
+            # so old and new buffers do not overlap on HBM.
             holder[1] += 1
+            holder[0] = torch.empty(0, device=dev, dtype=torch.uint8)
+            holder[0] = torch.empty(aligned_cap, device=dev, dtype=torch.uint8)
         return holder[0][:nbytes], holder, int(holder[1])
 
 
@@ -151,6 +172,7 @@ def clear_grow_only_buffers() -> None:
         _GROW_ONLY_CLEAR_EPOCH += 1
         for holder in _GROW_ONLY_BUFFERS.values():
             holder[1] += 1
+            holder[0] = torch.empty(0, device=holder[0].device, dtype=torch.uint8)
         _GROW_ONLY_BUFFERS.clear()
 
 

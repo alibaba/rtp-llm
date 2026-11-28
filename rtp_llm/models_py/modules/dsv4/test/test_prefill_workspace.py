@@ -18,6 +18,9 @@ disjointness. ``align_bytes=1`` is passed throughout to avoid the production
 
 import torch
 
+from rtp_llm.models_py.distributed import collective_torch
+from rtp_llm.models_py.distributed.collective_torch import Group
+from rtp_llm.models_py.modules.dsv4 import cp as _cp_mod
 from rtp_llm.models_py.modules.dsv4.prefill_workspace import PrefillWorkspace
 
 
@@ -300,6 +303,186 @@ def test_cp_gather_restore_overflow():
     )
 
 
+def test_scratch_respects_enable_flag_entry_limit_budget_and_growth():
+    ws = PrefillWorkspace(
+        torch.device("cpu"), q_rows=1, q_dim=1, reserve_cp=False, align_bytes=1
+    )
+    # 1. enable_scratch_cache=False disables caching and returns ephemeral storage.
+    ws.enable_scratch_cache = False
+    e1 = ws.scratch("disabled", (8,), torch.int32, zero=True)
+    e2 = ws.scratch("disabled", (8,), torch.int32)
+    assert e1.data_ptr() != e2.data_ptr()
+    assert int(e1.sum().item()) == 0
+    assert not ws.owns_tensor(e1)
+    assert ws._scratch == {}
+    assert ws._scratch_total_bytes == 0
+
+    # 2. Entry larger than scratch_max_entry_bytes is uncached.
+    ws.enable_scratch_cache = True
+    ws.scratch_max_entry_bytes = 64
+    ws.scratch_budget_bytes = 128
+    over_entry = ws.scratch("big", (20,), torch.float32)  # 80 B > 64 B
+    assert not ws.owns_tensor(over_entry)
+    assert "big" not in ws._scratch
+    assert ws._scratch_total_bytes == 0
+
+    # 3. Cached allocation grows and updates total without double counting old size.
+    k1 = ws.scratch("k", (8,), torch.float32)  # 32 B
+    assert ws.owns_tensor(k1)
+    assert ws._scratch_total_bytes == 32
+    k1_same = ws.scratch("k", (4,), torch.float32)  # 16 B fits in 32 B
+    assert k1_same.data_ptr() == k1.data_ptr()
+    assert ws._scratch_total_bytes == 32
+
+    k1_grown = ws.scratch("k", (12,), torch.float32)  # 48 B <= 64 B, <= 128 B
+    assert ws.owns_tensor(k1_grown)
+    assert ws._scratch_total_bytes == 48
+
+    # 4. Adding entries within budget caches; pushing over budget falls back ephemeral.
+    m1 = ws.scratch("m", (16,), torch.float32)  # 64 B -> total 112 B <= 128 B
+    assert ws.owns_tensor(m1)
+    assert ws._scratch_total_bytes == 112
+
+    spill = ws.scratch("spill", (8,), torch.float32)  # 112 + 32 = 144 B > 128 B
+    assert not ws.owns_tensor(spill)
+    assert "spill" not in ws._scratch
+    assert ws._scratch_total_bytes == 112
+
+    # Growing an existing key uses (total - cur + new) <= budget.
+    # m currently holds 64 B; growing m to 64 B is cached, total=112.
+    # Growing k (48 B) to 64 B: 112 - 48 + 64 = 128 B <= 128 B -> cached!
+    k1_edge = ws.scratch("k", (16,), torch.float32)
+    assert ws.owns_tensor(k1_edge)
+    assert ws._scratch_total_bytes == 128
+
+
+def test_grow_only_buffer_caps_and_clear_epoch_sync():
+    orig_max_cache = collective_torch._GROW_ONLY_MAX_CACHE_BYTES
+    orig_max_total = collective_torch._GROW_ONLY_MAX_TOTAL_BYTES
+    try:
+        collective_torch.clear_grow_only_buffers()
+        collective_torch._GROW_ONLY_MAX_CACHE_BYTES = 64
+        collective_torch._GROW_ONLY_MAX_TOTAL_BYTES = 96
+
+        # Oversized single buffer (> 64 B) stays ephemeral.
+        big_u8, big_holder, big_gen = collective_torch.acquire_grow_only_u8_holder(
+            "cpu", "ut.big", 80, check_capture=False
+        )
+        assert big_u8.numel() == 80
+        assert big_holder is None and big_gen == -1
+        assert len(collective_torch._GROW_ONLY_BUFFERS) == 0
+
+        # Small buffer within cache & total budget is cached.
+        a_u8, a_holder, a_gen = collective_torch.acquire_grow_only_u8_holder(
+            "cpu", "ut.a", 48, check_capture=False
+        )
+        assert a_u8.numel() == 48
+        assert a_holder is not None and a_gen == 1
+        assert a_holder[0].numel() == 48
+
+        # Growing within caps bumps gen.
+        a2_u8, a2_holder, a2_gen = collective_torch.acquire_grow_only_u8_holder(
+            "cpu", "ut.a", 64, check_capture=False
+        )
+        assert a2_holder is a_holder
+        assert a2_gen == 2
+        assert a2_u8.numel() == 64
+
+        # Another key that pushes per-device total > 96 B stays ephemeral.
+        b_u8, b_holder, b_gen = collective_torch.acquire_grow_only_u8_holder(
+            "cpu", "ut.b", 48, check_capture=False
+        )
+        assert b_u8.numel() == 48
+        assert b_holder is None and b_gen == -1
+        assert (("cpu", None), "ut.b") not in collective_torch._GROW_ONLY_BUFFERS
+
+        # clear_grow_only_buffers invalidates holder gen, drops backing tensor,
+        # and bumps _GROW_ONLY_CLEAR_EPOCH.
+        epoch_before = collective_torch._GROW_ONLY_CLEAR_EPOCH
+        collective_torch.clear_grow_only_buffers()
+        assert collective_torch._GROW_ONLY_CLEAR_EPOCH == epoch_before + 1
+        assert a_holder[1] == 3
+        assert a_holder[0].numel() == 0
+        assert len(collective_torch._GROW_ONLY_BUFFERS) == 0
+    finally:
+        collective_torch._GROW_ONLY_MAX_CACHE_BYTES = orig_max_cache
+        collective_torch._GROW_ONLY_MAX_TOTAL_BYTES = orig_max_total
+        collective_torch.clear_grow_only_buffers()
+
+
+def test_coalesced_plan_handles_uncached_buffers_and_clear_epoch():
+    from types import SimpleNamespace
+    from unittest.mock import patch
+
+    orig_max_cache = collective_torch._GROW_ONLY_MAX_CACHE_BYTES
+    orig_max_total = collective_torch._GROW_ONLY_MAX_TOTAL_BYTES
+    try:
+        collective_torch.clear_grow_only_buffers()
+        _cp_mod._COALESCED_PLAN_CACHE.clear()
+        _cp_mod._COALESCED_LAST_PLAN_BY_SLOT.clear()
+
+        fake_pg = SimpleNamespace(rank=lambda: 0, size=lambda: 1)
+        with (
+            patch.object(collective_torch, "_get_group", return_value=fake_pg),
+            patch.object(torch.distributed, "get_world_size", return_value=1),
+            patch.object(torch.distributed, "is_initialized", return_value=True),
+            patch.object(torch.distributed, "all_gather_into_tensor"),
+        ):
+            # Case 1: oversized staging exceeds cap -> holder is None, but
+            # _build_coalesced_plan still builds an uncached plan without crashing.
+            collective_torch._GROW_ONLY_MAX_CACHE_BYTES = 32
+            collective_torch._GROW_ONLY_MAX_TOTAL_BYTES = 64
+            t_big = torch.ones((4, 16), dtype=torch.float32)  # 256 B > 32 B
+            handle_big = _cp_mod.start_cp_all_gather_coalesced(
+                (t_big,),
+                group=Group.TP,
+                async_op=False,
+                slot_key="ut.plan.oversize",
+            )
+            assert len(handle_big.outputs) == 1
+            assert tuple(handle_big.outputs[0].shape) == (4, 16)
+            assert len(_cp_mod._COALESCED_PLAN_CACHE) == 0
+            assert len(_cp_mod._COALESCED_LAST_PLAN_BY_SLOT) == 0
+
+            # Case 2: small tensors fit cache, then clear_grow_only_buffers()
+            # bumps epoch and purges both coalesced plan caches cleanly.
+            collective_torch._GROW_ONLY_MAX_CACHE_BYTES = 4096
+            collective_torch._GROW_ONLY_MAX_TOTAL_BYTES = 8192
+            t_small = torch.ones((2, 8), dtype=torch.float32)  # 64 B
+            plan1 = _cp_mod._get_or_build_coalesced_plan(
+                (t_small,),
+                device=torch.device("cpu"),
+                group=Group.TP,
+                allow_col2d=True,
+                slot_key="ut.plan.small",
+            )
+            assert plan1 is not None and plan1.send_holder is not None
+            assert len(_cp_mod._COALESCED_PLAN_CACHE) == 1
+            assert len(_cp_mod._COALESCED_LAST_PLAN_BY_SLOT) == 1
+
+            collective_torch.clear_grow_only_buffers()
+            t_tiny = torch.ones((1, 8), dtype=torch.float32)
+            plan2 = _cp_mod._get_or_build_coalesced_plan(
+                (t_tiny,),
+                device=torch.device("cpu"),
+                group=Group.TP,
+                allow_col2d=True,
+                slot_key="ut.plan.other",
+            )
+            assert plan2 is not None
+            # Old cached plan for ut.plan.small must have been evicted by epoch sync.
+            assert all(k[0] != "ut.plan.small" for k in _cp_mod._COALESCED_PLAN_CACHE)
+            assert all(
+                k[0] != "ut.plan.small" for k in _cp_mod._COALESCED_LAST_PLAN_BY_SLOT
+            )
+    finally:
+        collective_torch._GROW_ONLY_MAX_CACHE_BYTES = orig_max_cache
+        collective_torch._GROW_ONLY_MAX_TOTAL_BYTES = orig_max_total
+        collective_torch.clear_grow_only_buffers()
+        _cp_mod._COALESCED_PLAN_CACHE.clear()
+        _cp_mod._COALESCED_LAST_PLAN_BY_SLOT.clear()
+
+
 if __name__ == "__main__":
     test_prefill_q_eager_alloc_shape_and_dtype()
     print("PASS test_prefill_q_eager_alloc_shape_and_dtype")
@@ -325,4 +508,10 @@ if __name__ == "__main__":
     print("PASS test_cp_restore_region_does_not_alias_gather_region")
     test_cp_gather_restore_overflow()
     print("PASS test_cp_gather_restore_overflow")
+    test_scratch_respects_enable_flag_entry_limit_budget_and_growth()
+    print("PASS test_scratch_respects_enable_flag_entry_limit_budget_and_growth")
+    test_grow_only_buffer_caps_and_clear_epoch_sync()
+    print("PASS test_grow_only_buffer_caps_and_clear_epoch_sync")
+    test_coalesced_plan_handles_uncached_buffers_and_clear_epoch()
+    print("PASS test_coalesced_plan_handles_uncached_buffers_and_clear_epoch")
     print("ALL TESTS PASSED")

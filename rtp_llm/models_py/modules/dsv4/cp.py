@@ -1294,9 +1294,9 @@ class _CoalescedPlan:
     layout: str
     sig_key: Tuple[Tuple[Tuple[int, ...], torch.dtype], ...]
     specs: Tuple[CoalescedTensorSpec, ...]
-    send_holder: List[Any]
+    send_holder: Optional[List[Any]]
     send_gen: int
-    recv_holder: List[Any]
+    recv_holder: Optional[List[Any]]
     recv_gen: int
     unpack_holder: Optional[List[Any]]
     unpack_gen: int
@@ -1310,6 +1310,28 @@ class _CoalescedPlan:
 _COALESCED_LAST_PLAN_BY_SLOT: Dict[Any, _CoalescedPlan] = {}
 _COALESCED_PLAN_CACHE: Dict[Any, _CoalescedPlan] = {}
 _COALESCED_PLAN_CACHE_MAX = 256
+_COALESCED_CACHE_EPOCH: int = -1
+
+
+def _sync_coalesced_cache_epoch() -> int:
+    global _COALESCED_CACHE_EPOCH
+    epoch = int(getattr(collective_torch, "_GROW_ONLY_CLEAR_EPOCH", 0))
+    if epoch != _COALESCED_CACHE_EPOCH:
+        _COALESCED_LAST_PLAN_BY_SLOT.clear()
+        _COALESCED_PLAN_CACHE.clear()
+        _COALESCED_CACHE_EPOCH = epoch
+    return epoch
+
+
+def _plan_holders_valid(plan: _CoalescedPlan, epoch: int) -> bool:
+    return (
+        plan.clear_epoch == epoch
+        and plan.send_holder is not None
+        and plan.recv_holder is not None
+        and plan.send_holder[1] == plan.send_gen
+        and plan.recv_holder[1] == plan.recv_gen
+        and (plan.unpack_holder is None or plan.unpack_holder[1] == plan.unpack_gen)
+    )
 
 
 def _align_up_16(n: int) -> int:
@@ -1488,7 +1510,7 @@ def _build_coalesced_plan(
     if acq_holder is None:
         return None
     sig_key = tuple((s.shape, s.dtype) for s in specs)
-    clear_epoch = int(getattr(collective_torch, "_GROW_ONLY_CLEAR_EPOCH", 0))
+    clear_epoch = _sync_coalesced_cache_epoch()
 
     if layout == "col2d":
         send_u8, send_holder, send_gen = acq_holder(
@@ -1500,8 +1522,7 @@ def _build_coalesced_plan(
             world_size * common_rows * total_size,
             check_capture=False,
         )
-        if send_holder is None or recv_holder is None:
-            return None
+        cacheable = send_holder is not None and recv_holder is not None
         send_buf = send_u8.view(common_rows, total_size)
         recv_buf = recv_u8.view(world_size * common_rows, total_size)
         send_pairs = []
@@ -1546,8 +1567,6 @@ def _build_coalesced_plan(
         recv_u8, recv_holder, recv_gen = acq_holder(
             device, f"{slot_key}.recv", world_size * total_size, check_capture=False
         )
-        if send_holder is None or recv_holder is None:
-            return None
         recv_buf = recv_u8.view(world_size, total_size)
         send_pairs = []
         for idx, spec in enumerate(specs):
@@ -1574,6 +1593,7 @@ def _build_coalesced_plan(
             unpack_gen = 0
             unpack_pairs = ()
             outputs = (_view_flat_u8_slice_as(recv_u8, world_size, specs[0]),)
+            cacheable = send_holder is not None and recv_holder is not None
         else:
             total_unpack_bytes = 0
             item_offsets = []
@@ -1587,8 +1607,11 @@ def _build_coalesced_plan(
             unpack_u8, unpack_holder, unpack_gen = acq_holder(
                 device, f"{slot_key}.out", total_unpack_bytes, check_capture=False
             )
-            if unpack_holder is None:
-                return None
+            cacheable = (
+                send_holder is not None
+                and recv_holder is not None
+                and unpack_holder is not None
+            )
             unpack_pairs_list = []
             outputs_list = []
             for spec, uoff in zip(specs, item_offsets):
@@ -1634,13 +1657,14 @@ def _build_coalesced_plan(
             outputs=outputs,
         )
 
-    dev_key = (device.type, device.index)
-    slot_cache_key = (slot_key, dev_key, allow_col2d, group)
-    full_cache_key = (slot_key, dev_key, allow_col2d, group, sig_key)
-    if len(_COALESCED_PLAN_CACHE) >= _COALESCED_PLAN_CACHE_MAX:
-        _COALESCED_PLAN_CACHE.clear()
-    _COALESCED_LAST_PLAN_BY_SLOT[slot_cache_key] = plan
-    _COALESCED_PLAN_CACHE[full_cache_key] = plan
+    if cacheable:
+        dev_key = (device.type, device.index)
+        slot_cache_key = (slot_key, dev_key, allow_col2d, group)
+        full_cache_key = (slot_key, dev_key, allow_col2d, group, sig_key)
+        if len(_COALESCED_PLAN_CACHE) >= _COALESCED_PLAN_CACHE_MAX:
+            _COALESCED_PLAN_CACHE.clear()
+        _COALESCED_LAST_PLAN_BY_SLOT[slot_cache_key] = plan
+        _COALESCED_PLAN_CACHE[full_cache_key] = plan
     return plan
 
 
@@ -1652,40 +1676,33 @@ def _get_or_build_coalesced_plan(
     allow_col2d: bool,
     slot_key: str,
 ) -> Optional[_CoalescedPlan]:
-    epoch = collective_torch._GROW_ONLY_CLEAR_EPOCH
+    epoch = _sync_coalesced_cache_epoch()
     dev_key = (device.type, device.index)
     slot_cache_key = (slot_key, dev_key, allow_col2d, group)
     n = len(tensors)
     plan = _COALESCED_LAST_PLAN_BY_SLOT.get(slot_cache_key)
-    if plan is not None and plan.clear_epoch == epoch and len(plan.sig_key) == n:
-        match = True
-        for t, (s, d) in zip(tensors, plan.sig_key):
-            if t.shape != s or t.dtype != d or t.device != device:
-                match = False
-                break
-        if match:
-            if (
-                plan.send_holder[1] == plan.send_gen
-                and plan.recv_holder[1] == plan.recv_gen
-                and (
-                    plan.unpack_holder is None
-                    or plan.unpack_holder[1] == plan.unpack_gen
-                )
-            ):
+    if plan is not None:
+        if not _plan_holders_valid(plan, epoch):
+            _COALESCED_LAST_PLAN_BY_SLOT.pop(slot_cache_key, None)
+        elif len(plan.sig_key) == n:
+            match = True
+            for t, (s, d) in zip(tensors, plan.sig_key):
+                if t.shape != s or t.dtype != d or t.device != device:
+                    match = False
+                    break
+            if match:
                 return plan
     sig_key = tuple((tuple(t.shape), t.dtype) for t in tensors)
     full_cache_key = (slot_key, dev_key, allow_col2d, group, sig_key)
     plan = _COALESCED_PLAN_CACHE.get(full_cache_key)
-    if (
-        plan is not None
-        and plan.clear_epoch == epoch
-        and plan.send_holder[1] == plan.send_gen
-        and plan.recv_holder[1] == plan.recv_gen
-        and (plan.unpack_holder is None or plan.unpack_holder[1] == plan.unpack_gen)
-        and all(t.device == device for t in tensors)
-    ):
-        _COALESCED_LAST_PLAN_BY_SLOT[slot_cache_key] = plan
-        return plan
+    if plan is not None:
+        if _plan_holders_valid(plan, epoch) and all(
+            t.device == device for t in tensors
+        ):
+            _COALESCED_LAST_PLAN_BY_SLOT[slot_cache_key] = plan
+            return plan
+        if not _plan_holders_valid(plan, epoch):
+            _COALESCED_PLAN_CACHE.pop(full_cache_key, None)
     return _build_coalesced_plan(
         tensors, device=device, group=group, allow_col2d=allow_col2d, slot_key=slot_key
     )

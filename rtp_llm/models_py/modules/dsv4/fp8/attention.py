@@ -2814,6 +2814,8 @@ class AttentionFP8(nn.Module):
             return False
         if type(common.cp_ctx) is not CPContext:
             return False
+        if int(common.cp_ctx.seq_len_full) > 32768:
+            return False
         if (
             not x.is_cuda
             or not getattr(_collective_torch_mod, "_initialized", False)

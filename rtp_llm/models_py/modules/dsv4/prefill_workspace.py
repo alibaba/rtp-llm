@@ -155,6 +155,10 @@ class PrefillWorkspace:
         self._disjoint_main_gather_buf: Optional[torch.Tensor] = None
         self._disjoint_live_q_end_bytes: int = 0
         self._scratch: Dict[str, torch.Tensor] = {}
+        self._scratch_total_bytes: int = 0
+        self.enable_scratch_cache: bool = True
+        self.scratch_budget_bytes: int = 1536 << 20
+        self.scratch_max_entry_bytes: int = 512 << 20
         self.reuse_layer_out_scratch: bool = False
 
     def scratch(
@@ -173,10 +177,30 @@ class PrefillWorkspace:
         nbytes = numel * elem_bytes
         if nbytes == 0:
             return self._union[:0].view(dtype).view(shape)
+        if not self.enable_scratch_cache or nbytes > self.scratch_max_entry_bytes:
+            buf = torch.empty(nbytes, dtype=torch.uint8, device=self._device)
+            out = buf[:nbytes].view(dtype).view(shape)
+            if zero:
+                out.zero_()
+            return out
         buf = self._scratch.get(key)
         if buf is None or int(buf.numel()) < nbytes:
+            cur_bytes = int(buf.numel()) if buf is not None else 0
+            if (
+                self._scratch_total_bytes - cur_bytes + nbytes
+            ) > self.scratch_budget_bytes:
+                tmp = torch.empty(nbytes, dtype=torch.uint8, device=self._device)
+                out = tmp[:nbytes].view(dtype).view(shape)
+                if zero:
+                    out.zero_()
+                return out
+            if key in self._scratch:
+                del self._scratch[key]
+                self._scratch_total_bytes -= cur_bytes
+                del buf
             buf = torch.empty(nbytes, dtype=torch.uint8, device=self._device)
             self._scratch[key] = buf
+            self._scratch_total_bytes += nbytes
         out = buf[:nbytes].view(dtype).view(shape)
         if zero:
             out.zero_()
