@@ -1,13 +1,19 @@
 #include "rtp_llm/cpp/disaggregate/cache_store/rdma/RdmaClientHostConnections.h"
 #include "rtp_llm/cpp/disaggregate/cache_store/rdma/RdmaClientConnectionCallback.h"
 
-#include "autil/EnvUtil.h"
+#include "autil/Scope.h"
 
-#include <unistd.h>
+#include <chrono>
 
 #include "rtp_llm/cpp/utils/Logger.h"
 
 namespace rtp_llm {
+
+namespace {
+// Limit simultaneous handshake batches for each peer. Established QPs are usable
+// by other callers while a batch is connecting.
+constexpr size_t kMaxConnectingGroups = 64;
+}  // namespace
 
 RdmaClientHostConnections::RdmaClientHostConnections(const std::shared_ptr<MemoryUtil>& memory_util,
                                                      const std::string&                 host,
@@ -42,68 +48,73 @@ RdmaClientHostConnections::~RdmaClientHostConnections() {
 
 std::shared_ptr<RdmaConnection>
 RdmaClientHostConnections::getConnection(const std::shared_ptr<::accl::barex::XClientTransport>& client) {
-    auto rdma_connection = getRdmaConnectionFromConnectionPool(available_connections_, true);
-    if (rdma_connection != nullptr) {
-        return rdma_connection;
-    }
-
-    // A connection callback may arrive after the request that initiated it has
-    // timed out. Such connections stay in newly_connections_. Reuse them
-    // before issuing more Connect calls. The timeout path in newRdmaConnection
-    // already permits a partial QP group, so keep the same behavior here.
-    rdma_connection = getRdmaConnectionFromConnectionPool(newly_connections_, false);
-    if (rdma_connection != nullptr) {
-        return rdma_connection;
-    }
-
-    rdma_connection = newRdmaConnection(client);
+    auto rdma_connection = acquire(client, true);
     if (rdma_connection == nullptr) {
         RTP_LLM_LOG_WARNING("new available connections to %s:%u failed", host_.c_str(), port_);
     }
     return rdma_connection;
 }
 
-std::shared_ptr<RdmaConnection> RdmaClientHostConnections::getRdmaConnectionFromConnectionPool(
-    std::set<std::shared_ptr<::accl::barex::XConnection>>& connection_pool, bool all_connected) {
+std::shared_ptr<RdmaConnection> RdmaClientHostConnections::takeReadyConnectionsLocked(bool use_recycled, bool use_new) {
     std::vector<std::shared_ptr<::accl::barex::XConnection>> connections;
-
-    std::lock_guard<std::mutex> lock(mutex_);
-    if (connection_pool.empty()) {
-        return nullptr;
+    auto                                                     take = [&](auto& pool) {
+        while (!pool.empty() && connections.size() < qp_count_per_rdma_connection_) {
+            auto it = pool.begin();
+            connections.push_back(*it);
+            busy_connections_.insert(*it);
+            pool.erase(it);
+        }
+    };
+    if (use_recycled) {
+        take(available_connections_);
     }
-
-    if (all_connected && connection_pool.size() < qp_count_per_rdma_connection_) {
-        return nullptr;
+    if (use_new) {
+        take(newly_connections_);
     }
-
-    for (int i = 0; i < qp_count_per_rdma_connection_ && !connection_pool.empty(); i++) {
-        auto iter       = connection_pool.begin();
-        auto connection = *iter;
-        connection_pool.erase(connection);
-        busy_connections_.insert(connection);
-        connections.push_back(connection);
+    if (connections.empty()) {
+        return nullptr;
     }
     return std::make_shared<RdmaConnection>(memory_util_, host_, port_, connections);
 }
 
 std::shared_ptr<RdmaConnection>
-RdmaClientHostConnections::newRdmaConnection(const std::shared_ptr<::accl::barex::XClientTransport>& client) {
-    // new xconnection first
+RdmaClientHostConnections::acquire(const std::shared_ptr<::accl::barex::XClientTransport>& client, bool use_recycled) {
+    if (qp_count_per_rdma_connection_ == 0) {
+        return nullptr;
+    }
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(connect_timeout_ms_);
+    std::unique_lock<std::mutex> lock(mutex_);
+    auto                         recycled    = [&] { return use_recycled && !available_connections_.empty(); };
+    auto                         can_acquire = [&] { return recycled() || connecting_groups_ < kMaxConnectingGroups; };
+    // The last caller can time out before its callbacks arrive. Even one late
+    // QP can service a request, as can a partially recycled group.
+    if (!pool_changed_.wait_until(lock, deadline, can_acquire)) {
+        return takeReadyConnectionsLocked(use_recycled, true);
+    }
+    // Let a caller holding a connect slot consume its completed QPs and
+    // release the slot. Otherwise queued callers can starve every creator.
+    if (recycled() || (connecting_groups_ == 0 && !newly_connections_.empty())) {
+        return takeReadyConnectionsLocked(use_recycled, connecting_groups_ == 0);
+    }
+
+    ++connecting_groups_;
+    autil::ScopeGuard release_slot([&] {
+        if (!lock.owns_lock()) {
+            lock.lock();
+        }
+        --connecting_groups_;
+        lock.unlock();
+        pool_changed_.notify_all();
+    });
+    lock.unlock();  // Connect may invoke its callback synchronously.
     auto callback = std::make_shared<RdmaClientConnectionCallback>(shared_from_this());
-    for (int i = 0; i < qp_count_per_rdma_connection_; i++) {  // 多建一些连接
+    for (uint32_t i = 0; i < qp_count_per_rdma_connection_; ++i) {
         client->Connect(::accl::barex::TCP_V4, host_, port_, callback);
     }
-
-    std::shared_ptr<RdmaConnection> rdma_connection;
-    for (int i = 0; i < connect_timeout_ms_; i++) {
-        auto rdma_connection = getRdmaConnectionFromConnectionPool(newly_connections_, true);
-        if (rdma_connection != nullptr) {
-            return rdma_connection;
-        }
-        usleep(1000);
-    }
-
-    return getRdmaConnectionFromConnectionPool(newly_connections_, false);
+    lock.lock();
+    pool_changed_.wait_until(
+        lock, deadline, [&] { return recycled() || newly_connections_.size() >= qp_count_per_rdma_connection_; });
+    return takeReadyConnectionsLocked(use_recycled, true);
 }
 
 void RdmaClientHostConnections::recycleConnection(const std::shared_ptr<RdmaConnection>& connection) {
@@ -127,6 +138,7 @@ void RdmaClientHostConnections::doRecycleConnections(
             available_connections_.insert(connection);
         }
     }
+    pool_changed_.notify_all();
 }
 
 void RdmaClientHostConnections::destroyConnection(const std::shared_ptr<RdmaConnection>& rdma_connection) {
@@ -158,6 +170,7 @@ void RdmaClientHostConnections::connectSuccess(const std::shared_ptr<::accl::bar
     RTP_LLM_LOG_INFO("rdma connection to %s:%u connect success", host_.c_str(), port_);
     std::lock_guard<std::mutex> lock(mutex_);
     newly_connections_.insert(connection);
+    pool_changed_.notify_all();
 }
 
 void RdmaClientHostConnections::connectFailed(const std::shared_ptr<::accl::barex::XConnection>& connection) {
@@ -195,16 +208,19 @@ int RdmaClientHostConnections::getAvailableConnectionCount() {
     return available_connections_.size();
 }
 
-bool RdmaClientHostConnections::fillConnectionPool(const std::shared_ptr<::accl::barex::XClientTransport>& client, int count) {
+bool RdmaClientHostConnections::fillConnectionPool(const std::shared_ptr<::accl::barex::XClientTransport>& client,
+                                                   int                                                     count) {
     for (int i = 0; i < count; i++) {
-        auto rdma_connection = newRdmaConnection(client);
+        // Each iteration must add idle QPs, even when the pool is already warm.
+        auto rdma_connection = acquire(client, false);
         if (rdma_connection == nullptr) {
             RTP_LLM_LOG_WARNING("new available connections to %s:%u failed", host_.c_str(), port_);
             return false;
         }
         recycleConnection(rdma_connection);
     }
-    RTP_LLM_LOG_INFO("rdma client host connections to %s:%u fill connection pool success, count %d", host_.c_str(), port_, count);
+    RTP_LLM_LOG_INFO(
+        "rdma client host connections to %s:%u fill connection pool success, count %d", host_.c_str(), port_, count);
     return true;
 }
 

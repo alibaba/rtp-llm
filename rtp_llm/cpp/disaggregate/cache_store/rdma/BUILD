@@ -60,6 +60,7 @@ cc_library(
             "//aios/network/rdma:accl_rdma",
             "@alibaba_rdma//aios/network/accl-barex:accl-barex",
             "@alibaba_rdma//aios/network/accl-barex/metric:kmonitor_metric_reporter",
+            "@havenask//aios/autil:scope",
         ],
         "//conditions:default": [],
     }),

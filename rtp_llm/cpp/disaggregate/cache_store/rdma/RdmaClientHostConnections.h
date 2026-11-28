@@ -1,5 +1,7 @@
 #pragma once
 
+#include <condition_variable>
+
 #include "aios/network/accl-barex/include/accl/barex/highlevel/xconnection.h"
 #include "aios/network/accl-barex/include/accl/barex/highlevel/xclient_transport.h"
 #include "rtp_llm/cpp/disaggregate/cache_store/MemoryUtil.h"
@@ -20,7 +22,7 @@ public:
     std::shared_ptr<RdmaConnection> getConnection(const std::shared_ptr<::accl::barex::XClientTransport>& client);
     void                            recycleConnection(const std::shared_ptr<RdmaConnection>& connection);
     void                            destroyConnection(const std::shared_ptr<RdmaConnection>& connection);
-    bool                            fillConnectionPool(const std::shared_ptr<::accl::barex::XClientTransport>& client, int count);
+    bool fillConnectionPool(const std::shared_ptr<::accl::barex::XClientTransport>& client, int count);
 
     void connectSuccess(const std::shared_ptr<::accl::barex::XConnection>& connection);
     void connectFailed(const std::shared_ptr<::accl::barex::XConnection>& connection);
@@ -28,10 +30,9 @@ public:
     int getAvailableConnectionCount();
 
 private:
-    std::shared_ptr<RdmaConnection>
-    getRdmaConnectionFromConnectionPool(std::set<std::shared_ptr<::accl::barex::XConnection>>& connection_pool,
-                                        bool                                                   all_connected);
-    std::shared_ptr<RdmaConnection> newRdmaConnection(const std::shared_ptr<::accl::barex::XClientTransport>& client);
+    std::shared_ptr<RdmaConnection> acquire(const std::shared_ptr<::accl::barex::XClientTransport>& client,
+                                            bool                                                    use_recycled);
+    std::shared_ptr<RdmaConnection> takeReadyConnectionsLocked(bool use_recycled, bool use_new);
     void doRecycleConnections(const std::vector<std::shared_ptr<::accl::barex::XConnection>>& connections);
 
 private:
@@ -42,10 +43,11 @@ private:
     uint32_t                    connect_timeout_ms_;
 
     std::mutex                                            mutex_;
+    std::condition_variable                               pool_changed_;
+    size_t                                                connecting_groups_ = 0;
     std::set<std::shared_ptr<::accl::barex::XConnection>> newly_connections_;      // 新建连接已被预订
     std::set<std::shared_ptr<::accl::barex::XConnection>> available_connections_;  // 可复用
     std::set<std::shared_ptr<::accl::barex::XConnection>> busy_connections_;       // 正在用
-
 };
 
 }  // namespace rtp_llm
