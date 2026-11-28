@@ -2,6 +2,7 @@
 #include <torch/torch.h>
 #include <ATen/cuda/CUDAContext.h>
 #include <limits>
+#include "rtp_llm/models_py/bindings/cuda/kernels/sampling/softmax_host.h"
 #include "rtp_llm/models_py/bindings/cuda/kernels/sampling/split_softmax.h"
 
 using namespace rtp_llm;
@@ -74,4 +75,41 @@ TEST(SplitSoftmaxTest, testSplitSoftmaxCoversNonSm120LargeVocab) {
             ASSERT_TRUE(torch::allclose(logits.sum(-1), torch::ones({rows}, options), 3e-6, 1e-8));
         }
     }
+}
+
+TEST(SplitSoftmaxTest, testSplitSoftmaxExtendedBatchSizesAndFallbackBoundary) {
+    auto options = torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA);
+    torch::manual_seed(20261128);
+
+    constexpr int64_t dsv4_vocab = 129280;
+    for (int64_t rows : {1, 16, 17, 32, 33, 48, 80, 96, 128, 256}) {
+        for (float gain : {0.0f, 1.0f, 50.0f}) {
+            auto logits = torch::randn({rows, dsv4_vocab}, options) * gain;
+            logits.slice(1, dsv4_vocab - 13).fill_(-std::numeric_limits<float>::infinity());
+            ASSERT_TRUE(rtp_llm::canSamplerSplitSoftmax(logits));
+            auto expected_fp64 = torch::softmax(logits.to(torch::kFloat64), -1).to(torch::kFloat32);
+            auto out           = rtp_llm::samplerSoftmaxInplace(logits);
+            ASSERT_EQ(out.data_ptr(), logits.data_ptr());
+            ASSERT_TRUE(torch::allclose(out, expected_fp64, 3e-6, 1e-8));
+            ASSERT_TRUE(torch::allclose(out.sum(-1), torch::ones({rows}, options), 3e-6, 1e-8));
+        }
+    }
+
+    // Verify exact FP32 accumulation parity at batch=80,128 for vocab=248320 as well.
+    for (int64_t rows : {80, 128}) {
+        auto logits   = torch::randn({rows, 248320}, options) * 8.0f;
+        auto expected = torch::softmax(logits, -1);
+        ASSERT_TRUE(rtp_llm::canSamplerSplitSoftmax(logits));
+        rtp_llm::splitSoftmaxInplace(logits);
+        ASSERT_TRUE(torch::equal(logits, expected));
+    }
+
+    // rows > 256 falls outside split softmax domain and falls back cleanly in samplerSoftmaxInplace.
+    auto over_rows = torch::randn({257, dsv4_vocab}, options);
+    ASSERT_FALSE(rtp_llm::canSamplerSplitSoftmax(over_rows));
+    EXPECT_THROW(rtp_llm::splitSoftmaxInplace(over_rows), c10::Error);
+    auto expected = torch::softmax(over_rows, -1);
+    auto out      = rtp_llm::samplerSoftmaxInplace(over_rows);
+    ASSERT_TRUE(torch::equal(out, expected));
+    ASSERT_TRUE(torch::equal(over_rows, expected));
 }

@@ -13,12 +13,91 @@
 #include <mutex>
 #include <optional>
 #include <tuple>
+#include <vector>
 
-#include "flashinfer/air_top_p.cuh"
+#include "fast_renorm.cuh"
 #include "flashinfer/sampling.cuh"
 
 namespace rtp_llm {
 namespace {
+
+struct FastRenormWorkspaceKey {
+    int      device_id;
+    uint64_t stream_id;
+
+    bool operator==(const FastRenormWorkspaceKey& other) const {
+        return device_id == other.device_id && stream_id == other.stream_id;
+    }
+};
+
+struct FastRenormWorkspaceEntry {
+    FastRenormWorkspaceKey key;
+    torch::Tensor          buffer;
+    uint64_t               last_used_seq = 0;
+};
+
+class FastRenormWorkspaceCache {
+public:
+    static constexpr size_t kMaxEntriesPerDevice = 4;
+
+    torch::Tensor
+    acquire(int device_id, uint64_t stream_id, int64_t required_bytes, const torch::TensorOptions& options) {
+        std::lock_guard<std::mutex>  lock(mutex_);
+        const FastRenormWorkspaceKey key{device_id, stream_id};
+        const uint64_t               seq = ++seq_counter_;
+
+        for (auto& entry : entries_) {
+            if (entry.key == key) {
+                entry.last_used_seq = seq;
+                if (entry.buffer.numel() < required_bytes) {
+                    entry.buffer = torch::empty({required_bytes}, options);
+                }
+                return entry.buffer;
+            }
+        }
+
+        size_t   device_count = 0;
+        size_t   lru_idx      = entries_.size();
+        uint64_t lru_seq      = std::numeric_limits<uint64_t>::max();
+        for (size_t i = 0; i < entries_.size(); ++i) {
+            if (entries_[i].key.device_id == device_id) {
+                ++device_count;
+                if (entries_[i].last_used_seq < lru_seq) {
+                    lru_seq = entries_[i].last_used_seq;
+                    lru_idx = i;
+                }
+            }
+        }
+        if (device_count >= kMaxEntriesPerDevice && lru_idx < entries_.size()) {
+            entries_.erase(entries_.begin() + static_cast<ptrdiff_t>(lru_idx));
+        }
+
+        auto buffer = torch::empty({required_bytes}, options);
+        entries_.push_back(FastRenormWorkspaceEntry{key, buffer, seq});
+        return buffer;
+    }
+
+private:
+    std::mutex                            mutex_;
+    std::vector<FastRenormWorkspaceEntry> entries_;
+    uint64_t                              seq_counter_ = 0;
+};
+
+torch::Tensor get_fast_renorm_workspace(const c10::Device& device, cudaStream_t stream, size_t required_bytes) {
+    if (required_bytes == 0) {
+        return torch::Tensor();
+    }
+    const auto              options        = torch::TensorOptions().dtype(at::kByte).device(device);
+    cudaStreamCaptureStatus capture_status = cudaStreamCaptureStatusNone;
+    unsigned long long      stream_id      = 0;
+    if (cudaStreamIsCapturing(stream, &capture_status) == cudaSuccess && capture_status == cudaStreamCaptureStatusNone
+        && cudaStreamGetId(stream, &stream_id) == cudaSuccess) {
+        static auto* cache = new FastRenormWorkspaceCache();
+        return cache->acquire(
+            device.index(), static_cast<uint64_t>(stream_id), static_cast<int64_t>(required_bytes), options);
+    }
+    return torch::empty({static_cast<int64_t>(required_bytes)}, options);
+}
 
 void check_renorm_inputs(const torch::Tensor& probs, const torch::Tensor& renorm_probs) {
     TORCH_CHECK(probs.is_cuda(), "probs must be a CUDA tensor");
@@ -99,25 +178,40 @@ cudaStream_t resolve_stream(int64_t cuda_stream) {
     return reinterpret_cast<cudaStream_t>(static_cast<uintptr_t>(cuda_stream));
 }
 
-template<bool IsDeterministic, typename DType>
-size_t air_top_p_workspace_size(uint32_t batch_size, uint32_t vocab_size) {
-    namespace air = flashinfer::sampling::air_top_p;
-    auto align256 = [](size_t x) { return ((x + 255) / 256) * 256; };
-
-    using HistT        = air::HisT<IsDeterministic, DType>;
-    const auto buf_len = static_cast<size_t>(air::calcBufLen<DType>(static_cast<air::IdxT>(vocab_size)));
-
-    const size_t counters_size = align256(sizeof(air::Counter<DType>) * batch_size);
-    const size_t hist_size     = align256(sizeof(HistT) * air::NUM_BUCKETS * batch_size);
-    const size_t count_size    = align256(sizeof(air::IdxT) * air::NUM_BUCKETS * batch_size);
-    const size_t buf_size      = align256(sizeof(DType) * buf_len * batch_size);
-    return counters_size + hist_size + count_size + 2 * buf_size;
-}
-
 void check_cuda_status(cudaError_t status, const char* kernel_name) {
     TORCH_CHECK(status == cudaSuccess, kernel_name, " failed with error code ", cudaGetErrorString(status));
     status = cudaGetLastError();
     TORCH_CHECK(status == cudaSuccess, kernel_name, " launch failed with error code ", cudaGetErrorString(status));
+}
+
+bool is_unfiltered_cpu_top_p(const std::optional<torch::Tensor>& maybe_top_p_arr,
+                             uint32_t                            batch_size,
+                             double                              top_p_val) {
+    if (!maybe_top_p_arr.has_value()) {
+        return top_p_val >= 1.0;
+    }
+    const auto& t = maybe_top_p_arr.value();
+    if (!t.is_cpu() || t.dim() != 1 || t.numel() != batch_size || t.scalar_type() != at::kFloat || !t.is_contiguous()) {
+        return false;
+    }
+    const float* ptr = t.data_ptr<float>();
+    return std::all_of(ptr, ptr + batch_size, [](float v) { return v >= 1.0f; });
+}
+
+bool is_unfiltered_cpu_top_k(const std::optional<torch::Tensor>& maybe_top_k_arr,
+                             uint32_t                            batch_size,
+                             uint32_t                            top_k_limit,
+                             uint32_t                            vocab_size) {
+    if (!maybe_top_k_arr.has_value()) {
+        return top_k_limit >= vocab_size;
+    }
+    const auto& t = maybe_top_k_arr.value();
+    if (!t.is_cpu() || t.dim() != 1 || t.numel() != batch_size || t.scalar_type() != at::kInt || !t.is_contiguous()) {
+        return false;
+    }
+    const int32_t* ptr = t.data_ptr<int32_t>();
+    return std::all_of(
+        ptr, ptr + batch_size, [vocab_size](int32_t v) { return v > 0 && static_cast<uint32_t>(v) >= vocab_size; });
 }
 
 }  // namespace
@@ -147,9 +241,8 @@ void sampling_from_probs(torch::Tensor                probs,
     const auto          vocab_size = static_cast<uint32_t>(probs.size(1));
     auto                indices    = prepare_optional_index(maybe_indices, batch_size, probs.device());
     auto                seed = prepare_optional_param(maybe_seed_arr, batch_size, probs.device(), at::kLong, "seed");
-    auto offset = prepare_optional_param(maybe_offset_arr, batch_size, probs.device(), at::kLong, "offset");
-    auto stream = resolve_stream(cuda_stream);
-
+    auto        offset = prepare_optional_param(maybe_offset_arr, batch_size, probs.device(), at::kLong, "offset");
+    auto        stream = resolve_stream(cuda_stream);
     cudaError_t status = flashinfer::sampling::SamplingFromProb<float, int32_t>(
         static_cast<float*>(probs.data_ptr()),
         static_cast<int32_t*>(output.data_ptr()),
@@ -183,11 +276,52 @@ void top_p_sampling_from_probs(torch::Tensor                probs,
     at::cuda::CUDAGuard device_guard(probs.device());
     const auto          batch_size = static_cast<uint32_t>(output.size(0));
     const auto          vocab_size = static_cast<uint32_t>(probs.size(1));
-    auto                indices    = prepare_optional_index(maybe_indices, batch_size, probs.device());
-    auto top_p  = prepare_optional_param(maybe_top_p_arr, batch_size, probs.device(), at::kFloat, "top_p");
-    auto seed   = prepare_optional_param(maybe_seed_arr, batch_size, probs.device(), at::kLong, "seed");
-    auto offset = prepare_optional_param(maybe_offset_arr, batch_size, probs.device(), at::kLong, "offset");
-    auto stream = resolve_stream(cuda_stream);
+    if (is_unfiltered_cpu_top_p(maybe_top_p_arr, batch_size, top_p_val)) {
+        sampling_from_probs(probs,
+                            output,
+                            valid,
+                            maybe_indices,
+                            deterministic,
+                            maybe_seed_arr,
+                            seed_val,
+                            maybe_offset_arr,
+                            offset_val,
+                            cuda_stream);
+        return;
+    }
+    auto indices = prepare_optional_index(maybe_indices, batch_size, probs.device());
+    auto top_p   = prepare_optional_param(maybe_top_p_arr, batch_size, probs.device(), at::kFloat, "top_p");
+    auto seed    = prepare_optional_param(maybe_seed_arr, batch_size, probs.device(), at::kLong, "seed");
+    auto offset  = prepare_optional_param(maybe_offset_arr, batch_size, probs.device(), at::kLong, "offset");
+    auto stream  = resolve_stream(cuda_stream);
+
+    if (!indices.defined() && rtp_llm::fast_renorm::FastRenormCTAsPerRow(batch_size, vocab_size) > 1u
+        && rtp_llm::fast_renorm::FastSampleSupportsVocab(vocab_size)) {
+        const size_t ws_bytes = rtp_llm::fast_renorm::FastRenormWorkspaceBytes(batch_size, vocab_size);
+        auto         ws_t     = get_fast_renorm_workspace(probs.device(), stream, ws_bytes);
+        if (ws_t.defined() && static_cast<size_t>(ws_t.numel()) >= ws_bytes) {
+            cudaError_t status = rtp_llm::fast_renorm::FastRenormOrSampleProb<false, false, int32_t>(
+                static_cast<const float*>(probs.data_ptr()),
+                nullptr,
+                static_cast<int32_t*>(output.data_ptr()),
+                static_cast<bool*>(valid.data_ptr()),
+                nullptr,
+                0,
+                top_p.defined() ? static_cast<const float*>(top_p.data_ptr()) : nullptr,
+                static_cast<float>(top_p_val),
+                batch_size,
+                vocab_size,
+                seed.defined() ? reinterpret_cast<uint64_t*>(seed.data_ptr<int64_t>()) : nullptr,
+                seed_val,
+                offset.defined() ? reinterpret_cast<uint64_t*>(offset.data_ptr<int64_t>()) : nullptr,
+                offset_val,
+                ws_t.data_ptr(),
+                ws_bytes,
+                stream);
+            check_cuda_status(status, "FastTopPSamplingFromProb");
+            return;
+        }
+    }
 
     cudaError_t status = flashinfer::sampling::TopPSamplingFromProb<float, int32_t>(
         static_cast<float*>(probs.data_ptr()),
@@ -222,15 +356,56 @@ void top_k_sampling_from_probs(torch::Tensor                probs,
     check_sampling_inputs(probs, output, valid);
 
     at::cuda::CUDAGuard device_guard(probs.device());
-    const auto          batch_size = static_cast<uint32_t>(output.size(0));
-    const auto          vocab_size = static_cast<uint32_t>(probs.size(1));
-    auto                indices    = prepare_optional_index(maybe_indices, batch_size, probs.device());
-    auto                top_k = prepare_optional_param(maybe_top_k_arr, batch_size, probs.device(), at::kInt, "top_k");
-    auto                seed  = prepare_optional_param(maybe_seed_arr, batch_size, probs.device(), at::kLong, "seed");
-    auto       offset = prepare_optional_param(maybe_offset_arr, batch_size, probs.device(), at::kLong, "offset");
-    auto       stream = resolve_stream(cuda_stream);
-    const auto top_k_limit =
-        static_cast<uint32_t>(top_k_val <= 0 ? vocab_size : std::min<int64_t>(top_k_val, vocab_size));
+    const auto          batch_size  = static_cast<uint32_t>(output.size(0));
+    const auto          vocab_size  = static_cast<uint32_t>(probs.size(1));
+    const auto          top_k_limit = static_cast<uint32_t>(
+        top_k_val <= 0 ? vocab_size : std::min<int64_t>(top_k_val, static_cast<int64_t>(vocab_size)));
+    if (is_unfiltered_cpu_top_k(maybe_top_k_arr, batch_size, top_k_limit, vocab_size)) {
+        sampling_from_probs(probs,
+                            output,
+                            valid,
+                            maybe_indices,
+                            deterministic,
+                            maybe_seed_arr,
+                            seed_val,
+                            maybe_offset_arr,
+                            offset_val,
+                            cuda_stream);
+        return;
+    }
+    auto indices = prepare_optional_index(maybe_indices, batch_size, probs.device());
+    auto top_k   = prepare_optional_param(maybe_top_k_arr, batch_size, probs.device(), at::kInt, "top_k");
+    auto seed    = prepare_optional_param(maybe_seed_arr, batch_size, probs.device(), at::kLong, "seed");
+    auto offset  = prepare_optional_param(maybe_offset_arr, batch_size, probs.device(), at::kLong, "offset");
+    auto stream  = resolve_stream(cuda_stream);
+
+    if (!indices.defined() && rtp_llm::fast_renorm::FastRenormCTAsPerRow(batch_size, vocab_size) > 1u
+        && rtp_llm::fast_renorm::FastSampleSupportsVocab(vocab_size)) {
+        const size_t ws_bytes = rtp_llm::fast_renorm::FastRenormWorkspaceBytes(batch_size, vocab_size);
+        auto         ws_t     = get_fast_renorm_workspace(probs.device(), stream, ws_bytes);
+        if (ws_t.defined() && static_cast<size_t>(ws_t.numel()) >= ws_bytes) {
+            cudaError_t status = rtp_llm::fast_renorm::FastRenormOrSampleProb<true, false, int32_t>(
+                static_cast<const float*>(probs.data_ptr()),
+                nullptr,
+                static_cast<int32_t*>(output.data_ptr()),
+                static_cast<bool*>(valid.data_ptr()),
+                top_k.defined() ? static_cast<const int32_t*>(top_k.data_ptr()) : nullptr,
+                static_cast<int32_t>(top_k_limit),
+                nullptr,
+                1.0f,
+                batch_size,
+                vocab_size,
+                seed.defined() ? reinterpret_cast<uint64_t*>(seed.data_ptr<int64_t>()) : nullptr,
+                seed_val,
+                offset.defined() ? reinterpret_cast<uint64_t*>(offset.data_ptr<int64_t>()) : nullptr,
+                offset_val,
+                ws_t.data_ptr(),
+                ws_bytes,
+                stream);
+            check_cuda_status(status, "FastTopKSamplingFromProb");
+            return;
+        }
+    }
 
     cudaError_t status = flashinfer::sampling::TopKSamplingFromProb<float, int32_t>(
         static_cast<float*>(probs.data_ptr()),
@@ -267,16 +442,58 @@ void top_k_top_p_sampling_from_probs(torch::Tensor                probs,
     check_sampling_inputs(probs, output, valid);
 
     at::cuda::CUDAGuard device_guard(probs.device());
-    const auto          batch_size = static_cast<uint32_t>(output.size(0));
-    const auto          vocab_size = static_cast<uint32_t>(probs.size(1));
-    auto                indices    = prepare_optional_index(maybe_indices, batch_size, probs.device());
-    auto                top_k = prepare_optional_param(maybe_top_k_arr, batch_size, probs.device(), at::kInt, "top_k");
-    auto       top_p  = prepare_optional_param(maybe_top_p_arr, batch_size, probs.device(), at::kFloat, "top_p");
-    auto       seed   = prepare_optional_param(maybe_seed_arr, batch_size, probs.device(), at::kLong, "seed");
-    auto       offset = prepare_optional_param(maybe_offset_arr, batch_size, probs.device(), at::kLong, "offset");
-    auto       stream = resolve_stream(cuda_stream);
-    const auto top_k_limit =
-        static_cast<int32_t>(top_k_val <= 0 ? vocab_size : std::min<int64_t>(top_k_val, vocab_size));
+    const auto          batch_size  = static_cast<uint32_t>(output.size(0));
+    const auto          vocab_size  = static_cast<uint32_t>(probs.size(1));
+    const auto          top_k_limit = static_cast<int32_t>(
+        top_k_val <= 0 ? vocab_size : std::min<int64_t>(top_k_val, static_cast<int64_t>(vocab_size)));
+    if (is_unfiltered_cpu_top_k(maybe_top_k_arr, batch_size, static_cast<uint32_t>(top_k_limit), vocab_size)
+        && is_unfiltered_cpu_top_p(maybe_top_p_arr, batch_size, top_p_val)) {
+        sampling_from_probs(probs,
+                            output,
+                            valid,
+                            maybe_indices,
+                            deterministic,
+                            maybe_seed_arr,
+                            seed_val,
+                            maybe_offset_arr,
+                            offset_val,
+                            cuda_stream);
+        return;
+    }
+    auto indices = prepare_optional_index(maybe_indices, batch_size, probs.device());
+    auto top_k   = prepare_optional_param(maybe_top_k_arr, batch_size, probs.device(), at::kInt, "top_k");
+    auto top_p   = prepare_optional_param(maybe_top_p_arr, batch_size, probs.device(), at::kFloat, "top_p");
+    auto seed    = prepare_optional_param(maybe_seed_arr, batch_size, probs.device(), at::kLong, "seed");
+    auto offset  = prepare_optional_param(maybe_offset_arr, batch_size, probs.device(), at::kLong, "offset");
+    auto stream  = resolve_stream(cuda_stream);
+
+    if (!indices.defined() && rtp_llm::fast_renorm::FastRenormCTAsPerRow(batch_size, vocab_size) > 1u
+        && rtp_llm::fast_renorm::FastSampleSupportsVocab(vocab_size)) {
+        const size_t ws_bytes = rtp_llm::fast_renorm::FastRenormWorkspaceBytes(batch_size, vocab_size);
+        auto         ws_t     = get_fast_renorm_workspace(probs.device(), stream, ws_bytes);
+        if (ws_t.defined() && static_cast<size_t>(ws_t.numel()) >= ws_bytes) {
+            cudaError_t status = rtp_llm::fast_renorm::FastRenormOrSampleProb<true, false, int32_t>(
+                static_cast<const float*>(probs.data_ptr()),
+                nullptr,
+                static_cast<int32_t*>(output.data_ptr()),
+                static_cast<bool*>(valid.data_ptr()),
+                top_k.defined() ? static_cast<const int32_t*>(top_k.data_ptr()) : nullptr,
+                top_k_limit,
+                top_p.defined() ? static_cast<const float*>(top_p.data_ptr()) : nullptr,
+                static_cast<float>(top_p_val),
+                batch_size,
+                vocab_size,
+                seed.defined() ? reinterpret_cast<uint64_t*>(seed.data_ptr<int64_t>()) : nullptr,
+                seed_val,
+                offset.defined() ? reinterpret_cast<uint64_t*>(offset.data_ptr<int64_t>()) : nullptr,
+                offset_val,
+                ws_t.data_ptr(),
+                ws_bytes,
+                stream);
+            check_cuda_status(status, "FastTopKTopPSamplingFromProb");
+            return;
+        }
+    }
 
     cudaError_t status = flashinfer::sampling::TopKTopPSamplingFromProb<float, int32_t>(
         static_cast<float*>(probs.data_ptr()),
@@ -309,37 +526,60 @@ void top_p_renorm_probs(torch::Tensor                probs,
     at::cuda::CUDAGuard device_guard(probs.device());
     const auto          batch_size = static_cast<uint32_t>(probs.size(0));
     const auto          vocab_size = static_cast<uint32_t>(probs.size(1));
-    auto   top_p     = prepare_optional_param(maybe_top_p_arr, batch_size, probs.device(), at::kFloat, "top_p");
-    auto   stream    = resolve_stream(cuda_stream);
-    float* top_p_ptr = top_p.defined() ? static_cast<float*>(top_p.data_ptr()) : nullptr;
+    auto         top_p     = prepare_optional_param(maybe_top_p_arr, batch_size, probs.device(), at::kFloat, "top_p");
+    auto         stream    = resolve_stream(cuda_stream);
+    float*       top_p_ptr = top_p.defined() ? static_cast<float*>(top_p.data_ptr()) : nullptr;
+    const size_t ws_bytes  = rtp_llm::fast_renorm::FastRenormWorkspaceBytes(batch_size, vocab_size);
+    auto         ws_t      = get_fast_renorm_workspace(probs.device(), stream, ws_bytes);
 
-    cudaError_t status = cudaSuccess;
-    if (vocab_size < flashinfer::sampling::air_top_p::NUM_BUCKETS) {
-        status = flashinfer::sampling::TopPRenormProb<float>(static_cast<float*>(probs.data_ptr()),
-                                                             static_cast<float*>(renorm_probs.data_ptr()),
-                                                             top_p_ptr,
-                                                             batch_size,
-                                                             static_cast<float>(top_p_val),
-                                                             vocab_size,
-                                                             stream);
-        check_cuda_status(status, "TopPRenormProb");
-        return;
-    }
+    cudaError_t status = rtp_llm::fast_renorm::FastRenormProb<false>(static_cast<const float*>(probs.data_ptr()),
+                                                                     static_cast<float*>(renorm_probs.data_ptr()),
+                                                                     nullptr,
+                                                                     0,
+                                                                     top_p_ptr,
+                                                                     static_cast<float>(top_p_val),
+                                                                     batch_size,
+                                                                     vocab_size,
+                                                                     ws_t.defined() ? ws_t.data_ptr() : nullptr,
+                                                                     ws_bytes,
+                                                                     stream);
+    check_cuda_status(status, "FastTopPRenormProb");
+}
 
-    constexpr bool deterministic  = false;
-    const auto     workspace_size = air_top_p_workspace_size<deterministic, float>(batch_size, vocab_size);
-    auto           workspace = torch::empty({static_cast<int64_t>(workspace_size)}, probs.options().dtype(at::kByte));
+void top_k_top_p_renorm_probs(torch::Tensor                probs,
+                              torch::Tensor                renorm_probs,
+                              std::optional<torch::Tensor> maybe_top_k_arr,
+                              int64_t                      top_k_val,
+                              std::optional<torch::Tensor> maybe_top_p_arr,
+                              double                       top_p_val,
+                              int64_t                      cuda_stream) {
+    check_renorm_inputs(probs, renorm_probs);
+    TORCH_CHECK(probs.scalar_type() == at::kFloat, "top_k_top_p_renorm_probs currently expects float32 probs");
 
-    status = flashinfer::sampling::air_top_p::AirTopPRenormProb<deterministic, float>(
-        static_cast<float*>(probs.data_ptr()),
+    at::cuda::CUDAGuard device_guard(probs.device());
+    const auto          batch_size = static_cast<uint32_t>(probs.size(0));
+    const auto          vocab_size = static_cast<uint32_t>(probs.size(1));
+    auto                top_k = prepare_optional_param(maybe_top_k_arr, batch_size, probs.device(), at::kInt, "top_k");
+    auto          top_p  = prepare_optional_param(maybe_top_p_arr, batch_size, probs.device(), at::kFloat, "top_p");
+    auto          stream = resolve_stream(cuda_stream);
+    const int32_t top_k_limit = static_cast<int32_t>(
+        top_k_val <= 0 ? vocab_size : std::min<int64_t>(top_k_val, static_cast<int64_t>(vocab_size)));
+    const size_t ws_bytes = rtp_llm::fast_renorm::FastRenormWorkspaceBytes(batch_size, vocab_size);
+    auto         ws_t     = get_fast_renorm_workspace(probs.device(), stream, ws_bytes);
+
+    cudaError_t status = rtp_llm::fast_renorm::FastRenormProb<true>(
+        static_cast<const float*>(probs.data_ptr()),
         static_cast<float*>(renorm_probs.data_ptr()),
-        top_p_ptr,
-        batch_size,
+        top_k.defined() ? static_cast<const int32_t*>(top_k.data_ptr()) : nullptr,
+        top_k_limit,
+        top_p.defined() ? static_cast<const float*>(top_p.data_ptr()) : nullptr,
         static_cast<float>(top_p_val),
+        batch_size,
         vocab_size,
-        workspace.data_ptr(),
+        ws_t.defined() ? ws_t.data_ptr() : nullptr,
+        ws_bytes,
         stream);
-    check_cuda_status(status, "AirTopPRenormProb");
+    check_cuda_status(status, "FusedTopKTopPRenormProb");
 }
 
 void top_k_renorm_probs(torch::Tensor                probs,
@@ -357,8 +597,29 @@ void top_k_renorm_probs(torch::Tensor                probs,
     const auto          vocab_size = static_cast<uint32_t>(probs.size(1));
     auto                top_k  = prepare_optional_param(maybe_top_k_arr, batch_size, probs.device(), at::kInt, "top_k");
     auto                stream = resolve_stream(cuda_stream);
-    int*                top_k_ptr   = top_k.defined() ? static_cast<int*>(top_k.data_ptr()) : nullptr;
-    const auto          top_k_limit = static_cast<uint32_t>(
+    int*                top_k_ptr = top_k.defined() ? static_cast<int*>(top_k.data_ptr()) : nullptr;
+
+    if (probs.scalar_type() == at::kFloat) {
+        const int32_t top_k_limit_i32 = static_cast<int32_t>(
+            top_k_val <= 0 ? vocab_size : std::min<int64_t>(top_k_val, static_cast<int64_t>(vocab_size)));
+        const size_t ws_bytes = rtp_llm::fast_renorm::FastRenormWorkspaceBytes(batch_size, vocab_size);
+        auto         ws_t     = get_fast_renorm_workspace(probs.device(), stream, ws_bytes);
+        cudaError_t  status   = rtp_llm::fast_renorm::FastRenormProb<true>(static_cast<const float*>(probs.data_ptr()),
+                                                                        static_cast<float*>(renorm_probs.data_ptr()),
+                                                                        top_k_ptr,
+                                                                        top_k_limit_i32,
+                                                                        nullptr,
+                                                                        1.0f,
+                                                                        batch_size,
+                                                                        vocab_size,
+                                                                        ws_t.defined() ? ws_t.data_ptr() : nullptr,
+                                                                        ws_bytes,
+                                                                        stream);
+        check_cuda_status(status, "FastTopKRenormProb");
+        return;
+    }
+
+    const auto top_k_limit = static_cast<uint32_t>(
         top_k_val <= 0 ? vocab_size : std::min<int64_t>(top_k_val, std::numeric_limits<uint32_t>::max()));
 
     auto  row_states     = torch::zeros({1024 * 1024}, probs.options().dtype(at::kByte));
@@ -403,6 +664,266 @@ void top_k_renorm_probs(torch::Tensor                probs,
             TORCH_CHECK(false, "unsupported dtype for top_k_renorm_probs");
     }
     check_cuda_status(status, "RadixTopKRenormProbMultiCTA");
+}
+
+void top_p_renorm_and_sample_probs(torch::Tensor                probs,
+                                   torch::Tensor                renorm_probs,
+                                   torch::Tensor                output,
+                                   torch::Tensor                valid,
+                                   std::optional<torch::Tensor> maybe_indices,
+                                   std::optional<torch::Tensor> maybe_top_p_arr,
+                                   double                       top_p_val,
+                                   bool                         deterministic,
+                                   std::optional<torch::Tensor> maybe_seed_arr,
+                                   uint64_t                     seed_val,
+                                   std::optional<torch::Tensor> maybe_offset_arr,
+                                   uint64_t                     offset_val,
+                                   int64_t                      cuda_stream) {
+    check_renorm_inputs(probs, renorm_probs);
+    check_sampling_inputs(probs, output, valid);
+
+    at::cuda::CUDAGuard device_guard(probs.device());
+    const auto          batch_size = static_cast<uint32_t>(output.size(0));
+    const auto          vocab_size = static_cast<uint32_t>(probs.size(1));
+    if (is_unfiltered_cpu_top_p(maybe_top_p_arr, batch_size, top_p_val)) {
+        sampling_from_probs(probs,
+                            output,
+                            valid,
+                            maybe_indices,
+                            deterministic,
+                            maybe_seed_arr,
+                            seed_val,
+                            maybe_offset_arr,
+                            offset_val,
+                            cuda_stream);
+        top_p_renorm_probs(probs, renorm_probs, maybe_top_p_arr, top_p_val, cuda_stream);
+        return;
+    }
+    auto indices = prepare_optional_index(maybe_indices, batch_size, probs.device());
+    auto top_p   = prepare_optional_param(maybe_top_p_arr, batch_size, probs.device(), at::kFloat, "top_p");
+    auto seed    = prepare_optional_param(maybe_seed_arr, batch_size, probs.device(), at::kLong, "seed");
+    auto offset  = prepare_optional_param(maybe_offset_arr, batch_size, probs.device(), at::kLong, "offset");
+    auto stream  = resolve_stream(cuda_stream);
+
+    if (!indices.defined() && probs.data_ptr() != renorm_probs.data_ptr()
+        && rtp_llm::fast_renorm::FastRenormCTAsPerRow(batch_size, vocab_size) > 1u
+        && rtp_llm::fast_renorm::FastSampleSupportsVocab(vocab_size)) {
+        const size_t ws_bytes = rtp_llm::fast_renorm::FastRenormWorkspaceBytes(batch_size, vocab_size);
+        auto         ws_t     = get_fast_renorm_workspace(probs.device(), stream, ws_bytes);
+        if (ws_t.defined() && static_cast<size_t>(ws_t.numel()) >= ws_bytes) {
+            cudaError_t status = rtp_llm::fast_renorm::FastRenormOrSampleProb<false, true, int32_t>(
+                static_cast<const float*>(probs.data_ptr()),
+                static_cast<float*>(renorm_probs.data_ptr()),
+                static_cast<int32_t*>(output.data_ptr()),
+                static_cast<bool*>(valid.data_ptr()),
+                nullptr,
+                0,
+                top_p.defined() ? static_cast<const float*>(top_p.data_ptr()) : nullptr,
+                static_cast<float>(top_p_val),
+                batch_size,
+                vocab_size,
+                seed.defined() ? reinterpret_cast<uint64_t*>(seed.data_ptr<int64_t>()) : nullptr,
+                seed_val,
+                offset.defined() ? reinterpret_cast<uint64_t*>(offset.data_ptr<int64_t>()) : nullptr,
+                offset_val,
+                ws_t.data_ptr(),
+                ws_bytes,
+                stream);
+            check_cuda_status(status, "FastTopPRenormAndSampleProb");
+            return;
+        }
+    }
+
+    top_p_sampling_from_probs(probs,
+                              output,
+                              valid,
+                              maybe_indices,
+                              maybe_top_p_arr,
+                              top_p_val,
+                              deterministic,
+                              maybe_seed_arr,
+                              seed_val,
+                              maybe_offset_arr,
+                              offset_val,
+                              cuda_stream);
+    top_p_renorm_probs(probs, renorm_probs, maybe_top_p_arr, top_p_val, cuda_stream);
+}
+
+void top_k_renorm_and_sample_probs(torch::Tensor                probs,
+                                   torch::Tensor                renorm_probs,
+                                   torch::Tensor                output,
+                                   torch::Tensor                valid,
+                                   std::optional<torch::Tensor> maybe_indices,
+                                   std::optional<torch::Tensor> maybe_top_k_arr,
+                                   int64_t                      top_k_val,
+                                   bool                         deterministic,
+                                   std::optional<torch::Tensor> maybe_seed_arr,
+                                   uint64_t                     seed_val,
+                                   std::optional<torch::Tensor> maybe_offset_arr,
+                                   uint64_t                     offset_val,
+                                   int64_t                      cuda_stream) {
+    check_renorm_inputs(probs, renorm_probs);
+    check_sampling_inputs(probs, output, valid);
+
+    at::cuda::CUDAGuard device_guard(probs.device());
+    const auto          batch_size  = static_cast<uint32_t>(output.size(0));
+    const auto          vocab_size  = static_cast<uint32_t>(probs.size(1));
+    const int32_t       top_k_limit = static_cast<int32_t>(
+        top_k_val <= 0 ? vocab_size : std::min<int64_t>(top_k_val, static_cast<int64_t>(vocab_size)));
+    if (is_unfiltered_cpu_top_k(maybe_top_k_arr, batch_size, static_cast<uint32_t>(top_k_limit), vocab_size)) {
+        sampling_from_probs(probs,
+                            output,
+                            valid,
+                            maybe_indices,
+                            deterministic,
+                            maybe_seed_arr,
+                            seed_val,
+                            maybe_offset_arr,
+                            offset_val,
+                            cuda_stream);
+        top_k_renorm_probs(probs, renorm_probs, maybe_top_k_arr, top_k_val, cuda_stream);
+        return;
+    }
+    auto indices = prepare_optional_index(maybe_indices, batch_size, probs.device());
+    auto top_k   = prepare_optional_param(maybe_top_k_arr, batch_size, probs.device(), at::kInt, "top_k");
+    auto seed    = prepare_optional_param(maybe_seed_arr, batch_size, probs.device(), at::kLong, "seed");
+    auto offset  = prepare_optional_param(maybe_offset_arr, batch_size, probs.device(), at::kLong, "offset");
+    auto stream  = resolve_stream(cuda_stream);
+
+    if (!indices.defined() && probs.data_ptr() != renorm_probs.data_ptr()
+        && rtp_llm::fast_renorm::FastRenormCTAsPerRow(batch_size, vocab_size) > 1u
+        && rtp_llm::fast_renorm::FastSampleSupportsVocab(vocab_size)) {
+        const size_t ws_bytes = rtp_llm::fast_renorm::FastRenormWorkspaceBytes(batch_size, vocab_size);
+        auto         ws_t     = get_fast_renorm_workspace(probs.device(), stream, ws_bytes);
+        if (ws_t.defined() && static_cast<size_t>(ws_t.numel()) >= ws_bytes) {
+            cudaError_t status = rtp_llm::fast_renorm::FastRenormOrSampleProb<true, true, int32_t>(
+                static_cast<const float*>(probs.data_ptr()),
+                static_cast<float*>(renorm_probs.data_ptr()),
+                static_cast<int32_t*>(output.data_ptr()),
+                static_cast<bool*>(valid.data_ptr()),
+                top_k.defined() ? static_cast<const int32_t*>(top_k.data_ptr()) : nullptr,
+                top_k_limit,
+                nullptr,
+                1.0f,
+                batch_size,
+                vocab_size,
+                seed.defined() ? reinterpret_cast<uint64_t*>(seed.data_ptr<int64_t>()) : nullptr,
+                seed_val,
+                offset.defined() ? reinterpret_cast<uint64_t*>(offset.data_ptr<int64_t>()) : nullptr,
+                offset_val,
+                ws_t.data_ptr(),
+                ws_bytes,
+                stream);
+            check_cuda_status(status, "FastTopKRenormAndSampleProb");
+            return;
+        }
+    }
+
+    top_k_sampling_from_probs(probs,
+                              output,
+                              valid,
+                              maybe_indices,
+                              maybe_top_k_arr,
+                              top_k_val,
+                              deterministic,
+                              maybe_seed_arr,
+                              seed_val,
+                              maybe_offset_arr,
+                              offset_val,
+                              cuda_stream);
+    top_k_renorm_probs(probs, renorm_probs, maybe_top_k_arr, top_k_val, cuda_stream);
+}
+
+void top_k_top_p_renorm_and_sample_probs(torch::Tensor                probs,
+                                         torch::Tensor                renorm_probs,
+                                         torch::Tensor                output,
+                                         torch::Tensor                valid,
+                                         std::optional<torch::Tensor> maybe_indices,
+                                         std::optional<torch::Tensor> maybe_top_k_arr,
+                                         int64_t                      top_k_val,
+                                         std::optional<torch::Tensor> maybe_top_p_arr,
+                                         double                       top_p_val,
+                                         bool                         deterministic,
+                                         std::optional<torch::Tensor> maybe_seed_arr,
+                                         uint64_t                     seed_val,
+                                         std::optional<torch::Tensor> maybe_offset_arr,
+                                         uint64_t                     offset_val,
+                                         int64_t                      cuda_stream) {
+    check_renorm_inputs(probs, renorm_probs);
+    check_sampling_inputs(probs, output, valid);
+
+    at::cuda::CUDAGuard device_guard(probs.device());
+    const auto          batch_size  = static_cast<uint32_t>(output.size(0));
+    const auto          vocab_size  = static_cast<uint32_t>(probs.size(1));
+    const auto          top_k_limit = static_cast<int32_t>(
+        top_k_val <= 0 ? vocab_size : std::min<int64_t>(top_k_val, static_cast<int64_t>(vocab_size)));
+    if (is_unfiltered_cpu_top_k(maybe_top_k_arr, batch_size, static_cast<uint32_t>(top_k_limit), vocab_size)
+        && is_unfiltered_cpu_top_p(maybe_top_p_arr, batch_size, top_p_val)) {
+        sampling_from_probs(probs,
+                            output,
+                            valid,
+                            maybe_indices,
+                            deterministic,
+                            maybe_seed_arr,
+                            seed_val,
+                            maybe_offset_arr,
+                            offset_val,
+                            cuda_stream);
+        top_k_top_p_renorm_probs(
+            probs, renorm_probs, maybe_top_k_arr, top_k_val, maybe_top_p_arr, top_p_val, cuda_stream);
+        return;
+    }
+    auto indices = prepare_optional_index(maybe_indices, batch_size, probs.device());
+    auto top_k   = prepare_optional_param(maybe_top_k_arr, batch_size, probs.device(), at::kInt, "top_k");
+    auto top_p   = prepare_optional_param(maybe_top_p_arr, batch_size, probs.device(), at::kFloat, "top_p");
+    auto seed    = prepare_optional_param(maybe_seed_arr, batch_size, probs.device(), at::kLong, "seed");
+    auto offset  = prepare_optional_param(maybe_offset_arr, batch_size, probs.device(), at::kLong, "offset");
+    auto stream  = resolve_stream(cuda_stream);
+
+    if (!indices.defined() && probs.data_ptr() != renorm_probs.data_ptr()
+        && rtp_llm::fast_renorm::FastRenormCTAsPerRow(batch_size, vocab_size) > 1u
+        && rtp_llm::fast_renorm::FastSampleSupportsVocab(vocab_size)) {
+        const size_t ws_bytes = rtp_llm::fast_renorm::FastRenormWorkspaceBytes(batch_size, vocab_size);
+        auto         ws_t     = get_fast_renorm_workspace(probs.device(), stream, ws_bytes);
+        if (ws_t.defined() && static_cast<size_t>(ws_t.numel()) >= ws_bytes) {
+            cudaError_t status = rtp_llm::fast_renorm::FastRenormOrSampleProb<true, true, int32_t>(
+                static_cast<const float*>(probs.data_ptr()),
+                static_cast<float*>(renorm_probs.data_ptr()),
+                static_cast<int32_t*>(output.data_ptr()),
+                static_cast<bool*>(valid.data_ptr()),
+                top_k.defined() ? static_cast<const int32_t*>(top_k.data_ptr()) : nullptr,
+                top_k_limit,
+                top_p.defined() ? static_cast<const float*>(top_p.data_ptr()) : nullptr,
+                static_cast<float>(top_p_val),
+                batch_size,
+                vocab_size,
+                seed.defined() ? reinterpret_cast<uint64_t*>(seed.data_ptr<int64_t>()) : nullptr,
+                seed_val,
+                offset.defined() ? reinterpret_cast<uint64_t*>(offset.data_ptr<int64_t>()) : nullptr,
+                offset_val,
+                ws_t.data_ptr(),
+                ws_bytes,
+                stream);
+            check_cuda_status(status, "FastTopKTopPRenormAndSampleProb");
+            return;
+        }
+    }
+
+    top_k_top_p_sampling_from_probs(probs,
+                                    output,
+                                    valid,
+                                    maybe_indices,
+                                    maybe_top_k_arr,
+                                    top_k_val,
+                                    maybe_top_p_arr,
+                                    top_p_val,
+                                    deterministic,
+                                    maybe_seed_arr,
+                                    seed_val,
+                                    maybe_offset_arr,
+                                    offset_val,
+                                    cuda_stream);
+    top_k_top_p_renorm_probs(probs, renorm_probs, maybe_top_k_arr, top_k_val, maybe_top_p_arr, top_p_val, cuda_stream);
 }
 
 }  // namespace rtp_llm

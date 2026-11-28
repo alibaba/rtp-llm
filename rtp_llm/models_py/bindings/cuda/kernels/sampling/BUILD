@@ -7,6 +7,7 @@ cc_library(
     name = "sampling",
     srcs = ["api.cu"],
     hdrs = [
+        "fast_renorm.cuh",
         "sampling.h",
         "flashinfer/air_top_p.cuh",
         "flashinfer/allocator.h",

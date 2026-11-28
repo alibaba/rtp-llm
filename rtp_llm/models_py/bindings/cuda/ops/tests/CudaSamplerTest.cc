@@ -559,7 +559,7 @@ TEST_F(CudaSamplerTest, testPenalty) {
         {(int64_t)batch_size, 10});
     size_t step               = 5;
     auto   output_token_ids_t = cudaIntTensor({2, 2, 2, 1, 1, 0, 2, 2, 2, 1, 1, 0, 2, 2, 2, 1, 1, 0, 2, 2, 2, 1, 1, 0},
-                                              {(int64_t)batch_size, (int64_t)(step + 1)});
+                                            {(int64_t)batch_size, (int64_t)(step + 1)});
 
     auto sequence_lengths_t = cudaIntTensor({5, 5, 5, 5}, {4});
     auto input_lengths_t    = cudaIntTensor({-1, -1, -1, -1}, {4});
@@ -640,7 +640,7 @@ TEST_F(CudaSamplerTest, testDoSample) {
         {(int64_t)batch_size, 10});
     size_t step               = 5;
     auto   output_token_ids_t = cudaIntTensor({2, 2, 2, 1, 1, 0, 2, 2, 2, 1, 1, 0, 2, 2, 2, 1, 1, 0, 2, 2, 2, 1, 1, 0},
-                                              {(int64_t)batch_size, (int64_t)(step + 1)});
+                                            {(int64_t)batch_size, (int64_t)(step + 1)});
 
     auto sequence_lengths_t = cudaIntTensor({5, 5, 5, 5}, {4});
     auto input_lengths_t    = cudaIntTensor({-1, -1, -1, -1}, {4});
@@ -859,9 +859,6 @@ TEST_F(CudaSamplerTest, testTopPOneCategoricalPreservesPublicOutputsAndRngReserv
     }
 }
 
-
-
-
 TEST_F(CudaSamplerTest, testCompactGreedyOutputAcrossVocabulariesAndBatchSizes) {
     auto options = torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA);
     for (int64_t batch : {1, 2, 32, 33, 64}) {
@@ -1001,6 +998,191 @@ TEST_F(CudaSamplerTest, testCompactOutputPreservesTokensProbabilitiesRngAndPenal
                             for (int64_t i = 0; i < batch; ++i)
                                 ASSERT_TRUE(torch::equal(generators[i].get_state(), states[generation * batch + i]));
                         }
+                    }
+                }
+            }
+        }
+    }
+}
+
+TEST_F(CudaSamplerTest, testMultiStepDecodeSamplingParityAtBatch80) {
+    auto options = torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA);
+    auto pin_i32 = torch::TensorOptions().dtype(torch::kInt32).pinned_memory(true);
+    auto pin_f32 = torch::TensorOptions().dtype(torch::kFloat32).pinned_memory(true);
+
+    torch::manual_seed(20261128);
+    constexpr int64_t batch = 80;
+    constexpr int64_t vocab = 129280;
+    constexpr int64_t step  = 64;
+
+    auto base_logits = torch::randn({batch, vocab}, options) * 2.0f;
+    base_logits.slice(1, vocab - 13).fill_(-std::numeric_limits<float>::infinity());
+    auto in_lengths  = torch::full({batch}, 32, pin_i32);
+    auto seq_lengths = torch::full({batch}, step, pin_i32);
+
+    // Run 4 sequential steps alternating active penalties / neutral rows, top_k {0, 20, 50}, top_p {0.95, 1.0},
+    // comparing CPU-tokens fallback vs GPU row-major sparse + persistent workspace path bit-for-bit on tokens,
+    // cum_log_probs, output_all_probs, and RNG states.
+    for (int round = 0; round < 4; ++round) {
+        auto top_k = torch::empty({batch}, pin_i32);
+        auto top_p = torch::empty({batch}, pin_f32);
+        auto temp  = torch::empty({batch}, pin_f32);
+        auto rep   = torch::ones({batch}, pin_f32);
+        auto pres  = torch::zeros({batch}, pin_f32);
+        auto freq  = torch::zeros({batch}, pin_f32);
+        for (int64_t i = 0; i < batch; ++i) {
+            top_k[i] = (round == 0) ? 20 : ((round == 1) ? 0 : ((i % 3 == 0) ? 0 : 50));
+            top_p[i] = (round == 2) ? 1.0f : ((i % 2 == 0) ? 0.95f : 0.85f);
+            temp[i]  = (i % 5 == 0) ? 1.0f : 0.7f;
+            if (round != 3 || i % 2 == 0) {
+                rep[i]  = 1.2f;
+                pres[i] = 0.1f;
+                freq[i] = 0.05f;
+            }
+        }
+
+        auto          tokens_init = torch::randint(0, vocab, {batch, step + 1}, options.dtype(torch::kInt32));
+        torch::Tensor ref_tokens, ref_probs, ref_cum;
+        std::vector<torch::Tensor> ref_states;
+        for (bool use_cpu_tokens : {true, false}) {
+            std::vector<at::Generator> gens;
+            for (int64_t i = 0; i < batch; ++i) {
+                auto g = torch::make_generator<at::CUDAGeneratorImpl>();
+                g.set_current_seed(500000 + round * 1000 + i);
+                gens.push_back(g);
+            }
+            auto         tokens = use_cpu_tokens ? tokens_init.cpu() : tokens_init.clone();
+            auto         logits = base_logits.clone();
+            auto         probs  = torch::empty_like(logits);
+            auto         cum    = torch::full({batch}, -1.5f, options);
+            GreedyParams params{logits,
+                                in_lengths,
+                                seq_lengths,
+                                tokens,
+                                static_cast<size_t>(step),
+                                top_k.clone(),
+                                top_p.clone(),
+                                temp.clone(),
+                                rep.clone(),
+                                std::nullopt,
+                                cum,
+                                std::nullopt,
+                                false,
+                                probs,
+                                pres.clone(),
+                                freq.clone(),
+                                std::nullopt,
+                                gens};
+            auto         result = execSampleGreedy(params);
+            check_cuda_error();
+            ASSERT_TRUE(!result.success.defined() || result.success.all().item<bool>());
+            ASSERT_TRUE(torch::allclose(probs.sum(-1), torch::ones({batch}, options), 3e-5, 1e-6));
+            if (use_cpu_tokens) {
+                ref_tokens = tokens.cpu();
+                ref_probs  = probs.clone();
+                ref_cum    = cum.clone();
+                for (auto& g : gens) {
+                    ref_states.push_back(g.get_state());
+                }
+            } else {
+                ASSERT_TRUE(torch::equal(tokens.cpu(), ref_tokens)) << "round=" << round;
+                ASSERT_TRUE(torch::equal(probs, ref_probs)) << "round=" << round;
+                ASSERT_TRUE(torch::equal(cum, ref_cum)) << "round=" << round;
+                for (int64_t i = 0; i < batch; ++i) {
+                    ASSERT_TRUE(torch::equal(gens[i].get_state(), ref_states[i]));
+                }
+            }
+        }
+    }
+}
+
+TEST_F(CudaSamplerTest, testDecodeSamplingAllProbsVsNoAllProbsParityAtBatch80) {
+    auto options = torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA);
+    auto pin_i32 = torch::TensorOptions().dtype(torch::kInt32).pinned_memory(true);
+    auto pin_f32 = torch::TensorOptions().dtype(torch::kFloat32).pinned_memory(true);
+
+    torch::manual_seed(20261129);
+    constexpr int64_t batch = 80;
+    constexpr int64_t vocab = 129280;
+    constexpr int64_t step  = 32;
+
+    auto base_logits = torch::randn({batch, vocab}, options) * 2.0f;
+    base_logits.slice(1, vocab - 13).fill_(-std::numeric_limits<float>::infinity());
+    auto in_lengths  = torch::full({batch}, 16, pin_i32);
+    auto seq_lengths = torch::full({batch}, step, pin_i32);
+    auto tokens_init = torch::randint(0, vocab, {batch, step + 1}, options.dtype(torch::kInt32));
+
+    struct ModeCfg {
+        int32_t top_k;
+        float   top_p;
+        bool    has_invalid;
+    };
+    for (const auto& cfg : std::vector<ModeCfg>{
+             {0, 1.0f, false},
+             {0, 0.95f, false},
+             {20, 1.0f, false},
+             {20, 0.95f, false},
+             {50, 0.80f, true},
+         }) {
+        auto top_k = torch::full({batch}, cfg.top_k, pin_i32);
+        auto top_p = torch::full({batch}, cfg.top_p, pin_f32);
+        auto temp  = torch::full({batch}, 0.7f, pin_f32);
+        if (cfg.has_invalid) {
+            top_p[3] = -1.0f;
+        }
+
+        torch::Tensor              ref_tokens, ref_valid;
+        std::vector<torch::Tensor> ref_states;
+        for (bool want_all_probs : {false, true}) {
+            std::vector<at::Generator> gens;
+            for (int64_t i = 0; i < batch; ++i) {
+                auto g = torch::make_generator<at::CUDAGeneratorImpl>();
+                g.set_current_seed(910000 + cfg.top_k * 100 + i);
+                gens.push_back(g);
+            }
+            auto         tokens = tokens_init.clone();
+            auto         logits = base_logits.clone();
+            auto         all_p  = want_all_probs ? std::make_optional(torch::empty_like(logits)) : std::nullopt;
+            GreedyParams params{logits,
+                                in_lengths,
+                                seq_lengths,
+                                tokens,
+                                static_cast<size_t>(step),
+                                top_k.clone(),
+                                top_p.clone(),
+                                temp.clone(),
+                                std::nullopt,
+                                std::nullopt,
+                                std::nullopt,
+                                std::nullopt,
+                                false,
+                                all_p,
+                                std::nullopt,
+                                std::nullopt,
+                                std::nullopt,
+                                gens};
+            auto         result = execSampleGreedy(params);
+            check_cuda_error();
+            ASSERT_TRUE(result.success.defined());
+
+            if (!want_all_probs) {
+                ref_tokens = tokens.clone();
+                ref_valid  = result.success.clone();
+                for (auto& g : gens) {
+                    ref_states.push_back(g.get_state());
+                }
+            } else {
+                ASSERT_TRUE(torch::equal(tokens, ref_tokens)) << "top_k=" << cfg.top_k << " top_p=" << cfg.top_p;
+                ASSERT_TRUE(torch::equal(result.success, ref_valid)) << "top_k=" << cfg.top_k << " top_p=" << cfg.top_p;
+                for (int64_t i = 0; i < batch; ++i) {
+                    ASSERT_TRUE(torch::equal(gens[i].get_state(), ref_states[i]));
+                }
+                auto valid_cpu = result.success.cpu();
+                for (int64_t i = 0; i < batch; ++i) {
+                    if (valid_cpu[i].item<bool>()) {
+                        ASSERT_NEAR(all_p.value()[i].sum().item<float>(), 1.0f, 3e-5f);
+                    } else {
+                        ASSERT_EQ(all_p.value()[i].count_nonzero().item<int64_t>(), 0);
                     }
                 }
             }

@@ -75,4 +75,56 @@ void top_k_renorm_probs(torch::Tensor                probs,
                         int64_t                      top_k_val,
                         int64_t                      cuda_stream = 0);
 
+void top_k_top_p_renorm_probs(torch::Tensor                probs,
+                              torch::Tensor                renorm_probs,
+                              std::optional<torch::Tensor> maybe_top_k_arr,
+                              int64_t                      top_k_val,
+                              std::optional<torch::Tensor> maybe_top_p_arr,
+                              double                       top_p_val,
+                              int64_t                      cuda_stream = 0);
+
+void top_p_renorm_and_sample_probs(torch::Tensor                probs,
+                                   torch::Tensor                renorm_probs,
+                                   torch::Tensor                output,
+                                   torch::Tensor                valid,
+                                   std::optional<torch::Tensor> maybe_indices,
+                                   std::optional<torch::Tensor> maybe_top_p_arr,
+                                   double                       top_p_val,
+                                   bool                         deterministic,
+                                   std::optional<torch::Tensor> maybe_seed_arr,
+                                   uint64_t                     seed_val,
+                                   std::optional<torch::Tensor> maybe_offset_arr,
+                                   uint64_t                     offset_val,
+                                   int64_t                      cuda_stream = 0);
+
+void top_k_renorm_and_sample_probs(torch::Tensor                probs,
+                                   torch::Tensor                renorm_probs,
+                                   torch::Tensor                output,
+                                   torch::Tensor                valid,
+                                   std::optional<torch::Tensor> maybe_indices,
+                                   std::optional<torch::Tensor> maybe_top_k_arr,
+                                   int64_t                      top_k_val,
+                                   bool                         deterministic,
+                                   std::optional<torch::Tensor> maybe_seed_arr,
+                                   uint64_t                     seed_val,
+                                   std::optional<torch::Tensor> maybe_offset_arr,
+                                   uint64_t                     offset_val,
+                                   int64_t                      cuda_stream = 0);
+
+void top_k_top_p_renorm_and_sample_probs(torch::Tensor                probs,
+                                         torch::Tensor                renorm_probs,
+                                         torch::Tensor                output,
+                                         torch::Tensor                valid,
+                                         std::optional<torch::Tensor> maybe_indices,
+                                         std::optional<torch::Tensor> maybe_top_k_arr,
+                                         int64_t                      top_k_val,
+                                         std::optional<torch::Tensor> maybe_top_p_arr,
+                                         double                       top_p_val,
+                                         bool                         deterministic,
+                                         std::optional<torch::Tensor> maybe_seed_arr,
+                                         uint64_t                     seed_val,
+                                         std::optional<torch::Tensor> maybe_offset_arr,
+                                         uint64_t                     offset_val,
+                                         int64_t                      cuda_stream = 0);
+
 }  // namespace rtp_llm

@@ -37,3 +37,71 @@ TEST(TiledTemperatureTest, testTiledTemperatureMatchesNativeBitsAndUnalignedView
         }
     }
 }
+
+TEST(TiledTemperatureTest, testTiledTemperatureExtendedBatchAndArbitraryVocab) {
+    auto options = torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA);
+    auto stream  = at::cuda::getCurrentCUDAStream().stream();
+    torch::manual_seed(20261128);
+    for (int batch : {1, 33, 80, 96, 128}) {
+        for (int vocab : {1, 3, 257, 4093, 129280, 129283}) {
+            for (int offset : {0, 1}) {
+                auto storage = torch::empty({static_cast<int64_t>(batch) * vocab + offset}, options);
+                auto actual  = storage.slice(0, offset).reshape({batch, vocab});
+                actual.normal_();
+                if (vocab >= 6) {
+                    actual.slice(1, 0, 1).fill_(std::numeric_limits<float>::denorm_min());
+                    actual.slice(1, 1, 2).fill_(-std::numeric_limits<float>::infinity());
+                    actual.slice(1, 2, 3).fill_(std::numeric_limits<float>::infinity());
+                    actual.slice(1, 3, 4).fill_(-0.0f);
+                }
+                auto expected     = actual.clone();
+                auto temperatures = torch::empty({batch}, options).uniform_(0.1, 2.5);
+                temperatures.select(0, 0).fill_(0.0f);
+                if (batch > 1) {
+                    temperatures.select(0, batch - 1).fill_(1.0f);
+                }
+                invokeBatchApplyTemperaturePenalty<float>(
+                    expected.data_ptr<float>(), nullptr, temperatures.data_ptr<float>(), batch, vocab, vocab, stream);
+                invokeTiledTemperaturePenalty(
+                    actual.data_ptr<float>(), temperatures.data_ptr<float>(), batch, vocab, stream);
+                check_cuda_error();
+                ASSERT_TRUE(torch::equal(actual.view(torch::kInt32), expected.view(torch::kInt32)))
+                    << "batch=" << batch << " vocab=" << vocab << " offset=" << offset;
+            }
+        }
+    }
+}
+
+TEST(TiledTemperatureTest, testScalarTemperatureMatchesArrayBits) {
+    auto options = torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA);
+    auto stream  = at::cuda::getCurrentCUDAStream().stream();
+    torch::manual_seed(20261130);
+    for (int batch : {1, 80, 96}) {
+        for (int vocab : {257, 129280, 129283}) {
+            for (int offset : {0, 1}) {
+                for (float temp : {0.0f, 0.7f, 1.5f}) {
+                    auto storage = torch::empty({static_cast<int64_t>(batch) * vocab + offset}, options);
+                    auto actual  = storage.slice(0, offset).reshape({batch, vocab});
+                    actual.normal_();
+                    actual.slice(1, 0, 1).fill_(std::numeric_limits<float>::denorm_min());
+                    actual.slice(1, 1, 2).fill_(-std::numeric_limits<float>::infinity());
+                    actual.slice(1, 2, 3).fill_(std::numeric_limits<float>::infinity());
+                    actual.slice(1, 3, 4).fill_(-0.0f);
+                    auto expected     = actual.clone();
+                    auto temperatures = torch::full({batch}, temp, options);
+                    invokeBatchApplyTemperaturePenalty<float>(expected.data_ptr<float>(),
+                                                              nullptr,
+                                                              temperatures.data_ptr<float>(),
+                                                              batch,
+                                                              vocab,
+                                                              vocab,
+                                                              stream);
+                    invokeTiledTemperaturePenalty(actual.data_ptr<float>(), temp, batch, vocab, stream);
+                    check_cuda_error();
+                    ASSERT_TRUE(torch::equal(actual.view(torch::kInt32), expected.view(torch::kInt32)))
+                        << "batch=" << batch << " vocab=" << vocab << " offset=" << offset << " temp=" << temp;
+                }
+            }
+        }
+    }
+}

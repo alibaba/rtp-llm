@@ -40,8 +40,45 @@ void invokeBatchApplyRepetitionPenalty(T*           logits,
                                        const int    step,
                                        cudaStream_t stream);
 
+template<typename T>
+void invokeBatchApplyRepetitionPenaltyRowMajorSparse(T*           logits,
+                                                     int*         penalty_ws,
+                                                     const float* repetition_penalty,
+                                                     const float* presence_penalty,
+                                                     const float* frequency_penalty,
+                                                     const int*   token_ids,
+                                                     const int    batch_size,
+                                                     const int    token_stride,
+                                                     const int    vocab_size,
+                                                     const int*   input_lengths,
+                                                     const int    max_input_length,
+                                                     const int    step,
+                                                     cudaStream_t stream);
+
+template<typename T>
+void invokeBatchApplyRepetitionPenaltyRowMajorSparse(T*           logits,
+                                                     int*         penalty_ws,
+                                                     const float* repetition_penalty,
+                                                     const float* presence_penalty,
+                                                     const float* frequency_penalty,
+                                                     float        scalar_repetition_penalty,
+                                                     float        scalar_presence_penalty,
+                                                     float        scalar_frequency_penalty,
+                                                     const int*   token_ids,
+                                                     const int    batch_size,
+                                                     const int    token_stride,
+                                                     const int    vocab_size,
+                                                     const int*   input_lengths,
+                                                     const int    uniform_input_length,
+                                                     const int    max_input_length,
+                                                     const int    step,
+                                                     cudaStream_t stream);
+
 void invokeTiledTemperaturePenalty(
     float* logits, const float* temperatures, int batch_size, int vocab, cudaStream_t stream);
+
+void invokeTiledTemperaturePenalty(
+    float* logits, float scalar_temperature, int batch_size, int vocab, cudaStream_t stream);
 
 template<typename T>
 void invokeBatchApplyTemperaturePenalty(T*           logits,

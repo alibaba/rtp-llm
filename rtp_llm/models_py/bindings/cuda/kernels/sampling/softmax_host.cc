@@ -13,7 +13,7 @@ namespace {
 // loads in samplerOrderedWarpSums.
 bool canUseSplitSoftmax(const torch::Tensor& logits) {
     return logits.is_cuda() && logits.is_contiguous() && logits.scalar_type() == torch::kFloat32 && logits.dim() == 2
-           && logits.size(0) > 0 && logits.size(0) <= 32 && logits.size(1) >= 65536 && logits.size(1) % 4 == 0;
+           && logits.size(0) > 0 && logits.size(0) <= 256 && logits.size(1) >= 65536 && logits.size(1) % 4 == 0;
 }
 }  // namespace
 
