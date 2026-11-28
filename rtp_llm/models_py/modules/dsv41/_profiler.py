@@ -2,28 +2,46 @@
 
 from __future__ import annotations
 
+import contextvars
+import os
 from contextlib import contextmanager
-from typing import Any, Callable, ContextManager
+from typing import Any, Callable, ContextManager, Optional, Type
 
 import torch
 
 from rtp_llm.models_py.utils.profiler import (
-    _NOOP_RECORD_FUNCTION_RANGE,
-    disable_record_function_ranges,
-)
-from rtp_llm.models_py.utils.profiler import (
-    record_function_ranges_enabled as _generic_ranges_enabled,
+    active_layer_forward_range,
+    is_light_timeline,
 )
 
-# record_function ranges are always on; only the internal
-# ``disable_record_function_ranges`` context can suppress them.
-_RANGES_ENABLED = True
+_RANGES_ENABLED = os.environ.get("DSV4_RECORD_FUNCTION_RANGES", "1") != "0"
+_DISABLED_DEPTH: contextvars.ContextVar[int] = contextvars.ContextVar(
+    "dsv4_record_function_ranges_disabled", default=0
+)
+
+
+class _NoopRecordFunctionRange:
+    __slots__ = ()
+
+    def __enter__(self) -> None:
+        return None
+
+    def __exit__(
+        self,
+        exc_type: Optional[Type[BaseException]],
+        exc: Optional[BaseException],
+        tb,
+    ) -> bool:
+        return False
+
+
+_NOOP_RECORD_FUNCTION_RANGE = _NoopRecordFunctionRange()
 
 LayerForwardRange = Callable[[int], ContextManager[Any]]
 
 
 def record_function_ranges_enabled() -> bool:
-    return _RANGES_ENABLED and _generic_ranges_enabled()
+    return _RANGES_ENABLED and _DISABLED_DEPTH.get() <= 0
 
 
 def record_function_range(name: str):
@@ -34,14 +52,6 @@ def record_function_range(name: str):
 
 def _noop_layer_forward_range(_layer_idx: int) -> ContextManager[Any]:
     return _NOOP_RECORD_FUNCTION_RANGE
-
-
-def _active_layer_forward_range(layer_idx: int) -> ContextManager[Any]:
-    # ``record_function`` uses USER_SCOPE, which Kineto mirrors onto every GPU
-    # stream covered by the range.  A default _RecordFunctionFast uses FUNCTION
-    # scope instead: the layer remains visible as one CPU ``cpu_op`` interval,
-    # without a ``gpu_user_annotation`` projection that lengthens the timeline.
-    return torch._C._profiler._RecordFunctionFast(f"forward(layer={layer_idx})")
 
 
 def _torch_profiler_enabled() -> bool:
@@ -61,14 +71,14 @@ def make_layer_forward_range() -> LayerForwardRange:
     """
     if not record_function_ranges_enabled() or not _torch_profiler_enabled():
         return _noop_layer_forward_range
-    return _active_layer_forward_range
+    return active_layer_forward_range()
 
 
 @contextmanager
-def moe_record_function_scope():
-    """Propagate the DSV4 profiler switch into the generic MoE call."""
-    if _RANGES_ENABLED:
+def disable_record_function_ranges():
+    depth = _DISABLED_DEPTH.get()
+    token = _DISABLED_DEPTH.set(depth + 1)
+    try:
         yield
-        return
-    with disable_record_function_ranges():
-        yield
+    finally:
+        _DISABLED_DEPTH.reset(token)

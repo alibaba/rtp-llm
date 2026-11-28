@@ -806,6 +806,7 @@ __global__ void SamplingFromProbKernel(DType*    probs,
                                        bool*     valid,
                                        IdType*   indices,
                                        uint32_t  d,
+                                       uint32_t  row_stride,
                                        uint64_t* seed_arr,
                                        uint64_t  seed_val,
                                        uint64_t* offset_arr,
@@ -836,7 +837,8 @@ __global__ void SamplingFromProbKernel(DType*    probs,
     for (uint32_t i = 0; i < ceil_div(d, BLOCK_THREADS * VEC_SIZE); ++i) {
         probs_vec.fill(0);
         if ((i * BLOCK_THREADS + tx) * VEC_SIZE < d) {
-            probs_vec.cast_load(probs + row_idx * d + i * BLOCK_THREADS * VEC_SIZE + tx * VEC_SIZE);
+            probs_vec.cast_load(probs + static_cast<size_t>(row_idx) * row_stride + i * BLOCK_THREADS * VEC_SIZE
+                                + tx * VEC_SIZE);
         }
 
         DeviceSamplingFromProb<VEC_SIZE, BLOCK_THREADS, SCAN_ALGORITHM, REDUCE_ALGORITHM, DETERMINISTIC>(
@@ -1579,19 +1581,23 @@ cudaError_t SamplingFromProb(T*           probs,
                              IdType*      indices,
                              uint32_t     batch_size,
                              uint32_t     d,
+                             uint32_t     row_stride,
                              bool         deterministic,
                              uint64_t*    seed_arr,
                              uint64_t     seed_val,
                              uint64_t*    offset_arr,
                              uint64_t     offset_val,
                              cudaStream_t stream = 0) {
-    const uint32_t vec_size = std::gcd(16 / sizeof(T), d);
+    const uint32_t vec_size =
+        std::gcd(std::gcd(16 / sizeof(T), d),
+                 std::gcd(row_stride, static_cast<uint32_t>(reinterpret_cast<uintptr_t>(probs) / sizeof(T))));
 
     auto compute_capacity = GetCudaComputeCapability();
     DISPATCH_COMPUTE_CAP_NUM_THREADS(compute_capacity, BLOCK_THREADS, {
-        dim3           nblks(batch_size);
-        dim3           nthrs(BLOCK_THREADS);
-        void*          args[] = {&probs, &output, &valid, &indices, &d, &seed_arr, &seed_val, &offset_arr, &offset_val};
+        dim3  nblks(batch_size);
+        dim3  nthrs(BLOCK_THREADS);
+        void* args[] = {
+            &probs, &output, &valid, &indices, &d, &row_stride, &seed_arr, &seed_val, &offset_arr, &offset_val};
         const uint32_t smem_size = sizeof(SamplingTempStorage<BLOCK_THREADS, SCAN_ALGO, REDUCE_ALGO>);
 
         DISPATCH_ALIGNED_VEC_SIZE(
@@ -1848,6 +1854,15 @@ TopPRenormProbKernel(DType* probs, DType* renormed_prob, float* top_p_arr, float
     auto&                  temp_storage = reinterpret_cast<RenormTempStorage<BLOCK_THREADS, REDUCE_ALGO>&>(smem_renorm);
     vec_t<float, VEC_SIZE> probs_vec;
 
+    // AIR copies p=1 rows unchanged. Preserve that behavior for the
+    // 4096-wide single-CTA path before the older small-vocab fast path.
+    if (d == 4096 && p == 1.0f) {
+        for (uint32_t i = tx; i < d; i += BLOCK_THREADS) {
+            renormed_prob[row_idx * d + i] = probs[row_idx * d + i];
+        }
+        return;
+    }
+
     // Fast-path: when p >= 1.0 (e.g., p == 1.0), perform simple sum and normalization
     if (p >= 1.0f) {
         // Stage A: per-thread float accumulation over assigned lanes (vectorized)
@@ -2005,6 +2020,125 @@ TopPRenormProbKernel(DType* probs, DType* renormed_prob, float* top_p_arr, float
     }
 }
 
+// For the compact FP32 support, ordered positive-float bits give a finite
+// top-p cutoff search. Keep the row in registers and reduce both trial masses
+// together; the generic kernel reloads the row and performs four reductions
+// per search round.
+struct TopPRenormSums4096 {
+    float first;
+    float second;
+};
+
+struct TopPRenormAddSums4096 {
+    __device__ __forceinline__ TopPRenormSums4096 operator()(const TopPRenormSums4096& a,
+                                                             const TopPRenormSums4096& b) const {
+        return {a.first + b.first, a.second + b.second};
+    }
+};
+
+struct TopPRenormMax4096 {
+    __device__ __forceinline__ float operator()(float a, float b) const {
+        return fmaxf(a, b);
+    }
+};
+
+__global__ void
+TopPRenormProb4096BitsKernel(const float* probs, float* renormed_prob, const float* top_p_arr, float top_p_val) {
+    constexpr int width = 4096, threads = 256, items = width / threads;
+    using SumReduce   = cub::BlockReduce<TopPRenormSums4096, threads>;
+    using FloatReduce = cub::BlockReduce<float, threads>;
+    __shared__ typename SumReduce::TempStorage   sum_storage;
+    __shared__ typename FloatReduce::TempStorage float_storage;
+    __shared__ TopPRenormSums4096                block_sums;
+    __shared__ float                             block_float;
+
+    const int   row = blockIdx.x, lane = threadIdx.x;
+    const float top_p = top_p_arr ? top_p_arr[row] : top_p_val;
+    float       values[items];
+    float       local_max = 0.0f;
+#pragma unroll
+    for (int i = 0; i < items; ++i) {
+        values[i] = probs[row * width + i * threads + lane];
+        local_max = fmaxf(local_max, values[i]);
+    }
+    if (top_p == 1.0f || top_p <= 0.0f) {
+#pragma unroll
+        for (int i = 0; i < items; ++i) {
+            renormed_prob[row * width + i * threads + lane] = values[i];
+        }
+        return;
+    }
+    if (top_p > 1.0f) {
+        float local_sum = 0.0f;
+#pragma unroll
+        for (int i = 0; i < items; ++i)
+            local_sum += values[i];
+        const float total = FloatReduce(float_storage).Sum(local_sum);
+        if (lane == 0)
+            block_float = total;
+        __syncthreads();
+        const float inv = math::ptx_rcp(max(block_float, 1e-8f));
+#pragma unroll
+        for (int i = 0; i < items; ++i) {
+            renormed_prob[row * width + i * threads + lane] = values[i] * inv;
+        }
+        return;
+    }
+
+    const float max_prob = FloatReduce(float_storage).Reduce(local_max, TopPRenormMax4096{});
+    if (lane == 0)
+        block_float = max_prob;
+    __syncthreads();
+    uint32_t low = 0, high = __float_as_uint(block_float);
+    // The positive FP32 bit order is monotonic. Each round shrinks [low, high]
+    // by at least one representable value, so this search always terminates.
+    while (high - low > 1) {
+        const uint32_t span   = high - low;
+        uint32_t       pivot0 = low + span / 3, pivot1 = low + 2 * span / 3;
+        if (pivot0 == low)
+            pivot0 = low + 1;
+        if (pivot1 <= pivot0)
+            pivot1 = pivot0;
+        if (pivot1 >= high)
+            pivot1 = high - 1;
+        TopPRenormSums4096 local{0.0f, 0.0f};
+#pragma unroll
+        for (int i = 0; i < items; ++i) {
+            const uint32_t bits = __float_as_uint(values[i]);
+            local.first += bits > pivot0 ? values[i] : 0.0f;
+            local.second += bits > pivot1 ? values[i] : 0.0f;
+        }
+        const auto reduced = SumReduce(sum_storage).Reduce(local, TopPRenormAddSums4096{});
+        if (lane == 0)
+            block_sums = reduced;
+        __syncthreads();
+        if (block_sums.second >= top_p) {
+            low = pivot1;
+        } else if (block_sums.first >= top_p) {
+            low  = pivot0;
+            high = pivot1;
+        } else {
+            high = pivot0;
+        }
+    }
+
+    float local_kept = 0.0f;
+#pragma unroll
+    for (int i = 0; i < items; ++i) {
+        local_kept += __float_as_uint(values[i]) > low ? values[i] : 0.0f;
+    }
+    const float kept = FloatReduce(float_storage).Sum(local_kept);
+    if (lane == 0)
+        block_float = kept;
+    __syncthreads();
+    const float inv = math::ptx_rcp(max(block_float, 1e-8f));
+#pragma unroll
+    for (int i = 0; i < items; ++i) {
+        const float value                               = values[i];
+        renormed_prob[row * width + i * threads + lane] = __float_as_uint(value) > low ? value * inv : 0.0f;
+    }
+}
+
 template<typename DType>
 cudaError_t TopPRenormProb(DType*       probs,
                            DType*       renormed_prob,
@@ -2014,6 +2148,14 @@ cudaError_t TopPRenormProb(DType*       probs,
                            uint32_t     d,
                            cudaStream_t stream = 0) {
     const uint32_t vec_size = std::gcd(16 / sizeof(DType), d);
+
+    if (d == 4096 && std::is_same_v<DType, float>) {
+        constexpr uint32_t BLOCK_THREADS = 256;
+        auto               kernel        = TopPRenormProb4096BitsKernel;
+        void*              args[]        = {&probs, &renormed_prob, &top_p_arr, &top_p_val};
+        FLASHINFER_CUDA_CALL(cudaLaunchKernel((void*)kernel, dim3(batch_size), dim3(BLOCK_THREADS), args, 0, stream));
+        return cudaSuccess;
+    }
 
     auto compute_capacity = GetCudaComputeCapability();
     DISPATCH_COMPUTE_CAP_NUM_THREADS(compute_capacity, BLOCK_THREADS, {

@@ -1,0 +1,643 @@
+"""DeepSeek-V4 MoE block: routed top-k experts + 1 shared expert.
+
+This orchestrator owns:
+  - ``self.gate``: ``Gate`` module (routing scores → topk)
+  - ``self.shared_experts``: ``W13SharedExpert`` (FP8 shared expert)
+  - ``self._strategy``: a ``RoutedExpertsStrategy`` chosen by ``select_strategy``
+
+Forward: gate → strategy.forward → shared_y add. The 4-way if/elif from
+legacy is gone; per-strategy weight loading lives inside
+``strategy.setup_weights``.
+
+Public-surface contract preserved:
+  - ``MoE`` constructor accepts the same 16 positional+keyword args used by
+    ``dsv4/block.py:167`` (no rename, no removal). Plus a new optional
+    ``strategy`` kwarg for tests / forced strategy selection.
+"""
+
+from __future__ import annotations
+
+import logging
+import os
+from typing import TYPE_CHECKING, Dict, Optional
+
+import torch
+import torch.nn as nn
+
+from rtp_llm.models_py.modules.dsv41._profiler import record_function_range
+from rtp_llm.models_py.modules.dsv41.chunk_env import (
+    DEFAULT_DSV4_CHUNK_TOKENS,
+    dsv4_chunk_tokens_from_env,
+    dsv4_global_chunk_tokens_configured,
+)
+from rtp_llm.models_py.utils.expert_load_monitor import ExpertLoadContext
+
+from .gate import Gate
+from .routing_metadata import GateRoutingMetadata
+from .shared_expert import (
+    W13SharedExpert,
+    combine_routed_and_shared,
+    get_shared_expert_executor,
+)
+from .strategies.base import MoeCfg, _resolve_forced, select_strategy
+
+if TYPE_CHECKING:
+    from .mega_se_input_packer import MegaMoEInputs
+
+_FINAL_OUT_CACHE: dict[tuple, torch.Tensor] = {}
+_CHUNKED_MOE_LOGGED = False
+DEFAULT_MOE_CHUNK_TOKENS = DEFAULT_DSV4_CHUNK_TOKENS
+
+
+def chunked_moe_enabled() -> bool:
+    if dsv4_global_chunk_tokens_configured():
+        return moe_chunk_tokens_from_env() > 0
+    return os.environ.get("DSV4_MOE_CHUNK_PREFILL", "1") != "0"
+
+
+def moe_chunk_tokens_from_env(default: int = DEFAULT_MOE_CHUNK_TOKENS) -> int:
+    min_value = 0 if dsv4_global_chunk_tokens_configured() else 1
+    return dsv4_chunk_tokens_from_env(
+        "DSV4_MOE_CHUNK_TOKENS", default, min_value=min_value
+    )
+
+
+def cp_padded_tokens_per_rank_bound(max_seq_len: int, cp_size: int) -> int:
+    """Rank-local CP token upper bound, including ZigZag padding.
+
+    The C++ ZigZagProcessor pads each request to a multiple of
+    ``cp_size * 2`` so every rank gets an even-length local chunk.  A plain
+    ``max_seq_len // cp_size`` underestimates lengths such as 200002 with
+    CP=4: the local padded chunk is 50002, not 50000.
+    """
+    cp_size = max(int(cp_size), 1)
+    max_seq_len = max(int(max_seq_len), 0)
+    if cp_size <= 1:
+        return max_seq_len
+    if max_seq_len == 0:
+        return 0
+    global_alignment = cp_size * 2
+    padded_seq_len = (
+        (max_seq_len + global_alignment - 1) // global_alignment * global_alignment
+    )
+    return padded_seq_len // cp_size
+
+
+def cp_padded_batch_tokens_per_rank_bound(
+    max_batch_tokens: int, cp_size: int, max_batch_size: int
+) -> int:
+    """Bound a batch whose requests are padded independently for ZigZag CP.
+
+    Each nonempty request adds at most ``2 * cp_size - 1`` padding tokens.
+    The sum of padded lengths is a multiple of ``2 * cp_size``, so rounding
+    this upper bound down gives an even rank-local row count.
+    """
+    max_batch_tokens = max(int(max_batch_tokens), 0)
+    cp_size = max(int(cp_size), 1)
+    if cp_size == 1:
+        return max_batch_tokens
+    max_batch_size = min(max(int(max_batch_size), 1), max_batch_tokens)
+    alignment = 2 * cp_size
+    return 2 * ((max_batch_tokens + max_batch_size * (alignment - 1)) // alignment)
+
+
+def resolve_moe_max_tokens_per_rank(
+    max_seq_len: int,
+    current_max_tokens_per_rank: int,
+    cp_size: int,
+    max_generate_batch_size: int,
+    *,
+    max_context_batch_size: int = 1,
+    is_decode_role: bool = False,
+    is_speculative: bool = False,
+    gen_num_per_cycle: int = 0,
+) -> int:
+    from rtp_llm.models_py.modules.factory.fused_moe.utils.fp8_fp4.chunked_layer import (
+        resolve_moe_max_tokens_per_rank as resolve_capacity,
+    )
+
+    return resolve_capacity(
+        max_seq_len,
+        current_max_tokens_per_rank,
+        cp_size,
+        max_generate_batch_size,
+        max_context_batch_size=max_context_batch_size,
+        is_decode_role=is_decode_role,
+        is_speculative=is_speculative,
+        gen_num_per_cycle=gen_num_per_cycle or 0,
+        chunking_enabled=chunked_moe_enabled(),
+        chunk_tokens=moe_chunk_tokens_from_env(),
+    )
+
+
+def _get_or_create_final_out(
+    capacity: int, dim: int, dtype: torch.dtype, device: torch.device
+) -> torch.Tensor:
+    key = (device, dim, dtype)
+    cached = _FINAL_OUT_CACHE.get(key)
+    if cached is not None and cached.size(0) >= capacity:
+        return cached
+    cached = torch.empty((max(capacity, 1), dim), dtype=dtype, device=device)
+    _FINAL_OUT_CACHE[key] = cached
+    return cached
+
+
+class MoE(nn.Module):
+    """V4 MoE block: routed top-k experts + 1 shared expert.
+
+    For TP=1 / EP=1 we instantiate ALL experts locally (LocalLoopStrategy)
+    or the grouped FP4 stacked tensors (GroupedFP4Strategy). For sharded
+    setups only ``[start, end)`` of routed experts live on this rank —
+    DeepEPStrategy or MegaMoEStrategy handles the cross-rank dispatch.
+    """
+
+    def __init__(
+        self,
+        layer_id: int,
+        dim: int,
+        moe_inter_dim: int,
+        n_routed_experts: int,
+        n_activated_experts: int,
+        n_shared_experts: int,
+        score_func: str,
+        route_scale: float,
+        swiglu_limit: float,
+        n_hash_layers: int,
+        vocab_size: int,
+        layer_weights: Optional[Dict] = None,
+        ep_size: int = 1,
+        ep_rank: int = 0,
+        max_tokens_per_rank: int = 8192,
+        is_decode_role: bool = False,
+        strategy: Optional[str] = None,
+        dp_size: int = 1,
+        dp_rank: int = 0,
+        fake_balance_expert: bool = False,
+        n_physical_experts: Optional[int] = None,
+    ):
+        """``layer_weights`` is the framework's per-layer dict
+        (``ModelWeights.weights[layer_id]``) keyed by ``W.v4_*`` enum.
+        Forwards router/shared sub-dicts to ``Gate``/``Expert``; reads the
+        stacked routed tensors ``W.v4_routed_w{1,2,3}_{w,s}`` (shape
+        ``[E_local, ...]``) directly into mega-moe / grouped-fp4 / per-expert
+        paths via the chosen strategy."""
+        super().__init__()
+        resolved_layer_weights: Dict = layer_weights
+        self.layer_id = layer_id
+        self.dim = dim
+        self.n_routed_experts = n_routed_experts
+        self.n_activated_experts = n_activated_experts
+        self.moe_inter_dim = moe_inter_dim
+        self.swiglu_limit = swiglu_limit
+        self.max_tokens_per_rank = max_tokens_per_rank
+        self._is_decode_role = bool(is_decode_role)
+        self.ep_size = ep_size
+        self.ep_rank = ep_rank
+        self.n_physical_experts = (
+            n_routed_experts if n_physical_experts is None else n_physical_experts
+        )
+        if self.n_physical_experts < n_routed_experts or self.n_physical_experts % max(
+            ep_size, 1
+        ):
+            raise ValueError(
+                "Physical experts must cover logical experts and divide evenly over EP"
+            )
+        self.n_local_experts = self.n_physical_experts // max(ep_size, 1)
+        self.local_expert_start = ep_rank * self.n_local_experts
+        self.local_expert_end = self.local_expert_start + self.n_local_experts
+        from rtp_llm.utils.model_weight import W
+
+        logical_to_physical = resolved_layer_weights.get(W.log2phy)
+        logical_count = resolved_layer_weights.get(W.logic_expert_cnt)
+        if (logical_to_physical is None) != (logical_count is None):
+            raise ValueError("EPLB requires both log2phy and logic_expert_cnt")
+        self.eplb_layer = None
+        shared_fp8_block_size = 128
+        if n_shared_experts > 0:
+            from rtp_llm.resident_weights import resident_init_scalar
+
+            def shared_block_size():
+                shared_weight = resolved_layer_weights[W.v4_shared_w13_w]
+                shared_scale = resolved_layer_weights[W.v4_shared_w13_s]
+                return (
+                    32
+                    if tuple(shared_scale.shape)
+                    == (
+                        (shared_weight.shape[0] + 31) // 32,
+                        (shared_weight.shape[1] + 31) // 32,
+                    )
+                    else 128
+                )
+
+            shared_fp8_block_size = int(
+                resident_init_scalar(
+                    resolved_layer_weights,
+                    "dsv41.shared_fp8_block_size.v1",
+                    shared_block_size,
+                )
+            )
+        self.gate = Gate(
+            layer_id,
+            dim,
+            n_routed_experts,
+            n_activated_experts,
+            score_func,
+            route_scale,
+            n_hash_layers,
+            vocab_size,
+            layer_weights=resolved_layer_weights,
+        )
+        cfg = MoeCfg(
+            layer_id=layer_id,
+            dim=dim,
+            moe_inter_dim=moe_inter_dim,
+            n_routed_experts=n_routed_experts,
+            n_physical_experts=self.n_physical_experts,
+            n_activated_experts=n_activated_experts,
+            swiglu_limit=swiglu_limit,
+            ep_size=ep_size,
+            ep_rank=ep_rank,
+            n_local_experts=self.n_local_experts,
+            local_expert_start=self.local_expert_start,
+            local_expert_end=self.local_expert_end,
+            max_tokens_per_rank=max_tokens_per_rank,
+            shared_fp8_block_size=shared_fp8_block_size,
+            is_decode_role=self._is_decode_role,
+            dp_size=dp_size,
+            dp_rank=dp_rank,
+            fake_balance_expert=fake_balance_expert,
+            n_shared_experts=n_shared_experts,
+        )
+        forced, strict = _resolve_forced(strategy)
+        strategy_cls = select_strategy(cfg, forced=forced, strict=strict)
+        self._routed_includes_shared = bool(
+            getattr(strategy_cls, "routed_includes_shared", False)
+        )
+        if self._routed_includes_shared or n_shared_experts == 0:
+            self.shared_experts = None
+            self._shared_executor = None
+        else:
+            shared_w = {
+                "w13_w": resolved_layer_weights[W.v4_shared_w13_w],
+                "w13_s": resolved_layer_weights[W.v4_shared_w13_s],
+                "w2_w": resolved_layer_weights[W.v4_shared_w2_w],
+                "w2_s": resolved_layer_weights[W.v4_shared_w2_s],
+            }
+            self.shared_experts = W13SharedExpert(
+                dim, moe_inter_dim, expert_weights=shared_w, swiglu_limit=swiglu_limit
+            )
+            self._shared_executor = get_shared_expert_executor(
+                max_tokens_per_rank=max_tokens_per_rank,
+                dim=dim,
+                inter_dim=moe_inter_dim,
+                swiglu_limit=swiglu_limit,
+                native_mxfp8=shared_fp8_block_size == 32,
+            )
+            self._shared_executor.prepare(self.shared_experts)
+        self._final_out: torch.Tensor | None = None
+        self._strategy = strategy_cls(cfg)
+        self.strategy_name = {"mega": "mega_moe", "mega_se": "mega_moe_se"}.get(
+            self._strategy.name, self._strategy.name
+        )
+        self.chunking_enabled = chunked_moe_enabled()
+        self._gate_pack_static = os.environ.get(
+            "MOEDBG", "0"
+        ) == "0" and self._strategy.can_use_gate_pack_static(self.gate)
+        self._has_visual_tokens = False
+        self._strategy._gate_pack_warmup_enabled = self._gate_pack_static
+        self._strategy._gate_pack_route_scale = float(self.gate.route_scale)
+        self._strategy.setup_weights(resolved_layer_weights)
+        if logical_to_physical is not None:
+            from rtp_llm.eplb.runtime import EplbLayer
+
+            self.eplb_layer = EplbLayer(
+                layer_id,
+                logical_to_physical,
+                logical_count,
+                self._strategy.get_eplb_weights(),
+                ep_rank=ep_rank,
+                # Mega dispatches each rank's full input and returns its own sum.
+                replica_offset=ep_rank,
+            )
+        self._strategy.setup_runtime()
+
+    def _should_chunk(self, tokens: int) -> bool:
+        from rtp_llm.models_py.modules.factory.fused_moe.utils.fp8_fp4.chunked_layer import (
+            _should_chunk_moe,
+            moe_decode_forward,
+        )
+
+        if (
+            tokens > self.max_tokens_per_rank
+            and not chunked_moe_enabled()
+            and self._strategy.name in ("mega", "mega_se")
+        ):
+            raise ValueError(
+                f"MoE input tokens={tokens} exceeds max_tokens_per_rank={self.max_tokens_per_rank}"
+            )
+        return _should_chunk_moe(
+            tokens,
+            self.max_tokens_per_rank,
+            is_decode_forward=self._is_decode_role or moe_decode_forward(),
+            chunking_enabled=chunked_moe_enabled(),
+        )
+
+    def _use_gate_pack(self) -> bool:
+        return self._gate_pack_static and (not self._has_visual_tokens)
+
+    def prepare_mhc_inputs(self, x: torch.Tensor) -> MegaMoEInputs | None:
+        """Request direct FP8 output for the native MegaMHC route.
+
+        Requires group-32 Mega-SE and the native BF16 gate.
+        """
+        from rtp_llm.models_py.modules.factory.fused_moe.utils.fp8_fp4.chunked_layer import (
+            planned_moe_tokens,
+        )
+
+        planned = planned_moe_tokens()
+        if planned is not None and planned > self.max_tokens_per_rank:
+            return None
+        from .mega_gate import can_use_mega_gate
+        from .strategies.mega_se import MegaMoEStrategySE
+
+        if (
+            not self._use_gate_pack()
+            or type(self._strategy) is not MegaMoEStrategySE
+            or x.ndim not in (2, 3)
+            or x.shape[-1] != self.dim
+            or not x.is_contiguous()
+        ):
+            return None
+        x = x.view(-1, self.dim)
+        if not can_use_mega_gate(x, self.gate):
+            return None
+        return self._strategy.prepare_mhc_inputs(x)
+
+    def _forward_gate_pack(self, x: torch.Tensor, input_ids: torch.Tensor, expert_load):
+        from .mega_gate import can_use_mega_gate, mega_gate
+
+        ced_route = getattr(self, "_ced_native_routing", None)
+        if ced_route is not None:
+            with record_function_range("dsv4.moe.deepgemm_mega_gate"):
+                weights, indices = ced_route(x)
+            # This path admits standard routing only and already emits physical IDs.
+            return self._strategy(x, weights, indices, expert_load=expert_load)
+        if can_use_mega_gate(x, self.gate):
+            layer = self.eplb_layer
+            with record_function_range("dsv4.moe.deepgemm_mega_gate"):
+                weights, indices = mega_gate(
+                    x,
+                    self.gate,
+                    self._strategy.cfg.ep_rank,
+                    to_physical_map=(
+                        layer.logical_to_physical if layer is not None else None
+                    ),
+                    logical_count=layer.logical_count if layer is not None else None,
+                )
+            # Native routing already emits physical IDs. Fake balance replaces
+            # them with logical IDs and still needs its override-then-map step.
+            return self._strategy(
+                x,
+                weights,
+                indices,
+                expert_load=expert_load,
+                eplb_layer=(
+                    layer if self._strategy.fake_balance_expert is not None else None
+                ),
+            )
+        return self._strategy.forward_with_gate_pack(
+            x, self.gate, input_ids, expert_load=expert_load, eplb_layer=self.eplb_layer
+        )
+
+    def _run_chunk(
+        self,
+        x: torch.Tensor,
+        input_ids: torch.Tensor,
+        out: torch.Tensor,
+        routing_metadata: Optional[GateRoutingMetadata] = None,
+        expert_load: Optional[ExpertLoadContext] = None,
+    ) -> None:
+        if self._use_gate_pack():
+            if self._shared_executor is None:
+                with record_function_range("dsv4.moe.routed_experts"):
+                    routed = self._forward_gate_pack(x, input_ids, expert_load)
+                out.copy_(routed)
+                return
+            with record_function_range("dsv4.moe.shared_expert_start"):
+                self._shared_executor.start(self.shared_experts, x)
+            try:
+                with record_function_range("dsv4.moe.routed_experts"):
+                    routed = self._forward_gate_pack(x, input_ids, expert_load)
+            except Exception:
+                with record_function_range("dsv4.moe.shared_expert_finish"):
+                    self._shared_executor.finish()
+                raise
+            with record_function_range("dsv4.moe.shared_expert_finish"):
+                shared = self._shared_executor.finish()
+            with record_function_range("dsv4.moe.add_shared"):
+                combined = combine_routed_and_shared(routed, shared, x.dtype, out=out)
+                if combined.data_ptr() != out.data_ptr():
+                    out.copy_(combined)
+            return
+        with record_function_range("dsv4.moe.gate"):
+            weights, indices = (
+                self.gate(x, input_ids)
+                if routing_metadata is None
+                else self.gate(x, input_ids, routing_metadata=routing_metadata)
+            )
+
+        if self._shared_executor is None:
+            with record_function_range("dsv4.moe.routed_experts"):
+                routed = self._strategy(
+                    x,
+                    weights,
+                    indices,
+                    expert_load=expert_load,
+                    eplb_layer=self.eplb_layer,
+                )
+            out.copy_(routed)
+            return
+        with record_function_range("dsv4.moe.shared_expert_start"):
+            self._shared_executor.start(self.shared_experts, x)
+        try:
+            with record_function_range("dsv4.moe.routed_experts"):
+                routed = self._strategy(
+                    x,
+                    weights,
+                    indices,
+                    expert_load=expert_load,
+                    eplb_layer=self.eplb_layer,
+                )
+        except Exception:
+            with record_function_range("dsv4.moe.shared_expert_finish"):
+                self._shared_executor.finish()
+            raise
+        with record_function_range("dsv4.moe.shared_expert_finish"):
+            shared = self._shared_executor.finish()
+        with record_function_range("dsv4.moe.add_shared"):
+            combined = combine_routed_and_shared(routed, shared, x.dtype, out=out)
+            if combined.data_ptr() != out.data_ptr():
+                out.copy_(combined)
+
+    def _forward_chunked(
+        self,
+        x: torch.Tensor,
+        input_ids_flat: torch.Tensor,
+        shape: torch.Size,
+        routing_metadata: Optional[GateRoutingMetadata] = None,
+        expert_load: Optional[ExpertLoadContext] = None,
+        synchronized_tokens: Optional[int] = None,
+    ) -> torch.Tensor:
+        global _CHUNKED_MOE_LOGGED
+        T = x.size(0)
+        chunk_tokens = int(self.max_tokens_per_rank)
+        if not _CHUNKED_MOE_LOGGED:
+            _CHUNKED_MOE_LOGGED = True
+            logging.info(
+                "[DSV4 MoE] chunked forward enabled: layer=%d tokens=%d chunk_tokens=%d chunks=%d dim=%d device=%s",
+                self.layer_id,
+                T,
+                chunk_tokens,
+                (T + chunk_tokens - 1) // chunk_tokens,
+                self.dim,
+                x.device,
+            )
+        out = _get_or_create_final_out(T, self.dim, x.dtype, x.device)[:T]
+        for global_start in range(0, max(T, synchronized_tokens or 0), chunk_tokens):
+            token_start = min(global_start, T)
+            token_end = min(global_start + chunk_tokens, T)
+            self._run_chunk(
+                x[token_start:token_end],
+                input_ids_flat[token_start:token_end],
+                out[token_start:token_end],
+                expert_load=expert_load,
+                routing_metadata=(
+                    routing_metadata.slice(token_start, token_end)
+                    if routing_metadata is not None
+                    else None
+                ),
+            )
+        return out.view(shape)
+
+    def forward(
+        self,
+        x: torch.Tensor,
+        input_ids: torch.Tensor,
+        expert_load: Optional[ExpertLoadContext] = None,
+        *,
+        routing_metadata: Optional[GateRoutingMetadata] = None,
+        mhc_inputs: MegaMoEInputs | None = None,
+    ) -> torch.Tensor:
+
+        shape = x.size()
+        if x.dim() != 2 or x.size(1) != self.dim:
+            x = x.view(-1, self.dim)
+        from rtp_llm.models_py.modules.factory.fused_moe.utils.fp8_fp4.chunked_layer import (
+            moe_decode_forward,
+            synchronize_moe_chunk_tokens,
+        )
+
+        tokens = x.size(0)
+        synchronized_tokens = tokens
+        if (
+            self.strategy_name in ("mega_moe", "mega_moe_se")
+            and not self._is_decode_role
+            and not moe_decode_forward()
+            and chunked_moe_enabled()
+        ):
+            synchronized_tokens = synchronize_moe_chunk_tokens(tokens, x.device)
+        should_chunk = self._should_chunk(synchronized_tokens)
+        if should_chunk and mhc_inputs is not None:
+            raise ValueError("Prepared MegaMHC inputs cannot be used with chunked MoE")
+        if mhc_inputs is not None:
+            # The block passes this only after a successful MegaMHC write.
+            # No allocation, activation pack, or shared-scale staging here.
+            if routing_metadata is not None:
+                raise ValueError("Prepared MegaMHC inputs require plain routing")
+            with record_function_range("dsv4.moe.routed_experts"):
+                y = self._strategy.forward_from_mhc(
+                    x,
+                    self.gate,
+                    mhc_inputs,
+                    expert_load=expert_load,
+                    eplb_layer=self.eplb_layer,
+                )
+            return y.view(shape)
+        input_ids_flat = (
+            routing_metadata.input_ids
+            if routing_metadata is not None
+            else input_ids if input_ids.dim() == 1 else input_ids.flatten()
+        )
+        if should_chunk:
+            return self._forward_chunked(
+                x,
+                input_ids_flat,
+                shape,
+                routing_metadata,
+                expert_load=expert_load,
+                synchronized_tokens=synchronized_tokens,
+            )
+
+        if self._use_gate_pack():
+            if self._shared_executor is None:
+                with record_function_range("dsv4.moe.routed_experts"):
+                    y = self._forward_gate_pack(x, input_ids_flat, expert_load)
+                return (y if y.dtype == x.dtype else y.type_as(x)).view(shape)
+            with record_function_range("dsv4.moe.shared_expert_start"):
+                self._shared_executor.start(self.shared_experts, x)
+            try:
+                with record_function_range("dsv4.moe.routed_experts"):
+                    y = self._forward_gate_pack(x, input_ids_flat, expert_load)
+            except Exception:
+                with record_function_range("dsv4.moe.shared_expert_finish"):
+                    self._shared_executor.finish()
+                raise
+            with record_function_range("dsv4.moe.shared_expert_finish"):
+                shared_y = self._shared_executor.finish()
+            with record_function_range("dsv4.moe.add_shared"):
+                T = x.size(0)
+                out = _get_or_create_final_out(
+                    max(T, self.max_tokens_per_rank, 1), self.dim, x.dtype, x.device
+                )
+                y = combine_routed_and_shared(y, shared_y, x.dtype, out=out[:T])
+                return y.view(shape)
+        with record_function_range("dsv4.moe.gate"):
+            weights, indices = (
+                self.gate(x, input_ids_flat)
+                if routing_metadata is None
+                else self.gate(x, input_ids_flat, routing_metadata=routing_metadata)
+            )
+        if self._shared_executor is None:
+            with record_function_range("dsv4.moe.routed_experts"):
+                y = self._strategy(
+                    x,
+                    weights,
+                    indices,
+                    expert_load=expert_load,
+                    eplb_layer=self.eplb_layer,
+                )
+            return (y if y.dtype == x.dtype else y.type_as(x)).view(shape)
+        with record_function_range("dsv4.moe.shared_expert_start"):
+            self._shared_executor.start(self.shared_experts, x)
+        try:
+            with record_function_range("dsv4.moe.routed_experts"):
+                y = self._strategy(
+                    x,
+                    weights,
+                    indices,
+                    expert_load=expert_load,
+                    eplb_layer=self.eplb_layer,
+                )
+        except Exception:
+            with record_function_range("dsv4.moe.shared_expert_finish"):
+                self._shared_executor.finish()
+            raise
+        with record_function_range("dsv4.moe.shared_expert_finish"):
+            shared_y = self._shared_executor.finish()
+        with record_function_range("dsv4.moe.add_shared"):
+            T = x.size(0)
+            out = _get_or_create_final_out(
+                max(T, self.max_tokens_per_rank, 1), self.dim, x.dtype, x.device
+            )
+            y = combine_routed_and_shared(y, shared_y, x.dtype, out=out[:T])
+            return y.view(shape)

@@ -57,6 +57,7 @@ from rtp_llm.models_py.triton_kernels.moe.fused_moe_kernel import (
     moe_align_block_size_compiled,
 )
 from rtp_llm.models_py.utils.arch import get_num_device_sms, get_sm
+from rtp_llm.models_py.utils.expert_load_monitor import ExpertLoadContext
 from rtp_llm.models_py.utils.math import align, ceil_div
 from rtp_llm.models_py.utils.memory import dispose_tensor
 from rtp_llm.ops.compute_ops import trt_fp8_quantize_128
@@ -213,7 +214,7 @@ class DeepGemmHybridExecutor(FusedMoeExpertExecutor):
 
         self.ep_size = config.ep_size
         self.ep_rank = config.ep_rank
-        self.num_experts = config.expert_num
+        self.num_experts = config.physical_expert_num
 
         assert self.num_experts % self.ep_size == 0
         self.num_experts_per_partition = self.num_experts // self.ep_size
@@ -276,6 +277,14 @@ class DeepGemmHybridExecutor(FusedMoeExpertExecutor):
 
         self.num_gemm_sms = get_num_device_sms()
 
+    def get_eplb_weights(self) -> tuple[torch.Tensor, ...]:
+        return (
+            self.w13_weight,
+            self.w13_weight_scale_inv,
+            self.w2_weight,
+            self.w2_weight_scale_inv,
+        )
+
     def execute(
         self,
         payload: ExpertForwardPayload,
@@ -305,6 +314,7 @@ class DeepGemmHybridExecutor(FusedMoeExpertExecutor):
                 payload,
                 activation,
                 apply_router_weight_on_input,
+                expert_load=payload.expert_load,
             )
         # The contiguous path uses a shape-derived fixed workspace and performs
         # all routing metadata work on GPU, so it is safe to capture/replay.
@@ -318,6 +328,7 @@ class DeepGemmHybridExecutor(FusedMoeExpertExecutor):
                 a2_scale,
                 apply_router_weight_on_input,
                 extra_expert_args,
+                expert_load=payload.expert_load,
             )
         else:
             return self.execute_contiguous(
@@ -327,6 +338,7 @@ class DeepGemmHybridExecutor(FusedMoeExpertExecutor):
                 a2_scale,
                 apply_router_weight_on_input,
                 extra_expert_args,
+                expert_load=payload.expert_load,
             )
 
     def execute_triton_fp8(
@@ -334,6 +346,7 @@ class DeepGemmHybridExecutor(FusedMoeExpertExecutor):
         payload: ExpertForwardPayload,
         activation: str,
         apply_router_weight_on_input: bool,
+        expert_load: Optional[ExpertLoadContext],
     ) -> CombineForwardPayload:
         """Run small SM120 decode batches without per-expert 64-row padding."""
         if not self.is_sm120:
@@ -386,6 +399,7 @@ class DeepGemmHybridExecutor(FusedMoeExpertExecutor):
             device=hidden_states_fp8.device,
             dtype=torch.bfloat16,
         )
+        counts = expert_load.expert_token_counts if expert_load is not None else None
         invoke_triton_moe_kernel(
             hidden_states_fp8,
             self.w13_weight,
@@ -403,6 +417,9 @@ class DeepGemmHybridExecutor(FusedMoeExpertExecutor):
             B_scale=self.w13_weight_scale_inv,
             block_shape=self.DEEPGEMM_BLOCK_SHAPE,
             scale_ue8m0=True,
+            expert_token_counts=counts,
+            load_topk_ids=topk_ids.reshape(-1),
+            load_expert_offset=0,
         )
 
         down_input = torch.empty(
@@ -440,6 +457,9 @@ class DeepGemmHybridExecutor(FusedMoeExpertExecutor):
             B_scale=self.w2_weight_scale_inv,
             block_shape=self.DEEPGEMM_BLOCK_SHAPE,
             scale_ue8m0=True,
+            expert_token_counts=None,
+            load_topk_ids=None,
+            load_expert_offset=0,
         )
         output = down_output.view(token_num, topk, hidden_size).sum(dim=1)
         return CombineForwardPayload(fused_expert_output=output)
@@ -452,6 +472,7 @@ class DeepGemmHybridExecutor(FusedMoeExpertExecutor):
         a2_scale: Optional[torch.Tensor],
         apply_router_weight_on_input: bool,
         extra_expert_args: Optional[dict[str, Any]],
+        expert_load: Optional[ExpertLoadContext],
     ) -> CombineForwardPayload:
         assert payload.expert_x is not None, "hidden_states_fp8 is not initialized"
         assert (
@@ -514,6 +535,9 @@ class DeepGemmHybridExecutor(FusedMoeExpertExecutor):
             ]
             output_index = torch.empty_like(topk_idx)
             expert_start_loc = torch.empty_like(num_recv_tokens_per_expert)
+            counts = (
+                expert_load.expert_token_counts if expert_load is not None else None
+            )
             ep_scatter_v2(
                 hidden_states_fp8,
                 hidden_states_scale,
@@ -526,6 +550,7 @@ class DeepGemmHybridExecutor(FusedMoeExpertExecutor):
                 input_tensor[1],
                 output_index,
                 scale_ue8m0=is_deep_gemm_e8m0_used(),
+                expert_token_counts=counts,
             )
             # Eager execution consumes the routed input as before; graph
             # warmup/capture must retain the same storage for later replays.
@@ -649,6 +674,7 @@ class DeepGemmHybridExecutor(FusedMoeExpertExecutor):
         a2_scale: Optional[torch.Tensor],
         apply_router_weight_on_input: bool,
         extra_expert_args: Optional[dict[str, Any]],
+        expert_load: Optional[ExpertLoadContext],
     ) -> CombineForwardPayload:
         assert payload.expert_x is not None, "hidden_states_fp8 is not initialized"
         assert (
@@ -786,6 +812,7 @@ class DeepGemmHybridExecutor(FusedMoeExpertExecutor):
             ).cuda(non_blocking=True)
             scatter_alignment = 1
         expert_start_loc = torch.empty_like(scatter_num_tokens_per_expert)
+        counts = expert_load.expert_token_counts if expert_load is not None else None
         ep_scatter(
             hidden_states_fp8,
             hidden_states_scale,
@@ -799,6 +826,7 @@ class DeepGemmHybridExecutor(FusedMoeExpertExecutor):
             scale_ue8m0=is_deep_gemm_e8m0_used(),
             align_m=scatter_alignment,
             derive_counts_from_topk=self.is_sm120 and self.enable_cuda_graph,
+            expert_token_counts=counts,
         )
         # Preserve the eager input lifetime without invalidating graph buffers.
         if not self.enable_cuda_graph:

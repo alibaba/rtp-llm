@@ -26,7 +26,8 @@ class KVCacheResource;
 // Offloads writeCacheStore CPU-heavy work to a background thread pool so the
 // main thread can keep launching CUDA kernels without stalling. A cycle is
 // ordered as either init -> write* -> waitAllDone, or init -> write* ->
-// finishSubmissions -> waitStoreCompletions.
+// sealSubmissions -> waitStoreCompletions. Sealing never waits for GPU-ready
+// workers; finishSubmissions remains available to explicitly drain them early.
 class CacheStoreAsyncWriter: public CacheStoreWriter {
 public:
     using StoreCompletionCallback = CacheStoreCompletionCallback;
@@ -41,6 +42,7 @@ public:
 
     void init(bool track_store_completions = false);
     StoreCompletionCallback registerStoreCompletion(std::shared_ptr<KVCacheResource> publication_lease = nullptr);
+    void                    sealSubmissions();
     void                    finishSubmissions();
     void                    waitStoreCompletions();
     void                    cancelStoreCompletions(std::exception_ptr exception);
@@ -68,7 +70,8 @@ private:
 
     enum class State {
         IDLE,
-        RUNNING
+        RUNNING,
+        SEALED
     };
 
     struct StoreCompletionState {

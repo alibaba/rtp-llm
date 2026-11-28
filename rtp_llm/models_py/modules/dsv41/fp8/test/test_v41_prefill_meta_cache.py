@@ -14,14 +14,16 @@ Covers ``AttentionV41FP8._build_shared_prefill_meta``'s
   like the fresh build.
 """
 
+import ast
 import os
 import sys
 import unittest
 import weakref
+from contextlib import nullcontext
 from pathlib import Path
 from types import SimpleNamespace
 from typing import NamedTuple
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import torch
 
@@ -36,9 +38,12 @@ from rtp_llm.models_py.modules.dsv41.fp8.attention_v41 import (  # noqa: E402
     AttentionV41FP8,
 )
 from rtp_llm.models_py.modules.dsv41.fp8.prefill_meta import (
+    _flat_optional,
     build_and_propagate_prefill_meta_fp8,
+    clear_prefill_meta_shared_fp8,
     release_v41_prefill_shared,
 )
+from rtp_llm.models_py.modules.dsv41.prefill_workspace import PrefillWorkspace
 
 
 def _tagged_cache(**kwargs):
@@ -119,6 +124,127 @@ def _inputs():
 
 
 class V41PrefillMetaCacheTest(unittest.TestCase):
+    def test_flat_optional_preserves_identity_or_normalizes_strided_input(self):
+        source = torch.arange(17)
+        self.assertIsNone(_flat_optional(None))
+        self.assertIs(_flat_optional(source), source)
+        self.assertTrue(torch.equal(_flat_optional(source[::2]), source[::2]))
+        self.assertTrue(_flat_optional(source[::2]).is_contiguous())
+        self.assertTrue(torch.equal(_flat_optional(source.view(1, 17)), source))
+
+    def test_cross_region_query_reuse_checks_window_context_and_input_identity(self):
+        from rtp_llm.models_py.modules.dsv41.fp8 import _swa_ops_triton as swa_ops
+        from rtp_llm.models_py.modules.dsv41.fp8.attention import SwaPrefillMeta
+
+        x, inputs = torch.zeros(8, 5120), _inputs()
+        owner = _make_attn(0, 0, {})
+        owner.rope_head_dim = 64
+        owner.freqs_cis = torch.arange(32 * 8).reshape(32, 8).float()
+
+        def swa(**kwargs):
+            values = dict.fromkeys(SwaPrefillMeta._fields)
+            values.update(
+                slot_mapping=torch.tensor([len(builds)]),
+                query_start_loc=kwargs["cu_seqlens"],
+                combined_seq_lens=kwargs["prefix_lengths"] + kwargs["input_lengths"],
+                topk_length_kv_full=kwargs["topk_length_kv_full"],
+                combined_gather_len_max=0,
+                M=0,
+                prefix_len_max=0,
+            )
+            builds.append(kwargs)
+            return SwaPrefillMeta(**values)
+
+        builds = []
+        with patch.object(
+            owner, "_build_swa_prefill_meta_varlen", side_effect=swa
+        ), patch.object(owner, "_ensure_freqs_cis_bound"), patch.object(
+            swa_ops,
+            "compute_window_topk_and_length_varlen",
+            return_value=(
+                torch.zeros(8, 128, dtype=torch.int32),
+                torch.ones(8, dtype=torch.int32),
+            ),
+        ) as topk:
+            source = AttentionFP8._build_shared_prefill_meta(owner, x, 0, **inputs)
+            reused = AttentionFP8._build_shared_prefill_meta(
+                owner,
+                x,
+                0,
+                **inputs,
+                reuse_query_meta=(128, source),
+                reuse_freqs_meta=source,
+            )
+            self.assertEqual(topk.call_count, 1)
+            self.assertIs(reused.topk_idxs, source.topk_idxs)
+            self.assertIs(reused.freqs_cis, source.freqs_cis)
+            self.assertIs(reused.row_seqlens_full, source.row_seqlens_full)
+            self.assertIsNot(reused.swa_meta.slot_mapping, source.swa_meta.slot_mapping)
+            self.assertIs(builds[-1]["reuse_query_swa_meta"], source.swa_meta)
+            for changed in (
+                dict(reuse_query_meta=(127, source)),
+                dict(reuse_query_meta=(128, source._replace(cp_ctx=object()))),
+                dict(
+                    reuse_query_meta=(
+                        128,
+                        source._replace(position_ids=inputs["position_ids"].clone()),
+                    )
+                ),
+            ):
+                before = topk.call_count
+                AttentionFP8._build_shared_prefill_meta(
+                    owner, x, 0, **inputs, **changed
+                )
+                self.assertEqual(topk.call_count, before + 1)
+                self.assertIsNone(builds[-1]["reuse_query_swa_meta"])
+
+    def test_workspace_views_release_with_plan_and_at_forward_exit(self):
+        workspace = PrefillWorkspace(
+            torch.device("cpu"), q_rows=4, q_dim=8, reserve_cp=False, align_bytes=1
+        )
+        layers = {
+            i: SimpleNamespace(
+                index_source_layer_id=2,
+                _prefill_meta_shared=SimpleNamespace(workspace=workspace),
+            )
+            for i in (2, 3)
+        }
+        indices = torch.zeros(9, 8, dtype=torch.int32)
+        reference = weakref.ref(indices)
+        lengths = torch.ones(9, dtype=torch.int32)
+        freqs = torch.ones(9, 2, dtype=torch.complex64)
+        workspace.attention_metadata(freqs, indices, lengths, 9, 4)
+        shared = {
+            "layers": layers,
+            "topk": {2: object()},
+            "prefill_index_plan": (indices, lengths),
+        }
+        del indices
+        with patch.object(
+            workspace,
+            "clear_attention_metadata",
+            wraps=workspace.clear_attention_metadata,
+        ) as clear:
+            release_v41_prefill_shared(shared, 2)
+            self.assertIsNotNone(reference())
+            clear.assert_not_called()
+            release_v41_prefill_shared(shared, 3)
+            self.assertIsNone(reference())
+            clear.assert_called_once_with()
+            self.assertNotIn("prefill_index_plan", shared)
+            release_v41_prefill_shared(shared, 3)
+            clear.assert_called_once_with()
+
+            # Final cleanup also drops views if no index plan was registered.
+            indices = torch.zeros(9, 8, dtype=torch.int32)
+            reference = weakref.ref(indices)
+            workspace.attention_metadata(freqs, indices, lengths, 9, 4)
+            del indices
+            release_v41_prefill_shared(shared)
+            self.assertIsNone(reference())
+            self.assertEqual(clear.call_count, 2)
+            self.assertIs(shared["layers"], layers)
+
     def test_release_rechecks_changed_consumers_and_noncontiguous_layers(self):
         future = SimpleNamespace(
             kv_source_layer_id=2, index_source_layer_id=4, is_index_source=True
@@ -149,6 +275,60 @@ class V41PrefillMetaCacheTest(unittest.TestCase):
         self.assertNotIn("prefill_index_plan", shared)
         self.assertNotIn("candidates", shared)
         self.assertIs(shared["layers"], layers)
+
+    def test_exception_exit_joins_async_work_before_releasing_metadata(self):
+        events = []
+        global_rows = torch.ones(3, 8)
+        reference = weakref.ref(global_rows)
+        shared = {"global": {2: [(global_rows, object())]}}
+
+        def wait(kind):
+            # Pending producers still depend on the same metadata/storage
+            # when their completion is handed to the forward stream.
+            self.assertIsNotNone(reference())
+            self.assertIn("global", shared)
+            events.append(kind)
+
+        def clear():
+            self.assertEqual(set(events), {"pool.wait", "state.wait"})
+            events.append("clear")
+
+        workspace = SimpleNamespace(clear_attention_metadata=clear)
+        shared["layers"] = {
+            2: SimpleNamespace(
+                _prefill_meta_shared=SimpleNamespace(workspace=workspace)
+            )
+        }
+        shared["prefill_pool_ready"] = SimpleNamespace(wait=lambda: wait("pool.wait"))
+        shared["prefill_state_ready"] = SimpleNamespace(wait=lambda: wait("state.wait"))
+        del global_rows
+        with self.assertRaisesRegex(ValueError, "query projection failed"):
+            try:
+                raise ValueError("query projection failed")
+            finally:
+                release_v41_prefill_shared(shared)
+        self.assertEqual(events[-1], "clear")
+        self.assertEqual(len(events), 3)
+        self.assertIsNone(reference())
+        for key in ("global", "prefill_pool_ready", "prefill_state_ready"):
+            self.assertNotIn(key, shared)
+
+    def test_state_prefetch_aborted_before_pool_publication_is_joined_once(self):
+        events = []
+        shared = {
+            "layers": {},
+            "prefill_state_ready": SimpleNamespace(
+                wait=lambda: events.append("state.wait")
+            ),
+        }
+        with self.assertRaisesRegex(RuntimeError, "QKV failed"):
+            try:
+                raise RuntimeError("QKV failed")
+            finally:
+                release_v41_prefill_shared(shared)
+        release_v41_prefill_shared(shared)
+        self.assertEqual(events, ["state.wait"])
+        self.assertEqual(shared, {"layers": {}})
 
     def test_shared_tensors_live_until_their_last_consumer(self):
         layers = {
@@ -470,6 +650,8 @@ class V41CommonMetaIntegrationTest(unittest.TestCase):
         return layers, x, inputs, cache, tables, normal_count
 
     def test_actual_parent_cp4_broadcast_exact_region_rope_and_reentry(self):
+        from rtp_llm.models_py.modules.dsv41.fp8 import _swa_ops_triton as swa_ops
+
         for rank in range(4):
             for prefixes, bound, compressed_first in (
                 ((127, 0, 129), True, False),
@@ -506,11 +688,30 @@ class V41CommonMetaIntegrationTest(unittest.TestCase):
 
                     with patch.object(
                         AttentionFP8, "_build_swa_prefill_meta_varlen", counted
-                    ):
+                    ), patch.object(
+                        swa_ops,
+                        "compute_window_topk_and_length_varlen",
+                        wraps=swa_ops.compute_window_topk_and_length_varlen,
+                    ) as topk:
                         build_and_propagate_prefill_meta_fp8(
                             model, x, 0, cache, tables, workspace=workspace, **inputs
                         )
                     self.assertEqual(len(calls), 2 if bound else 1)
+                    flat_window_needed = not (bound and any(prefixes))
+                    self.assertEqual(topk.call_count, int(flat_window_needed))
+                    if flat_window_needed:
+                        self.assertEqual(
+                            layers[0]._prefill_meta_shared.topk_idxs.ndim, 2
+                        )
+                        self.assertEqual(
+                            layers[0]._prefill_meta_shared.topk_idxs.dtype,
+                            torch.int32,
+                        )
+                    else:
+                        self.assertIsNone(layers[0]._prefill_meta_shared.topk_idxs)
+                        self.assertIsNone(
+                            layers[0]._prefill_meta_shared.swa_meta.topk_length_kv_full
+                        )
                     for a, want in zip(layers, expected):
                         got = a._prefill_meta_shared
                         for field in want._fields:
@@ -528,6 +729,13 @@ class V41CommonMetaIntegrationTest(unittest.TestCase):
                         other = layers[-1]._prefill_meta_shared.swa_meta
                         self.assertIsNot(other, source)
                         self.assertIs(layers[-2]._prefill_meta_shared.swa_meta, other)
+                        self.assertIsNot(other.slot_mapping, source.slot_mapping)
+                        self.assertIs(other.query_start_loc, source.query_start_loc)
+                        self.assertIs(other.combined_seq_lens, source.combined_seq_lens)
+                        self.assertIs(
+                            layers[-1]._prefill_meta_shared.topk_idxs,
+                            layers[0]._prefill_meta_shared.topk_idxs,
+                        )
                     # Full real parent must honor a different table identity even
                     # with an existing same-rope-kind cache entry and reuse source.
                     a = layers[1]
@@ -641,7 +849,9 @@ class V41SwaWriteReuseDispatchTest(unittest.TestCase):
                         0,
                         cache,
                         tables,
-                        host_block_ids=host,
+                        host_swa_tables={
+                            region: host[ids.index(region)] for region in ids
+                        },
                         workspace=None,
                         **_inputs(),
                     )
@@ -656,7 +866,9 @@ class V41SwaWriteReuseDispatchTest(unittest.TestCase):
                         cache,
                         tables,
                         first_layer=21,
-                        host_block_ids=host,
+                        host_swa_tables={
+                            region: host[ids.index(region)] for region in ids
+                        },
                         workspace=None,
                         **_inputs(),
                     )
@@ -809,6 +1021,176 @@ class V41SwaWriteReuseDispatchTest(unittest.TestCase):
                     all(a._prefill_meta_shared is not None for a in layers[21:])
                 )
 
+    def test_stop_layer_skips_only_tail_buckets_and_rebuilds_after_compaction(self):
+        for separate_decoder in (False, True):
+            for options in ({}, {"stop_layer": None}, {"stop_layer": 21}):
+                with self.subTest(decoder=separate_decoder, options=options):
+                    shared = {}
+                    layers = [
+                        _make_attn(0 if i == 0 else 1, i, shared) for i in range(40)
+                    ]
+                    mapping = [
+                        (
+                            {DECODER_SWA_KV: 1}
+                            if separate_decoder and i >= 21
+                            else {SWA_KV: 0}
+                        )
+                        for i in range(40)
+                    ]
+                    cache = _tagged_cache(
+                        group_tags=(SWA_KV, DECODER_SWA_KV),
+                        layer_region_to_group_id=mapping,
+                    )
+                    tables = {
+                        SWA_KV: torch.tensor([[1]]),
+                        DECODER_SWA_KV: torch.tensor([[2]]),
+                    }
+                    model = SimpleNamespace(
+                        layers=[SimpleNamespace(attn=a) for a in layers]
+                    )
+                    for attn in layers:
+                        attn._prefill_meta_shared = object()
+                    calls = []
+
+                    def parent(attn, *args, **kwargs):
+                        calls.append(attn.layer_id)
+                        return _FakeMeta()
+
+                    with patch.object(
+                        AttentionFP8, "_build_shared_prefill_meta", parent
+                    ), patch.object(AttentionFP8, "_ensure_freqs_cis_bound"):
+                        previous = build_and_propagate_prefill_meta_fp8(
+                            model,
+                            torch.zeros(8, 1),
+                            0,
+                            cache,
+                            tables,
+                            workspace=object(),
+                            **options,
+                            **_inputs(),
+                        )
+                        skipped = separate_decoder and options.get("stop_layer") == 21
+                        self.assertEqual(
+                            calls,
+                            [0, 1, 21] if separate_decoder and not skipped else [0, 1],
+                        )
+                        self.assertTrue(
+                            all(a._prefill_meta_shared is not None for a in layers[:21])
+                        )
+                        for attn in layers[21:]:
+                            self.assertEqual(attn._prefill_meta_shared is None, skipped)
+                            if not separate_decoder:
+                                self.assertIs(
+                                    attn._prefill_meta_shared,
+                                    layers[1]._prefill_meta_shared,
+                                )
+
+                        clear_prefill_meta_shared_fp8(model)
+                        calls.clear()
+                        build_and_propagate_prefill_meta_fp8(
+                            model,
+                            torch.zeros(4, 1),
+                            0,
+                            cache,
+                            tables,
+                            workspace=None,
+                            first_layer=21,
+                            reuse_write_by_region=previous,
+                            **_inputs(),
+                        )
+                    self.assertEqual(calls, [21])
+                    self.assertTrue(
+                        all(a._prefill_meta_shared is None for a in layers[:21])
+                    )
+                    self.assertTrue(
+                        all(a._prefill_meta_shared is not None for a in layers[21:])
+                    )
+
+
+class V41CedMetadataPrologueTest(unittest.TestCase):
+    @staticmethod
+    def _prologue():
+        path = Path(__file__).resolve().parents[2] / "prefill/forward.py"
+        tree = ast.parse(path.read_text())
+        forward = next(
+            node
+            for node in tree.body
+            if isinstance(node, ast.FunctionDef) and node.name == "forward_layers"
+        )
+        assignments = {
+            node.targets[0].id: index
+            for index, node in enumerate(forward.body)
+            if isinstance(node, ast.Assign) and isinstance(node.targets[0], ast.Name)
+        }
+        body = forward.body[
+            assignments["ced_tail"] : assignments["layer_forward_range"]
+        ]
+        prefix = ast.parse("from __future__ import annotations").body
+        return compile(
+            ast.Module(body=prefix + body, type_ignores=[]), str(path), "exec"
+        )
+
+    @staticmethod
+    def _state(*, allow_ced=True):
+        events = Mock()
+        return dict(
+            torch=torch,
+            allow_ced=allow_ced,
+            _env_flag=lambda name: True,
+            shared_prefill={},
+            _rt_on=False,
+            _fwd_dbg=SimpleNamespace(enabled=lambda: False),
+            CEDPlan=SimpleNamespace(create=events.create),
+            v4=SimpleNamespace(
+                fp8_kv_cache=True, swa_bounded_replay=True, layers=[None] * 40
+            ),
+            cp_ctx=SimpleNamespace(
+                first_position_host=0,
+                prefix_lengths=torch.tensor([0]),
+                req_id_per_token=torch.zeros(8, dtype=torch.int32),
+            ),
+            attn_inputs=None,
+            kv_cache=object(),
+            block_tables_by_type={},
+            prepare_hidden_fn=None,
+            record_range_ctx=nullcontext,
+            positions=torch.arange(8),
+            cu_seqlens=None,
+            h=torch.zeros(8, 1),
+            ws=object(),
+            host_block_table_for_tag=lambda *args: None,
+            host_block_tables=lambda *args: None,
+            build_and_propagate_prefill_meta_fp8=events.build,
+            clear_prefill_meta_shared_fp8=events.clear,
+            release_v41_prefill_shared=events.release,
+            events=events,
+        )
+
+    def test_initial_build_limits_decoder_bucket_only_when_ced_requested(self):
+        code = self._prologue()
+        for allow_ced, stop_layer in ((False, None), (True, 21)):
+            with self.subTest(allow_ced=allow_ced):
+                state = self._state(allow_ced=allow_ced)
+                exec(code, state)
+                events = state["events"]
+                events.create.assert_not_called()
+                events.build.assert_called_once()
+                self.assertEqual(
+                    events.build.call_args.kwargs["stop_layer"], stop_layer
+                )
+
+    def test_initial_build_failure_propagates_before_late_ced_plan(self):
+        code = self._prologue()
+        state = self._state()
+        events = state["events"]
+        error = RuntimeError("initial metadata failed")
+        events.build.side_effect = error
+        with self.assertRaisesRegex(RuntimeError, "initial metadata failed") as raised:
+            exec(code, state)
+        self.assertIs(raised.exception, error)
+        events.create.assert_not_called()
+        events.build.assert_called_once()
+
 
 @unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
 class V41SwaHostPlanCudaTest(unittest.TestCase):
@@ -893,7 +1275,23 @@ class V41SwaHostPlanCudaTest(unittest.TestCase):
             self.assertIs(reused.slot_mapping, new.slot_mapping)
             self.assertIs(reused.slot_compaction, new.slot_compaction)
             # Exact / pure-SWA still consumes all prefix and combined metadata.
-            full = owner._build_swa_prefill_meta_varlen(**kwargs, host_swa_table=host)
+            with patch(
+                "rtp_llm.models_py.modules.dsv41.fp8._swa_ops_triton.compute_prefill_gather_lens",
+                side_effect=AssertionError("CP must not build unused gather lengths"),
+            ):
+                full = owner._build_swa_prefill_meta_varlen(
+                    **kwargs, host_swa_table=host
+                )
+            self.assertIsNone(full.combined_gather_lens)
+            if kwargs["any_cont"]:
+                expected = torch.tensor(
+                    [min(p, 127) for p in owner._cp_ctx.prefix_lengths_host],
+                    device="cuda",
+                    dtype=torch.int32,
+                )
+                torch.testing.assert_close(
+                    full.cache_gather_lens, expected, rtol=0, atol=0
+                )
             for field in old._fields:
                 a, b = getattr(full, field), getattr(old, field)
                 if isinstance(a, torch.Tensor):

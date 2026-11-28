@@ -22,14 +22,18 @@ from dataclasses import dataclass, field, replace
 from functools import partial
 from typing import Any, Optional, Tuple
 
+import numpy as np
 import torch
 import torch.nn.functional as F
 
 from rtp_llm.models_py.distributed import collective_torch
 from rtp_llm.models_py.distributed.collective_torch import Group
+from rtp_llm.models_py.modules.dsv41 import _cp_collectives
+from rtp_llm.models_py.modules.dsv41._prefill_stream import prefill_stream_is_capturing
+from rtp_llm.models_py.modules.dsv41._profiler import record_function_range
 from rtp_llm.models_py.modules.dsv41.attn_type import DECODER_SWA_KV, SWA_KV
 from rtp_llm.models_py.modules.dsv41.cp import CPContext, cp_swa_replay_starts
-from rtp_llm.models_py.modules.dsv41.kv_cache_utils import host_block_tables
+from rtp_llm.models_py.modules.dsv41.kv_cache_utils import as_attention_inputs_by_tag
 
 _TAIL_TOKENS = 3072
 _MIN_TOKENS = 32768
@@ -124,6 +128,13 @@ def _supported_model(v4) -> bool:
     return True
 
 
+def _split_matrix(source_owners, destination_owners, cp_size):
+    counts = np.bincount(
+        source_owners * cp_size + destination_owners, minlength=cp_size * cp_size
+    ).reshape(cp_size, cp_size)
+    return tuple(tuple(row) for row in counts.tolist())
+
+
 @dataclass
 class _RowExchange:
     """A bijection on real selected rows; padding is never sent back."""
@@ -135,35 +146,46 @@ class _RowExchange:
     send_sizes: Tuple[int, ...]
     receive_sizes: Tuple[int, ...]
     group: Any
+    splits_matrix: Tuple[Tuple[int, ...], ...]
     candidate_rows_host: Optional[Tuple[int, ...]] = None
     projection_groups_host: Tuple = ()
     receive_is_identity: bool = False
+    # Keep the immutable pinned upload alive through this forward. Each layout
+    # owns fresh host/device storage, including when earlier H2D is pending.
+    _layout_host_buffer: Optional[torch.Tensor] = field(default=None, repr=False)
 
-    def compact(self, value):
-        send = value.index_select(0, self.send_indices).contiguous()
-        received = value.new_empty((sum(self.receive_sizes), *value.shape[1:]))
+    def _exchange_into(self, received, value, rows, *, transpose=False):
+        if _cp_collectives.try_all_to_all_into(
+            received,
+            value,
+            self.group,
+            self.splits_matrix,
+            rows=rows,
+            transpose=transpose,
+        ):
+            return
+        send_sizes, receive_sizes = self.send_sizes, self.receive_sizes
+        if transpose:
+            send_sizes, receive_sizes = receive_sizes, send_sizes
         torch.distributed.all_to_all_single(
             received,
-            send,
-            output_split_sizes=list(self.receive_sizes),
-            input_split_sizes=list(self.send_sizes),
+            value.index_select(0, rows),
+            output_split_sizes=list(receive_sizes),
+            input_split_sizes=list(send_sizes),
             group=self.group,
         )
+
+    def compact(self, value):
+        received = value.new_empty((sum(self.receive_sizes), *value.shape[1:]))
+        self._exchange_into(received, value, self.send_indices)
         if self.receive_is_identity:
             return received
         output = value.new_zeros((self.compact_rows, *value.shape[1:]))
         return output.index_copy_(0, self.receive_positions, received)
 
     def restore(self, value, out=None):
-        send = value.index_select(0, self.receive_positions).contiguous()
         received = value.new_empty((sum(self.send_sizes), *value.shape[1:]))
-        torch.distributed.all_to_all_single(
-            received,
-            send,
-            output_split_sizes=list(self.send_sizes),
-            input_split_sizes=list(self.receive_sizes),
-            group=self.group,
-        )
+        self._exchange_into(received, value, self.receive_positions, transpose=True)
         if out is None:
             out = value.new_empty((self.original_rows, *value.shape[1:]))
         # received is independent even when value and out alias the aux buffer.
@@ -178,8 +200,31 @@ def _host_cp_metadata(info, name):
     return host.detach()
 
 
+def _clear_attention_metadata(attn):
+    """Release cached query views at the same boundary as their index plan."""
+    meta = getattr(attn, "_prefill_meta_shared", None)
+    workspace = getattr(meta, "workspace", None)
+    if workspace is not None:
+        workspace.clear_attention_metadata()
+
+
 def _bounded_replay_selected(lengths, starts):
-    """Build concatenated per-request tail windows without a Python loop."""
+    """Build only retained per-request rows, avoiding Torch CPU thread dispatch."""
+    if (
+        len(lengths) == len(starts)
+        and all(type(n) is int and n >= 0 for n in lengths)
+        and all(type(s) is int and 0 <= s <= n for n, s in zip(lengths, starts))
+    ):
+        parts, offset = [], 0
+        for length, start in zip(lengths, starts):
+            parts.append(np.arange(offset + start, offset + length, dtype=np.int64))
+            offset += length
+        selected = np.concatenate(parts) if parts else np.empty(0, dtype=np.int64)
+        return (
+            torch.from_numpy(selected)
+            if selected.size
+            else torch.empty(0, dtype=torch.int64)
+        )
     lengths_t = torch.tensor(lengths, dtype=torch.int64)
     starts_t = torch.tensor(starts, dtype=torch.int64)
     counts = lengths_t - starts_t
@@ -339,7 +384,247 @@ def _vectorized_query_layout_rows(
     chunks.extend(int(chunk) for chunk in chunks_t.tolist())
 
 
+def _upload_layout_arrays(arrays, device):
+    """Upload heterogeneous host metadata once, preserving exact integer types.
+
+    Packing uses NumPy views over a Torch-owned slab, avoiding per-array Torch
+    construction/copy dispatch. Typed device views share that one allocation;
+    all offsets are aligned, including empty and strided source arrays.
+    """
+    dtypes = {
+        np.dtype("int64"): torch.int64,
+        np.dtype("int32"): torch.int32,
+        np.dtype("bool"): torch.bool,
+    }
+    offsets, size = [], 0
+    for array in arrays:
+        # Match independently allocated tensors for downstream JIT alignment.
+        alignment = 16
+        size = (size + alignment - 1) // alignment * alignment
+        offsets.append(size)
+        size += array.nbytes
+    # Every dtype view spans the entire byte slab, so round its length too.
+    size = (size + 15) // 16 * 16
+    host = torch.empty(size, dtype=torch.uint8, pin_memory=device.type == "cuda")
+    raw = host.numpy()
+    for array, offset in zip(arrays, offsets):
+        raw[offset : offset + array.nbytes].view(array.dtype)[:] = array
+    packed = host.to(device, non_blocking=True)
+    typed = {dtype: packed.view(dtypes[dtype]) for dtype in {a.dtype for a in arrays}}
+    views = tuple(
+        typed[array.dtype].as_strided(
+            (array.size,), (1,), offset // array.dtype.itemsize
+        )
+        for array, offset in zip(arrays, offsets)
+    )
+    return views, host
+
+
+def _host_query_layout(original, selected, group, *, keep_candidate_rows):
+    """Build only selected-row transport and this rank's compact CPU layout.
+
+    The native mask is normally a real-token prefix plus padding per request.
+    Validate that contract without constructing full-length long/bool tensors,
+    then gather the *actual* inverse map only at selected padded positions.
+    An arbitrary restore permutation is supported; unusual masks use fallback.
+    One pinned upload publishes the host plan; no GPU shape reads are needed.
+    """
+    lengths = original.input_lengths_global_host
+    prefixes = original.prefix_lengths_host
+    chunks = original.chunk_lengths_per_req
+    cp, rank = original.cp_size, original.cp_rank
+    if (
+        not lengths
+        or prefixes is None
+        or chunks is None
+        or len(lengths) != len(prefixes)
+        or len(lengths) != len(chunks)
+        or type(cp) is not int
+        or cp <= 0
+        or type(rank) is not int
+        or not 0 <= rank < cp
+        or any(type(n) is not int or n <= 0 for n in lengths)
+        or any(type(n) is not int or n < 0 for n in prefixes)
+        or any(type(n) is not int or n <= 0 for n in chunks)
+        or sum(lengths) != original.seq_len_full
+        or sum(chunks) != original.chunk_length
+    ):
+        return None
+    try:
+        restore = _host_cp_metadata(original.cp_info, "prefill_qkv_restore_indice")
+        mask = _host_cp_metadata(original.cp_info, "prefill_qkv_padding_mask")
+    except (AttributeError, RuntimeError, TypeError):
+        return None
+    for tensor in (selected, restore, mask):
+        if (
+            not isinstance(tensor, torch.Tensor)
+            or tensor.device.type != "cpu"
+            or tensor.layout != torch.strided
+            or tensor.ndim != 1
+            or tensor.is_conj()
+            or tensor.is_neg()
+        ):
+            return None
+    if (
+        selected.dtype != torch.int64
+        or selected.numel() == 0
+        or restore.dtype not in (torch.int32, torch.int64)
+        or mask.dtype not in (torch.bool, torch.uint8, torch.int32, torch.int64)
+        or restore.numel() != original.padded_seq_len
+        or mask.numel() != original.padded_seq_len
+        or original.padded_seq_len != original.chunk_length * cp
+    ):
+        return None
+    selected_np = selected.numpy()
+    if (
+        selected_np[0] < 0
+        or selected_np[-1] >= original.seq_len_full
+        or np.any(selected_np[1:] < selected_np[:-1])
+    ):
+        return None
+    lengths_np = np.asarray(lengths, dtype=np.int64)
+    prefixes_np = np.asarray(prefixes, dtype=np.int64)
+    original_chunks = np.asarray(chunks, dtype=np.int64)
+    padded_lengths = original_chunks * cp
+    mask_np = mask.numpy()
+    if (
+        np.any(padded_lengths < lengths_np)
+        or np.count_nonzero(mask_np) != original.seq_len_full
+    ):
+        return None
+    padded_ends = np.cumsum(padded_lengths)
+    padded_starts = padded_ends - padded_lengths
+    padding = padded_lengths > lengths_np
+    # With exactly sum(lengths) nonzero entries, zero padding implies every
+    # real position is nonzero. Only nonempty padding intervals need separate
+    # validation, including ragged requests; there is no uniform-shape branch.
+    for start, stop in zip((padded_starts + lengths_np)[padding], padded_ends[padding]):
+        if np.count_nonzero(mask_np[start:stop]):
+            return None
+
+    ends = np.cumsum(lengths_np)
+    starts = ends - lengths_np
+    lower = np.searchsorted(selected_np, starts)
+    counts = np.searchsorted(selected_np, ends) - lower
+    padded_counts = (counts + 2 * cp - 1) // (2 * cp) * (2 * cp)
+    compact_chunks, halves = padded_counts // cp, padded_counts // (2 * cp)
+    count_starts = np.cumsum(counts) - counts
+    chunk_starts = np.cumsum(compact_chunks) - compact_chunks
+    request = np.repeat(np.arange(len(lengths), dtype=np.int64), counts)
+    canonical = np.arange(selected_np.size, dtype=np.int64) - count_starts[request]
+    half = halves[request]
+    pair = canonical // half
+    owners = np.where(pair < cp, pair, 2 * cp - 1 - pair)
+    local = canonical % half + np.where(pair < cp, 0, half) + chunk_starts[request]
+    own = owners == rank
+    rows = int(compact_chunks.sum())
+    row_request = np.repeat(np.arange(len(lengths), dtype=np.int64), compact_chunks)
+    positions = lengths_np[row_request] - 1
+    positions[local[own]] = selected_np[own] - starts[request[own]]
+    real = np.zeros(rows, dtype=np.bool_)
+    real[local[own]] = True
+    source_positions = selected_np + padded_starts[request] - starts[request]
+    source_flat = restore.numpy()[source_positions].astype(np.int64, copy=False)
+    source_owners = source_flat // original.chunk_length
+    source_rows = source_flat % original.chunk_length
+
+    splits_matrix = _split_matrix(source_owners, owners, cp)
+    sends, receives, group_arrays = [], [], []
+    projection_groups = []
+    for peer in range(cp):
+        outgoing = (source_owners == rank) & (owners == peer)
+        incoming = (source_owners == peer) & own
+        send, receive = source_rows[outgoing], local[incoming]
+        source = source_rows[incoming]
+        sends.append(send)
+        receives.append(receive)
+        if receive.size:
+            group_arrays.extend((receive, source))
+            if keep_candidate_rows:
+                projection_groups.append(
+                    (tuple(receive.tolist()), tuple(source.tolist()))
+                )
+    receive_positions = np.concatenate(receives)
+    absolute = positions + prefixes_np[row_request]
+    arrays = (
+        np.concatenate(sends),
+        receive_positions,
+        positions + padded_starts[row_request],
+        absolute,
+        real,
+        owners * rows + local,
+        row_request.astype(np.int32),
+        selected_np,
+        *group_arrays,
+    )
+    (
+        send_device,
+        receive_device,
+        relative_device,
+        absolute_device,
+        real_device,
+        restore_device,
+        request_device,
+        selected_device,
+        *group_devices,
+    ), host_buffer = _upload_layout_arrays(arrays, original.global_positions.device)
+    # Keep peer arrays independently aligned even for odd ragged split sizes;
+    # downstream JIT kernels see the same alignment as separate allocations.
+    groups = tuple(zip(group_devices[::2], group_devices[1::2]))
+    send_sizes = splits_matrix[rank]
+    receive_sizes = tuple(source[rank] for source in splits_matrix)
+    exchange = _RowExchange(
+        original.chunk_length,
+        rows,
+        send_device,
+        receive_device,
+        send_sizes,
+        receive_sizes,
+        group,
+        splits_matrix,
+        candidate_rows_host=(
+            tuple(sorted(source_rows[source_owners == rank].tolist()))
+            if keep_candidate_rows
+            else None
+        ),
+        projection_groups_host=tuple(projection_groups),
+        receive_is_identity=(
+            sum(receive_sizes) == rows
+            and np.array_equal(receive_positions, np.arange(rows, dtype=np.int64))
+        ),
+        _layout_host_buffer=host_buffer,
+    )
+    context = replace(
+        original,
+        chunk_length=rows,
+        padded_seq_len=rows * cp,
+        relative_positions=relative_device,
+        global_positions=absolute_device,
+        first_position_host=int(absolute[0]),
+        local_is_real=real_device,
+        unpad_restore=restore_device,
+        unpad_restore_is_prefix=False,
+        chunk_lengths_per_req=tuple(compact_chunks.tolist()),
+        req_id_per_token=request_device,
+        gather_restore_positions=selected_device,
+    )
+    return context, exchange, tuple(groups)
+
+
 def _query_layout(original, selected, group, *, keep_candidate_rows=False):
+    with record_function_range("dsv41.ced.query_layout"):
+        if os.environ.get("DSV41_CED_VECTOR_LAYOUT", "1") == "1":
+            fast = _host_query_layout(
+                original, selected, group, keep_candidate_rows=keep_candidate_rows
+            )
+            if fast is not None:
+                return fast
+        return _query_layout_fallback(
+            original, selected, group, keep_candidate_rows=keep_candidate_rows
+        )
+
+
+def _query_layout_fallback(original, selected, group, *, keep_candidate_rows=False):
     """Derive transport from the actual engine inverse map, not rank0 ownership."""
     device = original.global_positions.device
     cp, rank = original.cp_size, original.cp_rank
@@ -390,15 +675,14 @@ def _query_layout(original, selected, group, *, keep_candidate_rows=False):
     source_owners = source_flat // original.chunk_length
     source_rows = source_flat % original.chunk_length
     own = owners == rank
-    sends, receives, send_sizes, receive_sizes, indexer_groups = [], [], [], [], []
+    splits_matrix = _split_matrix(source_owners.numpy(), owners.numpy(), cp)
+    sends, receives, indexer_groups = [], [], []
     projection_groups_host = []
     for peer in range(cp):
         outgoing = (source_owners == rank) & (owners == peer)
         incoming = (source_owners == peer) & own
         sends.append(source_rows[outgoing])
         receives.append(local[incoming])
-        send_sizes.append(int(outgoing.sum()))
-        receive_sizes.append(int(incoming.sum()))
         if incoming.any():
             indexer_groups.append(
                 (
@@ -414,14 +698,17 @@ def _query_layout(original, selected, group, *, keep_candidate_rows=False):
                     )
                 )
     receive_positions_host = torch.cat(receives)
+    send_sizes = splits_matrix[rank]
+    receive_sizes = tuple(source[rank] for source in splits_matrix)
     exchange = _RowExchange(
         original.chunk_length,
         rows,
         torch.cat(sends).to(device, non_blocking=True),
         receive_positions_host.to(device, non_blocking=True),
-        tuple(send_sizes),
-        tuple(receive_sizes),
+        send_sizes,
+        receive_sizes,
         group,
+        splits_matrix,
         candidate_rows_host=(
             tuple(sorted(source_rows[source_owners == rank].tolist()))
             if keep_candidate_rows
@@ -464,9 +751,16 @@ class CEDPlan:
     exchange: _RowExchange
     indexer_groups: Tuple
     _capture_ids: Tuple[int, ...]
+    admission_group: Any = None
+    early_indexer: bool = field(default=False, init=False)
+    early_indexer_fallback: bool = field(default=False, init=False)
+    _early_admission: Optional[Tuple] = field(default=None, init=False, repr=False)
     _router_groups: Optional[Tuple] = field(default=None, init=False)
     _router_chunk_rows: Optional[int] = field(default=None, init=False)
     _router_gate_groups: Optional[Tuple] = field(default=None, init=False)
+    _router_groups_host: list[torch.Tensor] = field(
+        default_factory=list, init=False, repr=False
+    )
 
     @classmethod
     @torch.inference_mode()
@@ -494,7 +788,7 @@ class CEDPlan:
             or bool(getattr(attn_inputs, "is_cuda_graph", False))
             or not _supported_model(v4)
             or not torch.distributed.is_initialized()
-            or torch.cuda.is_current_stream_capturing()
+            or prefill_stream_is_capturing()
         ):
             return None
         lengths = cp_ctx.input_lengths_global_host
@@ -517,17 +811,24 @@ class CEDPlan:
         regions = tuple(getattr(kv_cache, "group_tags", ()))
         region = DECODER_SWA_KV if bounded_replay else SWA_KV
         groups = [i for i, r in enumerate(regions) if str(r) == str(region)]
-        host = host_block_tables(kv_cache, attn_inputs)
+        by_tag = as_attention_inputs_by_tag(attn_inputs, kv_cache)
+        host = getattr(by_tag.get(str(region)), "kv_cache_block_id", None)
         spans = tuple(
             kv_cache.get_seq_size_per_block(tag) for tag in kv_cache.group_tags
         )
         if (
             len(groups) != 1
+            or any(
+                getattr(by_tag.get(str(tag)), "kv_cache_block_id", None) is None
+                for tag in regions
+            )
             or not isinstance(host, torch.Tensor)
-            or host.device.type != "cpu"
-            or host.ndim != 3
-            or host.shape[1] != len(lengths)
-            or host.shape[0] != len(regions)
+            # Only exact CED reads the selected table values (``host[0].tolist()``)
+            # and therefore needs a host-resident tensor. Bounded replay uses the
+            # shape only, so a CUDA table (RTP_LLM_DEVICE_INPUT=1) is fine.
+            or (not bounded_replay and host.device.type != "cpu")
+            or host.ndim != 2
+            or host.shape[0] != len(lengths)
             or len(spans) != len(regions)
             or spans[groups[0]] <= 0
         ):
@@ -561,7 +862,7 @@ class CEDPlan:
             selected = checkpoint_positions(
                 cp_ctx.prefix_length,
                 cp_ctx.seq_len_full,
-                host[group_id, 0].tolist(),
+                host[0].tolist(),
                 spans[group_id],
                 ring_entries,
             )
@@ -593,6 +894,7 @@ class CEDPlan:
             exchange,
             indexer_groups,
             tuple(v4.capture_aux_hidden_layer_ids),
+            admission_group=getattr(v4, "_dsv41_ced_admission_group", None),
         )
 
     @contextmanager
@@ -610,7 +912,11 @@ class CEDPlan:
 
     def can_split_l20(self, v4):
         """Keep Stage0 publication/compaction if a split interface is absent."""
-        if self.original_context.seq_len_full < _MIN_L20_SPLIT_TOKENS:
+        early = self.original_context.seq_len_full < _MIN_L20_SPLIT_TOKENS
+        if early and not (
+            os.environ.get("DSV41_CED_EARLY_INDEXER", "0") == "1"
+            and self.context.chunk_length < self.original_context.chunk_length
+        ):
             return False
         block = v4.layers[20]
         interfaces = (
@@ -632,7 +938,14 @@ class CEDPlan:
             return False
         # The callback maps all compact rows. A separately chunked compact FFN
         # would need its own call-local row offsets, so retain Stage0 there.
-        if block.ffn._should_chunk(self.context.chunk_length):
+        from rtp_llm.models_py.modules.factory.fused_moe.utils.fp8_fp4.chunked_layer import (
+            planned_moe_tokens,
+        )
+
+        planned = planned_moe_tokens()
+        if block.ffn._should_chunk(
+            self.context.chunk_length if planned is None else planned
+        ):
             return False
         from rtp_llm.models_py.modules.dsv41.hc.v41_mega_mhc import (
             can_preserve_compact_mhc,
@@ -642,12 +955,177 @@ class CEDPlan:
             block.attn_hc,
             getattr(block, "ffn_hc", None),
             getattr(block, "ffn_norm", None),
+            use_prepared=True,
             original_tokens=self.original_context.chunk_length,
             compact_tokens=self.context.chunk_length,
         ):
             return False
-        self._prepare_router_projection(block.ffn)
+        if early:
+            if self.admission_group is None or block.ffn._should_chunk(
+                self.original_context.chunk_length
+            ):
+                return False
+            config = block.attn.v41_config or {}
+            candidate_span = config.get("candidate_block_size", 0) * config.get(
+                "candidate_topk_blocks", 0
+            )
+            original = self.original_context
+            visible = max(
+                (
+                    prefix + count
+                    for prefix, count in zip(
+                        original.prefix_lengths_host or (),
+                        original.input_lengths_global_host or (),
+                    )
+                ),
+                default=0,
+            )
+            if candidate_span <= 0 or visible <= candidate_span:
+                return False
+            self.early_indexer = True
+        else:
+            self._prepare_router_projection(block.ffn)
         return True
+
+    def _can_use_original_routing(self, ffn, x):
+        from rtp_llm.models_py.modules.dsv41.moe.mega_gate import can_use_mega_gate
+
+        group = self.exchange.group
+        cfg = ffn._strategy.cfg
+        # EPLB's replica hash uses the original expert rank and row number.
+        eplb = ffn.eplb_layer
+        peer_ranks = torch.distributed.get_process_group_ranks(group)
+        return (
+            ffn._use_gate_pack()
+            and ffn._strategy.fake_balance_expert is None
+            and (
+                eplb is None
+                or (
+                    peer_ranks == list(range(cfg.ep_size))
+                    and cfg.ep_rank == self.original_context.cp_rank
+                )
+            )
+            and can_use_mega_gate(x, ffn.gate)
+        )
+
+    def start_early_admission(self, block, hidden, kv_cache, tables):
+        """Overlap the CPU agreement with L19 and L20 source production."""
+        from rtp_llm.models_py.modules.dsv41.fp8._v41_batched_prefill_select import (
+            prepare_owned_references,
+        )
+        from rtp_llm.models_py.modules.dsv41.fp8._v41_joint_pool import (
+            prepare_owned_layout,
+        )
+        from rtp_llm.models_py.modules.dsv41.fp8.attention import bind_attn_cache
+
+        cp = self.original_context
+        attn = block.attn
+        references = None
+        if (
+            isinstance(hidden, torch.Tensor)
+            and hidden.ndim == 3
+            and hidden.shape[0] == cp.chunk_length
+            and hidden.is_contiguous()
+            and hidden.device == cp.global_positions.device
+            and cp.kv_cache_sharded
+            and kv_cache is not None
+            and tables is not None
+            and attn.compress_ratio == 1
+            and attn.kv_source_layer_id == attn.layer_id
+            and cp.prefix_lengths_host
+            and cp.input_lengths_global_host
+        ):
+            # The L20 HC pre-mix and norm produce one dense row per token.
+            # Only metadata is inspected by the routing capability predicate.
+            projection_view = hidden.view(-1, hidden.shape[-1])[: cp.chunk_length]
+            if self._can_use_original_routing(block.ffn, projection_view):
+                widths = tuple(
+                    p + n
+                    for p, n in zip(
+                        cp.prefix_lengths_host,
+                        cp.input_lengths_global_host,
+                        strict=True,
+                    )
+                )
+                with bind_attn_cache(attn, kv_cache, tables, cp):
+                    groups = prepare_owned_layout(attn, widths, hidden.device)
+                if groups is not None:
+                    references = prepare_owned_references(attn, self, widths, groups)
+        ready = torch.tensor(references is not None, device="cpu", dtype=torch.int32)
+        work = torch.distributed.all_reduce(
+            ready,
+            op=torch.distributed.ReduceOp.MIN,
+            group=self.admission_group,
+            async_op=True,
+        )
+        self._early_admission = (ready, work, references)
+
+    def prepare_early_indexer(self, attn, ffn, x):
+        if self._early_admission is not None:
+            ready, work, references = self._early_admission
+            self._early_admission = None
+            work.wait()
+            self.early_indexer_fallback = not bool(ready.item())
+            return references if not self.early_indexer_fallback else None
+
+        from rtp_llm.models_py.modules.dsv41.fp8._v41_batched_prefill_select import (
+            prepare_retained_references,
+        )
+
+        references = (
+            prepare_retained_references(attn, self)
+            if self._can_use_original_routing(ffn, x)
+            else None
+        )
+        # Host metadata decides the branch. Keep the vote off the NCCL
+        # communicator and its queued CP data work.
+        ready = torch.tensor(references is not None, device="cpu", dtype=torch.int32)
+        torch.distributed.all_reduce(
+            ready, op=torch.distributed.ReduceOp.MIN, group=self.admission_group
+        )
+        self.early_indexer_fallback = not bool(ready.item())
+        return references if not self.early_indexer_fallback else None
+
+    @contextmanager
+    def original_native_routing(self, ffn):
+        """Retain native arithmetic and EPLB with the current DeepGEMM ABI."""
+        from rtp_llm.models_py.modules.dsv41.moe.mega_gate import mega_gate
+
+        def route(x):
+            gate = ffn.gate
+            eplb = ffn.eplb_layer
+            weights = x.new_zeros((x.shape[0], gate.topk), dtype=torch.float32)
+            indices = x.new_full((x.shape[0], gate.topk), -1, dtype=torch.int64)
+            peers = (
+                peer for peer, count in enumerate(self.exchange.receive_sizes) if count
+            )
+            for owner, (compact_rows, source_rows) in zip(
+                peers, self.indexer_groups, strict=True
+            ):
+                full_x = x.new_zeros((self.original_context.chunk_length, x.shape[1]))
+                full_x.index_copy_(0, source_rows, x.index_select(0, compact_rows))
+                owner_weights, owner_ids = mega_gate(
+                    full_x,
+                    gate,
+                    owner,
+                    to_physical_map=(
+                        eplb.logical_to_physical if eplb is not None else None
+                    ),
+                    logical_count=eplb.logical_count if eplb is not None else None,
+                )
+                weights.index_copy_(
+                    0, compact_rows, owner_weights.index_select(0, source_rows)
+                )
+                indices.index_copy_(
+                    0, compact_rows, owner_ids.index_select(0, source_rows)
+                )
+            return weights, indices
+
+        ffn._ced_native_routing = route
+        try:
+            yield
+        finally:
+            del ffn._ced_native_routing
 
     def _prepare_router_projection(self, ffn):
         """Prepare only eligible Stage1 maps during the pre-L0 admission check."""
@@ -694,17 +1172,20 @@ class CEDPlan:
     def compact_l20(self, block, residual, post, comb, input_ids):
         """Move the current Block state after full L20 source production."""
         shared = block.attn._shared_attention
+        _clear_attention_metadata(block.attn)
         residual = self.exchange.compact(residual)
         post = self.exchange.compact(post)
         comb = self.exchange.compact(comb)
         input_ids = self.exchange.compact(input_ids)
         block.attn_hc.pre_mix_out = self.exchange.compact(block.attn_hc.pre_mix_out)
+        # L20 gets explicit source weights. Later index-source layers still
+        # need the original-owner projection on their compact input.
         shared["ced_indexer_projection"] = self.project_indexer_weights
         for key in _DERIVED_KEYS:
             shared.pop(key, None)
         return residual, post, comb, input_ids
 
-    def l20_query_metadata(self, common):
+    def l20_query_metadata(self, common, freqs_table):
         """Replace only query fields; L20 keeps exact SWA/global visibility."""
         query_context = replace(
             self.context, swa_replay_start=None, swa_replay_starts_host=None
@@ -714,10 +1195,13 @@ class CEDPlan:
         for count in query_context.chunk_lengths_per_req:
             slices.append(slice(start, start + count))
             start += count
+        freqs = freqs_table.index_select(0, query_context.global_positions)
+        # Compact transport used to zero the padded slots.
+        freqs.masked_fill_(~query_context.local_is_real[:, None], 0)
         return common._replace(
             seqlen=rows,
             cp_ctx=query_context,
-            freqs_cis=self.exchange.compact(common.freqs_cis),
+            freqs_cis=freqs,
             cu_seqlens=self.cu_seqlens,
             input_lengths=self.cu_seqlens[1:] - self.cu_seqlens[:-1],
             position_ids=query_context.global_positions,
@@ -729,6 +1213,7 @@ class CEDPlan:
 
     @torch.inference_mode()
     def compact(self, v4, hidden, input_ids, shared):
+        _clear_attention_metadata(v4.layers[20].attn)
         pre_mix = v4.layers[20].ffn_hc.pre_mix_out
         topk = shared["topk"][20]
         candidates = shared["candidates"]
@@ -746,36 +1231,43 @@ class CEDPlan:
 
     def _router_chunk_groups(self, rows_per_chunk, *, gate_rows=0):
         device = self.context.global_positions.device
-        groups = []
+        chunk_length = self.original_context.chunk_length
+        arrays, spans = [], []
         for compact_rows, original_rows in self.exchange.projection_groups_host:
-            # Keep original owners separate even when their chunk-local row
-            # indices coincide. All grouping uses metadata retained on CPU.
-            chunks = {}
-            for dst, src in zip(compact_rows, original_rows):
-                outer_start = src // rows_per_chunk * rows_per_chunk
-                stop = min(
-                    outer_start + rows_per_chunk, self.original_context.chunk_length
-                )
-                start = outer_start
-                if gate_rows > 0:
-                    start += (src - outer_start) // gate_rows * gate_rows
-                    stop = min(stop, start + gate_rows)
-                destinations, sources = chunks.setdefault((start, stop), ([], []))
-                destinations.append(dst)
-                sources.append(src - start)
-            for (start, stop), (destinations, sources) in chunks.items():
-                groups.append(
-                    (
-                        torch.tensor(destinations, dtype=torch.long).to(
-                            device, non_blocking=True
-                        ),
-                        torch.tensor(sources, dtype=torch.long).to(
-                            device, non_blocking=True
-                        ),
-                        stop - start,
-                    )
-                )
-        return tuple(groups)
+            count = min(len(compact_rows), len(original_rows))
+            if not count:
+                continue
+            dst = np.asarray(compact_rows[:count], dtype=np.int64)
+            src = np.asarray(original_rows[:count], dtype=np.int64)
+            outer_start = src // rows_per_chunk * rows_per_chunk
+            stop = np.minimum(outer_start + rows_per_chunk, chunk_length)
+            start = outer_start
+            if gate_rows > 0:
+                start = start + (src - outer_start) // gate_rows * gate_rows
+                stop = np.minimum(stop, start + gate_rows)
+            key = start * np.int64(chunk_length + 1) + stop
+            unique_keys, first_seen, inverse = np.unique(
+                key, return_index=True, return_inverse=True
+            )
+            # Preserve first-appearance chunk order and pair order within each
+            # owner; equal chunk keys from different owners must stay separate.
+            for unique_slot in np.argsort(first_seen, kind="stable"):
+                members = np.flatnonzero(inverse == unique_slot)
+                unique_key = int(unique_keys[unique_slot])
+                start_c = unique_key // (chunk_length + 1)
+                stop_c = unique_key % (chunk_length + 1)
+                arrays.append(dst[members])
+                arrays.append(src[members] - start_c)
+                spans.append(stop_c - start_c)
+        if not arrays:
+            return ()
+        views, host = _upload_layout_arrays(arrays, device)
+        # MoE and gate maps can both upload; retain each pinned slab for the plan.
+        self._router_groups_host.append(host)
+        return tuple(
+            (views[index], views[index + 1], span)
+            for index, span in zip(range(0, len(views), 2), spans)
+        )
 
     def _project_router_weights(self, x, weight):
         # CED's gate callback precedes Gate's own chunk policy. Reproduce that

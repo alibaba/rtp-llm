@@ -94,30 +94,12 @@ class FrontendRoutingTest(unittest.TestCase):
                 store.assert_not_called()
 
 
-    def test_warmup_without_local_serving_rank_keeps_resolution_error(self):
-        from rtp_llm.start_server import (
-            StartupRealWarmupAddressResolutionError,
-            _get_startup_real_warmup_grpc_addresses,
-        )
-
-        with (
-            patch(
-                "rtp_llm.distribute.distributed_server.socket.gethostbyname",
-                return_value="127.0.0.1",
-            ),
-            patch("rtp_llm.distribute.distributed_server.TCPStore") as store,
-            self.assertRaises(StartupRealWarmupAddressResolutionError),
-        ):
-            _get_startup_real_warmup_grpc_addresses(self.config())
-        store.assert_not_called()
-
     def test_serving_clients_keep_local_stage_zero_addresses(self):
         from rtp_llm.frontend.frontend_app import FrontendApp
         from rtp_llm.frontend.frontend_worker import FrontendWorker
         from rtp_llm.server.backend_rpc_server_visitor import (
             create_backend_rpc_server_visitor,
         )
-        from rtp_llm.start_server import _get_startup_real_warmup_grpc_addresses
 
         config = self.config(dp=4, local_size=4, world_rank=4)
         model_config = SimpleNamespace(
@@ -138,10 +120,6 @@ class FrontendRoutingTest(unittest.TestCase):
             patch("rtp_llm.frontend.frontend_worker.Pipeline") as pipeline,
             patch("rtp_llm.frontend.frontend_app.FrontendServer"),
             patch(
-                "rtp_llm.frontend.frontend_app.get_eplb_stage_root_addresses",
-                return_value=["stage0:8001", "stage1:8001"],
-            ) as resolve_roots,
-            patch(
                 "rtp_llm.server.backend_rpc_server_visitor.BackendRPCServerVisitor"
             ) as visitor,
         ):
@@ -154,17 +132,8 @@ class FrontendRoutingTest(unittest.TestCase):
                     )
                     client = FrontendApp(app_config).grpc_client
                     self.assertEqual(client.dp_addresses, expected)
-                    resolve_roots.assert_not_called()
-                    if pp_size == 1:
-                        self.assertIsNone(client._eplb_address_resolver)
-                    else:
-                        self.assertEqual(
-                            client._eplb_address_resolver(), resolve_roots.return_value
-                        )
-                        resolve_roots.assert_called_once_with(app_config)
             create_backend_rpc_server_visitor(config, model_config)
             self.assertEqual(visitor.call_args.kwargs["addresses"], expected)
-            self.assertEqual(_get_startup_real_warmup_grpc_addresses(config), expected)
             store.assert_not_called()
 
 

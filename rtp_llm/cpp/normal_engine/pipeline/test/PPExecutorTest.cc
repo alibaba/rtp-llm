@@ -1269,7 +1269,7 @@ TEST_F(PPExecutorTest, FirstLocalMoeLayerUsesStageRange) {
     }
 }
 
-TEST_F(PPExecutorTest, CommonDenseStageDoesNotStartExpertBalancer) {
+TEST_F(PPExecutorTest, CommonDenseStageRejectsExpertBalancer) {
     auto params                                     = makeStageParams(0);
     params.model_config_.num_layers                 = 8;
     params.model_config_.moe_style                  = 1;
@@ -1277,8 +1277,12 @@ TEST_F(PPExecutorTest, CommonDenseStageDoesNotStartExpertBalancer) {
     params.model_config_.moe_layer_index            = {2, 4, 5, 7};
     params.parallelism_config.pp_stage_layer_counts = {2, 3, 3};
     params.eplb_config.eplb_mode                    = EplbMode::ALL;
-    PPExecutor executor(params, nullptr, true);
-    EXPECT_EQ(executor.expert_balancer_, nullptr);
+    try {
+        PPExecutor executor(params, nullptr, true);
+        FAIL() << "PP with EPLB must be rejected";
+    } catch (const std::runtime_error& error) {
+        EXPECT_NE(std::string(error.what()).find("PP with EPLB is not supported"), std::string::npos);
+    }
 }
 
 TEST_F(PPExecutorTpTest, CommonPythonTargetIgnoresGenerationPrefillGraphBuckets) {
@@ -6981,6 +6985,41 @@ TEST_F(PPExecutorTest, MiddleDSparkCompletionDoesNotWaitForPublication) {
     EXPECT_TRUE(executor.dspark_q_.empty());
     executor.drainCacheStorePublication();
     EXPECT_EQ(waits, 2);
+}
+
+TEST_F(PPExecutorTest, DSparkP2PPublicationDrainsBothWritersBeforeReturning) {
+    auto params                    = makeStageParams(2, SP_TYPE_DSPARK);
+    params.pd_sep_config.role_type = RoleType::PREFILL;
+    auto       propose             = makeMtpProposeParams(params);
+    auto       cache_config        = test::makeSimpleMhaCacheConfig(3, 16, 4, DataType::TYPE_FP16);
+    const auto draft_config        = test::makeSimpleMhaCacheConfig(1, 16, 4, DataType::TYPE_FP16);
+    cache_config.mtp_sub_configs.push_back(cache_config.mergeMTPModule(draft_config, 0, cache_config.layer_num));
+    cache_config.finalizeBlockNums(16, RuntimeConfig{});
+    auto cache = std::make_shared<KVCacheManager>(cache_config);
+    ASSERT_TRUE(cache->init());
+    ASSERT_EQ(cache->getMTPModuleCacheConfig(0).layer_num, 1u);
+    PPExecutor executor(params, cache, false, nullptr, nullptr, propose.get());
+    auto*      wire           = attachTransport(executor);
+    auto*      target         = installModel<RecordingDraftModel>(executor);
+    auto       draft          = installDSparkModels(executor, 3);
+    bool       target_drained = false;
+    bool       draft_drained  = false;
+    target->wait_publication  = [&] {
+        target_drained = !target->inputs.empty();
+        return std::string();
+    };
+    draft->wait_publication = [&] {
+        draft_drained = !draft->inputs.empty();
+        return std::string();
+    };
+    auto plan = makePlan(params);
+    ASSERT_TRUE(plan.model_input.pd_separation);
+    ASSERT_FALSE(plan.model_input.skip_lm_head);
+    enqueuePlan(*wire, plan);
+    ASSERT_TRUE(executor.process(ScheduleOutput{}).ok());
+    EXPECT_TRUE(target_drained);
+    EXPECT_TRUE(draft_drained);
+    executor.waitLastRun();
 }
 
 TEST_F(PPExecutorTpTest, LastCpChunkKeepsLocalFeaturesAndNarrowsOnlyTheHandoffRows) {

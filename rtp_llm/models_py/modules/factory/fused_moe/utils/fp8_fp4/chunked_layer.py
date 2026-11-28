@@ -8,6 +8,8 @@ from contextvars import ContextVar
 from typing import Callable, ContextManager, Dict, Iterable, Optional
 
 import torch
+
+from rtp_llm.models_py.utils.expert_load_monitor import ExpertLoadContext
 import torch.distributed as dist
 import torch.nn as nn
 
@@ -404,6 +406,7 @@ class ChunkedFp8Fp4MoeLayer(nn.Module):
         *,
         observer: Optional[Callable[[str, torch.Tensor], None]] = None,
         out: Optional[torch.Tensor] = None,
+        expert_load: Optional[ExpertLoadContext] = None,
     ) -> torch.Tensor:
         with self._record_function_scope():
             return self._moe(
@@ -411,6 +414,7 @@ class ChunkedFp8Fp4MoeLayer(nn.Module):
                 input_ids,
                 observer=observer,
                 out=out,
+                expert_load=expert_load,
             )
 
     def forward(
@@ -420,6 +424,7 @@ class ChunkedFp8Fp4MoeLayer(nn.Module):
         *,
         is_decode_forward: bool = False,
         positions: Optional[torch.Tensor] = None,
+        expert_load: Optional[ExpertLoadContext] = None,
     ) -> torch.Tensor:
         shape = x.shape
         flat_x = x.reshape(-1, self.dim)
@@ -450,9 +455,9 @@ class ChunkedFp8Fp4MoeLayer(nn.Module):
                 )
                 chunk_observer = self._observer(chunk_positions)
             if chunk_observer is None:
-                return self._call_moe(flat_x[start:end], chunk_ids, out=out_view)
+                return self._call_moe(flat_x[start:end], chunk_ids, out=out_view, expert_load=expert_load)
             return self._call_moe(
-                flat_x[start:end], chunk_ids, observer=chunk_observer, out=out_view
+                flat_x[start:end], chunk_ids, observer=chunk_observer, out=out_view, expert_load=expert_load
             )
 
         run_moe_chunks(

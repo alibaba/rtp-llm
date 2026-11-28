@@ -195,8 +195,25 @@ struct EpilogueRunner {
                     OutIdxT  out[NUM_OUTPUT_IDX_PER_ROUND];
                     ld_shared<NUM_OUTPUT_IDX_PER_ROUND>(indices_u32, smem_index_buf + i);
                     CUTE_UNROLL
-                    for (uint32_t j = 0; j < NUM_OUTPUT_IDX_PER_ROUND; ++j)
-                        out[j] = (OutIdxT)indices_u32[j] + output_idx_offset;
+                    for (uint32_t j = 0; j < NUM_OUTPUT_IDX_PER_ROUND; ++j) {
+                        if constexpr (Config::pin_last_index) {
+                            static_assert(Config::sorted_index && !Config::return_value && !Config::filter_finite);
+                            // Long rows have topk distinct, ascending IDs. The
+                            // last visible ID is their upper bound, so this
+                            // preserves uniqueness/order even on NaN/+inf ties.
+                            if (i + j == args.topk - 1) {
+                                indices_u32[j] = end_vocab_idx - 1;
+                            }
+                        }
+                        if constexpr (Config::canonicalize_nan && Config::sorted_index && !Config::pin_last_index) {
+                            // Dense token selection may retain masked tail -INF
+                            // ties. Preserve the unsorted outlet's bounds check.
+                            out[j] = indices_u32[j] < end_vocab_idx ? (OutIdxT)indices_u32[j] + output_idx_offset :
+                                                                      args.idx_oob_fill_value;
+                        } else {
+                            out[j] = (OutIdxT)indices_u32[j] + output_idx_offset;
+                        }
+                    }
                     st_global<NUM_OUTPUT_IDX_PER_ROUND>(result_indices + i, out);
                 }
 
@@ -927,6 +944,26 @@ public:
     static constexpr uint16_t PLACEHOLDER     = 0xff80;  // -INF
     static constexpr uint32_t NEG_INF_X2_BITS = 0xFF80FF80u;
 
+    // RTP dense token selection ranks both signs of NaN like +inf. Transform
+    // only loaded registers; sparse instantiations compile this out entirely.
+    static __device__ __forceinline__ uint32_t canonicalize_nan(uint32_t bits) {
+        if constexpr (Config::canonicalize_nan) {
+            return (bits & 0x7fffu) > 0x7f80u ? 0x7f80u : bits;
+        } else {
+            return bits;
+        }
+    }
+
+    static __device__ __forceinline__ nv_bfloat162 canonicalize_nan_pair(nv_bfloat162 value) {
+        if constexpr (Config::canonicalize_nan) {
+            uint32_t bits = *reinterpret_cast<const uint32_t*>(&value);
+            bits          = canonicalize_nan(bits & 0xffffu) | (canonicalize_nan(bits >> 16) << 16);
+            return u32_to_bf16x2(bits);
+        } else {
+            return value;
+        }
+    }
+
     // Histogram pass 1 (MSB radix): for each distorted bf16x2 value, retrieve the upper 8 bits and performs atomicAdd
     // on the bucket counter `num_packed_values` should be guaranteed to be aligned by `NUM_PACKED_VALUES_ALIGNMENT`
     template<uint32_t N, uint32_t NUM_PACKED_VALUES_ALIGNMENT = 1>
@@ -1022,19 +1059,34 @@ public:
             if (i % NUM_PACKED_VALUES_ALIGNMENT == 0 && i == num_packed_values)
                 break;
             uint32_t raw = bf16x2_to_u32(values[i]);
-            asm volatile("{\n"
-                         ".reg .b32 gt_result, eq_result;\n"
-                         "set.gt.bf16x2.bf16x2 gt_result, %3, %4;\n"
-                         "add.rn.bf16x2 %0, gt_result, %0;\n"
-                         "set.eq.bf16x2.bf16x2 eq_result, %3, %4;\n"
-                         "add.rn.bf16x2 %1, eq_result, %1;\n"
-                         "min.NaN.bf16x2 %2, %2, %3;\n"  // We use `min.NaN` for NaN detection
-                         "}\n"
-                         : "+r"(*(uint32_t*)&gt_accum), "+r"(*(uint32_t*)&eq_accum), "+r"(*(uint32_t*)&nan_accum)
-                         : "r"(raw), "r"(pivot_value_x2_bits));
+            if constexpr (Config::canonicalize_nan) {
+                asm volatile("{\n"
+                             ".reg .b32 gt_result, eq_result;\n"
+                             "set.gt.bf16x2.bf16x2 gt_result, %2, %3;\n"
+                             "add.rn.bf16x2 %0, gt_result, %0;\n"
+                             "set.eq.bf16x2.bf16x2 eq_result, %2, %3;\n"
+                             "add.rn.bf16x2 %1, eq_result, %1;\n"
+                             "}\n"
+                             : "+r"(*(uint32_t*)&gt_accum), "+r"(*(uint32_t*)&eq_accum)
+                             : "r"(raw), "r"(pivot_value_x2_bits));
+            } else {
+                asm volatile("{\n"
+                             ".reg .b32 gt_result, eq_result;\n"
+                             "set.gt.bf16x2.bf16x2 gt_result, %3, %4;\n"
+                             "add.rn.bf16x2 %0, gt_result, %0;\n"
+                             "set.eq.bf16x2.bf16x2 eq_result, %3, %4;\n"
+                             "add.rn.bf16x2 %1, eq_result, %1;\n"
+                             "min.NaN.bf16x2 %2, %2, %3;\n"  // We use `min.NaN` for NaN detection
+                             "}\n"
+                             : "+r"(*(uint32_t*)&gt_accum), "+r"(*(uint32_t*)&eq_accum), "+r"(*(uint32_t*)&nan_accum)
+                             : "r"(raw), "r"(pivot_value_x2_bits));
+            }
         }
         uint32_t cnt_gt = (uint32_t)(float)(gt_accum.x + gt_accum.y);
         uint32_t cnt_eq = (uint32_t)(float)(eq_accum.x + eq_accum.y);
+        if constexpr (Config::canonicalize_nan) {
+            return {cnt_gt, cnt_eq, 0};
+        }
         uint32_t nan_flag;
         asm("set.nan.bf16x2.bf16x2 %0, %1, %1;" : "=r"(nan_flag) : "r"(*(uint32_t*)&nan_accum));
         uint32_t cnt_nan = nan_flag != 0 ? 1u : 0u;
@@ -1119,6 +1171,36 @@ public:
 #undef APPEND_SELECTED_PAIR2
     }
 
+    // Candidate-only boundary pairs: padding must not consume an equality quota
+    // when real scores are -INF. Interior pairs keep the vectorized fast path.
+    static __device__ __forceinline__ void append_valid_candidate_pair(uint32_t&    dst_ptr,
+                                                                       uint32_t&    eq_quota,
+                                                                       nv_bfloat162 values,
+                                                                       uint32_t     pivot_bits,
+                                                                       uint32_t     index0,
+                                                                       uint32_t     index1,
+                                                                       uint32_t     valid_mask) {
+        uint32_t bits = bf16x2_to_u32(values);
+        uint32_t gt_mask, eq_mask;
+        asm("set.gt.s32.bf16x2 %0, %2, %3;\n"
+            "set.eq.s32.bf16x2 %1, %2, %3;"
+            : "=&r"(gt_mask), "=&r"(eq_mask)
+            : "r"(bits), "r"(pivot_bits));
+        CUTE_UNROLL
+        for (uint32_t i = 0; i < 2; ++i) {
+            uint32_t value_bits = (bits >> (i * 16)) & 0xffffu;
+            bool     gt         = ((gt_mask >> (i * 16)) & 0xffffu) != 0;
+            bool     eq         = ((eq_mask >> (i * 16)) & 0xffffu) != 0;
+            if ((valid_mask & (1u << i)) && (gt || (eq && eq_quota))) {
+                if (eq)
+                    --eq_quota;
+                uint32_t index = i == 0 ? index0 : index1;
+                asm volatile("st.shared.v2.u32 [%0], {%1, %2};" ::"r"(dst_ptr), "r"(index), "r"(value_bits) : "memory");
+                dst_ptr += sizeof(uint64_t);
+            }
+        }
+    }
+
     // Get the pivot via a two-stage histogram and get PivotAndQuota
     // The MSB histogram should be ready and all threads should be able to see it (e.g. via a `__syncthreads()`) before
     // we call the function We don't absorb MSB histogram's logic inside since sometimes we'd like to overlap TMA load
@@ -1136,7 +1218,8 @@ public:
                                                                             uint32_t              num_values,
                                                                             uint32_t              warp_idx,
                                                                             uint32_t              lane_idx,
-                                                                            SharedMemoryPlanBase& smem) {
+                                                                            SharedMemoryPlanBase& smem,
+                                                                            uint32_t              padding_count = 0) {
         if (warp_idx == 0) {
             Base::template find_pivot_in_histogram<false>(smem, smem.reconstruct_bucket_counter[0], topk, lane_idx);
         }
@@ -1159,6 +1242,12 @@ public:
         uint32_t pivot_value_x2_bits = ((uint32_t)pivot_value << 16) | pivot_value;
 
         auto census = get_census_counts<N, NUM_PACKED_VALUES_ALIGNMENT>(values, num_values, pivot_value_x2_bits);
+        if constexpr (Config::exclude_padding) {
+            // Padding is the lowest histogram bucket, so it cannot change the
+            // valid kth pivot. Exclude it from the tie census before quotas.
+            if (pivot_value == PLACEHOLDER)
+                census.cnt_eq -= padding_count;
+        }
 
         static_assert(NUM_WARPS <= NUM_RECONSTRUCT_BUCKETS);
         auto eqgt = Base::compute_equal_quota_and_prefix(
@@ -1302,6 +1391,10 @@ public:
                         ld_shared<4>(
                             my_values + k * 4,
                             reinterpret_cast<const nv_bfloat162*>(init_buf + Base::sw_b128(pos) * NUM_ELEMS_PER_128b));
+                        CUTE_UNROLL
+                        for (uint32_t v = 0; v < 4; ++v) {
+                            my_values[k * 4 + v] = canonicalize_nan_pair(my_values[k * 4 + v]);
+                        }
                         num_my_values = 4 * (k + 1);
                     }
                 }
@@ -1317,6 +1410,11 @@ public:
                 uint32_t u0 = my_elem_start_idx / NUM_ELEMS_PER_128b + j;
                 ld_shared<4>(init_values + j * NUM_UINT32_PER_128b,
                              reinterpret_cast<const nv_bfloat162*>(init_buf + Base::sw_b128(u0) * NUM_ELEMS_PER_128b));
+                CUTE_UNROLL
+                for (uint32_t v = 0; v < NUM_UINT32_PER_128b; ++v) {
+                    init_values[j * NUM_UINT32_PER_128b + v] =
+                        canonicalize_nan_pair(init_values[j * NUM_UINT32_PER_128b + v]);
+                }
             }
 
             __syncthreads();  // publish the round-1 histogram
@@ -1326,10 +1424,17 @@ public:
             // rank whose visit range mostly overlaps the padded tail). In that case the pivot
             // selection must degrade to "select all real elements": cap the K used in the pivot /
             // quota computation at the real count
-            uint32_t effective_topk = min(topk, num_real_init_elems);
+            uint32_t effective_topk   = min(topk, num_real_init_elems);
+            uint32_t my_padding_count = 0;
+            if constexpr (Config::exclude_padding) {
+                static_assert(!USE_CLUSTER_ADDRESSING);
+                uint32_t padding_begin = max(my_elem_start_idx, num_local_tail_elems);
+                uint32_t padding_end   = min(my_elem_start_idx + num_my_elems, num_local_tail_elems_padded);
+                my_padding_count       = padding_end > padding_begin ? padding_end - padding_begin : 0u;
+            }
             auto [pivot_value_x2_bits, start_pos_in_collector, eq_quota, cnt_nan] =
                 compute_pivot_and_quota<USE_CLUSTER_ADDRESSING, NUM_UINT32_IN_INIT_WINDOW_PER_THREAD, 4>(
-                    effective_topk, init_values, num_my_elems / 2, warp_idx, lane_idx, smem);
+                    effective_topk, init_values, num_my_elems / 2, warp_idx, lane_idx, smem, my_padding_count);
             // The init census walks the thread's whole slice of the window, i.e. every element of the init
             // window exactly once, so NaNs inside the window are caught here.
             have_nan |= cnt_nan != 0;
@@ -1363,6 +1468,18 @@ public:
                     uint32_t     index0    = __float_as_uint(unit_base_f + __uint_as_float(i % 4 * 2));
                     uint32_t     index1    = __float_as_uint(unit_base_f + __uint_as_float(i % 4 * 2 + 1));
                     nv_bfloat162 cur_value = init_values[i];  // two bf16 payloads packed as bf16x2
+                    if constexpr (Config::exclude_padding) {
+                        if (index1 >= end_vocab_idx) {
+                            append_valid_candidate_pair(out_ptr,
+                                                        eq_quota,
+                                                        cur_value,
+                                                        pivot_value_x2_bits,
+                                                        index0,
+                                                        index1,
+                                                        index0 < end_vocab_idx ? 1u : 0u);
+                            continue;
+                        }
+                    }
                     append_selected_pairs_from_registers<USE_CLUSTER_ADDRESSING>(
                         out_ptr, eq_quota, cur_value, pivot_value_x2_bits, index0, index1);
                 }
@@ -1390,18 +1507,21 @@ public:
             }
             __syncthreads();
 
-            // units [0, MAX_TOPK/2): the current survivor buffer
+            // Candidate runtime K may be smaller than the capacity. Never let
+            // unused survivor slots compete with real -INF scores.
+            uint32_t survivor_count = Config::exclude_padding ? topk : MAX_TOPK;
+            // units [0, survivor_count/2): the current survivor buffer
             // The rest: incomers
-            uint32_t num_uint32 = (MAX_TOPK + padded_extra_len) / 2;
+            uint32_t num_uint32 = (survivor_count + padded_extra_len) / 2;
             uint32_t num_uint32_per_thread =
                 ku::ceil_div(num_uint32, (uint32_t)NUM_THREADS) | 1u;  // force odd => bank-conflict-free smem gathers
             uint32_t unit_base    = tid * num_uint32_per_thread;
             uint32_t num_my_units = unit_base < num_uint32 ? min(num_uint32_per_thread, num_uint32 - unit_base) : 0u;
 
             auto unit_to_pair_addr = [&](uint32_t offset) -> uint32_t {
-                return offset < MAX_TOPK / 2 ?
+                return offset < survivor_count / 2 ?
                            cute::cast_smem_ptr_to_uint(smem.surviving_topk_pairs[survivor_buf_idx] + 2 * offset) :
-                           cute::cast_smem_ptr_to_uint(smem.incoming_topk_pairs + (2 * offset - MAX_TOPK));
+                           cute::cast_smem_ptr_to_uint(smem.incoming_topk_pairs + (2 * offset - survivor_count));
             };
 
             nv_bfloat162 values[NUM_UINT32_RECONSTRUCT_PER_THREAD];
@@ -1419,8 +1539,12 @@ public:
             histogram_radix_msb(smem.reconstruct_bucket_counter[0], values, num_my_units);
             __syncthreads();
 
-            auto [pivot_value_x2_bits, out_prefix, eq_quota, cnt_nan] =
-                compute_pivot_and_quota<USE_CLUSTER_ADDRESSING>(topk, values, num_my_units, warp_idx, lane_idx, smem);
+            uint32_t my_padding_count = 0;
+            if constexpr (Config::exclude_padding) {
+                my_padding_count = (cur_extra_len & 1u) && num_my_units && unit_base + num_my_units == num_uint32;
+            }
+            auto [pivot_value_x2_bits, out_prefix, eq_quota, cnt_nan] = compute_pivot_and_quota<USE_CLUSTER_ADDRESSING>(
+                topk, values, num_my_units, warp_idx, lane_idx, smem, my_padding_count);
             // Every NaN that the main loop collected is part of the buffer this census just walked (the hit
             // test is `.gtu`, so NaN always becomes an incomer).
             have_nan |= cnt_nan != 0;
@@ -1432,6 +1556,15 @@ public:
                 for (uint32_t m = 0; m < NUM_UINT32_RECONSTRUCT_PER_THREAD; m++) {
                     if (m == num_my_units)
                         break;
+                    if constexpr (Config::exclude_padding) {
+                        if ((cur_extra_len & 1u) && unit_base + m + 1 == num_uint32) {
+                            uint32_t pair2[4];
+                            ld_shared<4>(pair2, (const uint32_t*)unit_to_pair_addr(unit_base + m));
+                            append_valid_candidate_pair(
+                                out_ptr, eq_quota, values[m], pivot_value_x2_bits, pair2[0], pair2[2], 1u);
+                            continue;
+                        }
+                    }
                     copy_selected_pairs_to_survivor<USE_CLUSTER_ADDRESSING>(
                         out_ptr, eq_quota, values[m], pivot_value_x2_bits, unit_to_pair_addr(unit_base + m));
                 }
@@ -1477,6 +1610,13 @@ public:
                 ValueT values[NUM_ELEMS_PER_THREAD_PER_ROUND];
                 Base::template load_swizzled_slice<NUM_128b_PER_THREAD_PER_ROUND>(
                     values, buf, smem_read_offset, chunk_swizzle_mask);
+                if constexpr (Config::canonicalize_nan) {
+                    CUTE_UNROLL
+                    for (uint32_t j = 0; j < NUM_ELEMS_PER_THREAD_PER_ROUND; j += 2) {
+                        auto* pair = reinterpret_cast<nv_bfloat162*>(values + j);
+                        *pair      = canonicalize_nan_pair(*pair);
+                    }
+                }
                 CUTE_UNROLL
                 for (int32_t j = NUM_ELEMS_PER_THREAD_PER_ROUND - 4; j >= 0; j -= 4) {
                     asm volatile(
@@ -1510,56 +1650,62 @@ public:
             uint32_t stored_warp_hits             = lane_idx < NUM_WARPS ? smem.warp_cnt[lane_idx] : 0u;
             uint32_t num_total_hits_in_this_round = __reduce_add_sync(0xFFFFFFFF, stored_warp_hits);
 
-            uint32_t seg_elem_base = current_permuted_segment * NUM_ELEMS_PER_SEG + offset_in_segment;
+            // A whole warp can skip the prefix when it has no writes this round.
+            if (warp_total_hits != 0) {
+                uint32_t seg_elem_base = current_permuted_segment * NUM_ELEMS_PER_SEG + offset_in_segment;
 
-            // Element e of this thread's slice lives at smem_read_offset + (e ^ chunk_swizzle_mask)
-            uint32_t elem_addr_base = cute::cast_smem_ptr_to_uint(buf + smem_read_offset);
+                // Element e of this thread's slice lives at smem_read_offset + (e ^ chunk_swizzle_mask)
+                uint32_t elem_addr_base = cute::cast_smem_ptr_to_uint(buf + smem_read_offset);
 
-            // Start the first hit's smem load before the prefix scan / count exchange below, so that its
-            // latency (and the barrier wait) overlaps with them instead of delaying the first store.
-            uint32_t first_hit_e   = hit_mask != 0 ? __ffs(hit_mask) - 1u : 0u;
-            uint32_t first_hit_val = 0;
-            if (is_warp_active && warp_total_hits != 0) {
-                asm volatile("ld.shared.u16 %0, [%1];"
-                             : "=r"(first_hit_val)
-                             : "r"(elem_addr_base + ((first_hit_e ^ chunk_swizzle_mask) << 1)));
-            }
-
-            // Lane prefix via one ballot per bit of the (<= 16) hit count: the ballots are independent,
-            // so this is much shorter on the critical path than a 5-step shuffle scan.
-            static_assert(NUM_ELEMS_PER_THREAD_PER_ROUND < 32);  // one ballot per bit of num_new_incomers
-            uint32_t lane_prefix = 0;
-            CUTE_UNROLL
-            for (uint32_t k = 0; k < 5; ++k) {
-                uint32_t bit = __ballot_sync(0xFFFFFFFF, (num_new_incomers >> k) & 1u) & ((1u << lane_idx) - 1u);
-                lane_prefix += (uint32_t)__popc(bit) << k;
-            }
-
-            uint32_t dst_slot =
-                num_incomers + __reduce_add_sync(0xFFFFFFFF, lane_idx < warp_idx ? stored_warp_hits : 0u) + lane_prefix;
-
-            if (is_warp_active && warp_total_hits != 0) {
-                uint32_t dst_ptr =
-                    cute::cast_smem_ptr_to_uint(smem.incoming_topk_pairs) + dst_slot * (uint32_t)sizeof(uint64_t);
-                if (hit_mask != 0) {
-                    asm volatile("st.shared.v2.u32 [%0], {%1, %2};" ::"r"(dst_ptr),
-                                 "r"(seg_elem_base + first_hit_e),
-                                 "r"(first_hit_val)
-                                 : "memory");
-                    dst_ptr += (uint32_t)sizeof(uint64_t);
-                }
-                uint32_t mask = hit_mask & (hit_mask - 1u);
-                while (mask != 0) {
-                    uint32_t e = __ffs(mask) - 1u;
-                    mask &= mask - 1u;
-                    uint32_t val_word;
+                // Start the first hit's smem load before the prefix scan / count exchange below, so that its
+                // latency (and the barrier wait) overlaps with them instead of delaying the first store.
+                uint32_t first_hit_e   = hit_mask != 0 ? __ffs(hit_mask) - 1u : 0u;
+                uint32_t first_hit_val = 0;
+                if (is_warp_active) {
                     asm volatile("ld.shared.u16 %0, [%1];"
-                                 : "=r"(val_word)
-                                 : "r"(elem_addr_base + ((e ^ chunk_swizzle_mask) << 1)));
-                    asm volatile(
-                        "st.shared.v2.u32 [%0], {%1, %2};" ::"r"(dst_ptr), "r"(seg_elem_base + e), "r"(val_word)
-                        : "memory");
-                    dst_ptr += (uint32_t)sizeof(uint64_t);
+                                 : "=r"(first_hit_val)
+                                 : "r"(elem_addr_base + ((first_hit_e ^ chunk_swizzle_mask) << 1)));
+                    first_hit_val = canonicalize_nan(first_hit_val);
+                }
+
+                // Lane prefix via one ballot per bit of the (<= 16) hit count: the ballots are independent,
+                // so this is much shorter on the critical path than a 5-step shuffle scan.
+                static_assert(NUM_ELEMS_PER_THREAD_PER_ROUND < 32);  // one ballot per bit of num_new_incomers
+                uint32_t lane_prefix = 0;
+                CUTE_UNROLL
+                for (uint32_t k = 0; k < 5; ++k) {
+                    uint32_t bit = __ballot_sync(0xFFFFFFFF, (num_new_incomers >> k) & 1u) & ((1u << lane_idx) - 1u);
+                    lane_prefix += (uint32_t)__popc(bit) << k;
+                }
+
+                uint32_t dst_slot = num_incomers
+                                    + __reduce_add_sync(0xFFFFFFFF, lane_idx < warp_idx ? stored_warp_hits : 0u)
+                                    + lane_prefix;
+
+                if (is_warp_active) {
+                    uint32_t dst_ptr =
+                        cute::cast_smem_ptr_to_uint(smem.incoming_topk_pairs) + dst_slot * (uint32_t)sizeof(uint64_t);
+                    if (hit_mask != 0) {
+                        asm volatile("st.shared.v2.u32 [%0], {%1, %2};" ::"r"(dst_ptr),
+                                     "r"(seg_elem_base + first_hit_e),
+                                     "r"(first_hit_val)
+                                     : "memory");
+                        dst_ptr += (uint32_t)sizeof(uint64_t);
+                    }
+                    uint32_t mask = hit_mask & (hit_mask - 1u);
+                    while (mask != 0) {
+                        uint32_t e = __ffs(mask) - 1u;
+                        mask &= mask - 1u;
+                        uint32_t val_word;
+                        asm volatile("ld.shared.u16 %0, [%1];"
+                                     : "=r"(val_word)
+                                     : "r"(elem_addr_base + ((e ^ chunk_swizzle_mask) << 1)));
+                        val_word = canonicalize_nan(val_word);
+                        asm volatile(
+                            "st.shared.v2.u32 [%0], {%1, %2};" ::"r"(dst_ptr), "r"(seg_elem_base + e), "r"(val_word)
+                            : "memory");
+                        dst_ptr += (uint32_t)sizeof(uint64_t);
+                    }
                 }
             }
             Base::advance_perm_state(current_permuted_segment, permuted_segment_stride_per_round, perm_len);

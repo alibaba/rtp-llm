@@ -178,6 +178,21 @@ class MMHashRpcTest(unittest.IsolatedAsyncioTestCase):
                 )
         self.assertEqual(error.exception.code(), grpc.StatusCode.RESOURCE_EXHAUSTED)
 
+    async def test_proxy_child_worker_can_acquire_hashes(self):
+        self.engine.is_proxy_mode = True
+        self.engine._hash_key_cache.put(self.keys[0], self.hashes)
+        response = await self.stub.GetMultimodalHashes(
+            MultimodalHashRequestPB(keys=self.keys), timeout=2
+        )
+        self.assertTrue(response.entries[0].hash_hit)
+        self.assertEqual(
+            response.worker_instance, self.engine._hash_key_cache.instance_id
+        )
+        self.assertEqual(
+            response.entries[0].feature_hashes,
+            struct.pack("<4i", *self.hashes[0].tolist()),
+        )
+
     async def test_cold_hot_and_evicted_embedding_preserve_hashes_and_approval(self):
         self.engine._greennet_enabled.return_value = True
         # An uninspected historical hash cannot bypass inspection.

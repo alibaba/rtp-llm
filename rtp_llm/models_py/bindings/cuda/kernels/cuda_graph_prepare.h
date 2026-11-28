@@ -9,6 +9,28 @@
 
 namespace rtp_llm {
 
+struct FusedD2DCopyParams;
+struct FusedStridedCopyParams;
+
+// Optional destination for a live preparation plan. The graph owns the node;
+// callers update its arguments before replay instead of launching separately.
+struct CudaGraphPrepareReplay {
+#if USING_CUDA
+    cudaGraphExec_t exec = nullptr;
+    cudaGraphNode_t node = nullptr;
+    // Target verification can stage the captured Engram history independently.
+    cudaGraphNode_t windows_node  = nullptr;
+    const void*     windows_dst   = nullptr;
+    size_t          windows_bytes = 0;
+#endif
+};
+
+#if USING_CUDA
+cudaGraphNode_t addCudaGraphPrepareNode(cudaGraph_t graph, cudaGraphNode_t independent_root = nullptr);
+cudaGraphNode_t addIndependentCudaGraphPrepareNode(cudaGraph_t graph);
+void            disableCudaGraphPrepareReplay(const CudaGraphPrepareReplay& replay);
+#endif
+
 #if USING_ROCM
 using CudaGraphPrepareStream = hipStream_t;
 #else
@@ -32,6 +54,13 @@ struct CudaGraphPrepareFillParams {
 };
 
 void invokeCudaGraphPrepareFill(CudaGraphPrepareFillParams params, CudaGraphPrepareStream stream);
+
+// Returns false without launching when aliasing or capacity requires the ordered path.
+bool tryInvokeCudaGraphPrepare(const CudaGraphPrepareFillParams& fills,
+                               const FusedD2DCopyParams&         copies,
+                               const FusedStridedCopyParams&     strided_copies,
+                               CudaGraphPrepareStream            stream,
+                               const CudaGraphPrepareReplay&     replay = {});
 
 void invokePrepareFlashInferDecodeParams(const int32_t*         sequence_lengths_plus_1,
                                          const int32_t*         block_ids,

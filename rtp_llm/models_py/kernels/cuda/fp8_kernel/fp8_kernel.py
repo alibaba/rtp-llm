@@ -1,6 +1,7 @@
 import functools
 import json
 import logging
+import os
 from functools import lru_cache
 from typing import Any, Dict, List, Optional, Tuple, Union
 
@@ -120,6 +121,47 @@ def create_per_token_group_quant_fp8_output_scale(
         )
 
 
+def can_use_per_token_group_quant_v3(x: torch.Tensor, eps: float = 1e-10) -> bool:
+    """Metadata-only automatic dispatch; finite input is a caller precondition.
+
+    v3 has no runtime epsilon parameter. These epsilon values are hidden by
+    the legacy scale floor, so the specialized result is identical to v1.
+    """
+    return (
+        0.0 <= eps <= 1e-10
+        and x.is_cuda
+        and x.dtype == torch.bfloat16
+        and x.ndim == 2
+        and x.shape[0] > 0
+        and x.shape[1] > 0
+        and x.shape[1] % 128 == 0
+        and x.is_contiguous()
+        and x.data_ptr() % 16 == 0
+    )
+
+
+def sgl_per_token_group_quant_fp8_v3(x: torch.Tensor):
+    """Quantize finite BF16 [M,K] to E4M3 and packed UE8M0, K % 128 == 0.
+
+    Scales follow legacy's 1e-10 floor and have shape [M,K/128], dtype
+    int32 and column-major TMA-aligned storage. v2's tiny-value scale policy
+    is different. Masked and fused-activation inputs use their existing APIs.
+    Input storage must be 16-byte aligned (normal PyTorch allocations are).
+    Finiteness is a caller precondition, avoiding a synchronizing GPU scan.
+    """
+    if x.ndim != 2 or x.shape[1] == 0 or x.shape[1] % 128:
+        raise ValueError("v3 requires [M,K], K a positive multiple of 128")
+    from librtp_compute_ops import rtp_llm_ops
+
+    m, k = x.shape
+    q = torch.empty_like(x, dtype=torch.float8_e4m3fn)
+    scales = torch.empty(
+        (k // 128, (m + 3) // 4 * 4), device=x.device, dtype=torch.int32
+    ).T[:m]
+    rtp_llm_ops.per_token_group_quant_fp8_v3(x, q, scales)
+    return q, scales
+
+
 def sgl_per_token_group_quant_fp8(
     x: torch.Tensor,
     group_size: int,
@@ -152,6 +194,25 @@ def sgl_per_token_group_quant_fp8(
                 "unmasked input, and TMA-aligned column-major UE8M0 scales"
             )
 
+    quant_kernel = os.environ.get("DSV4_FP8_QUANT_KERNEL", "auto").strip().lower()
+    if quant_kernel not in ("auto", "legacy", "v2"):
+        raise ValueError(f"Unknown DSV4_FP8_QUANT_KERNEL: {quant_kernel!r}")
+    # V4.1 dense group32 always uses legacy numerical rules. Matrix size
+    # must not change a group's Q/S. Other layouts/masked/fused APIs retain
+    # their existing dispatch, as do explicit legacy and v2 overrides.
+    auto_legacy = (
+        quant_kernel == "auto"
+        and x.ndim == 2
+        and group_size == 32
+        and scale_ue8m0
+        and not fuse_silu_and_mul
+        and masked_m is None
+    )
+    if auto_legacy:
+        assert column_major_scales and scale_tma_aligned
+        if can_use_per_token_group_quant_v3(x, eps):
+            return sgl_per_token_group_quant_fp8_v3(x)
+
     out_shape = (*x.shape[:-1], x.shape[-1] // (2 if fuse_silu_and_mul else 1))
     x_q = torch.empty(out_shape, device=x.device, dtype=fp8_dtype)
     x_s = create_per_token_group_quant_fp8_output_scale(
@@ -180,7 +241,9 @@ def sgl_per_token_group_quant_fp8(
             # consistently once the quantized matrix has at least ~4M elements.
             return x.numel() >= 4 * 1024 * 1024
 
-        if preserve_silu_mul_rounding:
+        # The legacy kernel cannot consume fused or masked output geometry.
+        # A caller's rounding contract takes precedence over the kernel override.
+        if preserve_silu_mul_rounding or fuse_silu_and_mul or masked_m is not None:
             per_token_group_quant_fp8_v2(
                 x,
                 x_q,
@@ -192,7 +255,25 @@ def sgl_per_token_group_quant_fp8(
                 scale_ue8m0,
                 fuse_silu_and_mul,
                 masked_m,
-                preserve_silu_mul_rounding=True,
+                preserve_silu_mul_rounding=preserve_silu_mul_rounding,
+            )
+        elif quant_kernel == "legacy" or auto_legacy:
+            per_token_group_quant_fp8(
+                x, x_q, x_s, group_size, eps, fp8_min, fp8_max, scale_ue8m0
+            )
+        elif quant_kernel == "v2":
+            per_token_group_quant_fp8_v2(
+                x,
+                x_q,
+                x_s,
+                group_size,
+                eps,
+                fp8_min,
+                fp8_max,
+                scale_ue8m0,
+                fuse_silu_and_mul,
+                masked_m,
+                preserve_silu_mul_rounding=preserve_silu_mul_rounding,
             )
         elif should_auto_use_v2():
             per_token_group_quant_fp8_v2(

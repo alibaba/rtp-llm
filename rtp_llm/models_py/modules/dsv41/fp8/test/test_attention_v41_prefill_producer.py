@@ -3,7 +3,7 @@
 import unittest
 from contextlib import ExitStack
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import torch
 
@@ -12,6 +12,51 @@ from rtp_llm.models_py.modules.dsv41.fp8 import attention_v41 as attention
 
 
 class PrefillProducerIntegrationCPU(unittest.TestCase):
+
+    def test_stream_metadata_admission_falls_back_at_request_and_layout_limits(self):
+        for batch, valid in ((1024, True), (1025, False)):
+            cp = SimpleNamespace(
+                input_lengths_global_host=(1,) * batch,
+                prefix_lengths_host=(0,) * batch,
+                cp_size=4,
+                cp_rank=0,
+            )
+            table = torch.ones(batch, 2, dtype=torch.int32)
+            source = SimpleNamespace(
+                compress_ratio=1,
+                _block_tables_by_type={
+                    attention.HCA_KV: table,
+                    attention.INDEXER_KV: table,
+                },
+                _kv_cache=SimpleNamespace(get_seq_size_per_block=lambda region: 128),
+                _global_region=lambda: attention.HCA_KV,
+                _source_pool=lambda region: torch.empty(1),
+                _source_entries=lambda region, pool: 128,
+            )
+            with patch.object(
+                attention, "require_pool_tokens_per_block", return_value=128
+            ), patch.object(
+                attention, "indexer_region_for_ratio", return_value=attention.INDEXER_KV
+            ):
+                self.assertEqual(
+                    attention.AttentionV41FP8._stream_metadata_supported(
+                        source, cp, table.device
+                    ),
+                    valid,
+                )
+                for unsupported in (
+                    table.float(),
+                    table[:, :0],
+                    table[:1],
+                    torch.ones(batch, 4, dtype=torch.int32)[:, ::2],
+                ):
+                    source._block_tables_by_type[attention.INDEXER_KV] = unsupported
+                    self.assertFalse(
+                        attention.AttentionV41FP8._stream_metadata_supported(
+                            source, cp, table.device
+                        )
+                    )
+
     def test_slots_forward_physical_owner_and_state_end_without_rewriting(self):
         positions = torch.tensor([0, 1, 7, 15, 16, 31])
         requests = torch.tensor([0, 0, 0, 1, 1, 1])
@@ -77,7 +122,9 @@ class PrefillProducerIntegrationCPU(unittest.TestCase):
                 _slots=lambda *args, **kwargs: slots, _source_pool=lambda region: pool
             )
 
-            def store(v, s, mapped, target):
+            def store(v, s, mapped, target, *, source_map=None, carry_out=None):
+                self.assertIsNone(source_map)
+                self.assertIsNone(carry_out)
                 self.assertIs(target, pool)
                 self.assertIs(mapped, slots)
                 if fast:
@@ -107,6 +154,7 @@ class PrefillProducerIntegrationCPU(unittest.TestCase):
         pool_bound,
         empty=False,
         index_only=False,
+        prefetched_state=False,
     ):
         starts_host, lengths_host = ([0], [0]) if empty else ([1, 0, 3], [4, 1, 2])
         starts = torch.tensor(starts_host)
@@ -172,7 +220,10 @@ class PrefillProducerIntegrationCPU(unittest.TestCase):
             mapping,
             actual_ratio,
             carry,
+            *,
+            source_map=None,
         ):
+            self.assertIsNone(source_map)
             calls.append("main")
             self.assertEqual(actual_ratio, ratio)
             if ratio == 2:
@@ -225,7 +276,7 @@ class PrefillProducerIntegrationCPU(unittest.TestCase):
                 count = min(tile_rows, rows - t0)
                 buffer.fill_(-991)
                 buffer[:count].copy_(raw[t0 : t0 + count])
-                yield t0, buffer[:count]
+                yield t0, buffer[:count], count, None
 
         shared = {"prefill_chunk_meta": object()}
         attn = SimpleNamespace(
@@ -256,6 +307,10 @@ class PrefillProducerIntegrationCPU(unittest.TestCase):
             _gather_shards=lambda value: value,
             _shared_attention=shared,
         )
+        pending = None
+        if prefetched_state:
+            pending = SimpleNamespace(wait=Mock(return_value=original_state.clone()))
+            attn._read_state = Mock(side_effect=AssertionError("State read twice"))
         with ExitStack() as stack:
             main_mock = stack.enter_context(
                 patch.object(
@@ -309,7 +364,10 @@ class PrefillProducerIntegrationCPU(unittest.TestCase):
                 lengths,
                 prefill=True,
                 projected_tiles=tiles(),
+                previous_state=pending,
             )
+        if pending is not None:
+            pending.wait.assert_called_once_with()
         self.assertNotIn("prefill_chunk_meta", shared)
         self.assertEqual(
             main_mock.call_count,
@@ -362,6 +420,15 @@ class PrefillProducerIntegrationCPU(unittest.TestCase):
                     for start, length in zip((1, 0, 3), (4, 1, 2))
                 ]
                 self.assertEqual([len(g) for g, k in actual[2]], expected)
+
+    def test_prefetched_state_matches_synchronous_snapshot_across_ring_writes(self):
+        for tile_rows in (1, 2, 7):
+            for fused in (False, True):
+                expected = self._run(2, tile_rows, fused, fused, True)
+                actual = self._run(
+                    2, tile_rows, fused, fused, True, prefetched_state=True
+                )
+                torch.testing.assert_close(actual, expected, rtol=0, atol=0)
 
     def test_main_pool_unbound_keeps_warmup_keys_with_index_pool_bound(self):
         for ratio in (1, 2):

@@ -263,7 +263,9 @@ def _run_batched_eager_and_graph(rank):
 
     def forward():
         select_topk(logits, topk_ids, topk_weights)
-        return fused_moe(hidden, topk_weights, topk_ids, activation="SiGLU")
+        return fused_moe(
+            hidden, topk_weights, topk_ids, activation="SiGLU", expert_load=None
+        )
 
     def assert_result(output):
         expected, expected_ids, expected_weights = _batched_reference(
@@ -354,12 +356,16 @@ def _run_real_two_gpu_case(rank, world_size, ports, with_gate):
             ),
         ):
             layer.use_unified_tp_allreduce = True
-            unified_output = layer(hidden_states.clone()).detach().clone()
+            unified_output = (
+                layer(hidden_states.clone(), expert_load=None).detach().clone()
+            )
             unified_calls = counts["all_reduce"]
             dist.barrier()
 
             layer.use_unified_tp_allreduce = False
-            legacy_output = layer(hidden_states.clone()).detach().clone()
+            legacy_output = (
+                layer(hidden_states.clone(), expert_load=None).detach().clone()
+            )
             legacy_calls = counts["all_reduce"] - unified_calls
             dist.barrier()
 

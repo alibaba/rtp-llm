@@ -13,6 +13,7 @@
 #include <string>
 #include <utility>
 #include "rtp_llm/cpp/utils/TensorDebugUtils.h"
+#include <cstring>
 #include <vector>
 #if USING_CUDA
 #include "rtp_llm/models_py/bindings/cuda/kernels/mtp_target_verify_prepare.h"

@@ -331,31 +331,7 @@ PPExecutor::PPExecutor(const EngineInitParams&                params,
                                                 metrics_reporter_);
     }
 
-    if (params.eplb_config.enable_eplb() && params.model_config_.moe_style != 0) {
-        const auto first_moe_layer = firstLocalMoeLayer(params.model_config_);
-        if (first_moe_layer >= 0) {
-            const auto range =
-                stageLayerRange(parallelism_config_, parallelism_config_.pp_rank, params.model_config_.num_layers);
-            const auto& moe_kernel = params.gpt_weights.layers[first_moe_layer].ffn_weights.moe_gate_weight->kernel;
-            auto        moe_weight_type     = torchDTypeToDataType(moe_kernel.dtype());
-            bool        is_gated_activation = params.model_config_.isGatedActivation();
-            auto        moe_inter_size      = is_gated_activation ? moe_kernel.size(1) / 2 : moe_kernel.size(1);
-
-            expert_balancer_ =
-                std::make_shared<ExpertBalancer>(params.model_config_.expert_num,
-                                                 params.eplb_config.phy_exp_num(params.model_config_.expert_num),
-                                                 params.model_config_.num_layers,
-                                                 moe_inter_size,
-                                                 params.model_config_.hidden_size,
-                                                 params.parallelism_config,
-                                                 std::pair<int64_t, int64_t>{range.begin, range.end()},
-                                                 params.py_eplb,
-                                                 moe_weight_type,
-                                                 params.model_config_.quant_algo,
-                                                 metrics_reporter_,
-                                                 params.eplb_config);
-        }
-    }
+    RTP_LLM_CHECK_WITH_INFO(params.eplb_config.eplb_mode == EplbMode::NONE, "PP with EPLB is not supported");
 
     if (!warm_up_ && isLastStage() && isStageRoot()) {
         const auto initial_sampler_batch_size =
@@ -619,10 +595,7 @@ absl::Status PPExecutor::warmUp(const ScheduleOutput& schedule_output) {
     }
 
     auto model_output = model_->forward(target_input);
-    if (expert_balancer_) {
-        RtpLLMExecutorMetricsCollector collector;
-        expert_balancer_->stepForward(*model_, collector);
-    }
+
 
     /** Keep model tensors alive until lazy initialization kernels finish. */
     cudaSyncAndCheck();
@@ -1063,7 +1036,8 @@ PPDraftOutput PPExecutor::runDraftStep(const PPExecutionPlan&  plan,
                                                                            draft_temperature,
                                                                            dspark_markov_w1_,
                                                                            dspark_markov_w2_,
-                                                                           draft_vocab_size_);
+                                                                           draft_vocab_size_,
+                                                                           /*greedy=*/false);  // PP caches dense q below.
                 if (should_cache_draft_probs) {
                     const auto* request_ids = sampling_plan.request_ids.data_ptr<RequestId>();
                     for (int64_t request_idx = 0; request_idx < batch_size; ++request_idx) {
@@ -1294,13 +1268,7 @@ absl::Status PPExecutor::processImpl(const ScheduleOutput& schedule_output, int6
                 executor_collector.model_forward_us = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
             }
 
-            if (expert_balancer_) {
-                RTP_LLM_PROFILE_SCOPE("executor.pp.eplb_step");
-                const auto start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
-                expert_balancer_->stepForward(*model_, executor_collector, !model_input.is_fake_stream);
-                executor_collector.eplb_step_latency_us =
-                    autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
-            }
+
         }
 
         if (!isLastStage()) {
@@ -1331,6 +1299,9 @@ absl::Status PPExecutor::processImpl(const ScheduleOutput& schedule_output, int6
         }
         if (cache_manager_ && model_input.pd_separation && !model_input.warmup && !model_input.is_fake_stream
             && !model_input.skip_lm_head) {
+            // Tracked forwards only seal their submission queues. Drain both
+            // writers before sealing P2P requests so every layer is registered.
+            drainCacheStorePublication();
             cache_manager_->finishP2PPublication(model_input.p2p_final_prefill,
                                                 model_input.request_pd_separation,
                                                 model_input.request_id,
@@ -1506,12 +1477,7 @@ void PPExecutor::requestResultRecvStop() {
     result_recv_cv_.notify_all();
 }
 
-bool PPExecutor::updateEplbConfig(const EPLBConfig& config) {
-    if (expert_balancer_) {
-        return expert_balancer_->updateEplbConfig(config);
-    }
-    return true;
-}
+
 
 void PPExecutor::collectExecutorMetrics(const GptModelInputs&           model_input,
                                         bool                            is_decode,

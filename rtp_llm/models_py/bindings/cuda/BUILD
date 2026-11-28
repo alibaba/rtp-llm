@@ -163,6 +163,7 @@ cc_library(
         "//rtp_llm/models_py/bindings/cuda/kernels:persistent_topk",
         "//rtp_llm/models_py/bindings/cuda/kernels:dsv4_persistent_topk",
         "//rtp_llm/models_py/bindings/cuda/kernels:deepselect_bf16",
+        "//rtp_llm/models_py/bindings/cuda/kernels:deepselect_fp32",
         "//rtp_llm/models_py/bindings/cuda/kernels:dsv4_top_k_per_row_prefill",
         "//rtp_llm/models_py/bindings/cuda/kernels:mha_paged_attn_plan",
         "//rtp_llm/models_py/bindings/cuda/kernels:mla_quant_kernel",
@@ -177,6 +178,7 @@ cc_library(
         "@//:using_ppu": [],
         "//conditions:default": [
             "//rtp_llm/models_py/bindings/cuda/kernels:topk_v3",
+            "//rtp_llm/models_py/bindings/cuda/kernels:dsv41_grouped_score_bounds",
             "//rtp_llm/models_py/bindings/cuda/kernels:topk_v3_tie_break",
         ],
     }) + select({
@@ -200,8 +202,10 @@ cc_library(
         "//rtp_llm/models_py/bindings:register_ops_hdr",
         "//rtp_llm/models_py/bindings/cuda/kernels:mla_quant_kernel",
         "//rtp_llm/models_py/bindings/cuda/kernels:deepselect_bf16",
+        "//rtp_llm/models_py/bindings/cuda/kernels:deepselect_fp32",
         "//rtp_llm/models_py/bindings/cuda/kernels:dsv4_top_k_per_row_prefill",
         ":cuda_bindings",
+        "//rtp_llm/models_py/bindings/cuda/kernels:v41_quantization",
     ],
     visibility = ["//visibility:public"],
     alwayslink = 1,
@@ -228,6 +232,7 @@ cc_library(
     ],
     copts = copts() + ["-fno-strict-aliasing"],
     deps = [
+        "//rtp_llm/models_py/bindings/cuda/kernels:expert_load",
         "//rtp_llm/models_py/bindings:register_ops_hdr",
         ":bf16_gemm_op",
         "//rtp_llm/models_py/bindings/common:common",

@@ -10,8 +10,10 @@ metadata kernels, so arbitrary prefix reuse does not require an M/N grid.
 from __future__ import annotations
 
 import logging
+import os
 from dataclasses import dataclass
 from functools import partial
+from itertools import product
 
 _WARMED: set[tuple] = set()
 
@@ -95,13 +97,18 @@ def _collect_pool_layouts(attentions, kv_cache, cp_size, kv_cache_sharded):
                 regions.append(CSA_STATE)
         for region in regions:
             from rtp_llm.models_py.modules.dsv41.kv_cache_utils import (
+                indexer_region_for_ratio,
                 swa_region_for_layer,
             )
 
             physical_tag = (
                 swa_region_for_layer(kv_cache, attn.layer_id)
                 if region == SWA_KV
-                else region
+                else (
+                    indexer_region_for_ratio(kv_cache, ratio)
+                    if region == INDEXER_KV
+                    else region
+                )
             )
             cache = kv_cache.get_layer_cache(attn.layer_id, physical_tag)
             base = cache.kv_cache_base
@@ -162,6 +169,8 @@ def _warm_swa_metadata(attn, layout, max_batch_size, device):
     )
     from rtp_llm.models_py.modules.dsv41.fp8 import _swa_ops_triton as ops
 
+    _warm_host_swa_metadata(layout, device)
+
     rows = 16
     cu = torch.arange(0, rows + 1, rows, dtype=torch.int32, device=device)
     prefix = torch.full((1,), 1, dtype=torch.int32, device=device)
@@ -172,6 +181,46 @@ def _warm_swa_metadata(attn, layout, max_batch_size, device):
         attn.window_size, cu, positions, prefix, requests
     )
     ops.compute_prefill_gather_lens(lengths, cu, 1, 0, attn.window_size)
+    packed_origin = torch.zeros(1, dtype=torch.int64, device=device)
+    empty_topk = torch.zeros((rows, 0), dtype=torch.int32, device=device)
+    # Packed pointers select new JIT variants even though request lengths
+    # remain runtime values. Warm them before the first continuation request.
+    for prefix_dtype, request_dtype in product((torch.int32, torch.int64), repeat=2):
+        typed_prefix = prefix.to(prefix_dtype)
+        typed_requests = requests.to(request_dtype)
+        ops.compute_swa_slot_in_flat(
+            positions,
+            typed_requests,
+            typed_prefix,
+            M=rows + 1,
+            window_size=attn.window_size,
+            row_offsets=packed_origin,
+        )
+        ops.combine_topk_swa_indices_cp(
+            empty_topk,
+            positions,
+            1,
+            attn.window_size,
+            1,
+            0,
+            rows + 1,
+            0,
+            typed_requests,
+            typed_prefix,
+            row_offsets=packed_origin,
+        )
+    ops.combine_topk_swa_indices(
+        empty_topk,
+        cu,
+        lengths,
+        lengths,
+        attn.window_size,
+        1,
+        0,
+        rows + 1,
+        0,
+        row_offsets=packed_origin,
+    )
     for table_offset in (0, 1):
         table = torch.ones(2 + table_offset, dtype=torch.int32, device=device)[
             table_offset:
@@ -199,15 +248,78 @@ def _warm_swa_metadata(attn, layout, max_batch_size, device):
     # Exact request counts are runtime; only BLOCK_B requires multiple kernels.
     for batch in _swa_slot_batch_block_warmup_sizes(max_batch_size):
         full_cu = torch.arange(0, 2 * batch + 1, 2, dtype=torch.int32, device=device)
+        packed_offsets = torch.arange(0, 3 * batch, 3, dtype=torch.int64, device=device)
         for dtype in (torch.int32, torch.int64):
             prefixes = torch.ones(batch, dtype=dtype, device=device)
-            ops.compute_swa_slot_in_flat_from_cu(
-                full_cu,
-                prefixes,
-                num_tokens=2 * batch,
-                M=attn.window_size + 2,
-                window_size=attn.window_size,
-                base_offset=0,
+            for row_offsets in (None, packed_offsets):
+                ops.compute_swa_slot_in_flat_from_cu(
+                    full_cu,
+                    prefixes,
+                    num_tokens=2 * batch,
+                    M=attn.window_size + 2,
+                    window_size=attn.window_size,
+                    base_offset=0,
+                    row_offsets=row_offsets,
+                )
+
+
+def _warm_host_swa_metadata(layout, device):
+    """Warm packed target and rank-ordered draft planners on private pages."""
+    from types import SimpleNamespace
+
+    import torch
+
+    from ._v41_swa_metadata import try_host_slot_metadata
+
+    host_table = torch.tensor([[1, 2], [2, 1], [1, 2]], dtype=torch.int32)
+    table = host_table.to(device)
+    for prefix_dtype, length_dtype in product((torch.int32, torch.int64), repeat=2):
+        cp = SimpleNamespace(
+            cp_size=4,
+            kv_cache_sharded=True,
+            prefix_lengths_host=(0, 1, 3),
+            input_lengths_global_host=(0, 1, 17),
+            prefix_lengths=torch.tensor((0, 1, 3), dtype=prefix_dtype, device=device),
+            input_lengths_global=torch.tensor(
+                (0, 1, 17), dtype=length_dtype, device=device
+            ),
+        )
+        for offset_dtype in (torch.int32, torch.int64):
+            cp.cu_seqlens_global = torch.tensor(
+                (0, 0, 1, 18), dtype=offset_dtype, device=device
+            )
+            for read in (False, True):
+                _require_launch(
+                    try_host_slot_metadata(
+                        table,
+                        host_table,
+                        cp,
+                        entries=layout.entries,
+                        span=layout.tokens_per_block,
+                        num_blocks=3,
+                        read=read,
+                    ),
+                    "host SWA slot metadata",
+                )
+        for request_dtype, position_dtype in product(
+            (torch.int32, torch.int64), repeat=2
+        ):
+            _require_launch(
+                try_host_slot_metadata(
+                    table,
+                    host_table,
+                    cp,
+                    entries=layout.entries,
+                    span=layout.tokens_per_block,
+                    num_blocks=3,
+                    request_ids=torch.tensor(
+                        (-1, 2, 1, 2), dtype=request_dtype, device=device
+                    ),
+                    positions=torch.tensor(
+                        (-1, 5, 1, 3), dtype=position_dtype, device=device
+                    ),
+                ),
+                "host SWA draft slot metadata",
             )
 
 
@@ -269,6 +381,17 @@ def _warm_swa_byte_slices(layout, cp_size, cp_rank, device):
                     local_bytes,
                     layout.entries,
                 )
+                swa._gather_swa_rank_major(
+                    out.view(-1, 512),
+                    gathered,
+                    slots[None],
+                    lengths,
+                    1,
+                    pages,
+                    local_bytes,
+                    layout.entries,
+                    out_row_offsets=torch.zeros(1, dtype=torch.int64, device=device),
+                )
 
 
 def _warm_joint_pool(main_layout, index_layout, cp_size, cp_rank, device):
@@ -305,6 +428,41 @@ def _warm_joint_pool(main_layout, index_layout, cp_size, cp_rank, device):
             )
 
 
+def _warm_chunk_metadata(meta, ratio, window, device):
+    import torch
+
+    physical_offsets = torch.arange(3, dtype=torch.int64, device=device)
+    # CP lengths and prefixes may have different integer dtypes. Independently
+    # cover their pointer alignment and request offsets, not just equal pairs.
+    for prefix_dtype, length_dtype in product((torch.int32, torch.int64), repeat=2):
+        for prefix_offset, length_offset, request_offset in product((0, 1), repeat=3):
+            prefixes = torch.zeros(
+                3 + prefix_offset, dtype=prefix_dtype, device=device
+            )[prefix_offset:]
+            lengths = torch.ones(3 + length_offset, dtype=length_dtype, device=device)[
+                length_offset:
+            ]
+            requests = torch.zeros(
+                3 + request_offset, dtype=torch.int64, device=device
+            )[request_offset:]
+            for replay, compact_replay, offsets in product(
+                (False, True), (False, True), (None, physical_offsets)
+            ):
+                _require_launch(
+                    meta.try_chunk_metadata(
+                        prefixes,
+                        lengths,
+                        requests,
+                        ratio,
+                        window,
+                        replay,
+                        compact_replay=compact_replay,
+                        physical_offsets=offsets,
+                    ),
+                    "chunk metadata",
+                )
+
+
 def _warm_pool(attn, layout, cp_size, cp_rank, max_batch_size, device):
     import torch
 
@@ -324,27 +482,7 @@ def _warm_pool(attn, layout, cp_size, cp_rank, max_batch_size, device):
     starts = torch.zeros((1,), dtype=torch.int64, device=device)
     slots = _private_slots(rows, layout.entries, device)
     if layout.region != SWA_KV:
-        for dtype in (torch.int32, torch.int64):
-            for offset in (0, 1):
-                chunk_prefix = torch.zeros(3 + offset, dtype=dtype, device=device)[
-                    offset:
-                ]
-                chunk_lengths = torch.ones_like(chunk_prefix)
-                chunk_req = torch.zeros(3 + offset, dtype=torch.int64, device=device)[
-                    offset:
-                ]
-                for replay in (False, True):
-                    _require_launch(
-                        meta.try_chunk_metadata(
-                            chunk_prefix,
-                            chunk_lengths,
-                            chunk_req,
-                            layout.ratio,
-                            attn.window_size,
-                            replay,
-                        ),
-                        "chunk metadata",
-                    )
+        _warm_chunk_metadata(meta, layout.ratio, attn.window_size, device)
         for offset, table_offset in _slot_metadata_layouts():
             metadata_positions = _indexer_warmup_vector(
                 rows, torch.int64, device, 1, offset
@@ -391,15 +529,17 @@ def _warm_pool(attn, layout, cp_size, cp_rank, max_batch_size, device):
                 swa.dequantize_and_gather_k_cache_slots(
                     out, pool, typed_slots[None], lengths, 1
                 )
+                swa.dequantize_and_gather_k_cache_slots(
+                    out.view(-1, 512),
+                    pool,
+                    typed_slots[None],
+                    lengths,
+                    1,
+                    out_row_offsets=torch.zeros(1, dtype=torch.int64, device=device),
+                )
         _warm_swa_byte_slices(layout, cp_size, cp_rank, device)
         return
     if layout.region == INDEXER_KV:
-        from . import _v41_grouped_gemm
-
-        if _v41_grouped_gemm._enabled():
-            _require_launch(
-                _v41_grouped_gemm.warmup(attn.index_wk), "grouped index GEMM"
-            )
         pool = _private_pool(layout, 68, device)
         projected = torch.zeros((rows, 128), dtype=torch.bfloat16, device=device)
         for offset, slot_offset in ((0, 0), (0, 1), (1, 0), (1, 1)):
@@ -428,6 +568,18 @@ def _warm_pool(attn, layout, cp_size, cp_rank, max_batch_size, device):
         pool = torch.zeros(
             (2 * layout.entries, 1024), dtype=torch.float32, device=device
         )
+        table = torch.ones((1, 2), dtype=torch.int32, device=device)
+        for dtype in (torch.int32, torch.int64):
+            prefixes = torch.ones(1, dtype=dtype, device=device)
+            meta.read_predecessor_states(
+                prefixes,
+                table,
+                pool,
+                layout.entries,
+                layout.tokens_per_block,
+                cp_size,
+                cp_rank,
+            )
         for stride, slot_offset in ((512, 0), (512, 1), (1024, 0), (1024, 1)):
             values = torch.zeros((rows, stride), dtype=torch.float32, device=device)
             state_slots = _private_slots(rows + slot_offset, layout.entries, device)[
@@ -465,8 +617,13 @@ def _warm_pool(attn, layout, cp_size, cp_rank, max_batch_size, device):
                     (2 * count, stride), dtype=torch.float32, device=device
                 )
                 scores = values[:, -512:]
-                indices = torch.arange(count, device=device, dtype=torch.int64) * 2 + 1
-                for offset, slot_offset in ((0, 0), (0, 1), (1, 0), (1, 1)):
+                for offset, slot_offset, boundary_offset in product((0, 1), repeat=3):
+                    # Ragged tiles slice a packed completed-pair vector. An odd
+                    # preceding count shifts int64 boundaries by eight bytes.
+                    indices = _indexer_warmup_vector(
+                        count, torch.int64, device, 1, boundary_offset
+                    )
+                    indices.mul_(2).add_(1 - 2 * boundary_offset)
                     pos = _indexer_warmup_vector(
                         2 * count, torch.int64, device, 1, offset
                     )
@@ -503,49 +660,6 @@ def _warm_pool(attn, layout, cp_size, cp_rank, max_batch_size, device):
                             "main compression",
                             enabled=producer._enabled(values),
                         )
-        from . import _v41_batched_producer as batched
-
-        if batched.is_supported(kv):
-            _require_launch(
-                batched.warmup_projected_groups(device), "batched projection transport"
-            )
-            count = rows // layout.ratio
-            plan = batched.GroupPlan(
-                0,
-                rows,
-                0,
-                count,
-                layout.ratio,
-                ((0, rows, 0, count, layout.ratio - 1),),
-            )
-            prepared = batched.prepare(plan, device)
-            for stride in (512, 1024):
-                group = torch.zeros((rows, stride), dtype=torch.float32, device=device)
-                for offset, slot_offset in ((0, 0), (0, 1), (1, 0), (1, 1)):
-                    pos = _indexer_warmup_vector(rows, torch.int64, device, 1, offset)
-                    req = _indexer_warmup_vector(
-                        rows, torch.int64, device, 1, offset, fill=0
-                    )
-                    mapped = _private_slots(
-                        count + slot_offset, layout.entries, device
-                    )[slot_offset:]
-                    _require_launch(
-                        batched.compress_main(
-                            group[:, :512],
-                            group[:, -512:] if layout.ratio == 2 else None,
-                            attn.global_norm,
-                            attn.eps,
-                            pos,
-                            req,
-                            starts,
-                            previous,
-                            prepared,
-                            attn.freqs_cis,
-                            pool,
-                            mapped,
-                        ),
-                        "batched main compression",
-                    )
 
 
 def _warm_raw_producer_metadata(ratio, cp_size, device):
@@ -580,7 +694,7 @@ def _warm_raw_producer_metadata(ratio, cp_size, device):
             torch.tensor(host, dtype=torch.int64, device=device) for host in values
         ]
         _require_launch(
-            prepare_raw(cp, *vectors, ratio, slots, (1, 2, 3), tile_rows=65536),
+            prepare_raw(cp, *vectors, ratio, slots, (1, 2, 3)),
             "raw producer metadata",
         )
 
@@ -632,8 +746,10 @@ def _warm_fused_producer_metadata(layouts, cp_size, cp_rank, device):
                         torch.ones((2, 2), dtype=table_dtype, device=device),
                         layout.entries,
                         layout.tokens_per_block,
-                        layout.owner_tokens_per_block,
-                        4,
+                        # Producer ownership follows the global KV region for
+                        # every plane; state retains its own physical page size.
+                        layouts[0].owner_tokens_per_block,
+                        cp_size,
                         cp_rank,
                     )
                     for layout in layouts
@@ -648,13 +764,48 @@ def _warm_fused_producer_metadata(layouts, cp_size, cp_rank, device):
                         ratio,
                         unexpected_fallback,
                         (1, 2, 3),
-                        tile_rows=65536,
                         slot_layouts=descriptors,
                     ),
                     "fused producer metadata",
                 )
                 if result.key_counts is None:
                     raise RuntimeError("fused producer warmup did not publish counts")
+        # The streamed source path uses a separate kernel specialized by the
+        # power-of-two request count. Scheduler updates can raise B after
+        # initialization, so compile every production B<=1024 bucket.
+        scratch = torch.empty(
+            (8, producer._RAW_TILE_ROWS), dtype=torch.int64, device=device
+        )
+        for batch in (1, 129, 257, 513):
+            starts = torch.full(
+                (batch,),
+                cp_rank * layouts[0].owner_tokens_per_block,
+                dtype=torch.int64,
+                device=device,
+            )
+            lengths = torch.full((batch,), 2, dtype=torch.int32, device=device)
+            tile_layouts = tuple(
+                producer.SlotLayout(
+                    torch.ones((batch, 2), dtype=table_dtype, device=device),
+                    layout.entries,
+                    layout.tokens_per_block,
+                    layouts[0].owner_tokens_per_block,
+                    cp_size,
+                    cp_rank,
+                )
+                for layout in layouts
+            )
+            _require_launch(
+                producer.prepare_fused_tile(
+                    starts,
+                    lengths,
+                    ratio,
+                    tile_layouts,
+                    (0, 2, 1 if ratio == 2 else 2),
+                    scratch,
+                ),
+                "streamed producer metadata",
+            )
 
 
 def _indexer_warmup_layouts():
@@ -697,11 +848,193 @@ def _warm_indexer(attn, max_seq_len, device):
         )
 
 
-def _warm_candidate_topk(device):
-    from . import _v41_candidate_topk
+def _native_topk_warmup_shapes(max_seq_len):
+    """Minimal witnesses for the K512 dispatcher in kernels/topk_v3.cu.
 
-    if _v41_candidate_topk._enabled() and not _v41_candidate_topk.warmup(device):
-        logging.info("[DSV41 Attention] candidate TopK retains existing fallback")
+    Register1/2/4, direct Cluster8/4, Streaming, and direct Cluster2 are
+    separate native functions. Width/row values themselves are runtime data.
+    The persistent branch is unreachable for K512: above 128K it requires
+    batch > 144, while uniform_plan's largest capacity is 128; at <= 128K
+    the capacities are <= 60, below the earlier direct-cluster batch limit.
+    Keep the dispatcher contract test in sync when native routing changes.
+    """
+    witnesses = (
+        (1, 512),
+        (1, 4097),
+        (1, 8193),
+        (1, 16385),
+        (9, 16385),
+        (17, 16385),
+        (37, 32769),
+    )
+    return tuple((rows, width) for rows, width in witnesses if width <= max_seq_len)
+
+
+def _warm_native_selectors(max_seq_len, device):
+    """Load native selector families without repeating Q/score JIT warmup.
+
+    DeepSelect has a second CUDA function above the device's SM count, even
+    though it is AOT rather than JIT. TopK-v3 remains reachable for ragged
+    widths/layouts and disabled DeepSelect; call its native entry directly so
+    the preferred selector cannot hide the fallback during startup.
+    Buffers are private and bounded by the dispatch witnesses, not context
+    capacity: the largest FP32 TopK score buffer is less than 5 MiB.
+    """
+    import torch
+
+    from rtp_llm.models_py.modules.dsv41.fp8 import _v41_deepselect as sparse
+    from rtp_llm.models_py.modules.dsv41.fp8 import _v41_prefill_deepselect as dense
+    from rtp_llm.models_py.modules.dsv41.fp8 import _v41_prefill_topk as topk
+
+    if max_seq_len < 512:
+        return
+    width = 1024 if max_seq_len >= 1024 else 512
+    sorted_decode_available = (
+        os.environ.get("DSV41_DECODE_DEEPSELECT", "1") == "1"
+        and os.environ.get("DSV41_DECODE_DEEPSELECT_SORTED", "1") == "1"
+        and getattr(dense.rtp_llm_ops, "deepselect_bf16_dense_sorted", None) is not None
+        and dense.is_available(device, torch.bfloat16, enabled=True)
+    )
+    dense_types = tuple(
+        dtype
+        for dtype in (torch.float32, torch.bfloat16)
+        if dense.is_available(device, dtype)
+        or (dtype == torch.bfloat16 and sorted_decode_available)
+    )
+    sparse_available = sparse.is_available(device)
+    if dense_types or sparse_available:
+        sms = torch.cuda.get_device_properties(device).multi_processor_count
+        for rows in (1, sms + 1):
+            ends = torch.full((rows,), width, dtype=torch.int32, device=device)
+            output = torch.empty((rows, 512), dtype=torch.int32, device=device)
+            for dtype in (torch.float32, torch.bfloat16):
+                if dtype not in dense_types and not (
+                    dtype == torch.bfloat16 and sparse_available
+                ):
+                    continue
+                # Include native score padding without materializing a large
+                # request. Width and strides are not native template keys.
+                logits = torch.zeros((rows, width + 512), dtype=dtype, device=device)[
+                    :, :width
+                ]
+                if dtype in dense_types:
+                    for finite in (False, True):
+                        _require_launch(
+                            dense.try_select_tokens(
+                                logits,
+                                ends,
+                                out=output,
+                                filter_finite=finite,
+                                enabled=True,
+                            ),
+                            "native dense DeepSelect",
+                        )
+                    if dtype == torch.bfloat16 and sorted_decode_available:
+                        _require_launch(
+                            dense.try_select_tokens(
+                                logits,
+                                ends,
+                                out=output,
+                                filter_finite=False,
+                                enabled=True,
+                                sorted_index=True,
+                            ),
+                            "native sorted dense DeepSelect",
+                        )
+                if dtype == torch.bfloat16 and sparse_available:
+                    _require_launch(
+                        sparse.try_select_sparse_tokens(logits, ends, output),
+                        "native sparse DeepSelect",
+                    )
+                del logits
+
+    if not topk._TOPK_V3_OK:
+        return
+    ops = topk.rtp_llm_ops
+    workspace = topk._get_topk_workspace(device)
+    finite_select = getattr(ops, "dsv41_topk_v3_finite", None)
+    selectors = (ops.topk_v3,)
+    if finite_select is not None:
+        selectors += (finite_select,)
+    dtypes = (
+        (torch.float32, torch.bfloat16) if topk.supports_bf16() else (torch.float32,)
+    )
+    for rows, width in _native_topk_warmup_shapes(max_seq_len):
+        ends = torch.full((rows,), width, dtype=torch.int32, device=device)
+        output = torch.empty((rows, 512), dtype=torch.int32, device=device)
+        stride = (width + 3) // 4 * 4
+        for dtype in dtypes:
+            # Native dispatch tests both base pointer and row-stride alignment.
+            # Offset one element selects its scalar-load specialization; this
+            # is also the branch used by a ragged contiguous odd-width matrix.
+            for offset in (0, 1):
+                storage = torch.zeros(
+                    rows * stride + offset, dtype=dtype, device=device
+                )
+                logits = storage[offset:].view(rows, stride)[:, :width]
+                for select in selectors:
+                    select(logits, ends, output, workspace, 512, width)
+                del logits, storage
+
+    # The finite BF16 SM103 streaming masks dispatch on reference geometry.
+    # Use one short row to load the CUDA functions without large score buffers.
+    reference_select = getattr(ops, "dsv41_topk_v3_with_reference", None)
+    if (
+        reference_select is not None
+        and torch.bfloat16 in dtypes
+        and max_seq_len > 32768
+        and torch.device(device).type == "cuda"
+        and torch.cuda.get_device_capability(device) == (10, 3)
+    ):
+        width = 513
+        ends = torch.full((1,), width, dtype=torch.int32, device=device)
+        output = torch.empty((1, 512), dtype=torch.int32, device=device)
+        stride = (width + 3) // 4 * 4
+        storage = torch.zeros(stride + 1, dtype=torch.bfloat16, device=device)
+        for reference_width in (32769, 163841, 262145):
+            if reference_width <= max_seq_len:
+                for offset in (0, 1):
+                    logits = storage[offset : offset + stride].view(1, stride)[
+                        :, :width
+                    ]
+                    reference_select(
+                        logits,
+                        ends,
+                        output,
+                        workspace,
+                        512,
+                        width,
+                        145,
+                        reference_width,
+                        True,
+                    )
+
+
+def _warm_swa_refresh(device):
+    from rtp_llm.models_py.modules.dsv41.fp8 import _v41_swa_refresh_triton
+
+    _require_launch(_v41_swa_refresh_triton.warmup(device), "ragged SWA refresh")
+
+
+def _warm_norm_quant(device):
+    from rtp_llm.models_py.modules.dsv41.fp8 import _v41_norm_quant
+
+    _require_launch(_v41_norm_quant.warmup(device), "attention RMSNorm quantization")
+
+
+def _warm_candidate_topk(device):
+    import torch
+
+    from . import _v41_candidate_topk_v3
+
+    if not any(
+        _v41_candidate_topk_v3.is_available(phase, device)
+        for phase in ("prefill", "decode")
+    ):
+        return
+    scores = torch.zeros((1, 4096), dtype=torch.float32, device=device)
+    block_lengths = torch.full((1,), 4096, dtype=torch.int32, device=device)
+    _v41_candidate_topk_v3.select(scores, block_lengths)
 
 
 def _warm_grouped_bounds(attn, device):
@@ -778,6 +1111,60 @@ def _warm_indexer_layout(
         weights = raw_weights.squeeze(1).float()
     else:
         q_fp4, q_sf, weights = (x.squeeze(1) for x in prepared)
+    # Sparse candidate consumers use a distinct BF16 output-pointer JIT
+    # specialization; compiling the dense FP32 variant does not warm it.
+    prepared_sparse = qfusion.try_fused_indexer_q(
+        q,
+        raw_weights,
+        attn.freqs_cis,
+        positions,
+        weights_out_dtype=torch.bfloat16,
+    )
+    _require_launch(
+        prepared_sparse,
+        "fused indexer Q BF16 weights",
+        enabled=qfusion.is_supported(
+            q,
+            raw_weights,
+            attn.freqs_cis,
+            positions,
+            weights_out_dtype=torch.bfloat16,
+        ),
+    )
+    # Prefill initializes token/candidate selection outputs in the Q launch.
+    # Widths are model configuration, independent of request lengths. Warm the
+    # token-only and candidate-publishing signatures before profiling/capture.
+    selection = torch.empty((rows, attn.index_topk), dtype=torch.int32, device=device)
+    count = int(attn.v41_config.get("candidate_topk_blocks", 0))
+    outputs = [None]
+    if count > 0:
+        outputs.append(torch.empty((rows, count), dtype=torch.int32, device=device))
+    for candidates_out in outputs:
+        initialized = qfusion.try_fused_indexer_q(
+            q,
+            raw_weights,
+            attn.freqs_cis,
+            positions,
+            weights_out_dtype=torch.bfloat16,
+            selection_out=selection,
+            candidates_out=candidates_out,
+        )
+        _require_launch(
+            initialized,
+            "fused indexer Q selection initialization",
+            enabled=qfusion.is_supported(
+                q,
+                raw_weights,
+                attn.freqs_cis,
+                positions,
+                weights_out_dtype=torch.bfloat16,
+            ),
+        )
+    sparse_weights = (
+        prepared_sparse[2].squeeze(1)
+        if prepared_sparse is not None
+        else weights.to(torch.bfloat16)
+    )
     # Also compile the explicit quantizer used for unsupported fused-Q layouts.
     indexer.quantize_indexer_q(q.squeeze(1))
     keys = indexer.PrefillIndexerKeys(
@@ -789,65 +1176,93 @@ def _warm_indexer_layout(
     visible = _indexer_warmup_vector(
         rows, torch.int32, device, vector_stride, vector_offset, fill=width
     )
-    logits = indexer.score_indexer_chunk(
-        q_fp4, q_sf, keys.quant, keys.scale, weights, visible, bounds=bounds
-    )
-    if heads == 32 and torch.cuda.get_device_capability(device)[0] == 10:
-        from ._indexer_score import fp8_fp4_mqa_indexer_score
-        from ._v41_grouped_prefill_score import (
-            _grouped_score_bounds_kernel,
-            _mask_tail_kernel,
-        )
-
-        grouped_positions = _indexer_warmup_vector(
-            rows, torch.int64, device, 1, vector_offset, fill=width - 1
-        )
-        grouped_requests = _indexer_warmup_vector(
-            rows, torch.int64, device, 1, vector_offset, fill=1
-        )
-        grouped_counts = torch.full((2,), width, dtype=torch.int32, device=device)
-        grouped_bounds = torch.empty((4, rows), dtype=torch.int32, device=device)
-        _grouped_score_bounds_kernel[(1,)](
-            grouped_positions,
-            grouped_requests,
-            grouped_counts,
-            grouped_bounds,
-            rows,
-            2,
-            1,
-            2,
-            width,
-            width,
-            attn.compress_ratio,
-            num_warps=4,
-        )
-
-        grouped_logits = fp8_fp4_mqa_indexer_score(
+    # Preserve the public FP32 compatibility path and prime direct BF16
+    # consumers with the native padded score strides, including finite cleanup.
+    score_modes = (False, True) if topk.supports_bf16() else (False,)
+    for return_bf16 in score_modes:
+        logits = indexer.score_indexer_chunk(
             q_fp4,
             q_sf,
             keys.quant,
             keys.scale,
-            weights,
-            *bounds,
-            clean_logits=False,
-            max_seqlen_k=width,
+            sparse_weights,
+            visible,
+            bounds=bounds,
+            return_bf16=return_bf16,
         )
-        _mask_tail_kernel[(rows,)](
-            grouped_logits, bounds[1], width, grouped_logits.stride(0), 256
-        )
-        del grouped_logits
-    if attn.index_topk == 512:
-        for dtype in (torch.int32, torch.int64):
-            typed_visible = _indexer_warmup_vector(
-                rows, dtype, device, vector_stride, vector_offset, fill=width
+        if heads == 32 and torch.cuda.get_device_capability(device)[0] == 10:
+            from ._indexer_score import fp8_fp4_mqa_indexer_score
+            from ._v41_grouped_prefill_score import (
+                _grouped_score_bounds_kernel,
+                _mask_tail_kernel,
             )
-            for cached in (bounds, None):
-                selected = topk.try_select_tokens(logits, typed_visible, bounds=cached)
-                _require_launch(
-                    selected,
-                    "dense token TopK",
-                    enabled=topk.is_supported(logits, typed_visible),
+
+            grouped_positions = _indexer_warmup_vector(
+                rows, torch.int64, device, 1, vector_offset, fill=width - 1
+            )
+            grouped_requests = _indexer_warmup_vector(
+                rows, torch.int64, device, 1, vector_offset, fill=1
+            )
+            grouped_counts = torch.full((2,), width, dtype=torch.int32, device=device)
+            grouped_bounds = torch.empty((4, rows), dtype=torch.int32, device=device)
+            _grouped_score_bounds_kernel[(1,)](
+                grouped_positions,
+                grouped_requests,
+                grouped_counts,
+                grouped_bounds,
+                rows,
+                2,
+                1,
+                2,
+                width,
+                width,
+                attn.compress_ratio,
+                num_warps=4,
+            )
+
+            grouped_logits = fp8_fp4_mqa_indexer_score(
+                q_fp4,
+                q_sf,
+                keys.quant,
+                keys.scale,
+                sparse_weights,
+                *bounds,
+                clean_logits=False,
+                max_seqlen_k=width,
+                return_bf16=return_bf16,
+            )
+            _mask_tail_kernel[(rows,)](
+                grouped_logits, bounds[1], width, grouped_logits.stride(0), 256
+            )
+            del grouped_logits
+        if attn.index_topk == 512:
+            for dtype in (torch.int32, torch.int64):
+                typed_visible = _indexer_warmup_vector(
+                    rows, dtype, device, vector_stride, vector_offset, fill=width
                 )
+                for cached in (bounds, None):
+                    selected = topk.try_select_tokens(
+                        logits, typed_visible, bounds=cached
+                    )
+                    _require_launch(
+                        selected,
+                        "dense token TopK",
+                        enabled=topk.is_supported(logits, typed_visible),
+                    )
+                    if cached is not None and selected is not None:
+                        # Candidate publication defers finite filtering to its
+                        # epilogue. Exercise the same adapter with a caller-owned
+                        # output; shapes/strides remain runtime kernel parameters.
+                        raw_output = torch.empty_like(selected)
+                        raw_selected = topk.try_select_tokens(
+                            logits,
+                            typed_visible,
+                            bounds=cached,
+                            out=raw_output,
+                            filter_finite=False,
+                        )
+                        _require_launch(raw_selected, "deferred-filter token TopK")
+                        topk.finish_tokens(logits, cached[1], raw_selected)
     config = attn.v41_config
     count = int(config.get("candidate_topk_blocks", 0))
     block = int(config.get("candidate_block_size", 0))
@@ -860,65 +1275,92 @@ def _warm_indexer_layout(
         # Also cover the indices-only path where every candidate block fits.
         widths = tuple(sorted({*widths, min(max_seq_len, block * count)}))
     for width in widths:
-        # Two rows bound the largest 512K-score startup buffer to 4 MiB.
-        logits = torch.zeros((2, width + 256), dtype=torch.float32, device=device)[
-            :, :width
-        ]
-        for dtype in (torch.int32, torch.int64):
-            visible = _indexer_warmup_vector(
-                2, dtype, device, vector_stride, vector_offset, fill=width
-            )
-            selected = candidates.select_candidates(
-                logits, visible, block, count, build_bitmap=False
-            )
-            _require_launch(
-                selected,
-                "candidate selection",
-                enabled=candidates.is_supported(logits, visible, block, count),
-            )
-            if dtype == torch.int32 and vector_stride == 1 and attn.index_topk == 512:
-                token_indices = torch.zeros((2, 512), dtype=torch.int32, device=device)
-                for build_bitmap in (False, True):
-                    published = candidates.select_candidates(
-                        logits,
-                        visible,
-                        block,
-                        count,
-                        build_bitmap=build_bitmap,
-                        mask_tail=True,
-                        token_indices=token_indices,
-                        token_ends=visible,
-                    )
-                    _require_launch(
-                        published,
-                        "candidate publication and token filtering",
-                        enabled=not build_bitmap
-                        or candidates.bitmap_is_bounded(2, width, block),
-                    )
-            if selected is not None:
-                ids = selected[0]
-                dense = candidates.select_candidates(logits, visible, block, count)
-                _require_launch(
-                    dense,
-                    "candidate bitmap",
-                    enabled=candidates.bitmap_is_bounded(2, width, block),
+        # BF16 input pointers require their own pool/mask JIT variants; the
+        # smaller pooled scores deliberately retain the FP32 TopK policy.
+        for score_dtype in (torch.float32, torch.bfloat16):
+            # Two rows bound each 512K-score startup buffer to at most 4 MiB.
+            logits = torch.zeros((2, width + 256), dtype=score_dtype, device=device)[
+                :, :width
+            ]
+            for dtype in (torch.int32, torch.int64):
+                visible = _indexer_warmup_vector(
+                    2, dtype, device, vector_stride, vector_offset, fill=width
                 )
-                if dense is not None:
-                    _require_launch(
-                        candidates.mask_candidates(logits, dense[1], block),
-                        "candidate mask",
-                    )
-                flags = candidates.build_flags(ids, width, block)
-                _require_launch(
-                    flags,
-                    "candidate bitmap rebuild",
-                    enabled=candidates.bitmap_is_bounded(2, width, block),
+                selected = candidates.select_candidates(
+                    logits, visible, block, count, build_bitmap=False
                 )
-                if flags is not None:
-                    _require_launch(
-                        candidates.mask_candidates(logits, flags, block),
-                        "rebuilt candidate mask",
+                _require_launch(
+                    selected,
+                    "candidate selection",
+                    enabled=candidates.is_supported(logits, visible, block, count),
+                )
+                if score_dtype == torch.bfloat16:
+                    # Single-request publication masks raw logits without the
+                    # grouped token-filter epilogue: a separate constexpr path.
+                    for build_bitmap in (False, True):
+                        masked = candidates.select_candidates(
+                            logits,
+                            visible,
+                            block,
+                            count,
+                            build_bitmap=build_bitmap,
+                            mask_tail=True,
+                        )
+                        _require_launch(
+                            masked,
+                            "masked candidate publication",
+                            enabled=not build_bitmap
+                            or candidates.bitmap_is_bounded(2, width, block),
+                        )
+                if (
+                    dtype == torch.int32
+                    and vector_stride == 1
+                    and attn.index_topk == 512
+                ):
+                    token_indices = torch.zeros(
+                        (2, 512), dtype=torch.int32, device=device
                     )
+                    for build_bitmap in (False, True):
+                        published = candidates.select_candidates(
+                            logits,
+                            visible,
+                            block,
+                            count,
+                            build_bitmap=build_bitmap,
+                            mask_tail=True,
+                            token_indices=token_indices,
+                            token_ends=visible,
+                        )
+                        _require_launch(
+                            published,
+                            "candidate publication and token filtering",
+                            enabled=not build_bitmap
+                            or candidates.bitmap_is_bounded(2, width, block),
+                        )
+                if selected is not None:
+                    ids = selected[0]
+                    dense = candidates.select_candidates(logits, visible, block, count)
+                    _require_launch(
+                        dense,
+                        "candidate bitmap",
+                        enabled=candidates.bitmap_is_bounded(2, width, block),
+                    )
+                    if dense is not None:
+                        _require_launch(
+                            candidates.mask_candidates(logits, dense[1], block),
+                            "candidate mask",
+                        )
+                    flags = candidates.build_flags(ids, width, block)
+                    _require_launch(
+                        flags,
+                        "candidate bitmap rebuild",
+                        enabled=candidates.bitmap_is_bounded(2, width, block),
+                    )
+                    if flags is not None:
+                        _require_launch(
+                            candidates.mask_candidates(logits, flags, block),
+                            "rebuilt candidate mask",
+                        )
     if (
         max_seq_len <= count * block
         or heads != 32
@@ -939,7 +1381,7 @@ def _warm_indexer_layout(
                 torch.zeros((width, 64), dtype=torch.int8, device=device),
                 torch.full((width,), 0x7F7F7F7F, dtype=torch.int32, device=device),
             )
-            logits = sparse.score(q_fp4, q_sf, keys, weights, plan)
+            logits = sparse.score(q_fp4, q_sf, keys, sparse_weights, plan)
             _require_launch(logits, "sparse score")
             selected = deepselect.try_select_sparse_tokens(logits, plan.end)
             _require_launch(selected, "BF16 DeepSelect")
@@ -987,7 +1429,7 @@ def _warm_indexer_layout(
                 )
             _require_launch(batched_plan, "batched sparse index plan")
             batched_logits = sparse.score(
-                q_fp4, q_sf, joined_keys, weights, batched_plan
+                q_fp4, q_sf, joined_keys, sparse_weights, batched_plan
             )
             _require_launch(batched_logits, "batched sparse score")
             selected = deepselect.try_select_sparse_tokens(
@@ -997,6 +1439,36 @@ def _warm_indexer_layout(
             _require_launch(
                 sparse.remap(selected, batched_plan, logits=batched_logits),
                 "batched sparse logical remap",
+            )
+
+
+def _warm_index_plan(attn, device):
+    import torch
+
+    from rtp_llm.models_py.modules.dsv41.fp8._v41_prefill_index_plan import (
+        try_build_index_plan,
+    )
+
+    # Production selection is contiguous int32. Query positions are long,
+    # including views; retain the existing int32 compatibility signature too.
+    # [3,M,1].unbind(0) is the actual batched metadata layout: odd M changes
+    # the count/start pointer alignment independently of query positions.
+    for rows, stride, offset in _indexer_warmup_layouts():
+        selected = torch.full(
+            (rows, attn.index_topk), -1, dtype=torch.int32, device=device
+        )
+        for dtype in (torch.int32, torch.int64):
+            positions = _indexer_warmup_vector(rows, dtype, device, stride, offset)
+            _require_launch(
+                try_build_index_plan(selected, positions, 0, 1, 0, attn.window_size),
+                "scalar FlashMLA index plan",
+            )
+            metadata = torch.ones((3, rows, 1), dtype=dtype, device=device)
+            _require_launch(
+                try_build_index_plan(
+                    selected, positions, *metadata.unbind(0), attn.window_size
+                ),
+                "batched FlashMLA index plan",
             )
 
 
@@ -1018,21 +1490,7 @@ def _warm_flash_mla(attn, device):
     indices[:, :, :4] = torch.arange(4, dtype=torch.int32, device=device)
     lengths = torch.full((2,), 4, dtype=torch.int32, device=device)
     if attn.compress_ratio:
-        from ._v41_prefill_index_plan import try_build_index_plan
-
-        selected = torch.full(
-            (2, attn.index_topk), -1, dtype=torch.int32, device=device
-        )
-        for dtype in (torch.int32, torch.int64):
-            positions = torch.arange(2, dtype=dtype, device=device)
-            offsets = torch.zeros((2, 1), dtype=dtype, device=device)
-            sizes = torch.ones((2, 1), dtype=dtype, device=device)
-            _require_launch(
-                try_build_index_plan(
-                    selected, positions, offsets, sizes, offsets, attn.window_size
-                ),
-                "batched FlashMLA index plan",
-            )
+        _warm_index_plan(attn, device)
     flash_mla_sparse_fwd(
         q=q,
         kv=kv,
@@ -1050,10 +1508,8 @@ def _warm_flash_mla(attn, device):
 def _warm_q_norm_rope(attn, device):
     import torch
 
-    from rtp_llm.models_py.modules.dsv41._fused_rmsnorm_rope_triton import (
-        fused_rmsnorm_rope,
-    )
     from rtp_llm.models_py.modules.dsv41._v41_fused_qkv import strided_q_rmsnorm
+    from rtp_llm.models_py.modules.dsv41.fp8._v41_swa_kv import swa_kv_norm_rope
     from rtp_llm.models_py.modules.dsv41.fp8.attention_v41 import rope_only
 
     rows = 2
@@ -1067,7 +1523,15 @@ def _warm_q_norm_rope(attn, device):
         (1, rows, rank + attn.head_dim), dtype=torch.bfloat16, device=device
     )
     strided_q_rmsnorm(combined[..., :rank], attn.q_norm, attn.eps)
-    fused_rmsnorm_rope(
+    if (
+        device.type == "cuda"
+        and torch.cuda.get_device_capability(device)[0] == 10
+        and rank % 128 == 0
+    ):
+        from rtp_llm.models_py.modules.dsv41._v41_query_quant import query_norm_quant
+
+        query_norm_quant(combined[..., :rank], attn.q_norm, attn.eps, emit_norm=False)
+    swa_kv_norm_rope(
         combined[..., rank:],
         attn.kv_norm,
         frequencies,
@@ -1075,7 +1539,7 @@ def _warm_q_norm_rope(attn, device):
         eps=attn.eps,
     )
     # The unfused projection's contiguous KV is also reachable via the flag.
-    fused_rmsnorm_rope(
+    swa_kv_norm_rope(
         combined[..., rank:].contiguous(),
         attn.kv_norm,
         frequencies,
@@ -1143,11 +1607,18 @@ def warmup_v41_attention_jit(
         _WARMED.add(key)
 
     with torch.inference_mode(), torch.cuda.device(device):
+        run(("swa_refresh",), partial(_warm_swa_refresh, device))
+        run(("norm_quant",), partial(_warm_norm_quant, device))
         for key, attn in attentions.items():
             run(("flash_mla", key), partial(_warm_flash_mla, attn, device))
             run(("q_norm_rope", key), partial(_warm_q_norm_rope, attn, device))
             if getattr(attn, "is_index_source", False) and attn.compress_ratio:
                 run(("candidate_topk",), partial(_warm_candidate_topk, device))
+                if attn.index_topk == 512:
+                    run(
+                        ("native_selectors", max_seq_len),
+                        partial(_warm_native_selectors, max_seq_len, device),
+                    )
                 if attn.index_n_heads == 32:
                     run(
                         ("grouped_bounds", key),
@@ -1175,7 +1646,7 @@ def warmup_v41_attention_jit(
                         _warm_pool, attn, layout, size, rank, max_batch_size, device
                     ),
                 )
-            if kv_cache_sharded and cp_size > 1 and max_batch_size >= 2:
+            if (kv_cache_sharded or cp_size == 1) and max_batch_size >= 1:
                 from rtp_llm.models_py.modules.dsv41.attn_type import (
                     CSA_KV,
                     CSA_STATE,
@@ -1197,7 +1668,13 @@ def warmup_v41_attention_jit(
                         producer_layouts += (
                             (state_layout,) if state_layout is not None else ()
                         )
-                    if len(producer_layouts) == (3 if main_layout.ratio == 2 else 2):
+                    if (
+                        kv_cache_sharded
+                        and cp_size > 1
+                        and max_batch_size >= 1
+                        and len(producer_layouts)
+                        == (3 if main_layout.ratio == 2 else 2)
+                    ):
                         run(
                             ("fused_producer", producer_layouts, cp_size, cp_rank),
                             partial(
@@ -1208,18 +1685,17 @@ def warmup_v41_attention_jit(
                                 device,
                             ),
                         )
-                    if max_batch_size >= 32:
-                        run(
-                            ("joint_pool", main_layout, index_layout, cp_size, cp_rank),
-                            partial(
-                                _warm_joint_pool,
-                                main_layout,
-                                index_layout,
-                                cp_size,
-                                cp_rank,
-                                device,
-                            ),
-                        )
+                    run(
+                        ("joint_pool", main_layout, index_layout, cp_size, cp_rank),
+                        partial(
+                            _warm_joint_pool,
+                            main_layout,
+                            index_layout,
+                            cp_size,
+                            cp_rank,
+                            device,
+                        ),
+                    )
             logging.info(
                 "[DSV41 Attention] warmed %d private pool layouts", len(layouts)
             )

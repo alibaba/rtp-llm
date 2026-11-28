@@ -64,37 +64,29 @@ prepareMTPEngineInitParams(size_t model_id, py::object propose_model, const Engi
     const size_t weight_count          = py_layers_weights_vec.size();
     size_t       gen_num_per_cycle     = base_params.sp_config.gen_num_per_cycle;
 
-    // Get py_eplb if available (from model)
-    py::object py_eplb = py::none();
-    if (py::hasattr(sp_model, "py_eplb")) {
-        py_eplb = sp_model.attr("py_eplb");
-    }
-
     if (isBlockDraftType(sp_type)) {
         // DSpARK is one multi-layer draft model: gen_num_per_cycle controls the
         // width of its draft block, not the number of one-layer MTP modules, so
         // it keeps the full checkpoint config instead of an MTP module plan.
         auto gpt_weight = convert.createGptWeights(py_layers_weights, py_global_weights);
         mtp_params->push_back(std::move(std::make_unique<EngineInitParams>(model_id,
-                                                                           model_config,
-                                                                           base_params.parallelism_config,
-                                                                           base_params.runtime_config,
-                                                                           base_params.pd_sep_config,
-                                                                           base_params.concurrency_config,
-                                                                           base_params.fmha_config,
-                                                                           base_params.kv_cache_config,
-                                                                           base_params.profiling_debug_logging_config,
-                                                                           base_params.hw_kernel_config,
-                                                                           base_params.moe_config,
-                                                                           base_params.sp_config,
-                                                                           base_params.cache_store_config,
-                                                                           base_params.misc_config,
-                                                                           base_params.arpc_config,
-                                                                           base_params.grpc_config,
-                                                                           base_params.vit_config,
-                                                                           std::move(*gpt_weight),
-                                                                           py::none(),
-                                                                           py_eplb)));
+                                                                          model_config,
+                                                                          base_params.parallelism_config,
+                                                                          base_params.runtime_config,
+                                                                          base_params.pd_sep_config,
+                                                                          base_params.concurrency_config,
+                                                                          base_params.fmha_config,
+                                                                          base_params.kv_cache_config,
+                                                                          base_params.profiling_debug_logging_config,
+                                                                          base_params.hw_kernel_config,
+                                                                          base_params.moe_config,
+                                                                          base_params.sp_config,
+                                                                          base_params.cache_store_config,
+                                                                          base_params.misc_config,
+                                                                          base_params.arpc_config,
+                                                                          base_params.grpc_config,
+                                                                          base_params.vit_config,
+                                                                          std::move(*gpt_weight))));
         return std::move(
             std::make_unique<ProposeModelEngineInitParams>(sp_type, gen_num_per_cycle, std::move(mtp_params)));
     }
@@ -136,14 +128,12 @@ prepareMTPEngineInitParams(size_t model_id, py::object propose_model, const Engi
                                                                            base_params.misc_config,
                                                                            base_params.arpc_config,
                                                                            base_params.grpc_config,
-                                                                           base_params.vit_config,
-                                                                           std::move(*gpt_weight),
-                                                                           py::none(),
-                                                                           py_eplb)));
+                                                                            base_params.vit_config,
+                                                                           std::move(*gpt_weight))));
         model_id++;
     }
 
-    return std::move(std::make_unique<ProposeModelEngineInitParams>(sp_type, gen_num_per_cycle, std::move(mtp_params)));
+    return std::make_unique<ProposeModelEngineInitParams>(sp_type, gen_num_per_cycle, std::move(mtp_params));
 };
 
 RtpLLMOp::RtpLLMOp() {}
@@ -210,17 +200,12 @@ void RtpLLMOp::init(py::object model,
         }
     }
 
-    pybind11::gil_scoped_release release;
-    grpc_server_thread_ = std::thread(&RtpLLMOp::initRPCServer,
-                                      this,
-                                      std::move(params),
-                                      std::move(propose_params),
-                                      std::move(mm_process_engine),
-                                      std::move(telemetry_config));
-    grpc_server_thread_.detach();
-    while (!is_server_ready_) {
-        sleep(1);  // wait 1s for server ready
-    }
+    // Keep startup on the pybind caller so initialization errors reach Python.
+    // The caller holds the GIL while the Python-owned arguments are destroyed.
+    initRPCServer(std::move(params),
+                  std::move(propose_params),
+                  std::move(mm_process_engine),
+                  std::move(telemetry_config));
 }
 
 EngineInitParams RtpLLMOp::initModel(py::object model, py::object engine_config, py::object vit_config) {
@@ -259,12 +244,6 @@ EngineInitParams RtpLLMOp::initModel(py::object model, py::object engine_config,
         auto weight_manager = model.attr("weight_manager");
         // TODO(wangyin.yx): Only one of `py_model` and `gpt_weight` is actually needed.
 
-        // Get py_eplb if available (from model)
-        py::object py_eplb = py::none();
-        if (py::hasattr(model, "py_eplb")) {
-            py_eplb = model.attr("py_eplb");
-        }
-
         EngineInitParams params(model_id_,
                                 model_config,
                                 parallelism_config,
@@ -284,8 +263,7 @@ EngineInitParams RtpLLMOp::initModel(py::object model, py::object engine_config,
                                 vit_config_cpp,
                                 std::move(*gpt_weight),
                                 py_model,
-                                weight_manager,
-                                py_eplb);
+                                weight_manager);
         params.grammar_config   = grammar_config;
         params.nccl_comm_config = engine_config.attr("nccl_comm_config").cast<NcclCommConfig>();
         params.server_config    = engine_config.attr("server_config");
@@ -325,21 +303,9 @@ std::unique_ptr<ProposeModelEngineInitParams> RtpLLMOp::initProposeModel(py::obj
             auto convert    = WeightsConverter(false, model_config.quant_algo);
             auto gpt_weight = convert.createGptWeights(py_layers_weights, py_global_weights);
 
-            // Get py_eplb if available (from model)
-            py::object py_eplb = py::none();
-            if (py::hasattr(sp_model, "py_eplb")) {
-                py_eplb = sp_model.attr("py_eplb");
-            }
-
             size_t gen_num_per_cycle = base_params.sp_config.gen_num_per_cycle;
-            params                   = std::make_unique<ProposeModelEngineInitParams>(model_id_,
-                                                                    sp_type,
-                                                                    gen_num_per_cycle,
-                                                                    model_config,
-                                                                    base_params,
-                                                                    std::move(*gpt_weight),
-                                                                    py::none(),
-                                                                    py_eplb);
+            params                   = std::make_unique<ProposeModelEngineInitParams>(
+                model_id_, sp_type, gen_num_per_cycle, model_config, base_params, std::move(*gpt_weight));
             model_id_++;
         } else if (sp_type == SP_TYPE_MTP || sp_type == SP_TYPE_EAGLE || sp_type == SP_TYPE_EAGLE3
                    || isBlockDraftType(sp_type)) {
@@ -406,23 +372,36 @@ void RtpLLMOp::initRPCServer(const EngineInitParams                        maga_
                                               maga_init_params.parallelism_config.dp_rank,
                                               maga_init_params.parallelism_config.world_rank);
         }
+        std::unique_ptr<RpcServiceImpl> rpc_service;
         if (role_type == RoleType::PREFILL || role_type == RoleType::DECODE) {
-            model_rpc_service_.reset(new RemoteRpcServiceImpl());
+            rpc_service = std::make_unique<RemoteRpcServiceImpl>();
         } else {
-            model_rpc_service_.reset(new LocalRpcServiceImpl());
+            rpc_service = std::make_unique<LocalRpcServiceImpl>();
         }
-        grpc::Status grpc_status =
-            model_rpc_service_->init(maga_init_params, std::move(propose_params), mm_process_engine);
-        if (!grpc_status.ok()) {
-            RTP_LLM_FAIL("init rpc server failed, error msg: %s", grpc_status.error_message().c_str());
+        try {
+            grpc::Status grpc_status =
+                rpc_service->init(maga_init_params, std::move(propose_params), mm_process_engine);
+            if (!grpc_status.ok()) {
+                RTP_LLM_FAIL("init rpc server failed, error msg: %s", grpc_status.error_message().c_str());
+            }
+        } catch (...) {
+            // A partially initialized service may already own a running engine.
+            // Join it without the GIL, then destroy Python members with the GIL.
+            {
+                pybind11::gil_scoped_release release;
+                rpc_service->stop();
+            }
+            rpc_service.reset();
+            throw;
         }
+        model_rpc_service_ = std::move(rpc_service);
 
         if (model_rpc_port < 0) {
-            is_server_ready_ = true;
             return;
         }
     }
-    grpc::ServerBuilder builder;
+    pybind11::gil_scoped_release release;
+    grpc::ServerBuilder          builder;
     // Set large message limits as C++-level defaults (overridable via server_config from grpc_group_args.py)
     builder.AddChannelArgument(GRPC_ARG_MAX_RECEIVE_MESSAGE_LENGTH, 1024 * 1024 * 1024);
     builder.AddChannelArgument(GRPC_ARG_MAX_SEND_MESSAGE_LENGTH, 1024 * 1024 * 1024);
@@ -443,9 +422,8 @@ void RtpLLMOp::initRPCServer(const EngineInitParams                        maga_
     RTP_LLM_CHECK_WITH_INFO(grpc_server_ != nullptr, "grpc server start failed at address " + server_address);
 
     RTP_LLM_LOG_INFO("Server listening on %s", server_address.c_str());
-    is_server_ready_ = true;
-    grpc_server_->Wait();
-    RTP_LLM_LOG_INFO("Server exit on %s", server_address.c_str());
+    // BuildAndStart owns the gRPC polling threads; the member keeps the server
+    // alive until stop() calls Shutdown(). No separate Wait() thread is needed.
 }
 
 void RtpLLMOp::setServing(bool serving) {
@@ -454,45 +432,39 @@ void RtpLLMOp::setServing(bool serving) {
 
 void RtpLLMOp::stop() {
     setKmonServiceServing(false);
-    const int64_t stop_timeout_ms = getGrpcStopTimeoutMs();
-    if (!is_server_shutdown_) {
-        if (model_rpc_service_) {
-            model_rpc_service_->beginShutdown();
-        }
-        if (grpc_server_) {
-            auto                         begin_wait_us = autil::TimeUtility::currentTimeInMicroSeconds();
-            pybind11::gil_scoped_release release;
-            while (auto onflight_request = model_rpc_service_->onflightRequestNum()) {
-                RTP_LLM_LOG_INFO("rpc service has [%lu] onflight request, waiting 1s, stop_timeout_ms=%ld",
-                                 onflight_request,
-                                 stop_timeout_ms);
-                sleep(1);
-                if (autil::TimeUtility::currentTimeInMicroSeconds() - begin_wait_us > stop_timeout_ms * 1000) {
-                    RTP_LLM_LOG_INFO("rpc service wait timeout, no more waiting");
-                    break;
-                }
-            }
-            RTP_LLM_LOG_INFO("Server shutdowning");
-            grpc_server_->Shutdown();
-            pybind11::gil_scoped_acquire acquire;
-            grpc_server_.reset();
-        }
-        if (model_rpc_service_) {
-            pybind11::gil_scoped_release release;
-            model_rpc_service_->stop();
-            pybind11::gil_scoped_acquire acquire;
-            model_rpc_service_.reset();
-        }
-        is_server_shutdown_ = true;
-        // bounded flush of remaining spans; never blocks process exit
-        {
-            pybind11::gil_scoped_release release;
-            /** Release the grammar reporter before KMonitor shutdown to avoid use-after-free at static destruction. */
-            LogitsProcessorFactory::shutdown();
-            telemetry::TelemetryRuntime::shutdown();
-        }
-        stopKmonitorFactory();
+    // Python forwards (including CUDA graph replay) still need the GIL while
+    // requests drain. Release it before waiting, including on another stop().
+    pybind11::gil_scoped_release release;
+    std::lock_guard<std::mutex>  stop_lock(stop_mutex_);
+    if (is_server_shutdown_) {
+        return;
     }
+    auto deadline = std::chrono::system_clock::now() + std::chrono::milliseconds(getGrpcStopTimeoutMs());
+    if (model_rpc_service_) {
+        model_rpc_service_->beginShutdown();
+        if (!model_rpc_service_->waitForDrain(deadline)) {
+            RTP_LLM_LOG_WARNING("RPC drain deadline expired; cancelling remaining requests");
+            deadline = std::chrono::system_clock::now();
+        }
+    }
+    if (grpc_server_) {
+        // Use the remaining drain budget; a synchronous Shutdown() without a
+        // deadline can wait forever for a stalled streaming client.
+        grpc_server_->Shutdown(deadline);
+        grpc_server_.reset();
+    }
+    if (model_rpc_service_) {
+        model_rpc_service_->stop();
+    }
+    {
+        // The service owns Python model references.
+        pybind11::gil_scoped_acquire acquire;
+        model_rpc_service_.reset();
+    }
+    is_server_shutdown_ = true;
+    LogitsProcessorFactory::shutdown();
+    telemetry::TelemetryRuntime::shutdown();
+    stopKmonitorFactory();
 }
 
 RtpLLMOp::~RtpLLMOp() {

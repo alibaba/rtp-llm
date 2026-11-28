@@ -6,6 +6,7 @@ model-specific allocator are needed.
 """
 
 import logging
+import os
 
 from rtp_llm.models.dsv4_kv_cache import (
     CSA_KV_TAG,
@@ -32,12 +33,13 @@ def build_v41_kv_cache_spec_descs(
     *,
     bounded_replay=False,
     draft=False,
+    compact_indexer=True,
 ):
     """Declare byte-exact FP4 global/indexer and FP8 sliding-window pools.
 
-    Indexer blocks keep one entry per raw token for both ratios, matching the
-    kernel's payload/scale planes (ratio two fills the first half). CP sizing
-    and placement are delegated to the descriptor's generic policies.
+    Each indexer page stores only the compressed entries. Distinct ratio tags
+    keep the main cache topology's one-physical-prototype-per-tag contract.
+    CP sizing and placement use the descriptor's generic policies.
     """
     global_pools = {
         ratio: _make_dsv4_desc(tag, "compressed_kv", 288, DataType.TYPE_UINT8, ratio)
@@ -45,7 +47,16 @@ def build_v41_kv_cache_spec_descs(
     }
     for desc in global_pools.values():
         desc.block_stride_bytes_alignment = 4608  # lcm(512, 288)
-    indexer = _make_dsv4_desc("indexer_kv", "compressed_kv", 68, DataType.TYPE_UINT8, 1)
+    indexer_pools = {
+        ratio: _make_dsv4_desc(
+            "indexer_kv_c2" if compact_indexer and ratio == 2 else "indexer_kv",
+            "compressed_kv",
+            68,
+            DataType.TYPE_UINT8,
+            ratio if compact_indexer else 1,
+        )
+        for ratio in (1, 2)
+    }
     state = _make_dsv4_desc(
         "csa_state", "fixed_state", 2 * head_dim, DataType.TYPE_FP32
     )
@@ -76,7 +87,7 @@ def build_v41_kv_cache_spec_descs(
             )
         ]
         if layer_id in sources:
-            layer.extend((global_pools[ratio], indexer))
+            layer.extend((global_pools[ratio], indexer_pools[ratio]))
             if ratio == 2:
                 layer.append(state)
         descs.append(layer)
@@ -99,6 +110,7 @@ def configure_v41_kv_cache(model_config, kv_cache_config=None):
         attn.tokens_per_block = promoted
     bounded = enabled()
     draft = bool(model_config.is_mtp)
+    compact_indexer = os.environ.get("DSV41_COMPACT_INDEXER_KV", "1") == "1"
     model_config.hybrid_attention_config.hybrid_attention_types = [
         HybridAttentionType.NONE
     ] * model_config.num_layers
@@ -109,6 +121,7 @@ def configure_v41_kv_cache(model_config, kv_cache_config=None):
         int(attn.size_per_head),
         bounded_replay=bounded,
         draft=draft,
+        compact_indexer=compact_indexer,
     )
     fixed_blocks = (
         int(kv_cache_config.dsv4_fixed_pool_blocks or 0) if kv_cache_config else 0
@@ -137,7 +150,9 @@ def configure_v41_kv_cache(model_config, kv_cache_config=None):
     model_config.kv_cache_spec_descs = descs
     model_config.cache_min_replay_tokens = 128 if bounded else 1
     # Token-interleaved FlashMLA bytes must never alias the old planar format.
-    # Full and bounded replay also need independent encoder checkpoint keys.
+    # Full/bounded replay and compact/legacy index pages need independent keys.
     model_config.cache_key_hash_seed = (
-        0x4453563431494231 if bounded else 0x4453563431494631
+        (0x4453563431494232 if bounded else 0x4453563431494632)
+        if compact_indexer
+        else (0x4453563431494231 if bounded else 0x4453563431494631)
     )

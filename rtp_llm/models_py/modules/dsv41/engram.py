@@ -24,11 +24,15 @@ import logging
 import math
 import mmap
 import os
+import re
 import shutil
-import uuid
+import threading
+import time
 import weakref
+from concurrent.futures import CancelledError, ThreadPoolExecutor, TimeoutError
+from contextlib import contextmanager, nullcontext
 from pathlib import Path
-from typing import Callable, Mapping, Optional
+from typing import Mapping, Optional
 
 import numpy as np
 import torch
@@ -315,122 +319,151 @@ def _prefault_host_tensor(tensor: torch.Tensor, name: str) -> None:
     )
 
 
-def _load_engram_tables(
-    root: Path, weight_map: Mapping, prefix: str, expected: tuple
-) -> tuple:
-    """Load one engram layer's embed pair as the /dev/shm staging copy source.
+_SHARED_TABLE_DIR = Path("/dev/shm")
+_DIGEST_CHARS = 24
+# A release must not wait forever: GC may run a finalizer while this thread
+# holds the same digest's lock. Long holders are loaders that lease the table.
+_RELEASE_LOCK_TIMEOUT_S = 5.0
 
-    Invoked at most once per table, by the flock winner, on a cache miss —
-    attaching processes never read the big tensors. Uses stock per-tensor
-    ``safe_open`` (measured ~102 MB/s per stream on the CI NAS; the
-    fastsafetensors loaders bring no gain here — their fast shm copier is
-    GPU-oriented while the nogds CPU copier benchmarks below the plain
-    per-tensor stream).
+
+def _shared_table_prefix() -> str:
+    return f"rtp_llm_engram_{os.getuid()}_"
+
+
+def _lock_table(lock_path: Path, timeout: Optional[float] = None) -> Optional[int]:
+    """Return an fd holding ``lock_path`` exclusively, or None on timeout.
+
+    ``timeout=None`` waits indefinitely and ``0`` tries once.
     """
-    from time import perf_counter
-
-    weight_name, scale_name = prefix + "embed.weight", prefix + "embed.scale"
-    for name in (weight_name, scale_name):
-        if name not in weight_map:
-            raise KeyError(f"V4.1 checkpoint is missing {name}")
-    started = perf_counter()
-    from safetensors import safe_open
-
-    pair = []
-    for name in (weight_name, scale_name):
-        with safe_open(
-            root / weight_map[name], framework="pt", device="cpu"
-        ) as file:
-            pair.append(file.get_tensor(name))
-    weight, scales = pair
-    reader = "per-tensor"
-    rows, width = expected
-    if tuple(weight.shape) != expected:
-        raise ValueError(
-            f"Engram table shape {weight.shape} does not match {expected}"
-        )
-    if tuple(scales.shape) != (rows, width // 32):
-        raise ValueError(
-            f"Engram scale shape {scales.shape} does not match {(rows, width // 32)}"
-        )
-    if (
-        weight.dtype != torch.float8_e4m3fn
-        or weight.element_size() != 1
-        or scales.element_size() != 1
-    ):
-        raise ValueError("Pinned Engram tables require native FP8/E8M0 bytes")
-    nbytes = weight.numel() + scales.numel()
-    logger.info(
-        "Engram %s read %.2f GiB from checkpoint in %.1fs (%s)",
-        prefix,
-        nbytes / 1024**3,
-        perf_counter() - started,
-        reader,
-    )
-    return weight, scales
-
-
-def _live_leases(data_path: Path):
-    leases = []
-    for lease in data_path.parent.glob(data_path.name + ".lease.*"):
+    deadline = None if timeout is None else time.monotonic() + timeout
+    while True:
+        fd = os.open(lock_path, os.O_RDWR | os.O_CREAT | os.O_CLOEXEC, 0o600)
         try:
-            pid = int(lease.name.split(".lease.", 1)[1].split(".", 1)[0])
-            os.kill(pid, 0)
-        except ProcessLookupError:
-            lease.unlink(missing_ok=True)
-        except (ValueError, PermissionError):
-            leases.append(lease)
-        else:
-            leases.append(lease)
-    return leases
-
-
-_ENGRAM_TABLE_TTL_SECONDS = 3600  # GC window; active attaches refresh mtime
-
-
-def _prune_expired_engram_tables() -> None:
-    """Drop stale /dev/shm Engram tables so persistence stays bounded.
-
-    The staged tables survive the process group that created them (the cold
-    staging of ~94 GiB per layer is far too expensive to repeat per run);
-    this TTL prune, taken under the creating digest's lock, bounds the
-    resident set. Tables with live leases are never pruned.
-    """
-    import time
-
-    cutoff = time.time() - _ENGRAM_TABLE_TTL_SECONDS
-    for table in Path("/dev/shm").glob(f"rtp_llm_engram_{os.getuid()}_*"):
-        if "." in table.name:  # .partial/.lease artifacts have their own paths
-            continue
-        try:
-            stat = table.stat()
-            if stat.st_mtime >= cutoff:
-                continue
-            if _live_leases(table):
-                continue
-            if table.stat().st_ino != stat.st_ino:
-                # The name now maps to a freshly created table (a creator
-                # replaced it after our expiry verdict on the old inode);
-                # never let the prune unlink a live generation.
-                continue
-            table.unlink(missing_ok=True)
-            logger.info("Pruned expired Engram shared table %s", table)
+            fcntl.flock(fd, fcntl.LOCK_EX | (0 if deadline is None else fcntl.LOCK_NB))
+            # A reclaimer may unlink the lock after we opened it; retry on the
+            # successor so both processes never hold different inodes.
+            if os.path.samestat(os.fstat(fd), os.stat(lock_path)):
+                return fd
+        except BlockingIOError:
+            if time.monotonic() >= deadline:
+                os.close(fd)
+                return None
+            time.sleep(0.01)
         except FileNotFoundError:
-            continue
+            pass
+        except BaseException:
+            os.close(fd)
+            raise
+        os.close(fd)
 
 
-def _release_shared_table(data_path, lock_path, lease_path):
-    with open(lock_path, "a+b") as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX)
-        Path(lease_path).unlink(missing_ok=True)
-        if not _live_leases(Path(data_path)):
-            # Keep the staged table for the next run on this host: the ~94 GiB
-            # cold staging amortizes across runs and is reclaimed by the TTL
-            # prune instead. Refresh mtime so the TTL measures last use.
+def _prune_stale_files(data_path: Path) -> bool:
+    """Remove dead writers' files; return whether a legacy writer is alive.
+
+    The caller must hold the creation lock, which every creator holds while
+    writing its ``.tmp`` file, so any such file belongs to a dead creator.
+    ``.lease``/``.partial`` files come from earlier versions that tracked
+    writers by PID and used another lock; honor them while that PID lives so
+    mixed versions sharing /dev/shm never lose a live table.
+    """
+    for temporary in data_path.parent.glob(data_path.name + ".tmp.*"):
+        temporary.unlink(missing_ok=True)
+    alive = False
+    for marker in (".lease.", ".partial."):
+        for path in data_path.parent.glob(data_path.name + marker + "*"):
             try:
-                os.utime(data_path)
-            except OSError:
-                pass
+                os.kill(int(path.name.split(marker, 1)[1].split(".", 1)[0]), 0)
+            except (ProcessLookupError, ValueError):
+                path.unlink(missing_ok=True)
+            except PermissionError:
+                alive = True
+            else:
+                alive = True
+    return alive
+
+
+def _reclaim_unused_table(data_path: Path) -> bool:
+    """Delete a table nobody maps. The caller must hold its creation lock.
+
+    Readers hold LOCK_SH on the data file for their lifetime. The kernel drops
+    it on any exit, including SIGKILL.
+    """
+    if _prune_stale_files(data_path):
+        return False
+    try:
+        fd = os.open(data_path, os.O_RDONLY | os.O_CLOEXEC)
+    except FileNotFoundError:
+        pass
+    else:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return False
+        finally:
+            os.close(fd)
+    data_path.unlink(missing_ok=True)
+    return True
+
+
+def _reclaim_with_lock(data_path: Path, timeout: Optional[float]) -> None:
+    lock_path = Path(str(data_path) + ".lock")
+    fd = _lock_table(lock_path, timeout)
+    if fd is None:
+        return
+    try:
+        if _reclaim_unused_table(data_path):
+            lock_path.unlink(missing_ok=True)
+    finally:
+        os.close(fd)
+
+
+def reclaim_stale_shared_tables(keep: Optional[Path] = None) -> None:
+    """Remove this user's tables left by crashed or SIGKILLed workers.
+
+    A table is keyed by checkpoint identity, so a restart with another
+    checkpoint never reopens the old one. Busy locks are skipped instead of
+    awaited to avoid lock-order deadlocks between concurrent loaders.
+    """
+    prefix = _shared_table_prefix()
+    table_name = re.compile(re.escape(prefix) + rf"[0-9a-f]{{{_DIGEST_CHARS}}}(?=\.|$)")
+    names = set()
+    for path in _SHARED_TABLE_DIR.glob(prefix + "*"):
+        match = table_name.match(path.name)
+        if match:
+            names.add(match.group())
+    for name in sorted(names):
+        if keep is None or name != keep.name:
+            try:
+                _reclaim_with_lock(_SHARED_TABLE_DIR / name, timeout=0)
+            except OSError as error:
+                logger.warning("Failed to reclaim Engram table %s: %s", name, error)
+
+
+def _map_shared_table(data_path: Path, nbytes: int):
+    """Lease and map a table. The caller must hold its creation lock.
+
+    The lease is taken before the caller drops the lock, so a concurrent
+    release cannot observe this reader as absent. mmap dups the fd it maps;
+    the lease needs its own open file description, or closing it would leave
+    LOCK_SH held by the mapping.
+    """
+    lease = open(data_path, "rb")
+    try:
+        fcntl.flock(lease, fcntl.LOCK_SH)
+        with open(data_path, "r+b") as file:
+            mapping = mmap.mmap(file.fileno(), nbytes)
+    except BaseException:
+        lease.close()
+        raise
+    return lease, mapping
+
+
+def _release_shared_table(data_path, lease_file):
+    lease_file.close()  # Drops this process's LOCK_SH.
+    try:
+        _reclaim_with_lock(Path(data_path), _RELEASE_LOCK_TIMEOUT_S)
+    except OSError as error:
+        logger.warning("Failed to release Engram table %s: %s", data_path, error)
 
 
 class _CudaArrayView:
@@ -451,59 +484,23 @@ class _PinnedSharedTable:
     Disk-backed MAP_SHARED mappings cannot be CUDA-registered on all drivers.
     A tmpfs mapping supports registration without the private COW copies that
     pinning a safetensors MAP_PRIVATE mapping could introduce. A lock protects
-    one-time creation. Per-process leases keep the table's mtime fresh while
-    readers are attached; after the last reader exits the table stays resident
-    for the next run on this host and is reclaimed by the TTL prune. Stale
-    leases from SIGKILL are pruned on the next access.
-
-    The copy source may be a lazy ``loader`` callable invoked only by the lock
-    winner on a cache miss, so attaching readers never read the checkpoint.
+    one-time creation. Each reader holds LOCK_SH on the file while mapped; the
+    last reader to release it removes the file. Tables orphaned by SIGKILL, for
+    any checkpoint, are reclaimed when the next table is loaded.
     """
 
-    def __init__(
-        self,
-        weight,
-        scales,
-        source_identity,
-        device,
-        *,
-        loader: Optional[Callable[[], tuple]] = None,
-        table_shape: Optional[tuple] = None,
-    ):
-        digest = hashlib.sha256(source_identity.encode()).hexdigest()[:24]
-        data_path = Path("/dev/shm") / f"rtp_llm_engram_{os.getuid()}_{digest}"
-        lock_path = Path("/tmp") / (data_path.name + ".lock")
-        lease_path = Path(str(data_path) + f".lease.{os.getpid()}.{uuid.uuid4().hex}")
-        if loader is None:
-            weight_bytes = weight.numel()
-            scale_bytes = scales.numel()
-            if weight.element_size() != 1 or scales.element_size() != 1:
-                raise ValueError("Pinned Engram tables require native FP8/E8M0 bytes")
-            weight_shape, weight_dtype = tuple(weight.shape), weight.dtype
-            scales_shape = tuple(scales.shape)
-        else:
-            if weight is not None or scales is not None or table_shape is None:
-                raise ValueError(
-                    "PinnedSharedTable lazy mode takes table_shape, not tensors"
-                )
-            rows, width = table_shape
-            # Same block-size expression as HostEngramEmbedding so the shared
-            # file geometry and the consumer's scale view can never disagree.
-            weight_shape, scales_shape = table_shape, (rows, width // 32)
-            weight_dtype = torch.float8_e4m3fn
-            weight_bytes, scale_bytes = rows * width, rows * (width // 32)
-            if weight_dtype.itemsize != 1:
-                raise ValueError("Pinned Engram tables require native FP8/E8M0 bytes")
-        total_bytes = weight_bytes + scale_bytes
-        with open(lock_path, "a+b") as lock:
-            fcntl.flock(lock, fcntl.LOCK_EX)
-            _live_leases(data_path)
-            for partial in data_path.parent.glob(data_path.name + ".partial.*"):
-                try:
-                    os.kill(int(partial.name.rsplit(".", 1)[1]), 0)
-                except ProcessLookupError:
-                    partial.unlink(missing_ok=True)
-            _prune_expired_engram_tables()
+    def __init__(self, weight, scales, source_identity, device):
+        digest = hashlib.sha256(source_identity.encode()).hexdigest()[:_DIGEST_CHARS]
+        data_path = _SHARED_TABLE_DIR / (_shared_table_prefix() + digest)
+        weight_bytes = weight.numel()
+        total_bytes = weight_bytes + scales.numel()
+        if weight.element_size() != 1 or scales.element_size() != 1:
+            raise ValueError("Pinned Engram tables require native FP8/E8M0 bytes")
+        # Free orphans first so they do not count against the space check.
+        reclaim_stale_shared_tables(keep=data_path)
+        lock = _lock_table(Path(str(data_path) + ".lock"))
+        try:
+            _prune_stale_files(data_path)
             if not data_path.exists():
                 free = shutil.disk_usage(data_path.parent).free
                 if free < total_bytes:
@@ -511,11 +508,7 @@ class _PinnedSharedTable:
                         f"Engram needs {total_bytes / 1024**3:.2f} GiB shared RAM, "
                         f"but /dev/shm has {free / 1024**3:.2f} GiB free"
                     )
-                # At most one invocation, by the flock winner, only on a miss;
-                # attaching processes (lock waiters that find the file present)
-                # never materialize the ~94 GiB pair from the checkpoint.
-                sources = (weight, scales) if loader is None else loader()
-                partial = Path(str(data_path) + f".partial.{os.getpid()}")
+                partial = Path(str(data_path) + f".tmp.{os.getpid()}")
                 try:
                     with open(partial, "w+b") as file:
                         os.chmod(partial, 0o600)
@@ -524,7 +517,7 @@ class _PinnedSharedTable:
                         try:
                             destination = np.frombuffer(mapping, dtype=np.uint8)
                             offset = 0
-                            for tensor in sources:
+                            for tensor in (weight, scales):
                                 source = tensor.view(torch.uint8).reshape(-1).numpy()
                                 for begin in range(0, source.size, 64 * 1024**2):
                                     end = min(begin + 64 * 1024**2, source.size)
@@ -532,7 +525,7 @@ class _PinnedSharedTable:
                                         begin:end
                                     ]
                                 offset += source.size
-                            del destination, source, sources
+                            del destination, source
                         finally:
                             mapping.close()
                     os.replace(partial, data_path)
@@ -548,19 +541,15 @@ class _PinnedSharedTable:
                 raise RuntimeError(
                     f"Engram shared table has an invalid size: {data_path}"
                 )
-            with open(data_path, "r+b") as file:
-                mapping = mmap.mmap(file.fileno(), total_bytes)
-            lease_path.touch(mode=0o600)
-            try:
-                os.utime(data_path)  # refresh LRU for the TTL prune
-            except OSError:
-                pass
+            lease, mapping = _map_shared_table(data_path, total_bytes)
+            self._lease_finalizer = weakref.finalize(
+                self, _release_shared_table, str(data_path), lease
+            )
+        finally:
+            os.close(lock)
         self.storage = torch.frombuffer(mapping, dtype=torch.uint8)
-        self.weight = self.storage[:weight_bytes].view(weight_dtype).view(weight_shape)
-        self.scales = self.storage[weight_bytes:].view(torch.uint8).view(scales_shape)
-        self._lease_finalizer = weakref.finalize(
-            self, _release_shared_table, str(data_path), str(lock_path), str(lease_path)
-        )
+        self.weight = self.storage[:weight_bytes].view(weight.dtype).view(weight.shape)
+        self.scales = self.storage[weight_bytes:].view(torch.uint8).view(scales.shape)
         self.device = torch.device(device)
         from cuda.bindings import runtime
 
@@ -571,8 +560,9 @@ class _PinnedSharedTable:
             if int(result) != 0:
                 self._lease_finalizer()
                 raise RuntimeError(f"Engram cudaHostRegister failed: {result}")
+        self._lookup_events = []
         self._registration_finalizer = weakref.finalize(
-            self, self._unregister, runtime, self.storage
+            self, self._unregister, runtime, self.storage, self._lookup_events
         )
         if not self.storage.is_pinned():
             self._registration_finalizer()
@@ -586,7 +576,11 @@ class _PinnedSharedTable:
         )
 
     @staticmethod
-    def _unregister(runtime, storage):
+    def _unregister(runtime, storage, lookup_events):
+        # Unlike CUDA allocator tensors, mapped host storage has no record_stream
+        # support. Keep its registration until every asynchronous reader exits.
+        for event in lookup_events:
+            event.synchronize()
         (result,) = runtime.cudaHostUnregister(storage.data_ptr())
         if int(result) != 0:
             logger.warning("Engram cudaHostUnregister failed: %s", result)
@@ -603,6 +597,122 @@ class _PinnedSharedTable:
             )
 
 
+# Device-scale generations use this cold-path release fence. Retain a failed
+# release rather than freeing GPU scales or unregistering host weights early.
+_DEVICE_SCALE_RELEASE_FAILURES = []
+
+
+class _DeviceScaleLease:
+    """Own a table generation through all future Graph replays and final reads."""
+
+    def __init__(self, uva, pinned, *, storage=None):
+        self.uva, self.pinned, self.storage = uva, pinned, storage
+        if pinned is None:
+            from cuda.bindings import runtime
+        else:
+            runtime = pinned.runtime
+        device = pinned.device.index if pinned is not None else storage.device
+        if device is None:
+            device = torch.cuda.current_device()
+        # Callback arguments retain BOTH resources until the device drain has
+        # finished; tensor/attribute destructor ordering is not a lifetime edge.
+        self._release = weakref.finalize(
+            self,
+            self._drain,
+            runtime,
+            device,
+            uva,
+            pinned if pinned is not None else storage,
+            _DEVICE_SCALE_RELEASE_FAILURES,
+            logger.warning,
+        )
+
+    @staticmethod
+    def _drain(runtime, device, uva, pinned, failures, warn):
+        def check(values, operation):
+            result, *rest = values
+            if int(result) != 0:
+                raise RuntimeError(f"Engram {operation} failed: {result}")
+            return rest
+
+        try:
+            (previous,) = check(runtime.cudaGetDevice(), "cudaGetDevice")
+            try:
+                if previous != device:
+                    check(runtime.cudaSetDevice(device), "cudaSetDevice")
+                # Unload/reload cold path, after the last Graph/embedding owner.
+                # Covers sync readers, abandoned consumers, and actual replay
+                # streams, without assuming a capture-time record_stream fence.
+                check(runtime.cudaDeviceSynchronize(), "cudaDeviceSynchronize")
+            finally:
+                if previous != device:
+                    check(runtime.cudaSetDevice(previous), "cudaSetDevice(restore)")
+        except BaseException as error:
+            failures.append((uva, pinned))
+            warn("Engram GPU-scale release failed; retaining generation: %s", error)
+
+
+_DEVICE_SCALE_CAPTURE = threading.local()
+
+
+class _DeviceScaleCapturePermit:
+    """Temporary capture authorization; metadata, not this token, owns tables."""
+
+    def __init__(self, plan, resources):
+        # A forgotten close must not make thread-local state a resource owner.
+        self.plan = weakref.ref(plan)
+        self.resources = weakref.ref(resources)
+        self.active = False
+
+    @staticmethod
+    def check_available():
+        current = getattr(_DEVICE_SCALE_CAPTURE, "permit", None)
+        if (
+            current is not None
+            and current.active
+            and current.plan() is not None
+            and current.resources() is not None
+        ):
+            raise RuntimeError("Engram GPU-scale capture plan is not reentrant")
+
+    def install(self):
+        self.check_available()
+        _DEVICE_SCALE_CAPTURE.permit = self
+        self.active = True
+
+    def close(self):
+        # Invalidate first, including an accidental close on another CPU thread.
+        self.active = False
+        if getattr(_DEVICE_SCALE_CAPTURE, "permit", None) is self:
+            del _DEVICE_SCALE_CAPTURE.permit
+
+    @staticmethod
+    def require(embedding, lease):
+        permit = getattr(_DEVICE_SCALE_CAPTURE, "permit", None)
+        plan = permit.plan() if permit is not None else None
+        resources = permit.resources() if permit is not None else None
+        if (
+            permit is None
+            or not permit.active
+            or plan is None
+            or resources is None
+            or getattr(
+                getattr(plan, "_capture_metadata", None), "_engram_decode_tables", None
+            )
+            is not resources
+        ):
+            raise RuntimeError(
+                "Engram GPU-scale capture requires an active decode metadata table owner"
+            )
+        resources.validate()
+        if not any(
+            getattr(state, "device_scale_lease", None) is lease
+            and state.matches(embedding)
+            for _, _, state in resources.entries
+        ):
+            raise RuntimeError("Engram GPU-scale capture table generation is not owned")
+
+
 class HostEngramEmbedding:
     """Native FP8/E8M0 host tensors deliberately not registered as buffers.
 
@@ -611,7 +721,14 @@ class HostEngramEmbedding:
     """
 
     def __init__(
-        self, weight: torch.Tensor, scales: torch.Tensor, block_size=32, pinned=None
+        self,
+        weight: torch.Tensor,
+        scales: torch.Tensor,
+        block_size=32,
+        pinned=None,
+        *,
+        scale_group=None,
+        scale_identity=None,
     ):
         if weight.device.type != "cpu" or scales.device.type != "cpu":
             raise ValueError("Engram embedding tables must remain in host RAM")
@@ -624,19 +741,363 @@ class HostEngramEmbedding:
         # CPU index_select does not implement Float8; select its unchanged bytes.
         self.scales = scales.view(torch.uint8) if scales.element_size() == 1 else scales
         self.block_size = block_size
-        self._pinned = pinned
-        self._uva = None
+        self._initialize_lookup_state(pinned=pinned)
         if pinned is not None:
-            self._uva = (pinned.cuda_view(self.weight), pinned.cuda_view(self.scales))
-            self._num_sms = torch.cuda.get_device_properties(
-                pinned.device
-            ).multi_processor_count
+            if os.getenv("DSV41_ENGRAM_DEVICE_SCALES", "1") == "1":
+                if torch.cuda.is_current_stream_capturing():
+                    raise RuntimeError(
+                        "Engram device scales require startup allocation"
+                    )
+                # Keep the CPU source and all FP8/E8M0 bytes unchanged.
+                if scale_group is not None:
+                    from rtp_llm.models_py.modules.dsv41._engram_scale_shards import (
+                        create_sharded_scales,
+                    )
 
-    def __call__(self, indices: torch.Tensor, device) -> torch.Tensor:
+                    gpu_scales = create_sharded_scales(
+                        self.scales, scale_group, pinned.device, scale_identity
+                    )
+                    self._scale_shard_count = getattr(gpu_scales, "group_size", 1)
+                    if self._scale_shard_count > 1:
+                        # Preserve the BF16 embedding API for diagnostic callers
+                        # without recreating a full GPU scales replica.
+                        self._legacy_scale_uva = pinned.cuda_view(self.scales)
+                else:
+                    gpu_scales = self.scales.to(pinned.device)
+                self._uva = (
+                    pinned.cuda_view(self.weight),
+                    gpu_scales,
+                )
+                self._device_scale_lease = _DeviceScaleLease(self._uva, pinned)
+            else:
+                self._uva = (
+                    pinned.cuda_view(self.weight),
+                    pinned.cuda_view(self.scales),
+                )
+            properties = torch.cuda.get_device_properties(pinned.device)
+            self._num_sms = properties.multi_processor_count
+            self._quantized_lookup_supported = (
+                self._device_scale_lease is not None
+                and (properties.major, properties.minor) in ((10, 0), (10, 3))
+                and weight.dtype == torch.float8_e4m3fn
+                and weight.shape[1] == 256
+                and self.scales.dtype == torch.uint8
+                and block_size == 32
+            )
+
+    def _initialize_lookup_state(self, *, pinned=None, storage=None):
+        """Common reader state for both checkpoint and external constructors."""
+        self._pinned = pinned
+        self._external_storage = storage
+        self._uses_external_storage = storage is not None
+        self._uva = None
+        self._device_scale_lease = None
+        self._quantized_lookup_supported = False
+        self._scale_shard_count = 1
+        self._legacy_scale_uva = None
+
+    @contextmanager
+    def lookup_guard(self):
+        """Fence external submissions against drain; local leases own host data."""
+        storage = self._external_storage
+        if self._uses_external_storage and storage is None:
+            raise RuntimeError("external Engram embedding is closed")
+        with storage.use() if storage is not None else nullcontext():
+            # release_external_views takes the same storage lock. Recheck after
+            # admission in case release won the race while entering the guard.
+            if self._uses_external_storage and self._external_storage is not storage:
+                raise RuntimeError("external Engram embedding is closed")
+            yield
+
+    def register_lookup_event(self, event):
+        """Register a stream's completion event with its table owner once."""
+        with self.lookup_guard():
+            if self._external_storage is not None:
+                self._external_storage.register_lookup_event(event)
+            elif self._pinned is not None:
+                self._pinned._lookup_events.append(event)
+            else:
+                raise RuntimeError("Engram asynchronous lookup requires a table owner")
+
+    def lookup_quantized(self, indices: torch.Tensor, device, *, prepare=False):
+        """Gather native FP8 and packed GPU scales in a single lookup kernel."""
+        from rtp_llm.models_py.modules.dsv41 import _engram_quantized_triton
+
+        if not self._quantized_lookup_supported or indices.device != torch.device(
+            device
+        ):
+            raise ValueError(
+                "Native Engram lookup requires supported Blackwell GPU tables"
+            )
+        with self.lookup_guard():
+            lease = self._device_scale_resources()
+            if lease is not None and torch.cuda.is_current_stream_capturing():
+                _DeviceScaleCapturePermit.require(self, lease)
+            uva = self._uva
+            try:
+                return _engram_quantized_triton.lookup_host_rows(
+                    *uva, indices, self._num_sms, prepare=prepare
+                )
+            finally:
+                # The lease owns future graph replays; cover queued eager reads too.
+                uva[1].record_stream(torch.cuda.current_stream(indices.device))
+
+    def _device_scale_resources(self):
+        lease = self._device_scale_lease
+        if lease is not None and (
+            lease.uva is not self._uva or lease.pinned is not self._pinned
+        ):
+            if torch.cuda.is_current_stream_capturing():
+                raise RuntimeError(
+                    "Engram table generation must be prepared before capture"
+                )
+            lease = self._device_scale_lease = _DeviceScaleLease(
+                self._uva, self._pinned, storage=self._external_storage
+            )
+        return lease
+
+    def warmup_prefetch(self, indices: torch.Tensor, device):
+        """Compile and configure the asynchronous lookup during model startup."""
+        if not self.supports_generic_prefetch:
+            return
+        from rtp_llm.models_py.modules.dsv41._engram_triton import (
+            warmup_lookup_prefetch_rows,
+        )
+
+        lease = self._device_scale_resources()
+        uva = self._uva
+        try:
+            lookup_scales = (
+                self._legacy_scale_uva if self._legacy_scale_uva is not None else uva[1]
+            )
+            return warmup_lookup_prefetch_rows(
+                uva[0], lookup_scales, indices, self._num_sms
+            )
+        finally:
+            if lease is not None:
+                uva[1].record_stream(torch.cuda.current_stream(indices.device))
+
+    @classmethod
+    def from_storage(
+        cls, storage, layer_id: int, *, scale_group=None, scale_identity=None
+    ):
+        """Use validated external device views without loading a local table.
+
+        The caller owns storage attach/drain. Graph capture must retain that
+        storage through the engine's process-lifetime pin. For host backing,
+        ``scale_group`` copies scales once into this node's symmetric GPU shards.
+        GPU backing already provides distributed HBM views for both tables, so
+        it keeps those views without another scale copy.
+        """
+        with storage.use():
+            weight, scales = storage.table_views(layer_id)
+            if (
+                weight.device.type != "cuda"
+                or scales.device != weight.device
+                or weight.device.index != storage.device
+            ):
+                raise ValueError(
+                    "external Engram views must use the storage CUDA device"
+                )
+            if weight.dtype != torch.uint8 or scales.dtype != torch.uint8:
+                raise ValueError(
+                    "external Engram views must preserve FP8/E8M0 as uint8"
+                )
+            if weight.ndim != 2 or weight.shape[0] <= 0:
+                raise ValueError("external Engram weight must be a nonempty matrix")
+            dim = weight.shape[1]
+            if dim < 32 or dim % 32 or dim & (dim - 1):
+                raise ValueError(
+                    "current Engram lookup requires power-of-two width >=32"
+                )
+            if scales.shape != (weight.shape[0], dim // 32):
+                raise ValueError("external Engram scale shape does not match weight")
+            if not weight.is_contiguous() or not scales.is_contiguous():
+                raise ValueError("external Engram views must be contiguous")
+            result = cls.__new__(cls)
+            result.weight = result.scales = (
+                None  # No private host table/reference copy.
+            )
+            result.block_size = 32
+            result._initialize_lookup_state(storage=storage)
+            properties = torch.cuda.get_device_properties(weight.device)
+            quantized_target = (
+                (properties.major, properties.minor) in ((10, 0), (10, 3))
+                and weight.shape[1] == 256
+                and scales.dtype == torch.uint8
+                and result.block_size == 32
+                and os.getenv("DSV41_ENGRAM_DIRECT_FP8", "1") == "1"
+            )
+            # The sharded scales are only readable by the quantized kernel, so a
+            # target that cannot run it keeps the fabric view untouched.
+            if getattr(storage, "device_resident_tables", False):
+                # Both tables already live in single-copy distributed HBM. Keep
+                # these Fabric views instead of cloning scales once per host.
+                result._uva = (weight, scales)
+                result._quantized_lookup_supported = quantized_target
+                result._device_scale_lease = _DeviceScaleLease(
+                    result._uva, None, storage=storage
+                )
+            elif (
+                quantized_target and os.getenv("DSV41_ENGRAM_DEVICE_SCALES", "1") == "1"
+            ):
+                from rtp_llm.models_py.modules.dsv41._engram_scale_shards import (
+                    create_sharded_scales,
+                )
+
+                # Startup-only: copy this rank's slice from the remote view
+                # after cache agreement, without a full-table CPU staging copy.
+                # A generation may contain equal-sized tables on different layers.
+                gpu_scales = (
+                    create_sharded_scales(
+                        scales,
+                        scale_group,
+                        weight.device,
+                        (
+                            (scale_identity, f"layers.{layer_id}.engram.embed.scale")
+                            if scale_identity
+                            else None
+                        ),
+                        external_source=True,
+                    )
+                    if scale_group is not None
+                    else scales.clone()
+                )
+                result._scale_shard_count = getattr(gpu_scales, "group_size", 1)
+                result._uva = (weight, gpu_scales)
+                if result._scale_shard_count > 1:
+                    # The plain host-row kernels cannot read a sharded descriptor;
+                    # keep the fabric view for those diagnostic/prefetch callers.
+                    result._legacy_scale_uva = scales
+                result._quantized_lookup_supported = True
+                result._device_scale_lease = _DeviceScaleLease(
+                    result._uva, None, storage=storage
+                )
+            else:
+                result._uva = (weight, scales)
+            result._table_shape = tuple(weight.shape)
+            result._num_sms = properties.multi_processor_count
+            return result
+
+    @property
+    def table_shape(self):
+        """Stable metadata for warmup, without exposing/copying an external table."""
+        if self._uses_external_storage:
+            return self._table_shape
+        return tuple(self.weight.shape)
+
+    @property
+    def supports_cpu_lookup(self):
+        """External Fabric views are GPU addresses, not CPU-readable tensors."""
+        return not self._uses_external_storage
+
+    @property
+    def supports_generic_prefetch(self):
+        """The generic host-table prefetch kernel requires pinned host storage."""
+        return not self._uses_external_storage
+
+    @property
+    def supports_async_prefetch(self):
+        """A side stream can prefetch the mapped table.
+
+        Local tables keep the prefetch-tuned host kernel. External Fabric views
+        are GPU addresses, so the plain host-row kernel runs on the same side
+        stream once the mapping exists.
+        """
+        return not self._uses_external_storage or self._uva is not None
+
+    @property
+    def supports_decode_prefetch(self):
+        """Scheduled native decode supports either live table owner."""
+        return (
+            self._quantized_lookup_supported
+            and self._uva is not None
+            and self._device_scale_lease is not None
+            and (self._pinned is not None or self._external_storage is not None)
+        )
+
+    def release_external_views(self):
+        """Drop this embedding's views after the caller has stopped requests."""
+        storage = self._external_storage
+        if storage is not None:
+            with storage._lock:
+                self._uva = None
+                self._legacy_scale_uva = None
+                self._device_scale_lease = None
+                self._external_storage = None
+
+    def __call__(
+        self, indices: torch.Tensor, device, *, prefetch=False
+    ) -> torch.Tensor:
+        if prefetch and not self.supports_async_prefetch:
+            raise RuntimeError("Engram asynchronous prefetch is not supported")
+        if self._uses_external_storage:
+            from rtp_llm.models_py.modules.dsv41 import _engram_triton
+
+            with self.lookup_guard():
+                storage = self._external_storage
+                target = torch.device(device)
+                if (
+                    not indices.is_cuda
+                    or indices.device != self._uva[0].device
+                    or target.type != "cuda"
+                    or (
+                        target.index is not None
+                        and target.index != indices.device.index
+                    )
+                ):
+                    raise ValueError(
+                        "external Engram lookup requires indices on its CUDA device"
+                    )
+                if indices.ndim != 2 or indices.dtype not in (torch.int32, torch.int64):
+                    raise ValueError(
+                        "external Engram lookup requires a 2D int32/int64 index tensor"
+                    )
+                with torch.cuda.device(storage.device):
+                    lease = self._device_scale_resources()
+                    if lease is not None and torch.cuda.is_current_stream_capturing():
+                        _DeviceScaleCapturePermit.require(self, lease)
+                    uva = self._uva
+                    # __call__ always returns BF16 rows, including on Blackwell.
+                    # The projection/schedule owns explicit quantized dispatch.
+                    lookup_scales = (
+                        self._legacy_scale_uva
+                        if self._legacy_scale_uva is not None
+                        else uva[1]
+                    )
+                    try:
+                        return _engram_triton.lookup_host_rows(
+                            uva[0], lookup_scales, indices, self._num_sms
+                        )
+                    finally:
+                        if lease is not None:
+                            uva[1].record_stream(
+                                torch.cuda.current_stream(indices.device)
+                            )
         if indices.is_cuda:
             from rtp_llm.models_py.modules.dsv41 import _engram_triton
 
-            return _engram_triton.lookup_host_rows(*self._uva, indices, self._num_sms)
+            lookup = (
+                _engram_triton.lookup_prefetch_rows
+                if prefetch
+                else _engram_triton.lookup_host_rows
+            )
+            lease = self._device_scale_resources()
+            if lease is not None and torch.cuda.is_current_stream_capturing():
+                _DeviceScaleCapturePermit.require(self, lease)
+            uva = self._uva
+            try:
+                lookup_scales = (
+                    self._legacy_scale_uva
+                    if self._legacy_scale_uva is not None
+                    else uva[1]
+                )
+                return lookup(uva[0], lookup_scales, indices, self._num_sms)
+            finally:
+                if lease is not None:
+                    # This covers queued eager uses. The generation lease,
+                    # retained by metadata snapshots, owns future replays.
+                    uva[1].record_stream(torch.cuda.current_stream(indices.device))
         indices = indices.detach().to(device="cpu", dtype=torch.int64)
         valid = indices >= 0
         flat = indices.clamp_min(0).flatten()
@@ -774,6 +1235,726 @@ def gated_engram_residual(
     return result if out is None else out.copy_(result)
 
 
+def engram_lookup_prefetch_enabled(*, is_decode_role=False, external=False):
+    # Fabric mappings can only be read on CUDA, so the CPU lookup preference
+    # does not take precedence over prefetch for external tables.
+    default = "1" if external else "0"
+    return (
+        external or not engram_cpu_lookup_enabled(is_decode_role=is_decode_role)
+    ) and os.getenv("DSV41_ASYNC_ENGRAM_LOOKUP", default) == "1"
+
+
+def engram_cpu_lookup_enabled(*, is_decode_role=False):
+    """Resolve the role default without mutating process-wide environment.
+
+    A configured CPU lookup still only runs on ordinary target prefill.
+    Decode verification, draft, and CUDA graph capture keep the GPU path.
+    """
+    default = "0" if is_decode_role else "1"
+    return os.getenv("DSV41_CPU_ENGRAM_LOOKUP", default) == "1"
+
+
+def _hash_token_windows_cpu(state, windows, image_token, num_threads=None):
+    """Native token-parallel hash; NumPy remains an independent CPU oracle."""
+    if num_threads is not None:
+        from rtp_llm.models_py.modules.dsv41.engram_cpu import hash_token_windows_cpu
+
+        return hash_token_windows_cpu(
+            windows,
+            state.token_map,
+            state.multipliers,
+            state.primes,
+            state.layout.offsets,
+            pad_id=state.pad_id,
+            image_token=image_token,
+            num_threads=num_threads,
+        )
+    values = windows.detach().numpy().astype(np.int64, copy=False)
+    token_map = state.token_map.numpy()
+    blocked = np.logical_or.accumulate(
+        (values < 0) | (values >= token_map.size) | (values == image_token), axis=1
+    )
+    mapped = token_map[np.clip(values, 0, token_map.size - 1)]
+    mapped = np.where(blocked, state.pad_id, mapped)
+    multipliers = state.multipliers.numpy()
+    primes = state.primes.numpy()
+    offsets = state.layout.offsets.numpy()
+    layout = state.layout
+    hashes = np.empty(
+        (values.shape[0], len(layout.layer_ids), layout.n_hash_cols), dtype=np.int64
+    )
+    rolling = np.zeros((values.shape[0], len(layout.layer_ids)), dtype=np.int64)
+    for shift in range(layout.max_ngram_size):
+        # NumPy int64 multiply wraps like the CPU/CUDA tensor hash, and signed
+        # remainder uses the same nonnegative result for each positive prime.
+        rolling ^= mapped[:, shift, None] * multipliers[None, :, shift]
+        if shift:
+            start, end = (shift - 1) * layout.n_heads, shift * layout.n_heads
+            hashes[:, :, start:end] = (
+                rolling[:, :, None] % primes[None, :, shift - 1]
+                + offsets[None, :, start:end]
+            )
+    return torch.from_numpy(hashes)
+
+
+def _timed_cpu_hash(state, windows, image_token, num_threads, timing):
+    if timing is not None:
+        timing["hash_started_ns"] = time.perf_counter_ns()
+    try:
+        return _hash_token_windows_cpu(state, windows, image_token, num_threads)
+    finally:
+        if timing is not None:
+            timing["hash_finished_ns"] = time.perf_counter_ns()
+
+
+class _EngramCPULookupSlot:
+    """Fixed host storage; request outputs belong to their allocation stream."""
+
+    def __init__(self, module, capacity):
+        from rtp_llm.models_py.modules.dsv41.utils import V41MXFP8Linear
+
+        self.embedding = module.embed_tokens
+        self.device = module.q_weight.device
+        self.hash_index = module.layer_hash_index
+        self.heads = module.layout.n_hash_cols
+        self.capacity = capacity
+        self.num_threads = int(os.getenv("DSV41_CPU_ENGRAM_LOOKUP_THREADS", "16"))
+        if not 1 <= self.num_threads <= 16:
+            raise ValueError("DSV41_CPU_ENGRAM_LOOKUP_THREADS must be between 1 and 16")
+        self.collect_timing = os.getenv("DSV41_CPU_ENGRAM_LOOKUP_TIMING", "0") == "1"
+        self.last_timing = None
+        self.deadline_enabled = True
+        self.packed = type(module.wkv) is V41MXFP8Linear
+        self.head_dim = module.layout.head_dim
+        self.width = self.heads * (
+            self.head_dim + self.head_dim // 32 if self.packed else self.head_dim
+        )
+        self.dtype = torch.uint8 if self.packed else torch.bfloat16
+        self.host = torch.empty(
+            (capacity, self.width), dtype=self.dtype, device="cpu", pin_memory=True
+        )
+        self.hosts = (self.host,)
+        self.stream = torch.cuda.Stream(device=self.device)
+        self.copied = torch.cuda.Event()
+        self.stage_events = (self.copied,)
+        self.allocated = torch.cuda.Event()
+        current = torch.cuda.current_stream(self.device)
+        self.allocated.record(current)
+        self.stream.wait_event(self.allocated)
+        self.copied.record(self.stream)
+
+    def enable_pipeline(self):
+        # The second staging buffer lets CPU lookup of the next chunk overlap
+        # the preceding chunk's H2D transfer. Each buffer has its own reuse event.
+        second = torch.empty(
+            (self.capacity, self.width),
+            dtype=self.dtype,
+            device="cpu",
+            pin_memory=True,
+        )
+        self.hosts = (self.host, second)
+        self.stage_events = (torch.cuda.Event(), torch.cuda.Event())
+        for event in self.stage_events:
+            event.record(self.stream)
+
+    def allocate_output(self, count):
+        current = torch.cuda.current_stream(self.device)
+        output = torch.empty(
+            (count, self.width),
+            dtype=getattr(self, "dtype", torch.bfloat16),
+            device=self.device,
+        )
+        # Record before submitting the worker. A later worker-side recording
+        # could include the consumer's wait for copied and create a cycle.
+        self.allocated.record(current)
+        return output, current
+
+    def run(self, hashes, output, submitted_ns=None, work=None):
+        from rtp_llm.models_py.modules.dsv41.engram_cpu import lookup_host_rows_cpu
+
+        with torch.inference_mode(), torch.cuda.device(self.device):
+            try:
+                timing = (
+                    {"submitted_ns": submitted_ns, "started_ns": time.perf_counter_ns()}
+                    if self.collect_timing
+                    else None
+                )
+                if work is not None:
+                    if work.timing is not None:
+                        work.timing.update(timing)
+                    timing = work.timing
+                    self.last_timing = timing
+                    if work.abandoned:
+                        return None
+                ids = hashes.result()[:, self.hash_index].contiguous()
+                if timing is not None:
+                    timing.update(getattr(hashes, "engram_timing", None) or {})
+                if work is not None and work.abandoned:
+                    return None
+                lookup = lookup_host_rows_cpu
+                if getattr(self, "packed", False):
+                    from rtp_llm.models_py.modules.dsv41.engram_cpu import (
+                        lookup_host_rows_cpu_packed,
+                    )
+
+                    lookup = lookup_host_rows_cpu_packed
+                count, capacity = output.shape[0], self.host.shape[0]
+                for chunk, begin in enumerate(range(0, count, capacity)):
+                    end = min(begin + capacity, count)
+                    stage = chunk % len(self.hosts)
+                    # Only wait for the previous H2D using this staging buffer.
+                    # The other buffer can be read by DMA while CPU fills this one.
+                    self.stage_events[stage].synchronize()
+                    if work is not None and work.abandoned:
+                        return None
+                    host = self.hosts[stage][: end - begin]
+                    if timing is not None and begin == 0:
+                        timing["lookup_started_ns"] = time.perf_counter_ns()
+                    lookup(
+                        self.embedding.weight,
+                        self.embedding.scales,
+                        ids[begin:end],
+                        host,
+                        num_threads=self.num_threads,
+                    )
+                    if timing is not None:
+                        timing["lookup_finished_ns"] = time.perf_counter_ns()
+                    target = output if count <= capacity else output[begin:end]
+                    # First-copy commitment is atomic against abandonment.
+                    # After it, finish every chunk: the consumer must never
+                    # see a partly initialized request output or race a UVA
+                    # fallback. This may wait for later CPU chunks at deadline.
+                    if work is None:
+                        self._copy(target, host, self.stage_events[stage])
+                    else:
+                        with work.lock:
+                            if work.abandoned:
+                                self.last_timing = timing
+                                return None
+                            self._copy(target, host, self.stage_events[stage])
+                            work.copy_submitted = True
+                    if timing is not None:
+                        timing["copy_submitted_ns"] = time.perf_counter_ns()
+                self.last_timing = timing
+                return output
+            except BaseException:
+                self.stream.synchronize()
+                raise
+
+    def _copy(self, output, host, stage_event):
+        with torch.cuda.stream(self.stream):
+            self.stream.wait_event(self.allocated)
+            output.copy_(host, non_blocking=True)
+            if stage_event is not self.copied:
+                stage_event.record(self.stream)
+            self.copied.record(self.stream)
+
+    def close(self):
+        self.stream.synchronize()
+
+
+def _close_cpu_lookup(executor, slots):
+    executor.shutdown(wait=True)
+    for slot in slots:
+        slot.close()
+
+
+class EngramCPULookupRuntime:
+    """Startup-owned worker and bounded buffers; request code never compiles."""
+
+    def __init__(self, model, capacity):
+        from rtp_llm.models_py.modules.dsv41.engram_cpu import prepare_cpu_lookup
+
+        prepare_cpu_lookup()
+        self.max_rows = int(capacity)
+        self.capacity = min(self.max_rows, 32768)
+        self.num_threads = int(os.getenv("DSV41_CPU_ENGRAM_LOOKUP_THREADS", "16"))
+        if not 1 <= self.num_threads <= 16:
+            raise ValueError("DSV41_CPU_ENGRAM_LOOKUP_THREADS must be between 1 and 16")
+        self.retired = []
+        self.slots = {}
+        self.executor = ThreadPoolExecutor(
+            max_workers=1, thread_name_prefix="engram-cpu-lookup"
+        )
+        try:
+            for layer_id, _ in model._engram_layers:
+                module = model.v4.layers[layer_id].engram
+                if layer_id < 20 and module.q_weight.is_cuda:
+                    self.slots[layer_id] = _EngramCPULookupSlot(module, self.capacity)
+                    if self.max_rows > self.capacity:
+                        self.slots[layer_id].enable_pipeline()
+            # Initialize the Python worker, native thread team and H2D stream /
+            # events before readiness. Use real CPU hashes and each real table.
+            state = model._engram_hash_state
+            windows = torch.zeros(
+                (self.capacity, state.layout.max_ngram_size), dtype=torch.int32
+            )
+            hashes = self.executor.submit(
+                _hash_token_windows_cpu, state, windows, -2, self.num_threads
+            )
+            for slot in self.slots.values():
+                output, _ = slot.allocate_output(self.capacity)
+                future = self.executor.submit(slot.run, hashes, output)
+                future.result()
+                slot.copied.synchronize()
+                if getattr(slot, "packed", False):
+                    from rtp_llm.models_py.modules.dsv41._engram_packed_triton import (
+                        unpack_packed_rows,
+                    )
+
+                    pair = unpack_packed_rows(output, slot.heads, slot.head_dim)
+                    if pair is None:
+                        raise RuntimeError(
+                            "Engram packed output failed startup qualification"
+                        )
+                    torch.cuda.current_stream(slot.device).synchronize()
+                    del pair
+                # Warm the allocation, copy and events without retaining a
+                # device tensor or a Future holding it after startup.
+                del future, output
+        except BaseException:
+            _close_cpu_lookup(self.executor, self.slots.values())
+            raise
+        self._finalizer = weakref.finalize(
+            self, _close_cpu_lookup, self.executor, tuple(self.slots.values())
+        )
+
+    def close(self):
+        self._finalizer()
+        self.reap()
+
+    def reap(self):
+        """Bound abandoned work to one request; never queue behind old lookups."""
+        pending = []
+        error = None
+        for future in self.retired:
+            if future.done():
+                try:
+                    future.result()
+                except BaseException as exc:
+                    error = error or exc
+            else:
+                pending.append(future)
+        self.retired = pending
+        if error is not None:
+            raise error  # Surface background errors once, including at shutdown.
+        return not pending
+
+    def retire(self, work):
+        self.retired.append(self.executor.submit(work._drain))
+
+
+def prepare_engram_cpu_lookup(model, *, max_m):
+    is_decode_role = bool(getattr(model, "_is_decode_role", False))
+    if (
+        is_decode_role
+        or not engram_cpu_lookup_enabled(is_decode_role=is_decode_role)
+        or max_m <= 0
+        # Capability selection is startup-only. Do not create a worker, compile
+        # CPU code or dereference None host views for a GPU-only backing.
+        or any(
+            not getattr(
+                model.v4.layers[layer_id].engram.embed_tokens,
+                "supports_cpu_lookup",
+                True,
+            )
+            for layer_id, _ in getattr(model, "_engram_layers", ())
+            if layer_id < 20
+        )
+    ):
+        return
+    runtime = getattr(model, "_engram_cpu_runtime", None)
+    # The scheduler/workspace bound also caps request-owned device outputs.
+    # Refresh it on both growth and shrinkage; staging alone caps at 32K.
+    if runtime is not None and runtime.max_rows == int(max_m):
+        return
+    if runtime is not None:
+        runtime.close()
+        model._engram_cpu_runtime = None
+    runtime = EngramCPULookupRuntime(model, max_m)
+    model._engram_cpu_runtime = runtime
+    logger.info(
+        "[DSV41 Engram] CPU lookup ready=True capacity=%d max_rows=%d slots=%d "
+        "workers=1 threads=%s pinned_bytes=%d device_bytes=%d",
+        runtime.capacity,
+        runtime.max_rows,
+        len(runtime.slots),
+        tuple(slot.num_threads for slot in runtime.slots.values()),
+        sum(
+            sum(host.numel() * host.element_size() for host in slot.hosts)
+            for slot in runtime.slots.values()
+        ),
+        0,  # Device outputs are allocated per request and released after WKV.
+    )
+
+
+class _EngramCPULookupWork:
+    def __init__(self, slot, ids, runtime=None):
+        self.slot, self.ids = slot, ids
+        # The model/request plan owns the runtime. A queued worker must not
+        # become its final owner: finalization on that same worker would call
+        # executor.shutdown(wait=True) and try to join its own thread.
+        self.runtime = weakref.proxy(runtime) if runtime is not None else None
+        self.lock = threading.Lock()
+        self.abandoned = self.copy_submitted = self.retired = False
+        self.timing = None
+        self.future = None
+        self.allocation_stream = None
+        self.signature = (ids.shape, ids.stride(), ids.storage_offset(), ids.dtype)
+        self.version = _tensor_version(ids)
+        self.consumed = False
+
+    def submit(self, executor, hashes, count, submitted_ns):
+        if getattr(self.slot, "collect_timing", False):
+            self.timing = {"submitted_ns": submitted_ns}
+            self.slot.last_timing = self.timing
+        output, self.allocation_stream = self.slot.allocate_output(count)
+        if self.runtime is None:
+            self.future = executor.submit(self.slot.run, hashes, output, submitted_ns)
+        else:
+            self.future = executor.submit(
+                self.slot.run, hashes, output, submitted_ns, self
+            )
+
+    def _abandon_before_copy(self):
+        with self.lock:
+            if self.copy_submitted:
+                return False
+            self.abandoned = True
+            self.future.cancel()
+            return True
+
+    def consume(self, ids, hidden):
+        if not (
+            self.ids is ids
+            and self.signature
+            == (ids.shape, ids.stride(), ids.storage_offset(), ids.dtype)
+            and self.version == _tensor_version(ids)
+            and hidden.shape[0] == ids.shape[0]
+            and hidden.device == self.slot.device
+            and torch.cuda.current_stream(hidden.device) == self.allocation_stream
+        ):
+            self.clear()
+            return None
+        started = time.perf_counter_ns() if self.slot.collect_timing else None
+        current = torch.cuda.current_stream(hidden.device)
+        polls = 0
+        if self.runtime is not None and self.slot.deadline_enabled:
+            while not self.future.done():
+                # Query before submitting WKV: completion means the GPU has
+                # reached this consumer, not merely that a wall-clock estimate
+                # expired. No extra event or GPU kernel is needed. Yield the
+                # GIL between probes rather than busy-polling the driver.
+                polls += 1
+                if current.query() and self._abandon_before_copy():
+                    if self.timing is not None:
+                        self.timing.update(
+                            outcome="gpu_deadline_fallback",
+                            consumer_wait_started_ns=started,
+                            consumer_wait_finished_ns=time.perf_counter_ns(),
+                            consumer_stream_queries=polls,
+                        )
+                    self.clear()
+                    return None
+                try:
+                    self.future.result(timeout=0.001)
+                except TimeoutError:
+                    if self.future.done():
+                        # Completion can race the timeout. Retrieve the actual
+                        # result/worker error instead of rethrowing a stale
+                        # wait timeout after a successful completion.
+                        self.future.result()
+                        break
+        rows = self.future.result()
+        if self.slot.last_timing is not None:
+            self.slot.last_timing["consumer_wait_started_ns"] = started
+            self.slot.last_timing["consumer_wait_finished_ns"] = time.perf_counter_ns()
+            self.slot.last_timing["consumer_stream_queries"] = polls
+            self.slot.last_timing["outcome"] = "consumed"
+        current.wait_event(self.slot.copied)
+        self.consumed = True
+        # Join the copy on the allocation's owning stream before returning it.
+        # Dropping the Future lets WKV release the tensor before forward ends;
+        # stream-ordered reuse needs no record_stream allocator polling.
+        self.ids = self.future = None
+        return rows
+
+    def clear(self):
+        self.ids = None
+        if self.runtime is not None and self.future is not None:
+            if not self.retired:
+                self._abandon_before_copy()
+                self.retired = True
+                self.runtime.retire(self)
+            return
+        self._drain()
+
+    def _drain(self):
+        try:
+            if self.future is not None:
+                try:
+                    self.future.result()
+                except CancelledError:
+                    if not self.abandoned:
+                        raise
+                if not self.consumed and (self.copy_submitted or not self.abandoned):
+                    self.slot.copied.synchronize()
+        finally:
+            self.ids = self.future = None
+
+
+class EngramCPULookupPrefetch:
+    """Queue CPU work immediately; one worker serves layers in model order."""
+
+    def __init__(self, model, windows, image_token):
+        self.runtime = getattr(model, "_engram_cpu_runtime", None)
+        self.work = []
+        self.hashes = None
+        if (
+            self.runtime is None
+            or windows is None
+            or windows.is_cuda
+            or windows.dtype not in (torch.int32, torch.int64)
+            or windows.ndim != 2
+            or windows.shape[1] != model._engram_hash_state.layout.max_ngram_size
+            or not 0 < windows.shape[0] <= self.runtime.max_rows
+            or torch.cuda.is_current_stream_capturing()
+        ):
+            return
+        if isinstance(self.runtime, EngramCPULookupRuntime) and not self.runtime.reap():
+            return
+        timing = (
+            {"hash_submitted_ns": time.perf_counter_ns()}
+            if any(slot.collect_timing for slot in self.runtime.slots.values())
+            else None
+        )
+        self.hashes = self.runtime.executor.submit(
+            _timed_cpu_hash,
+            model._engram_hash_state,
+            windows,
+            image_token,
+            getattr(self.runtime, "num_threads", None),
+            timing,
+        )
+        self.hashes.engram_timing = timing
+        try:
+            for layer_id, slot in self.runtime.slots.items():
+                layer = model.v4.layers[layer_id]
+                ids = layer.engram_hashes
+                if not (
+                    ids is not None
+                    and ids.is_cuda
+                    and ids.device == slot.device
+                    and ids.dtype == torch.int64
+                    and ids.shape == (windows.shape[0], slot.heads)
+                ):
+                    continue
+                if layer.engram._cpu_lookup_work is not None:
+                    raise RuntimeError("Engram CPU lookup is already pending")
+                work = _EngramCPULookupWork(
+                    slot,
+                    layer.engram_hashes,
+                    (
+                        self.runtime
+                        if isinstance(self.runtime, EngramCPULookupRuntime)
+                        else None
+                    ),
+                )
+                self.work.append((layer.engram, work))
+                work.submit(
+                    self.runtime.executor,
+                    self.hashes,
+                    windows.shape[0],
+                    time.perf_counter_ns() if slot.collect_timing else None,
+                )
+                layer.engram._cpu_lookup_work = work
+        except BaseException:
+            self.clear()
+            raise
+
+    def before_layer(self, index):
+        pass
+
+    def clear(self):
+        error = None
+        for module, work in self.work:
+            module._cpu_lookup_work = None
+            try:
+                work.clear()
+            except BaseException as exc:
+                error = error or exc
+        if self.hashes is not None:
+            try:
+                if isinstance(self.runtime, EngramCPULookupRuntime):
+                    # Hold CPU windows/state until hashing finishes without
+                    # blocking the fallback consumer or allowing another batch
+                    # to pile work behind this one.
+                    if not self.hashes.done():
+                        self.runtime.retired.append(self.hashes)
+                    else:
+                        self.hashes.result()
+                else:
+                    self.hashes.result()
+            except BaseException as exc:
+                error = error or exc
+        self.hashes = None
+        self.work = []
+        if error is not None:
+            raise error
+
+
+def _tensor_version(tensor):
+    # Production hashes are fresh inference tensors, immutable for this forward.
+    # Ordinary tensors additionally let us reject an in-place edit before consume.
+    if tensor.is_inference():
+        return None
+    return tensor._version
+
+
+_ENGRAM_CHUNK_ROWS = 32768
+
+
+def _lookup_tensors(rows):
+    return rows if isinstance(rows, tuple) else (rows,)
+
+
+def _lookup_for_projection(module, ids, device, *, prefetch=False):
+    if (
+        getattr(module, "_direct_fp8_lookup", False) is True
+        and ids.is_cuda
+        and ids.dtype == torch.int64
+        and ids.device == torch.device(device)
+    ):
+        return module.embed_tokens.lookup_quantized(ids, device)
+    if prefetch:
+        return module.embed_tokens(ids, device, prefetch=True)
+    return module.embed_tokens(ids, device)
+
+
+class _EngramLookupWork:
+    """One forward's lookup; CUDA dependencies never imply a host-side wait."""
+
+    def __init__(self, embedding, ids, rows, done):
+        self.embedding = embedding  # Own the custom UVA registration while pending.
+        self.ids = ids
+        self.signature = (ids.shape, ids.stride(), ids.storage_offset(), ids.dtype)
+        self.version = _tensor_version(ids)
+        self.rows = rows
+        self.done = done
+
+    def consume(self, ids, hidden, *, record_consumer=True):
+        outputs = _lookup_tensors(self.rows) if self.rows is not None else ()
+        valid = (
+            bool(outputs)
+            and self.ids is ids
+            and self.signature
+            == (ids.shape, ids.stride(), ids.storage_offset(), ids.dtype)
+            and self.version == _tensor_version(ids)
+            and all(
+                t.shape[0] == hidden.shape[0] and t.device == hidden.device
+                for t in outputs
+            )
+        )
+        if not valid:
+            self.clear()
+            return None
+        current = torch.cuda.current_stream(hidden.device)
+        current.wait_event(self.done)
+        rows = self.rows
+        if record_consumer:
+            for tensor in outputs:
+                tensor.record_stream(current)
+        self.rows = self.ids = self.embedding = None
+        return rows
+
+    def clear(self):
+        if self.rows is not None:
+            # Only abandoned/invalid work waits on the CPU. The normal consumer
+            # joins on its stream and record_stream covers the output allocator.
+            self.done.synchronize()
+        self.rows = self.ids = self.embedding = None
+
+
+class _EngramChunkLookup:
+    """First prefetched chunk and its original request identity."""
+
+    def __init__(self, ids, first):
+        self.ids = ids
+        self.signature = (ids.shape, ids.stride(), ids.storage_offset(), ids.dtype)
+        self.version = _tensor_version(ids)
+        self.first = first
+
+    @property
+    def rows(self):
+        return self.first.rows
+
+    def matches(self, ids, hidden):
+        return (
+            self.ids is ids
+            and self.signature
+            == (ids.shape, ids.stride(), ids.storage_offset(), ids.dtype)
+            and self.version == _tensor_version(ids)
+            and ids.shape[0] == hidden.shape[0]
+            and ids.device == hidden.device
+        )
+
+    def clear(self):
+        self.first.clear()
+        self.ids = None
+
+
+class EngramLookupPrefetch:
+    """Forward-local, two-layer lookahead with at most one pending lookup.
+
+    Hash tensors must remain immutable for this forward. No lookup result or
+    hash is reused by a later request, including requests reusing tensor storage.
+    Layers in the CED query domain are conservatively left synchronous.
+    """
+
+    def __init__(self, layers):
+        self.layers = tuple(
+            (index, layer.engram, layer.engram_hashes)
+            for index, layer in layers
+            if index < 20 and layer.engram is not None
+        )
+        self.cursor = 0
+        self.pending = None
+
+    def before_layer(self, index):
+        if self.pending is not None:
+            target, module, work = self.pending
+            if work.rows is None:
+                self.pending = None
+            elif target < index:
+                module.clear_lookup_prefetch()
+                self.pending = None
+            else:
+                return
+        while self.cursor < len(self.layers):
+            target, module, ids = self.layers[self.cursor]
+            if target > index + 2:
+                return
+            self.cursor += 1
+            if target < index:
+                continue
+            from rtp_llm.models_py.modules.dsv41 import _profiler
+
+            with _profiler.record_function_range(f"dsv41.engram.prefetch.L{target}"):
+                work = module.prefetch_lookup(ids)
+            if work is not None:
+                self.pending = (target, module, work)
+                return
+
+    def clear(self):
+        if self.pending is not None:
+            _, module, work = self.pending
+            # The module can already have consumed the work; clear is idempotent.
+            module.clear_lookup_prefetch()
+            work.clear()
+            self.pending = None
+        self.layers = ()
+
+
 class Engram(nn.Module):
     def __init__(
         self,
@@ -793,13 +1974,138 @@ class Engram(nn.Module):
         self.register_buffer("q_weight", q_weight, persistent=False)
         self.register_buffer("k_weight", k_weight, persistent=False)
         self.eps = eps
+        self._lookup_stream = None
+        self._lookup_done = None
+        self._lookup_work = None
+        self._cpu_lookup_work = None
+        self._direct_fp8_lookup = False
+        if (
+            getattr(embedding, "_quantized_lookup_supported", False) is True
+            and layout.n_hash_cols == 24
+            and layout.head_dim == 256
+            and os.getenv("DSV41_ENGRAM_DIRECT_FP8", "1") == "1"
+        ):
+            from rtp_llm.models_py.modules.dsv41.utils import V41MXFP8Linear
+
+            self._direct_fp8_lookup = type(wkv) is V41MXFP8Linear
+
+    def warmup_lookup(self, ids, device):
+        if self._direct_fp8_lookup:
+            return self.embed_tokens.lookup_quantized(ids, device, prepare=True)
+        return self.embed_tokens(ids, device)
+
+    def prepare_lookup_prefetch(self):
+        """Called after lookup JIT warmup, never from a request or capture."""
+        if (
+            not getattr(self.embed_tokens, "supports_async_prefetch", True)
+            or not engram_lookup_prefetch_enabled(
+                external=self.embed_tokens._uses_external_storage is True
+            )
+            or not self.q_weight.is_cuda
+            or self.embed_tokens._uva is None
+            or self._lookup_stream is not None
+        ):
+            return
+        if torch.cuda.is_current_stream_capturing():
+            raise RuntimeError("Engram prefetch must be initialized before capture")
+        device = self.q_weight.device
+        stream = torch.cuda.Stream(device=device, priority=0)
+        done = torch.cuda.Event()
+        stream.wait_stream(torch.cuda.current_stream(device))
+        done.record(stream)
+        torch.cuda.current_stream(device).wait_event(done)
+        # Register the event once, not once per request. Its latest recording
+        # covers all earlier reads on this stream when the table is destroyed.
+        self.embed_tokens.register_lookup_event(done)
+        self._lookup_stream, self._lookup_done = stream, done
+
+    def prefetch_lookup(self, hash_ids):
+        if (
+            not getattr(self.embed_tokens, "supports_async_prefetch", True)
+            or self._lookup_stream is None
+            or self._lookup_work is not None
+            or not hash_ids.is_cuda
+            or hash_ids.device != self.q_weight.device
+            or hash_ids.dtype != torch.int64
+            or hash_ids.ndim != 2
+            or hash_ids.shape[1] != self.layout.n_hash_cols
+            or hash_ids.shape[0] == 0
+            or not hash_ids.is_contiguous()
+            or torch.cuda.is_current_stream_capturing()
+        ):
+            return None
+        chunked = hash_ids.shape[0] > _ENGRAM_CHUNK_ROWS
+        if chunked and self.embed_tokens._uses_external_storage is not True:
+            return None
+        self._lookup_stream.wait_stream(torch.cuda.current_stream(hash_ids.device))
+        if chunked:
+            first = self._submit_lookup(hash_ids[:_ENGRAM_CHUNK_ROWS])
+            work = _EngramChunkLookup(hash_ids, first)
+        else:
+            work = self._submit_lookup(hash_ids)
+        self._lookup_work = work
+        return work
+
+    def _submit_lookup(self, hash_ids):
+        stream = self._lookup_stream
+        hash_ids.record_stream(stream)
+        with self.embed_tokens.lookup_guard(), torch.cuda.stream(stream):
+            try:
+                rows = _lookup_for_projection(
+                    self, hash_ids, hash_ids.device, prefetch=True
+                )
+                self._lookup_done.record(stream)
+            except BaseException:
+                # Keep the backing admitted until any queued reads finish.
+                stream.synchronize()
+                raise
+        return _EngramLookupWork(self.embed_tokens, hash_ids, rows, self._lookup_done)
+
+    def clear_lookup_prefetch(self):
+        work = self._lookup_work
+        self._lookup_work = None
+        if work is not None:
+            work.clear()
 
     @classmethod
-    def from_checkpoint(cls, config, layer_id: int, checkpoint_path: str, device):
+    def from_checkpoint(
+        cls,
+        config,
+        layer_id: int,
+        checkpoint_path: str,
+        device,
+        *,
+        external_storage=None,
+        scale_group=None,
+    ):
+        """Load local projection weights and an explicit legacy/external table.
+
+        The caller must attach with a trusted model/checkpoint identity before
+        supplying external_storage, and retain it through all model graphs.
+        External mode never opens an embedding checkpoint or silently falls back.
+        """
         from safetensors import safe_open
 
         layout = EngramLayout(config)
         layer_hash_index = layout.layer_ids.index(layer_id)
+        target = torch.device(device)
+        if external_storage is not None:
+            if target.type != "cuda":
+                raise ValueError("external Engram storage requires a CUDA model")
+            ordinal = (
+                target.index
+                if target.index is not None
+                else torch.cuda.current_device()
+            )
+            if ordinal != external_storage.device:
+                raise ValueError(
+                    "model and external Engram storage must use the same CUDA device"
+                )
+            with external_storage.use():
+                external_storage.require_model_layout(
+                    layout.layer_ids, layout.num_embeddings, layout.head_dim
+                )
+
         root = Path(checkpoint_path)
         with (root / "model.safetensors.index.json").open() as file:
             weight_map = json.load(file)["weight_map"]
@@ -814,68 +2120,104 @@ class Engram(nn.Module):
             ) as file:
                 return file.get_tensor(name)
 
-        expected = (layout.num_embeddings[layer_hash_index], layout.head_dim)
-        pinned = None
-        if torch.device(device).type == "cuda":
-            from rtp_llm.models_py.modules.dsv41.utils import V41MXFP8Linear
+        embedding = None
+        try:
+            if external_storage is not None:
+                manifest = external_storage.validated.manifest
+                embedding = HostEngramEmbedding.from_storage(
+                    external_storage,
+                    layer_id,
+                    scale_group=scale_group,
+                    scale_identity=f"{manifest.model_revision}|{manifest.generation}",
+                )
+            else:
+                table, scales = load("embed.weight"), load("embed.scale")
+                shape = (layout.num_embeddings[layer_hash_index], layout.head_dim)
+                if tuple(table.shape) != shape:
+                    raise ValueError(
+                        f"Engram table shape {table.shape} does not match {shape}"
+                    )
+                pinned = None
+                identity = None
+                if target.type == "cuda":
+                    parts = [str(root.resolve()), prefix]
+                    for suffix in ("embed.weight", "embed.scale"):
+                        path = root / weight_map[prefix + suffix]
+                        stat = path.stat()
+                        parts.extend(
+                            [
+                                str(path.resolve()),
+                                str(stat.st_size),
+                                str(stat.st_mtime_ns),
+                            ]
+                        )
+                    identity = "|".join(parts)
+                    pinned = _PinnedSharedTable(table, scales, identity, target)
+                    table, scales = pinned.weight, pinned.scales
+                else:
+                    _prefault_host_tensor(table, prefix + "embed.weight")
+                    _prefault_host_tensor(scales, prefix + "embed.scale")
+                embedding = HostEngramEmbedding(
+                    table,
+                    scales,
+                    pinned=pinned,
+                    scale_group=scale_group,
+                    scale_identity=identity,
+                )
+            if target.type == "cuda":
+                with torch.cuda.device(target):
+                    from rtp_llm.models_py.modules.dsv41.utils import V41MXFP8Linear
 
-            # "staging-v2" salts the digest: tables staged by the removed
-            # fastsafetensors view path could be silently corrupted (its
-            # generator freed the 94 GiB backing buffer before the staging
-            # copy read it); the salt orphans any such table for TTL prune.
-            identity = [str(root.resolve()), prefix, "staging-v2"]
-            for suffix in ("embed.weight", "embed.scale"):
-                path = root / weight_map[prefix + suffix]
-                stat = path.stat()
-                identity.extend(
-                    [str(path.resolve()), str(stat.st_size), str(stat.st_mtime_ns)]
+                    projection = V41MXFP8Linear(
+                        load("wkv.weight").to(target), load("wkv.scale").to(target)
+                    )
+            else:
+                projection = _ReferenceWKV(
+                    dequantize_block_weight(load("wkv.weight"), load("wkv.scale"))
                 )
-            # Lazy source: only the flock winner materializes the ~94 GiB pair
-            # (per-tensor safe_open reads inside _load_engram_tables); processes that
-            # find the shared table already present never read it at all.
-            pinned = _PinnedSharedTable(
-                None,
-                None,
-                "|".join(identity),
-                device,
-                loader=lambda: _load_engram_tables(root, weight_map, prefix, expected),
-                table_shape=expected,
+            return cls(
+                layout,
+                layer_hash_index,
+                embedding,
+                projection,
+                load("q_weight").to(target),
+                load("k_weight").to(target),
+                float(_config_value(config, "rms_norm_eps")),
             )
-            table, scales = pinned.weight, pinned.scales
-            projection = V41MXFP8Linear(
-                load("wkv.weight").to(device), load("wkv.scale").to(device)
-            )
-        else:
-            table, scales = load("embed.weight"), load("embed.scale")
-            if tuple(table.shape) != expected:
-                raise ValueError(
-                    f"Engram table shape {table.shape} does not match {expected}"
-                )
-            _prefault_host_tensor(table, prefix + "embed.weight")
-            _prefault_host_tensor(scales, prefix + "embed.scale")
-            projection = _ReferenceWKV(
-                dequantize_block_weight(load("wkv.weight"), load("wkv.scale"))
-            )
-        return cls(
-            layout,
-            layer_hash_index,
-            HostEngramEmbedding(table, scales, pinned=pinned),
-            projection,
-            load("q_weight").to(device),
-            load("k_weight").to(device),
-            float(_config_value(config, "rms_norm_eps")),
-        )
+        except BaseException:
+            if external_storage is not None and embedding is not None:
+                embedding.release_external_views()
+            raise
+
+    def release_external_views(self):
+        """Release this layer after the engine has stopped using its graphs."""
+        self.embed_tokens.release_external_views()
 
     def forward(self, hidden, hash_ids, token_mask=None):
         if hidden.shape[0] == 0:
             return hidden
         # Engram is token-local after hashing. Bound lookup/projection/gate
         # temporaries for packed long prompts without changing the decode path.
-        chunk_rows = 32768
+        chunk_rows = _ENGRAM_CHUNK_ROWS
         inplace = _engram_inject_supported(
             hidden, self.q_weight, self.k_weight, token_mask
         )
         if hidden.shape[0] > chunk_rows:
+            work = self._lookup_work
+            if isinstance(work, _EngramChunkLookup):
+                self._lookup_work = None
+                if work.matches(hash_ids, hidden):
+                    return self._forward_prefetched_chunks(
+                        hidden, hash_ids, token_mask, inplace, work
+                    )
+                work.clear()
+            # Validate the original request IDs exactly once, before creating
+            # chunk views. Identity/version/stream checks must remain strict.
+            rows = None
+            cpu_work = self._cpu_lookup_work
+            if cpu_work is not None:
+                self._cpu_lookup_work = None
+                rows = cpu_work.consume(hash_ids, hidden)
             output = (
                 hidden
                 if inplace
@@ -888,15 +2230,111 @@ class Engram(nn.Module):
                     hash_ids[begin:end],
                     None if token_mask is None else token_mask[begin:end],
                     out=output[begin:end],
+                    cpu_rows=None if rows is None else rows[begin:end],
                 )
             return output
         return self._forward_rows(
             hidden, hash_ids, token_mask, out=hidden if inplace else None
         )
 
-    def _forward_rows(self, hidden, hash_ids, token_mask, *, out=None):
-        rows = self.embed_tokens(hash_ids, hidden.device).flatten(-2)
-        kv = self.wkv(rows)
+    def _forward_prefetched_chunks(self, hidden, ids, mask, inplace, work):
+        output = (
+            hidden
+            if inplace
+            else torch.empty_like(hidden, memory_format=torch.contiguous_format)
+        )
+        stream = self._lookup_stream
+        current = torch.cuda.current_stream(hidden.device)
+        pending = work.first
+        try:
+            for begin in range(0, hidden.shape[0], _ENGRAM_CHUNK_ROWS):
+                end = min(begin + _ENGRAM_CHUNK_ROWS, hidden.shape[0])
+                rows = pending.consume(
+                    pending.ids, hidden[begin:end], record_consumer=False
+                )
+                pending = None
+                try:
+                    if end < hidden.shape[0]:
+                        pending = self._submit_lookup(
+                            ids[end : end + _ENGRAM_CHUNK_ROWS]
+                        )
+                    self._forward_rows(
+                        hidden[begin:end],
+                        ids[begin:end],
+                        None if mask is None else mask[begin:end],
+                        out=output[begin:end],
+                        lookup_rows=rows,
+                    )
+                finally:
+                    if rows is not None:
+                        # The result was allocated on the lookup stream. Join
+                        # its last reader before returning the allocation so
+                        # the next chunk can reuse it on that same stream.
+                        try:
+                            stream.wait_stream(current)
+                        except BaseException:
+                            for tensor in _lookup_tensors(rows):
+                                tensor.record_stream(current)
+                            raise
+                        finally:
+                            del rows
+        finally:
+            work.ids = None
+            if pending is not None:
+                pending.clear()
+        return output
+
+    def projection_input(self, hidden, hash_ids, *, cpu_rows=None):
+        """Consume this forward's lookup once, preserving packed FP8 inputs."""
+        rows = cpu_rows
+        del cpu_rows
+        cpu_work = self._cpu_lookup_work
+        if rows is None and cpu_work is not None:
+            self._cpu_lookup_work = None
+            rows = cpu_work.consume(hash_ids, hidden)
+        if rows is not None:
+            if rows.dtype == torch.uint8:
+                from rtp_llm.models_py.modules.dsv41._engram_packed_triton import (
+                    unpack_packed_rows,
+                )
+
+                pair = unpack_packed_rows(
+                    rows, self.layout.n_hash_cols, self.layout.head_dim
+                )
+                if pair is None:
+                    del rows
+                    return Engram.projection_input(self, hidden, hash_ids)
+                return pair
+            return rows
+        work = self._lookup_work
+        rows = None
+        if work is not None:
+            self._lookup_work = None
+            if isinstance(work, _EngramChunkLookup):
+                work.clear()
+            else:
+                rows = work.consume(hash_ids, hidden)
+        if rows is None:
+            rows = _lookup_for_projection(self, hash_ids, hidden.device)
+        return rows if isinstance(rows, tuple) else rows.flatten(-2)
+
+    def _forward_rows(
+        self, hidden, hash_ids, token_mask, *, out=None, cpu_rows=None, lookup_rows=None
+    ):
+        if lookup_rows is None:
+            rows = Engram.projection_input(self, hidden, hash_ids, cpu_rows=cpu_rows)
+        else:
+            rows = (
+                lookup_rows
+                if isinstance(lookup_rows, tuple)
+                else lookup_rows.flatten(-2)
+            )
+            del lookup_rows
+        if isinstance(rows, tuple):
+            kv = self.wkv.forward_quantized(*rows)
+        else:
+            kv = self.wkv(rows)
+        del rows
         return gated_engram_residual(
             hidden, kv, self.q_weight, self.k_weight, self.eps, token_mask, out=out
         )

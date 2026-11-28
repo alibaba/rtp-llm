@@ -49,8 +49,11 @@ public:
         return model_config_;
     }
 
-    void
-    startTimelineProfiling(const std::string& trace_name, int start_step, int num_steps, bool enable_all_rank = false);
+    void startTimelineProfiling(const std::string& trace_name,
+                                int                start_step,
+                                int                num_steps,
+                                bool               enable_all_rank = false,
+                                bool               profile_light   = false);
 
 private:
     absl::Status trySaveStepError() const;

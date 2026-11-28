@@ -7,11 +7,16 @@ import time
 import traceback
 from typing import Iterator, Optional
 
+# Apply before torch/native imports can allocate memory or start worker threads.
+if __name__ == "__main__":
+    from rtp_llm.utils.numa import configure_numa_interleave
+
+    configure_numa_interleave()
+
 import requests
 import torch
 
 from rtp_llm.utils.time_util import timer_wrapper
-from rtp_llm.utils.util import str_to_bool
 
 CUR_PATH = os.path.dirname(os.path.abspath(__file__))
 sys.path.append(os.path.join(str(CUR_PATH), ".."))
@@ -24,7 +29,7 @@ from rtp_llm.config.server_config_setup import (
 )
 from rtp_llm.distribute.distributed_server import get_local_world_info
 from rtp_llm.models_py.distributed.rank_layout import RankLayout
-from rtp_llm.ops import RoleType, SpeculativeType, VitSeparation
+from rtp_llm.ops import RoleType, VitSeparation
 from rtp_llm.server.server_args.server_args import setup_args
 from rtp_llm.utils.backend_restart import ShutdownRequested
 from rtp_llm.utils.concurrency_controller import init_controller
@@ -38,6 +43,9 @@ from rtp_llm.utils.process_manager import (
 from rtp_llm.utils.warmup import configure_warmup
 
 setup_logging()
+
+# Existing backend restart readiness channel.
+STARTUP_WARMUP_HEALTH_GATE_FILE_ENV = "RTP_LLM_STARTUP_WARMUP_HEALTH_GATE_FILE"
 
 
 def _install_hot_hook_runtime(role: str, py_env_configs) -> None:
@@ -57,17 +65,6 @@ def _install_hot_hook_runtime(role: str, py_env_configs) -> None:
             )
     except Exception as e:
         logging.error("failed to install RTP hot hook runtime for %s: %s", role, e)
-
-
-STARTUP_WARMUP_HEALTH_GATE_FILE_ENV = "RTP_LLM_STARTUP_WARMUP_HEALTH_GATE_FILE"
-STARTUP_REAL_WARMUP_MIN_TOKEN_LEN = 2
-STARTUP_REAL_WARMUP_TIMEOUT_S = 600.0
-STARTUP_REAL_WARMUP_MAX_NEW_TOKENS = 1
-STARTUP_REAL_WARMUP_TOKEN_ID = 100
-
-
-class StartupRealWarmupAddressResolutionError(RuntimeError):
-    pass
 
 
 def check_server_health(server_port, path="/health"):
@@ -658,53 +655,9 @@ def start_frontend_server_impl(
     return frontend_processes
 
 
-def _role_is_prefill(py_env_configs: PyEnvConfigs) -> bool:
-    return py_env_configs.role_config.role_type == RoleType.PREFILL
-
-
-def _is_startup_real_warmup_entry_rank(py_env_configs: PyEnvConfigs) -> bool:
-    parallelism_config = py_env_configs.parallelism_config
-    world_rank = int(parallelism_config.world_rank)
-    world_size = int(parallelism_config.world_size)
-    tp_size = int(parallelism_config.tp_size)
-    if world_size <= 1:
-        return True
-    if tp_size <= 0:
-        raise ValueError(
-            f"parallelism_config.tp_size should be positive, got {tp_size}"
-        )
-
-    layout = RankLayout.from_parallelism_config(parallelism_config)
-    coord = layout.coord_of(world_rank)
-    return coord.pp == 0 and coord.tp == 0
-
-
-def _should_run_startup_real_warmup(py_env_configs: PyEnvConfigs) -> bool:
-    runtime_config = py_env_configs.runtime_config
-    if not runtime_config.warm_up or not runtime_config.model_warm_up:
-        return False
-
-    role_is_prefill = _role_is_prefill(py_env_configs)
-    if not role_is_prefill:
-        return False
-
-    if not _is_startup_real_warmup_entry_rank(py_env_configs):
-        parallelism_config = py_env_configs.parallelism_config
-        logging.info(
-            "skip startup real warmup on non-entry rank, "
-            "world_rank=%s, tp_size=%s, world_size=%s",
-            parallelism_config.world_rank,
-            parallelism_config.tp_size,
-            parallelism_config.world_size,
-        )
-        return False
-
-    return getattr(py_env_configs.model_args, "model_type", "") == "deepseek_v4"
-
-
 def _setup_startup_warmup_health_gate(py_env_configs: PyEnvConfigs, force=False):
     # Backend restarts reuse this gate: /health stays 503 until a generation is ready.
-    if not force and not _should_run_startup_real_warmup(py_env_configs):
+    if not force:
         os.environ.pop(STARTUP_WARMUP_HEALTH_GATE_FILE_ENV, None)
         return None
 
@@ -864,11 +817,9 @@ def _create_backend_restarter(
         heartbeat_timeout_s=heartbeat_timeout,
     )
     coordinator.start(should_abort=lambda: process_manager.shutdown_requested)
-    backend_startup_status = {}
 
     def spawn_backend():
-        nonlocal backend_startup_status
-        process, check_ready, backend_startup_status = _spawn_backend_process(
+        process, check_ready, _ = _spawn_backend_process(
             global_controller,
             py_env_configs,
             _backend_service_draining(service_draining, process_manager, True),
@@ -881,9 +832,6 @@ def _create_backend_restarter(
         coordinator=coordinator,
         is_shutdown_requested=lambda: process_manager.shutdown_requested,
         gate_file=gate_file,
-        after_ready=lambda: _maybe_run_startup_real_warmup(
-            py_env_configs, backend_startup_status.get("max_seq_len")
-        ),
         ready_timeout_s=startup_timeout,
     )
 
@@ -1018,9 +966,6 @@ def start_server(py_env_configs: PyEnvConfigs):
             logging.error("[START_SERVER] Health checks failed")
             raise Exception("Health checks failed")
 
-        _maybe_run_startup_real_warmup(
-            py_env_configs, backend_startup_status.get("max_seq_len")
-        )
         _mark_startup_warmup_health_gate_ready(startup_warmup_gate_file)
         if backend_restarter is not None:
             backend_restarter.arm()
@@ -1049,323 +994,6 @@ def start_server(py_env_configs: PyEnvConfigs):
             backend_restarter.coordinator.close()
     if resident_store_name:
         _stop_instance_resident_store(resident_store_name)
-
-
-def _get_startup_real_warmup_token_lens(prompt_limit: int) -> list[int]:
-    token_lens = []
-    value = STARTUP_REAL_WARMUP_MIN_TOKEN_LEN
-    while value <= prompt_limit:
-        token_lens.append(value)
-        value *= 2
-    if not token_lens or token_lens[-1] != prompt_limit:
-        token_lens.append(prompt_limit)
-    return token_lens
-
-
-def _get_startup_real_warmup_grpc_addresses(py_env_configs: PyEnvConfigs):
-    from rtp_llm.distribute.distributed_server import get_dp_rpc_addresses
-
-    parallelism_config = py_env_configs.parallelism_config
-    resolve_trace = None
-    try:
-        addrs = get_dp_rpc_addresses(py_env_configs)
-        if addrs:
-            return addrs
-    except Exception:
-        resolve_trace = traceback.format_exc()
-
-    world_size = int(parallelism_config.world_size)
-    if world_size > 1:
-        if resolve_trace:
-            logging.warning(
-                "failed to resolve startup real warmup grpc addrs from world info, "
-                "trace=%s",
-                resolve_trace,
-            )
-        raise StartupRealWarmupAddressResolutionError(
-            "failed to resolve startup real warmup grpc entry address "
-            "in multi-rank mode; refusing to fallback to local rpc_server_port"
-        )
-    if resolve_trace:
-        logging.warning(
-            "failed to resolve startup real warmup grpc addrs from world info, "
-            "fallback to local rpc_server_port, trace=%s",
-            resolve_trace,
-        )
-    return [f"127.0.0.1:{int(py_env_configs.server_config.rpc_server_port)}"]
-
-
-def _new_startup_real_warmup_request_id(index: int) -> int:
-    return (int(time.time() * 1000000) + index) & 0x7FFFFFFFFFFFFFFF
-
-
-def _get_startup_real_warmup_speculative_reserve_step(
-    py_env_configs: PyEnvConfigs,
-) -> int:
-    sp_config = getattr(py_env_configs, "sp_config", None)
-    if sp_config is None:
-        return 0
-    sp_type = getattr(sp_config, "type", SpeculativeType.NONE)
-    if sp_type in (None, "", SpeculativeType.NONE):
-        return 0
-    gamma = int(getattr(sp_config, "gen_num_per_cycle", 0) or 0)
-    if sp_type in (SpeculativeType.DSPARK, SpeculativeType.DFLASH):
-        # Keep startup request sizing identical to NormalEngine's fixed DSpARK
-        # reserve, including async rounds whose host bookkeeping can lag.
-        return 3 * gamma
-    # Match GenerateStream::useStreamAsyncReserveTokens(): one verify window
-    # in synchronous mode, or two in-flight proposal windows when async
-    # bookkeeping is on.
-    stream_async = str_to_bool(os.environ.get("RTP_LLM_STREAM_ASYNC", "0") or "0")
-    return 2 * gamma + 1 if stream_async else gamma + 1
-
-
-def _get_startup_real_warmup_kv_prompt_limit(
-    total_tokens: int,
-    block_size: int,
-    local_block_size: int,
-    reserve_block_ratio: int,
-    reserve_step: int,
-) -> int:
-    if block_size <= 0 or local_block_size <= 0:
-        return 0
-    total_blocks = total_tokens // block_size
-    reserved_blocks = total_blocks * max(0, reserve_block_ratio) // 100
-    speculative_tokens = reserve_step
-    if block_size > local_block_size:
-        # CP allocates the speculative tokens in whole local blocks after the prompt.
-        local_reserve_blocks = (reserve_step + local_block_size - 1) // local_block_size
-        speculative_tokens = local_reserve_blocks * block_size
-    return (
-        (total_blocks - reserved_blocks) * block_size
-        - speculative_tokens
-        - STARTUP_REAL_WARMUP_MAX_NEW_TOKENS
-    )
-
-
-def _get_startup_real_warmup_timeout_s() -> float:
-    timeout_s = float(
-        os.environ.get(
-            "DSV4_STARTUP_REAL_WARMUP_TIMEOUT_S", STARTUP_REAL_WARMUP_TIMEOUT_S
-        )
-    )
-    if timeout_s <= 0:
-        raise ValueError(
-            f"DSV4_STARTUP_REAL_WARMUP_TIMEOUT_S should be positive, got {timeout_s}"
-        )
-    return timeout_s
-
-
-def _run_startup_real_warmup_async(coroutine):
-    import asyncio
-
-    if hasattr(asyncio, "run"):
-        return asyncio.run(coroutine)
-    loop = asyncio.get_event_loop()
-    return loop.run_until_complete(coroutine)
-
-
-async def _run_startup_real_warmup_grpc(py_env_configs: PyEnvConfigs, max_len: int):
-    import torch
-
-    from rtp_llm.config.generate_config import GenerateConfig
-    from rtp_llm.cpp.model_rpc.model_rpc_client import ModelRpcClient
-    from rtp_llm.utils.base_model_datatypes import GenerateInput
-    from rtp_llm.utils.grpc_client_wrapper import GrpcClientWrapper
-
-    if max_len < STARTUP_REAL_WARMUP_MIN_TOKEN_LEN:
-        raise ValueError(
-            "model max_seq_len should be at least "
-            f"{STARTUP_REAL_WARMUP_MIN_TOKEN_LEN}, got {max_len}"
-        )
-    reserve_step = _get_startup_real_warmup_speculative_reserve_step(py_env_configs)
-    max_new_tokens = STARTUP_REAL_WARMUP_MAX_NEW_TOKENS
-    model_prompt_limit = max_len - reserve_step - max_new_tokens
-    if model_prompt_limit < 1:
-        raise ValueError(
-            "model max_seq_len cannot hold one startup warmup input and its reserved "
-            f"tokens, got max_seq_len={max_len}, reserve_step={reserve_step}, "
-            f"max_new_tokens={max_new_tokens}"
-        )
-    addresses = _get_startup_real_warmup_grpc_addresses(py_env_configs)
-    timeout_s = _get_startup_real_warmup_timeout_s()
-    timeout_ms = int(timeout_s * 1000)
-
-    client_config = (
-        py_env_configs.grpc_config.get_client_config()
-        if py_env_configs.grpc_config is not None
-        else {}
-    )
-    cache_client = GrpcClientWrapper(
-        py_env_configs.server_config.rpc_server_port,
-        dp_addresses=addresses,
-        client_config=client_config,
-    )
-    try:
-        cache_status = await cache_client.get_cache_status({"need_cache_keys": False})
-    finally:
-        await cache_client.close()
-    kv_config = py_env_configs.kv_cache_config
-    kv_prompt_limits = {
-        result["address"]: _get_startup_real_warmup_kv_prompt_limit(
-            int(result["total_kv_cache"]),
-            int(result["block_size"]),
-            kv_config.seq_size_per_block,
-            kv_config.reserve_block_ratio,
-            reserve_step,
-        )
-        for result in cache_status.get("results", [])
-    }
-    if set(kv_prompt_limits) != set(addresses):
-        raise RuntimeError(
-            "startup real warmup could not read every backend's KV capacity"
-        )
-    kv_prompt_limit = min(kv_prompt_limits.values())
-    if kv_prompt_limit < 1:
-        raise ValueError(
-            "backend KV capacity cannot hold one startup warmup input and its reserved tokens"
-        )
-    token_lens = _get_startup_real_warmup_token_lens(
-        min(model_prompt_limit, kv_prompt_limit)
-    )
-    logging.info(
-        "running startup real warmup via backend grpc, addrs=%s, "
-        "token_lens=%s, token_id=%d, max_new_tokens=%d, reserve_step=%d, timeout=%.1fs",
-        addresses,
-        token_lens,
-        STARTUP_REAL_WARMUP_TOKEN_ID,
-        max_new_tokens,
-        reserve_step,
-        timeout_s,
-    )
-
-    begin_all = time.time()
-    total_requests = 0
-    for addr_idx, addr in enumerate(addresses):
-        client = ModelRpcClient(
-            addresses=[addr],
-            client_config=client_config,
-            max_rpc_timeout_ms=timeout_ms,
-        )
-        try:
-            for len_idx, request_token_len in enumerate(token_lens):
-                total_requests += 1
-                request_id = _new_startup_real_warmup_request_id(
-                    addr_idx * len(token_lens) + len_idx
-                )
-                generate_config = GenerateConfig(
-                    max_new_tokens=max_new_tokens,
-                    top_k=1,
-                    top_p=1.0,
-                    temperature=0.0,
-                    do_sample=False,
-                    can_use_pd_separation=False,
-                    reuse_cache=False,
-                    enable_device_cache=False,
-                    enable_memory_cache=False,
-                    enable_disk_cache=False,
-                    enable_remote_cache=False,
-                    aux_info=True,
-                    timeout_ms=timeout_ms,
-                )
-                generate_input = GenerateInput(
-                    request_id=request_id,
-                    token_ids=torch.full(
-                        (request_token_len,),
-                        STARTUP_REAL_WARMUP_TOKEN_ID,
-                        dtype=torch.int32,
-                    ),
-                    mm_inputs=[],
-                    generate_config=generate_config,
-                )
-
-                begin = time.time()
-                last_aux = None
-                chunk_count = 0
-                logging.info(
-                    "startup grpc warmup request begin, "
-                    "addr=%s, request_id=%d, "
-                    "request_token_len=%d, max_new_tokens=%d, reserve_step=%d",
-                    addr,
-                    request_id,
-                    request_token_len,
-                    max_new_tokens,
-                    reserve_step,
-                )
-                async for outputs in client.enqueue(generate_input):
-                    chunk_count += 1
-                    if outputs.generate_outputs:
-                        last_aux = outputs.generate_outputs[0].aux_info
-                if last_aux is not None:
-                    logging.info(
-                        "startup grpc warmup request finished, addr=%s, request_id=%d, "
-                        "request_token_len=%d, max_new_tokens=%d, "
-                        "chunks=%d, input_len=%s, "
-                        "reuse_len=%s, output_len=%s, cost=%.2fs",
-                        addr,
-                        request_id,
-                        request_token_len,
-                        max_new_tokens,
-                        chunk_count,
-                        getattr(last_aux, "input_len", None),
-                        getattr(last_aux, "reuse_len", None),
-                        getattr(last_aux, "output_len", None),
-                        time.time() - begin,
-                    )
-                else:
-                    logging.info(
-                        "startup grpc warmup request finished, addr=%s, request_id=%d, "
-                        "request_token_len=%d, max_new_tokens=%d, "
-                        "chunks=%d, aux_info=None, cost=%.2fs",
-                        addr,
-                        request_id,
-                        request_token_len,
-                        max_new_tokens,
-                        chunk_count,
-                        time.time() - begin,
-                    )
-        finally:
-            try:
-                await client.close()
-            except Exception:
-                logging.warning(
-                    "failed to close startup grpc warmup client, addr=%s, trace=%s",
-                    addr,
-                    traceback.format_exc(),
-                )
-
-    logging.info(
-        "startup grpc warmup finished, requests=%d, addrs=%d, token_lens=%d, cost=%.2fs",
-        total_requests,
-        len(addresses),
-        len(token_lens),
-        time.time() - begin_all,
-    )
-
-
-def _maybe_run_startup_real_warmup(py_env_configs: PyEnvConfigs, max_seq_len) -> bool:
-    if not _should_run_startup_real_warmup(py_env_configs):
-        return False
-
-    try:
-        _run_startup_real_warmup_async(
-            _run_startup_real_warmup_grpc(py_env_configs, int(max_seq_len))
-        )
-        return True
-    except StartupRealWarmupAddressResolutionError:
-        logging.error(
-            "startup real warmup address resolution failed, trace: %s",
-            traceback.format_exc(),
-        )
-        raise
-    except Exception:
-        logging.error(
-            "startup real warmup failed, trace: %s",
-            traceback.format_exc(),
-        )
-        # This warmup owns the startup health gate. Propagate the failure so
-        # the caller cannot mark an unhealthy process ready.
-        raise
 
 
 if __name__ == "__main__":

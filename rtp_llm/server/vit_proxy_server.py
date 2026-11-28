@@ -7,6 +7,7 @@ import logging
 import queue
 import threading
 import time
+import uuid
 from collections import defaultdict
 from concurrent import futures
 from typing import NamedTuple, Optional
@@ -18,6 +19,7 @@ from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import (
     CacheStatusPB,
     CacheVersionPB,
     EmptyPB,
+    MultimodalHashRequestPB,
     MultimodalInputsPB,
     MultimodalOutputPB,
     ReleaseLeasePB,
@@ -467,6 +469,7 @@ class VitProxyRpcServer(MultimodalRpcServiceServicer):
         self.load_balancer = load_balancer
         self.connection_pool = connection_pool
         self.default_rpc_timeout_seconds = default_rpc_timeout_seconds
+        self._hash_worker_instance = uuid.uuid4().hex
         self.profiler = MMProfiler()
         self._transport_router = MMOutputProxyRouter(connection_pool, transport_config)
         kmonitor.init()
@@ -510,6 +513,47 @@ class VitProxyRpcServer(MultimodalRpcServiceServicer):
             context.set_code(code)
             context.set_details(details)
         raise error
+
+    def GetMultimodalHashes(self, request: MultimodalHashRequestPB, context):
+        """Acquire routing hashes through the same worker pool as embeddings."""
+        deadline = _resolve_forwarding_deadline_seconds(
+            (request.timeout_ms or 120000) / 1000.0, context
+        )
+        attempted = set()
+        while len(attempted) < len(self.load_balancer.worker_addresses):
+            timeout = _resolve_forwarding_timeout_seconds(deadline)
+            if timeout is None:
+                self._abort_deadline_exceeded(context, "ViT hash forwarding timeout")
+            try:
+                worker = self.load_balancer.get_worker(attempted)
+            except RuntimeError:
+                break
+            attempted.add(worker)
+            self.load_balancer.increment_connections(worker)
+            try:
+                stub = self.connection_pool.get_stub(worker)
+                call = stub.GetMultimodalHashes.future(
+                    request,
+                    timeout=timeout,
+                    metadata=dashscope_greennet_metadata(
+                        dict(context.invocation_metadata() or ())
+                    ),
+                )
+                if not context.add_callback(call.cancel):
+                    call.cancel()
+                response = call.result()
+                # The endpoint represents this worker pool. Probe and fill may
+                # reach different children; their UUIDs are not endpoint restarts.
+                response.worker_instance = self._hash_worker_instance
+                self.load_balancer.set_worker_alive(worker, True)
+                return response
+            except grpc.RpcError as error:
+                if not _is_retryable_worker_rpc_error(error):
+                    self._abort_with_worker_status(context, error)
+                self.load_balancer.set_worker_alive(worker, False)
+            finally:
+                self.load_balancer.decrement_connections(worker)
+        self._abort_unavailable(context, "No healthy ViT worker for hash acquisition")
 
     def RemoteMultimodalEmbedding(
         self, request: MultimodalInputsPB, context

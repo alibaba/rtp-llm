@@ -155,9 +155,12 @@ std::shared_ptr<GenerateConfig> QueryConverter::transGenerateConfig(const Genera
         generate_config->return_all_probs =
             config_proto->return_all_probs() ? ReturnAllProbsMode::DEFAULT : ReturnAllProbsMode::NONE;
     }
+    generate_config->return_logprobs = config_proto->return_logprobs();
+    generate_config->top_logprobs = static_cast<int>(config_proto->top_logprobs());
     generate_config->return_softmax_probs  = config_proto->return_softmax_probs();
     generate_config->can_use_pd_separation = config_proto->can_use_pd_separation();
     generate_config->gen_timeline          = config_proto->gen_timeline();
+    generate_config->profile_light         = config_proto->profile_light();
     generate_config->profile_step          = config_proto->profile_step();
     generate_config->profile_trace_name    = config_proto->profile_trace_name();
     generate_config->ignore_eos            = config_proto->ignore_eos();
@@ -476,6 +479,8 @@ void fillAuxMetadata(AuxInfoPB* aux_info, const AuxInfo& info, const std::string
     aux_info->set_decode_remote_reuse_len(info.decode_remote_reuse_len);
     aux_info->set_decode_memory_reuse_len(info.decode_memory_reuse_len);
     aux_info->set_decode_disk_reuse_len(info.decode_disk_reuse_len);
+    aux_info->set_xgrammar_update_timeout(info.xgrammar_update_timeout);
+    aux_info->set_speculative_verified_draft_tokens(info.speculative_verified_draft_tokens);
     aux_info->set_speculative_draft_rounds(info.speculative_draft_rounds);
     for (const auto accepted_tokens : info.speculative_accepted_tokens_per_pos) {
         aux_info->add_speculative_accepted_tokens_per_pos(accepted_tokens);

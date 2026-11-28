@@ -1,0 +1,1001 @@
+"""Decode token K512 dispatch, score precision, and changing graph inputs."""
+
+import os
+import unittest
+from unittest.mock import patch
+
+import torch
+
+from rtp_llm.models_py.modules.dsv41.fp8 import _v41_decode_indexer as indexer
+from rtp_llm.models_py.modules.dsv41.fp8 import _v41_decode_topk as selector
+from rtp_llm.models_py.modules.dsv41.fp8.test.test_v41_decode_indexer import make_case
+from rtp_llm.models_py.modules.dsv41.fp8.test.test_v41_prefill_deepselect import (
+    assert_equivalent as assert_prefill_equivalent,
+)
+from rtp_llm.models_py.modules.dsv41.fp8.test.test_v41_prefill_deepselect import (
+    reference as prefill_reference,
+)
+from rtp_llm.ops.compute_ops import rtp_llm_ops
+
+
+def _static_select_candidates(logits, lengths, block_size, topk_blocks):
+    """Reference: the padded static pool kernel + identical selection chain.
+
+    Mirrors selector.select_candidates but always launches the capacity-wide
+    _candidate_pool_kernel, so the bounded production path can be compared
+    against the historical padded scores end to end.
+    """
+    rows, width = logits.shape
+    nblocks = selector.triton.cdiv(width, block_size)
+    count = min(topk_blocks, nblocks)
+    score_stride = selector.triton.cdiv(nblocks, 256) * 256
+    scores = torch.empty(
+        (rows, score_stride), dtype=torch.float32, device=logits.device
+    )[:, :nblocks]
+    block_lengths = torch.empty((rows,), dtype=torch.int32, device=logits.device)
+    selector._candidate_pool_kernel[(rows, selector.triton.cdiv(nblocks, 128))](
+        logits,
+        lengths,
+        scores,
+        block_lengths,
+        width,
+        logits.stride(0),
+        block_size,
+        nblocks,
+        score_stride,
+        128,
+    )
+    candidates = torch.empty((rows, count), dtype=torch.int32, device=logits.device)
+    if nblocks > count:
+        rtp_llm_ops.topk_v3(
+            scores,
+            block_lengths,
+            candidates,
+            selector._get_topk_workspace(logits.device),
+            count,
+            nblocks,
+        )
+    flags = torch.empty((rows, nblocks), dtype=torch.uint8, device=logits.device)
+    selector._candidate_store_flags_kernel[(rows,)](
+        scores, candidates, flags, count, nblocks, score_stride
+    )
+    return candidates, flags
+
+
+def reference(logits, ends):
+    """Decode preserves every visible index on short rows, including mask holes."""
+    result = prefill_reference(logits, ends)
+    dense = torch.arange(512, device=logits.device)[None].expand_as(result)
+    dense = torch.where(dense < ends[:, None].clamp(0, logits.shape[1]), dense, -1)
+    return torch.where((ends <= 512)[:, None], dense, result).int()
+
+
+def assert_equivalent(case, actual, expected, logits, ends):
+    short = ends <= 512
+    torch.testing.assert_close(
+        actual[short], reference(logits, ends)[short], rtol=0, atol=0
+    )
+    long = ~short
+    if long.any().item():
+        assert_prefill_equivalent(
+            case, actual[long], expected[long], logits[long], ends[long]
+        )
+
+
+@unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
+class DecodeTopKTest(unittest.TestCase):
+    def test_complete_candidates_are_sorted_and_only_pad_after_visible_prefix(self):
+        for k in (512, 1024, 2048):
+            source = torch.randn(6, 32768, device="cuda")
+            lengths = torch.tensor(
+                [0, 1, 513, 4096, 32761, 32768], device="cuda", dtype=torch.int32
+            )
+            source[3].fill_(-torch.inf)
+            source[4, :8192] = torch.nan
+            source[5].fill_(-torch.inf)
+            candidates, flags = selector.select_candidates(
+                source, lengths, 8, k, complete=True
+            )
+            for row, length in enumerate(lengths.tolist()):
+                visible = (length + 7) // 8
+                count = min(visible, k)
+                selected = candidates[row, :count]
+                self.assertTrue(bool(((selected >= 0) & (selected < visible)).all()))
+                self.assertTrue(bool((selected[1:] > selected[:-1]).all()))
+                self.assertTrue(bool((candidates[row, count:] == -1).all()))
+                self.assertEqual(int(flags[row].sum()), count)
+                if count:
+                    self.assertEqual(int(selected[-1]), visible - 1)
+                    self.assertTrue(bool((flags[row, selected.long()] == 1).all()))
+
+    def setUp(self):
+        if torch.cuda.get_device_capability() not in ((10, 0), (10, 3)):
+            self.skipTest("DeepSelect requires SM100/SM103")
+        torch.manual_seed(714)
+        env = patch.dict(
+            os.environ,
+            {
+                "DSV41_PREFILL_DEEPSELECT": "0",
+                "DSV41_DECODE_CANDIDATE_TOPK_V3": "0",
+                "DSV41_DECODE_DEEPSELECT_SORTED": "0",
+            },
+        )
+        env.start()
+        self.addCleanup(env.stop)
+        # Default-on decode selection must not depend on the prefill switch.
+        previous = os.environ.pop("DSV41_DECODE_DEEPSELECT", None)
+        self.addCleanup(self.restore_switch, previous)
+
+    def require_native(self, dtype):
+        name = (
+            "deepselect_bf16_available"
+            if dtype == torch.bfloat16
+            else "deepselect_fp32_available"
+        )
+        # This suite explicitly targets SM100/SM103 builds with native DeepSelect.
+        self.assertTrue(getattr(rtp_llm_ops, name, lambda: False)(), name + " missing")
+
+    @staticmethod
+    def restore_switch(previous):
+        if previous is None:
+            os.environ.pop("DSV41_DECODE_DEEPSELECT", None)
+        else:
+            os.environ["DSV41_DECODE_DEEPSELECT"] = previous
+
+    def test_explicit_unsorted_decode_uses_native_dense_deepselect_for_both_score_dtypes(
+        self,
+    ):
+        for dtype, name in (
+            (torch.float32, "deepselect_fp32"),
+            (torch.bfloat16, "deepselect_bf16_dense"),
+        ):
+            self.require_native(dtype)
+            logits = torch.randn(6, 4096, device="cuda", dtype=dtype)
+            ends = torch.tensor(
+                [0, 1, 511, 512, 513, 4096], device="cuda", dtype=torch.int32
+            )
+            with self.subTest(dtype=dtype), patch.object(
+                rtp_llm_ops, name, wraps=getattr(rtp_llm_ops, name)
+            ) as native, patch.object(
+                rtp_llm_ops,
+                "topk_v3",
+                side_effect=AssertionError("decode skipped DeepSelect"),
+            ):
+                result = selector.select_tokens(logits, ends, 512)
+                native.assert_called_once()
+                self.assertIs(native.call_args.args[0], logits)
+                assert_equivalent(self, result, reference(logits, ends), logits, ends)
+                torch.testing.assert_close(
+                    result[3], torch.arange(512, device="cuda").int()
+                )
+
+    def assert_sorted_valid_ids(self, result):
+        for row in result.cpu():
+            valid = row[row >= 0]
+            self.assertTrue(bool((valid[1:] > valid[:-1]).all()))
+
+    def test_default_sorted_bf16_decode_preserves_selection_and_nonfinite_contract(
+        self,
+    ):
+        self.require_native(torch.bfloat16)
+        # Both native occupancy buckets, including the index-window shuffle.
+        for rows in (7, 173):
+            logits = torch.randn(rows, 32768, device="cuda", dtype=torch.bfloat16)
+            ends = (
+                torch.tensor(
+                    [0, 1, 511, 512, 513, 32761, 32768],
+                    device="cuda",
+                    dtype=torch.int32,
+                )
+                .repeat((rows + 6) // 7)[:rows]
+                .contiguous()
+            )
+            logits[::7].fill_(-torch.inf)
+            logits[4::7].fill_(-torch.inf)
+            logits[5::7, :900] = torch.nan
+            logits[6::7, 1:9] = torch.inf
+            logits[6::7, 9:11] = -torch.inf
+            baseline = selector.select_tokens(logits, ends, 512)
+            with patch.dict(os.environ), patch.object(
+                rtp_llm_ops,
+                "deepselect_bf16_dense_sorted",
+                wraps=rtp_llm_ops.deepselect_bf16_dense_sorted,
+            ) as native, patch.object(
+                rtp_llm_ops,
+                "topk_v3",
+                side_effect=AssertionError("lost DeepSelect"),
+            ):
+                os.environ.pop("DSV41_DECODE_DEEPSELECT_SORTED", None)
+                result = selector.select_tokens(logits, ends, 512)
+            native.assert_called_once()
+            torch.testing.assert_close(
+                result.sort(-1).values, baseline.sort(-1).values, rtol=0, atol=0
+            )
+            assert_equivalent(self, result, reference(logits, ends), logits, ends)
+            self.assert_sorted_valid_ids(result)
+
+    def test_sorted_bf16_graph_replay_changes_scores_and_bounds(self):
+        logits = torch.randn(7, 32768, device="cuda", dtype=torch.bfloat16)
+        ends = torch.full((7,), 32768, device="cuda", dtype=torch.int32)
+        stream = torch.cuda.Stream()
+        stream.wait_stream(torch.cuda.current_stream())
+        with patch.dict(os.environ, {"DSV41_DECODE_DEEPSELECT_SORTED": "1"}):
+            with torch.cuda.stream(stream):
+                for _ in range(3):
+                    selector.select_tokens(logits, ends, 512)
+            torch.cuda.current_stream().wait_stream(stream)
+            graph = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(graph, stream=stream):
+                result = selector.select_tokens(logits, ends, 512)
+            for lengths in (
+                [0, 1, 511, 512, 513, 32761, 32768],
+                [32768, 16001, 1023, 513, 512, 1, 0],
+            ):
+                logits.normal_()
+                logits[:, :3] = torch.nan
+                ends.copy_(torch.tensor(lengths, device="cuda", dtype=torch.int32))
+                graph.replay()
+                snapshot = result.clone()
+                eager = selector.select_tokens(logits, ends, 512)
+                torch.testing.assert_close(snapshot, eager, rtol=0, atol=0)
+                assert_equivalent(self, snapshot, reference(logits, ends), logits, ends)
+                self.assert_sorted_valid_ids(snapshot)
+
+    def test_sorted_raw_output_masks_partial_window_padding(self):
+        logits = torch.full((6, 32768), -torch.inf, device="cuda", dtype=torch.bfloat16)
+        ends = torch.tensor(
+            [513, 1023, 4095, 16385, 16895, 32761], device="cuda", dtype=torch.int32
+        )
+        output = torch.full((6, 512), 987654, device="cuda", dtype=torch.int32)
+        rtp_llm_ops.deepselect_bf16_dense_sorted(logits, ends, output)
+        self.assertTrue(
+            bool(((output == -1) | ((output >= 0) & (output < ends[:, None]))).all())
+        )
+        self.assert_sorted_valid_ids(output)
+        with patch.dict(os.environ, {"DSV41_DECODE_DEEPSELECT_SORTED": "1"}):
+            published = selector.select_tokens(logits, ends, 512)
+        self.assertTrue(bool((published == -1).all()))
+
+    def test_sort_switch_preserves_fp32_precision_and_backend(self):
+        logits = torch.randn(7, 4096, device="cuda", dtype=torch.float32)
+        ends = torch.full((7,), 4096, device="cuda", dtype=torch.int32)
+        with patch.dict(
+            os.environ, {"DSV41_DECODE_DEEPSELECT_SORTED": "1"}
+        ), patch.object(
+            rtp_llm_ops,
+            "deepselect_fp32",
+            wraps=rtp_llm_ops.deepselect_fp32,
+        ) as native:
+            result = selector.select_tokens(logits, ends, 512)
+        native.assert_called_once()
+        assert_equivalent(self, result, reference(logits, ends), logits, ends)
+
+    def test_opt_out_and_missing_backend_retain_radix_fallback(self):
+        logits = torch.randn(6, 4096, device="cuda")
+        ends = torch.full((6,), 4096, device="cuda", dtype=torch.int32)
+        for disable in (True, False):
+            with self.subTest(disable=disable), patch.dict(
+                os.environ, {"DSV41_DECODE_DEEPSELECT": "0" if disable else "1"}
+            ), patch.object(
+                rtp_llm_ops,
+                "deepselect_fp32_available",
+                return_value=disable,
+                create=True,
+            ), patch.object(
+                rtp_llm_ops, "topk_v3", wraps=rtp_llm_ops.topk_v3
+            ) as fallback:
+                result = selector.select_tokens(logits, ends, 512)
+                fallback.assert_called_once()
+                assert_equivalent(self, result, reference(logits, ends), logits, ends)
+
+    def test_missing_both_native_backends_still_runs_bf16_radix(self):
+        logits = torch.randn(6, 1024, device="cuda", dtype=torch.bfloat16)
+        logits[:, :64] = -float("inf")
+        ends = torch.tensor(
+            [0, 1, 128, 511, 512, 1024], device="cuda", dtype=torch.int32
+        )
+        with patch.object(
+            rtp_llm_ops, "deepselect_fp32_available", return_value=False, create=True
+        ), patch.object(
+            rtp_llm_ops, "deepselect_bf16_available", return_value=False, create=True
+        ), patch.object(
+            rtp_llm_ops, "topk_v3", wraps=rtp_llm_ops.topk_v3
+        ) as fallback:
+            result = selector.select_tokens(logits, ends, 512)
+            fallback.assert_called_once()
+            assert_equivalent(self, result, reference(logits, ends), logits, ends)
+
+    def test_unsupported_bf16_layout_and_other_k_use_radix(self):
+        for dtype, width, k in (
+            (torch.bfloat16, 768, 512),
+            (torch.float32, 2048, 1024),
+        ):
+            logits = torch.randn(6, width, device="cuda", dtype=dtype)
+            ends = torch.full((6,), width, device="cuda", dtype=torch.int32)
+            with patch.object(
+                rtp_llm_ops, "topk_v3", wraps=rtp_llm_ops.topk_v3
+            ) as fallback:
+                actual = selector.select_tokens(logits, ends, k)
+                fallback.assert_called_once()
+                values = logits.gather(1, actual.long()).sort(-1).values
+                torch.testing.assert_close(
+                    values, logits.topk(k).values.sort(-1).values, rtol=0, atol=0
+                )
+
+    def test_native_execution_error_is_not_hidden_by_fallback(self):
+        self.require_native(torch.float32)
+        logits = torch.randn(6, 4096, device="cuda")
+        ends = torch.full((6,), 4096, device="cuda", dtype=torch.int32)
+        with patch.object(
+            rtp_llm_ops, "deepselect_fp32", side_effect=RuntimeError("native failure")
+        ), patch.object(
+            rtp_llm_ops, "topk_v3", side_effect=AssertionError("unexpected fallback")
+        ):
+            with self.assertRaisesRegex(RuntimeError, "native failure"):
+                selector.select_tokens(logits, ends, 512)
+
+    def test_production_rows_lengths_nonfinite_and_cutoff_ties(self):
+        for dtype in (torch.bfloat16, torch.float32):
+            self.require_native(dtype)
+            logits = torch.randn(192, 32768, device="cuda", dtype=dtype)
+            # Exercise short rows, full rows, clamping, and different MTP positions.
+            ends = torch.arange(192, device="cuda", dtype=torch.int32) * 127 + 513
+            ends[:6] = torch.tensor([-1, 0, 511, 512, 513, 40000], device="cuda")
+            logits[6:9, :20] = float("nan")
+            logits[9:12, :20] = float("inf")
+            logits[12:15, :20] = -float("inf")
+            logits[15:18, :1024] = 10
+            result = selector.select_tokens(logits, ends, 512)
+            assert_equivalent(self, result, reference(logits, ends), logits, ends)
+
+    def test_graph_replay_refreshes_scores_and_causal_lengths(self):
+        for dtype in (torch.bfloat16, torch.float32):
+            self.require_native(dtype)
+            logits = torch.randn(160, 32768, device="cuda", dtype=dtype)
+            ends = torch.full((160,), 13000, device="cuda", dtype=torch.int32)
+            stream = torch.cuda.Stream()
+            stream.wait_stream(torch.cuda.current_stream())
+            with torch.cuda.stream(stream):
+                selector.select_tokens(logits, ends, 512)
+            stream.synchronize()
+            graph = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(graph, stream=stream):
+                result = selector.select_tokens(logits, ends, 512)
+            for length in (0, 511, 512, 513, 13000, 32768):
+                logits.normal_()
+                logits[:, :64] = -float("inf")
+                ends.fill_(length)
+                graph.replay()
+                assert_equivalent(self, result, reference(logits, ends), logits, ends)
+
+    def test_bf16_candidate_publication_keeps_original_block_membership(self):
+        logits = torch.randn(192, 32768, device="cuda", dtype=torch.bfloat16)
+        logits[:3].zero_()
+        ends = torch.full((192,), 32768, device="cuda", dtype=torch.int32)
+        expected = selector.select_candidates(logits.float(), ends, 8, 2048)
+        actual = selector.select_candidates(logits, ends, 8, 2048)
+        for got, ref in zip(actual, expected):
+            torch.testing.assert_close(got, ref, rtol=0, atol=0)
+
+    @patch.dict(os.environ, {"DSV41_DECODE_CANDIDATE_TOPK_V3": "1"})
+    def test_candidate_pool_bounded_elides_padding_and_matches_static(self):
+        """Production-shape pooling: width >> visible, count=2048 (topk_v3 path).
+
+        The bounded row-loop kernel must (a) write bitwise-identical scores on
+        the visible blocks and identical block_lengths, (b) leave the >=
+        block_lengths tail unwritten while the static kernel pads it with -inf,
+        and (c) drive select_candidates to the exact same candidates+flags as
+        the padded static chain, with every selected block < block_lengths.
+        """
+        rows, width, block_size, count = 192, 524288, 8, 2048
+        nblocks = selector.triton.cdiv(width, block_size)
+        score_stride = selector.triton.cdiv(nblocks, 256) * 256
+        torch.manual_seed(1522)
+        logits = torch.randn(rows, width, device="cuda", dtype=torch.bfloat16)
+        # Mixed lengths: production ~32.8k, plus short/full/zero/non-multiple-of-8
+        # rows to exercise every bounding edge. ends never exceeds width in
+        # production (visible_per_token <= capacity), so the full row uses width
+        # and the near-full row width-1 (both pin the newest block identically).
+        ends = torch.full((rows,), 32820, device="cuda", dtype=torch.int32)
+        ends += (torch.arange(rows, device="cuda", dtype=torch.int32) % 11) - 5
+        ends[:8] = torch.tensor(
+            [0, 1, 7, 8, 2047, 16384, width, width - 1], device="cuda"
+        ).to(torch.int32)
+        ends = torch.clamp(ends, min=0)
+        # Poison the allocator tail so any unbounded read would surface garbage.
+        logits[:, 40000:] = float("nan")
+
+        # Pre-fill the bounded score buffer with a sentinel so elision of the
+        # >= block_lengths tail is proven deterministically (not left to chance
+        # allocator contents).
+        s_b = torch.full(
+            (rows, score_stride), 777.0, device="cuda", dtype=torch.float32
+        )
+        b_b = torch.empty(rows, device="cuda", dtype=torch.int32)
+        selector._candidate_pool_bounded_kernel[(rows,)](
+            logits,
+            ends,
+            s_b,
+            b_b,
+            width,
+            logits.stride(0),
+            block_size,
+            score_stride,
+            256,
+            num_warps=8,
+        )
+        s_s = torch.empty(rows, score_stride, device="cuda", dtype=torch.float32)
+        b_s = torch.empty(rows, device="cuda", dtype=torch.int32)
+        selector._candidate_pool_kernel[(rows, selector.triton.cdiv(nblocks, 128))](
+            logits,
+            ends,
+            s_s,
+            b_s,
+            width,
+            logits.stride(0),
+            block_size,
+            nblocks,
+            score_stride,
+            128,
+        )
+        torch.cuda.synchronize()
+        # (a) block_lengths identical; visible-block scores bitwise identical
+        #     (equal_nan: full rows pool the poisoned tail identically).
+        torch.testing.assert_close(b_b, b_s, rtol=0, atol=0)
+        for r in range(rows):
+            n = int(b_s[r].item())
+            torch.testing.assert_close(
+                s_b[r, :n], s_s[r, :n], rtol=0, atol=0, equal_nan=True
+            )
+        # (b) static pads the tail with -inf; the bounded kernel leaves a
+        #     representative elided row's tail at the sentinel (no write).
+        r = 10
+        n = int(b_s[r].item())
+        self.assertLess(n, nblocks)
+        self.assertTrue(bool((s_s[r, n:] == -float("inf")).all()))
+        self.assertTrue(bool((s_b[r, n:] == 777.0).all()))
+        # (c) end-to-end select_candidates (auto-selects bounded) == static chain.
+        cand_b, flags_b = selector.select_candidates(logits, ends, block_size, count)
+        cand_s, flags_s = _static_select_candidates(logits, ends, block_size, count)
+        torch.testing.assert_close(cand_b, cand_s, rtol=0, atol=0)
+        torch.testing.assert_close(flags_b, flags_s, rtol=0, atol=0)
+        # Every selected block is within the row's visible span (no padding leak).
+        valid = cand_b >= 0
+        bounds = b_s[:, None].expand_as(cand_b)
+        self.assertTrue(bool((cand_b[valid] < bounds[valid]).all()))
+
+    @patch.dict(os.environ, {"DSV41_DECODE_CANDIDATE_TOPK_V3": "1"})
+    def test_candidate_pool_bounded_graph_replay_tracks_lengths(self):
+        """Capture select_candidates in a CUDA graph; replay across changing
+        visible lengths (grow/shrink/zero/full). The device-bounded row loop
+        must re-derive block_lengths each replay with no host read, matching a
+        fresh eager static computation at every length."""
+        rows, width, block_size, count = 160, 65536, 8, 2048
+        torch.manual_seed(1523)
+        logits = torch.randn(rows, width, device="cuda", dtype=torch.bfloat16)
+        ends = torch.full((rows,), 20000, device="cuda", dtype=torch.int32)
+        stream = torch.cuda.Stream()
+        stream.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(stream):
+            selector.select_candidates(logits, ends, block_size, count)
+        stream.synchronize()
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph, stream=stream):
+            cand, flags = selector.select_candidates(logits, ends, block_size, count)
+        for length in (0, 8, 2047, 16384, 20000, width):
+            logits.normal_()
+            ends.fill_(length)
+            graph.replay()
+            torch.cuda.synchronize()
+            exp_cand, exp_flags = _static_select_candidates(
+                logits, ends, block_size, count
+            )
+            torch.testing.assert_close(cand, exp_cand, rtol=0, atol=0)
+            torch.testing.assert_close(flags, exp_flags, rtol=0, atol=0)
+
+    def test_attention_paged_caller_reaches_dense_deepselect(self):
+        self.require_native(torch.bfloat16)
+        from rtp_llm.models_py.modules.dsv41.fp8.attention_v41 import AttentionV41FP8
+        from rtp_llm.models_py.modules.dsv41.fp8.test.test_v41_decode_attention_fusion import (
+            _fixture,
+        )
+
+        for ratio in (1, 2):
+            attn, _, x, qr, positions = _fixture("cuda", ratio)
+            # BF16 TMA selection requires complete 512-element tiles.
+            keys = attn._shared_attention["global"][attn.kv_source_layer_id]
+            table = torch.nn.functional.pad(
+                keys.block_table,
+                (0, 1024 // keys.logical_entries_per_block - keys.block_table.shape[1]),
+            )
+            keys = indexer.DecodeIndexerKeys(
+                keys.pool, table, 1024, keys.logical_entries_per_block
+            )
+            attn._shared_attention["global"][attn.kv_source_layer_id] = keys
+            with patch.object(
+                indexer, "score_decode_indexer", wraps=indexer.score_decode_indexer
+            ) as score, patch.object(
+                rtp_llm_ops,
+                "deepselect_bf16_dense",
+                wraps=rtp_llm_ops.deepselect_bf16_dense,
+            ) as select, patch.object(
+                rtp_llm_ops, "topk_v3", side_effect=AssertionError("unexpected radix")
+            ):
+                selected = AttentionV41FP8._select_indices_decode(
+                    attn, x, qr, positions
+                )
+                select.assert_called_once()
+                self.assertTrue(score.call_args.kwargs["preserve_score_dtype"])
+                self.assertEqual(select.call_args.args[0].dtype, torch.bfloat16)
+                visible = ((positions + 1) // ratio).int()
+                assert_equivalent(
+                    self,
+                    selected,
+                    reference(select.call_args.args[0], visible),
+                    select.call_args.args[0],
+                    visible,
+                )
+
+    def test_short_rows_preserve_nonfinite_and_candidate_mask_indices(self):
+        for dtype, name in (
+            (torch.float32, "deepselect_fp32"),
+            (torch.bfloat16, "deepselect_bf16_dense"),
+        ):
+            self.require_native(dtype)
+            lengths = [0, 1, 128, 511, 512, 513]
+            ends = torch.tensor(lengths, device="cuda", dtype=torch.int32)
+            for value in (float("nan"), float("inf"), -float("inf")):
+                logits = torch.randn(6, 1024, device="cuda", dtype=dtype)
+                logits[:, :64] = value
+                with patch.object(
+                    rtp_llm_ops, name, wraps=getattr(rtp_llm_ops, name)
+                ) as native:
+                    actual = selector.select_tokens(logits, ends, 512)
+                    native.assert_called_once()
+                for row, length in enumerate(lengths[:-1]):
+                    expected = torch.full((512,), -1, device="cuda", dtype=torch.int32)
+                    expected[:length] = torch.arange(length, device="cuda")
+                    torch.testing.assert_close(actual[row], expected, rtol=0, atol=0)
+                with patch.dict(os.environ, {"DSV41_DECODE_DEEPSELECT": "0"}):
+                    old = selector.select_tokens(logits, ends, 512)
+                assert_equivalent(self, actual, old, logits, ends)
+
+    def test_paged_candidate_fallback_preserves_fp32_membership(self):
+        from rtp_llm.models_py.modules.dsv41.fp8.attention_v41 import AttentionV41FP8
+        from rtp_llm.models_py.modules.dsv41.fp8.test.test_v41_decode_attention_fusion import (
+            _fixture,
+        )
+
+        for k, capacity in ((256, 1024), (512, 256)):
+            attn, keys, x, qr, positions = _fixture("cuda", 1, candidate=True)
+            attn.index_topk = k
+            positions = positions.clamp_max(capacity - 1)
+            table = keys.block_table
+            pages = capacity // keys.logical_entries_per_block
+            table = torch.nn.functional.pad(table, (0, max(0, pages - table.shape[1])))[
+                :, :pages
+            ].contiguous()
+            attn._shared_attention["global"][attn.kv_source_layer_id] = (
+                indexer.DecodeIndexerKeys(
+                    keys.pool, table, capacity, keys.logical_entries_per_block
+                )
+            )
+            original_score = indexer.score_decode_indexer
+
+            def score_with_dtype(*args, **kwargs):
+                logits = original_score(*args, **kwargs)
+                self.assertIsNotNone(logits)
+                self.assertEqual(logits.dtype, torch.bfloat16)
+                return logits
+
+            def score_fp32(*args, **kwargs):
+                kwargs["preserve_score_dtype"] = False
+                return original_score(*args, **kwargs)
+
+            with patch.object(
+                indexer, "score_decode_indexer", side_effect=score_with_dtype
+            ), patch.object(
+                selector,
+                "select_tokens",
+                side_effect=AssertionError("must enter old fallback"),
+            ):
+                actual = AttentionV41FP8._select_indices_decode(attn, x, qr, positions)
+                candidates = attn._shared_attention["candidates"].clone()
+            with patch.object(indexer, "score_decode_indexer", side_effect=score_fp32):
+                expected = AttentionV41FP8._select_indices_decode(
+                    attn, x, qr, positions
+                )
+            torch.testing.assert_close(
+                candidates, attn._shared_attention["candidates"], rtol=0, atol=0
+            )
+            torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+
+    def test_candidate_v3_short_capacity_preserves_invalid_blocks(self):
+        from rtp_llm.models_py.modules.dsv41.fp8.attention_v41 import (
+            select_candidate_blocks,
+        )
+
+        for dtype in (torch.float32, torch.bfloat16):
+            for width, block_size in ((16376, 8), (16375, 8), (15, 7)):
+                logits = torch.randn(6, width, device="cuda", dtype=dtype)
+                ends = torch.tensor(
+                    [0, 1, 7, 8, width - 1, width], device="cuda", dtype=torch.int32
+                )
+                columns = torch.arange(width, device="cuda")
+                if width > 32:
+                    logits[:, 8:16] = float("nan")
+                    logits[:, 16:24] = -float("inf")
+                    logits[:, 24:32] = float("inf")
+                logits.masked_fill_(columns[None] >= ends[:, None], -torch.inf)
+                expected = select_candidate_blocks(
+                    logits.float(), ends, block_size, 2048
+                )
+                expected_flags = torch.zeros(
+                    6,
+                    (width + block_size - 1) // block_size,
+                    device="cuda",
+                    dtype=torch.uint8,
+                )
+                for row in range(6):
+                    expected_flags[row, expected[row][expected[row] >= 0].long()] = 1
+                with patch.object(
+                    torch.Tensor,
+                    "topk",
+                    side_effect=AssertionError("short rows need no topk"),
+                ), patch.dict(
+                    os.environ, {"DSV41_DECODE_CANDIDATE_TOPK_V3": "1"}
+                ), patch.object(
+                    rtp_llm_ops, "topk_v3", wraps=rtp_llm_ops.topk_v3
+                ) as native:
+                    ids, flags = selector.select_candidates(
+                        logits, ends, block_size, 2048
+                    )
+                torch.testing.assert_close(flags, expected_flags, rtol=0, atol=0)
+                torch.testing.assert_close(
+                    ids.sort(-1).values, expected.sort(-1).values, rtol=0, atol=0
+                )
+
+    def test_candidate_v3_is_default_and_opt_out_or_missing_backend_retains_torch(self):
+        logits = torch.randn(4, 32768, device="cuda", dtype=torch.bfloat16)
+        ends = torch.tensor([0, 13000, 16384, 32768], device="cuda", dtype=torch.int32)
+        # Force cutoff ties so another valid block set cannot fail this test.
+        logits[-1].zero_()
+        logits.masked_fill_(
+            torch.arange(logits.shape[1], device="cuda")[None] >= ends[:, None],
+            -torch.inf,
+        )
+        with patch.dict(
+            os.environ, {"DSV41_DECODE_CANDIDATE_TOPK_V3": "0"}
+        ), patch.object(
+            rtp_llm_ops,
+            "topk_v3",
+            side_effect=AssertionError("opt-out must retain torch"),
+        ):
+            expected = selector.select_candidates(logits, ends, 8, 2048)
+        with patch.dict(
+            os.environ, {"DSV41_DECODE_CANDIDATE_TOPK_V3": "1"}
+        ), patch.object(selector.candidate_topk, "_TOPK_V3_OK", False):
+            actual = selector.select_candidates(logits, ends, 8, 2048)
+        for got, ref in zip(actual, expected):
+            torch.testing.assert_close(got, ref, rtol=0, atol=0)
+        with patch.dict(
+            os.environ, {"DSV41_DECODE_CANDIDATE_TOPK_V3": "1"}
+        ), patch.object(rtp_llm_ops, "topk_v3", wraps=rtp_llm_ops.topk_v3) as native:
+            ids, flags = selector.select_candidates(logits, ends, 8, 2048)
+            native.assert_called_once()
+            self.assertEqual(native.call_args.args[-2], 2048)
+            torch.testing.assert_close(native.call_args.args[1], (ends + 7) // 8)
+            from rtp_llm.models_py.modules.dsv41.fp8.test.test_v41_prefill_candidates import (
+                assert_candidate_values,
+            )
+
+            assert_candidate_values(self, ids, expected[0], logits, ends, 8)
+            self.assertTrue(
+                ((ids < 0) | (ids < ((ends + 7) // 8)[:, None])).all().item()
+            )
+            nblocks = flags.shape[1]
+            rebuilt = torch.zeros(
+                (ids.shape[0], nblocks + 1), device=ids.device, dtype=torch.uint8
+            )
+            rebuilt.scatter_(1, torch.where(ids >= 0, ids, nblocks).long(), 1)
+            torch.testing.assert_close(flags, rebuilt[:, :nblocks], rtol=0, atol=0)
+            self.assertEqual(ids.dtype, torch.int32)
+
+    def test_candidate_v3_keeps_newest_and_filters_invalid_blocks(self):
+        for dtype in (torch.float32, torch.bfloat16):
+            logits = torch.randn(8, 32776, device="cuda", dtype=dtype)
+            logits[:, 8:16] = float("nan")
+            logits[:, 16:24] = -float("inf")
+            logits[:, 24:32] = float("inf")
+            ends = torch.tensor(
+                [0, 1, 7, 8, 9, 16384, 16385, 32776], device="cuda", dtype=torch.int32
+            )
+            with patch.dict(os.environ, {"DSV41_DECODE_CANDIDATE_TOPK_V3": "0"}):
+                expected = selector.select_candidates(logits, ends, 8, 2048)
+            with patch.dict(os.environ, {"DSV41_DECODE_CANDIDATE_TOPK_V3": "1"}):
+                ids, flags = selector.select_candidates(logits, ends, 8, 2048)
+            torch.testing.assert_close(
+                flags.sum(-1), expected[1].sum(-1), rtol=0, atol=0
+            )
+            newest = ((ends - 1).clamp_min(0) // 8).long()
+            self.assertTrue(
+                (flags.gather(1, newest[:, None]).flatten()[ends > 0] == 1).all().item()
+            )
+            self.assertFalse(flags[0].any().item())
+            self.assertEqual(int(flags[-1, 1]), 0)
+            self.assertEqual(int(flags[-1, 2]), 0)
+            self.assertEqual(int(flags[-1, 3]), 1)
+            for row in range(8):
+                valid = ids[row][ids[row] >= 0].long()
+                self.assertEqual(valid.numel(), valid.unique().numel())
+                self.assertTrue((valid < ((ends[row] + 7) // 8)).all().item())
+
+    def test_candidate_v3_graph_refreshes_short_long_lengths_and_masks(self):
+        logits = torch.randn(6, 32768, device="cuda", dtype=torch.bfloat16)
+        ends = torch.full((6,), 13000, device="cuda", dtype=torch.int32)
+        stream = torch.cuda.Stream()
+        stream.wait_stream(torch.cuda.current_stream())
+        with patch.dict(os.environ, {"DSV41_DECODE_CANDIDATE_TOPK_V3": "1"}):
+            with torch.cuda.stream(stream):
+                selector.select_candidates(logits, ends, 8, 2048)
+            stream.synchronize()
+            graph = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(graph, stream=stream):
+                ids, flags = selector.select_candidates(logits, ends, 8, 2048)
+            for length in (32768, 0, 16384, 16385, 13000, 1):
+                logits.normal_()
+                ends.fill_(length)
+                graph.replay()
+                reference_ids, reference_flags = selector.select_candidates(
+                    logits, ends, 8, 2048
+                )
+                torch.testing.assert_close(ids, reference_ids, rtol=0, atol=0)
+                torch.testing.assert_close(flags, reference_flags, rtol=0, atol=0)
+
+    def test_candidate_v3_cutoff_ties_preserve_values_without_promising_membership(
+        self,
+    ):
+        logits = torch.rand(4, 32768, device="cuda", dtype=torch.bfloat16) * 0.5
+        logits[:, ::8] = 1
+        ends = torch.full((4,), 32768, device="cuda", dtype=torch.int32)
+        expected = selector.select_candidates(logits, ends, 8, 2048)
+        with patch.dict(os.environ, {"DSV41_DECODE_CANDIDATE_TOPK_V3": "1"}):
+            ids, flags = selector.select_candidates(logits, ends, 8, 2048)
+        torch.testing.assert_close(flags.sum(-1), expected[1].sum(-1), rtol=0, atol=0)
+        scores = logits.float().view(4, 4096, 8).amax(-1)
+        scores[:, -1] = torch.inf
+        got = scores.gather(1, ids.long()).sort(-1).values
+        ref = scores.gather(1, expected[0].long()).sort(-1).values
+        torch.testing.assert_close(got, ref, rtol=0, atol=0)
+        self.assertTrue((flags[:, -1] == 1).all().item())
+
+    def test_candidate_native_execution_failure_is_not_hidden(self):
+        logits = torch.randn(4, 32768, device="cuda")
+        ends = torch.full((4,), 32768, device="cuda", dtype=torch.int32)
+        with patch.dict(
+            os.environ, {"DSV41_DECODE_CANDIDATE_TOPK_V3": "1"}
+        ), patch.object(
+            rtp_llm_ops, "topk_v3", side_effect=RuntimeError("candidate failure")
+        ):
+            with self.assertRaisesRegex(RuntimeError, "candidate failure"):
+                selector.select_candidates(logits, ends, 8, 2048)
+
+    def test_candidate_warmup_uses_v3_without_legacy_jit(self):
+        from rtp_llm.models_py.modules.dsv41.fp8 import (
+            _v41_attention_jit_warmup as warmup,
+        )
+
+        with patch.dict(
+            os.environ, {"DSV41_PREFILL_CANDIDATE_TOPK_V3": "1"}
+        ), patch.object(rtp_llm_ops, "topk_v3", wraps=rtp_llm_ops.topk_v3) as native:
+            warmup._warm_candidate_topk(torch.device("cuda"))
+            native.assert_called_once()
+        with patch.dict(
+            os.environ,
+            {
+                "DSV41_PREFILL_CANDIDATE_TOPK_V3": "0",
+                "DSV41_DECODE_CANDIDATE_TOPK_V3": "0",
+            },
+        ), patch.object(
+            rtp_llm_ops,
+            "topk_v3",
+            side_effect=AssertionError("disabled warmup must skip"),
+        ):
+            warmup._warm_candidate_topk(torch.device("cuda"))
+
+    def test_paged_compaction_preserves_bf16_without_changing_scores(self):
+        for logical in (32, 64):
+            case, _ = make_case(2, 6, 1024, 64, logical, 64 // logical)
+            expected = indexer.score_decode_indexer(**case)
+            actual = indexer.score_decode_indexer(**case, preserve_score_dtype=True)
+            self.assertEqual(actual.dtype, torch.bfloat16)
+            torch.testing.assert_close(actual.float(), expected, rtol=0, atol=0)
+
+    def _assert_persistent_pool_matches_row_loop(self, logits, ends, scores, counts):
+        rows, width = logits.shape
+        reference_scores = torch.empty_like(scores)
+        reference_counts = torch.empty_like(counts)
+        selector._candidate_pool_bounded_kernel[(rows,)](
+            logits,
+            ends,
+            reference_scores,
+            reference_counts,
+            width,
+            logits.stride(0),
+            8,
+            reference_scores.stride(0),
+            256,
+            num_warps=8,
+        )
+        torch.testing.assert_close(counts, reference_counts, rtol=0, atol=0)
+        columns = torch.arange(scores.shape[1], device=scores.device)
+        visible = columns[None] < reference_counts[:, None]
+        torch.testing.assert_close(
+            scores[visible], reference_scores[visible], rtol=0, atol=0, equal_nan=True
+        )
+        self.assertTrue(bool((scores[~visible] == 256).all()))
+
+    @patch.dict(os.environ, {"DSV41_DECODE_CANDIDATE_POOL_PERSISTENT": "1"})
+    def test_persistent_candidate_pool_preserves_bounds_nan_and_strides(self):
+        rows, width = 259, 131072
+        # Odd rows and a second preparation CTA cover both partial query groups
+        # and the prefix-task offsets omitted by the original upstream shape.
+        storage = torch.randn(rows, width + 32, device="cuda", dtype=torch.bfloat16)
+        logits = storage[:, :width]
+        pattern = torch.tensor(
+            [0, 1, 7, 8, 15, 16, 16383, 16384, 16385, width - 1, width, width + 7],
+            device="cuda",
+            dtype=torch.int32,
+        )
+        ends = pattern.repeat((rows + len(pattern) - 1) // len(pattern))[
+            :rows
+        ].contiguous()
+        logits[9, 0] = float("nan")
+        logits[9, 17] = float("inf")
+        logits[10].fill_(-float("inf"))
+        logits[11].fill_(float("inf"))
+        # Invisible NaNs must never affect a preceding visible block.
+        columns = torch.arange(width, device="cuda")
+        logits.masked_fill_(columns[None] >= ends[:, None], float("nan"))
+        backing = torch.full(
+            (rows, width // 8 + 32), 256, device="cuda", dtype=torch.bfloat16
+        )
+        scores = backing[:, : width // 8]
+        counts = torch.empty_like(ends)
+        self.assertTrue(
+            selector.candidate_pool.try_pool(logits, ends, scores, counts, 8)
+        )
+        self._assert_persistent_pool_matches_row_loop(logits, ends, scores, counts)
+
+    @patch.dict(os.environ, {"DSV41_DECODE_CANDIDATE_POOL_PERSISTENT": "1"})
+    def test_persistent_candidate_pool_graph_replays_live_auxiliary_inputs(self):
+        rows, width = 259, 65536
+        logits = torch.randn(rows, width, device="cuda", dtype=torch.bfloat16)
+        ends = torch.full((rows,), 32768, device="cuda", dtype=torch.int32)
+        scores = torch.full(
+            (rows, width // 8), 256, device="cuda", dtype=torch.bfloat16
+        )
+        counts = torch.empty_like(ends)
+        stream = torch.cuda.Stream()
+        stream.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(stream):
+            self.assertTrue(
+                selector.candidate_pool.try_pool(logits, ends, scores, counts, 8)
+            )
+        stream.synchronize()
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph, stream=stream):
+            selected = selector.candidate_pool.try_pool(logits, ends, scores, counts, 8)
+        self.assertTrue(selected)
+        for step in range(4):
+            logits.normal_()
+            logits[:, 8:16] = float("nan")
+            pattern = [0] if step == 0 else [1, 7, 16383, 16384, 45000, width]
+            values = torch.tensor(pattern, dtype=torch.int32, device="cuda")
+            ends.copy_(values.repeat((rows + len(pattern) - 1) // len(pattern))[:rows])
+            if step % 2:
+                ends.copy_(ends.flip(0))
+            scores.fill_(256)
+            graph.replay()
+            self._assert_persistent_pool_matches_row_loop(logits, ends, scores, counts)
+
+    def test_persistent_candidate_pool_gate_retains_old_paths(self):
+        logits = torch.randn(128, 65536, device="cuda", dtype=torch.bfloat16)
+        ends = torch.full((128,), 65536, device="cuda", dtype=torch.int32)
+        scores = torch.full((128, 8192), 256, device="cuda", dtype=torch.bfloat16)
+        counts = torch.full_like(ends, -1)
+        with patch.dict(
+            os.environ, {"DSV41_DECODE_CANDIDATE_POOL_PERSISTENT": "0"}
+        ), patch.object(
+            selector.candidate_pool,
+            "_load_kernel",
+            side_effect=AssertionError("disabled import"),
+        ):
+            self.assertFalse(
+                selector.candidate_pool.try_pool(logits, ends, scores, counts, 8)
+            )
+        self.assertFalse(
+            selector.candidate_pool.is_supported(
+                logits.float(), ends, scores, counts, 8
+            )
+        )
+        self.assertFalse(
+            selector.candidate_pool.is_supported(
+                logits, ends, scores.float(), counts, 8
+            )
+        )
+        self.assertFalse(
+            selector.candidate_pool.is_supported(logits, ends, scores, counts, 16)
+        )
+        self.assertTrue(bool((counts == -1).all()))
+        self.assertTrue(bool((scores == 256).all()))
+
+    @patch.dict(os.environ, {"DSV41_DECODE_CANDIDATE_POOL_PERSISTENT": "1"})
+    def test_persistent_candidate_pool_rejects_misaligned_views(self):
+        rows, width = 128, 65536
+        logits = torch.empty(rows, width, device="cuda", dtype=torch.bfloat16)
+        ends = torch.full((rows,), width, device="cuda", dtype=torch.int32)
+        scores = torch.full(
+            (rows, width // 8), 256, device="cuda", dtype=torch.bfloat16
+        )
+        counts = torch.full_like(ends, -1)
+        aligned = (logits, ends, scores, counts)
+        self.assertTrue(selector.candidate_pool.is_supported(*aligned, 8))
+
+        # These views retain every admitted shape, stride and contiguity property.
+        # Their first addresses violate the TileLang vector load/store alignment.
+        offset_logits = torch.empty(
+            rows, width + 16, device="cuda", dtype=torch.bfloat16
+        )[:, 1 : width + 1]
+        offset_scores = torch.full(
+            (rows, width // 8 + 16), 256, device="cuda", dtype=torch.bfloat16
+        )[:, 1 : width // 8 + 1]
+        offset_ends = torch.full((rows + 1,), width, device="cuda", dtype=torch.int32)[
+            1:
+        ]
+        offset_counts = torch.full((rows + 1,), -1, device="cuda", dtype=torch.int32)[
+            1:
+        ]
+        cases = (
+            ("logits", 0, offset_logits, 32),
+            ("lengths", 1, offset_ends, 8),
+            ("scores", 2, offset_scores, 32),
+            ("block_lengths", 3, offset_counts, 8),
+        )
+        for name, index, tensor, alignment in cases:
+            with self.subTest(tensor=name):
+                self.assertNotEqual(tensor.data_ptr() % alignment, 0)
+                args = list(aligned)
+                args[index] = tensor
+                # Guard the loader too: no unsafe kernel may compile or launch,
+                # even when this test is run before the admission fix is applied.
+                with patch.object(
+                    selector.candidate_pool,
+                    "_load_kernel",
+                    side_effect=AssertionError("misaligned kernel must not launch"),
+                ) as load_kernel:
+                    self.assertFalse(selector.candidate_pool.is_supported(*args, 8))
+                    self.assertFalse(selector.candidate_pool.try_pool(*args, 8))
+                    load_kernel.assert_not_called()
+                self.assertTrue(bool((args[2] == 256).all()))
+                self.assertTrue(bool((args[3] == -1).all()))
+
+    def test_complete_candidate_selection_uses_persistent_pool(self):
+        self.require_native(torch.bfloat16)
+        logits = torch.randn(128, 65536, device="cuda", dtype=torch.bfloat16)
+        ends = torch.full((128,), 50000, device="cuda", dtype=torch.int32)
+        with patch.dict(os.environ, {"DSV41_DECODE_CANDIDATE_POOL_PERSISTENT": "0"}):
+            expected = selector.select_candidates(logits, ends, 8, 2048, complete=True)
+        with patch.dict(
+            os.environ, {"DSV41_DECODE_CANDIDATE_POOL_PERSISTENT": "1"}
+        ), patch.object(
+            selector.candidate_pool, "try_pool", wraps=selector.candidate_pool.try_pool
+        ) as persistent:
+            actual = selector.select_candidates(logits, ends, 8, 2048, complete=True)
+            persistent.assert_called_once()
+        for got, ref in zip(actual, expected):
+            torch.testing.assert_close(got, ref, rtol=0, atol=0)
+
+
+if __name__ == "__main__":
+    unittest.main()

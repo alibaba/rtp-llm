@@ -152,23 +152,18 @@ class StrategyRegistry:
                     "or register a backend with W8A8 INT8 per-channel execution "
                     f"support. {_requested_strategy_context(config)}"
                 )
-            if quant_method == "FP8_FP4" and getattr(
-                config, "has_redundant_experts", False
-            ):
-                raise ValueError(
-                    "FP8/FP4 MOE strategies do not support EPLB redundant "
-                    "experts; disable EPLB or register an EPLB-aware backend "
-                    f"(logical_experts={getattr(config, 'expert_num', None)}, "
-                    "physical_experts="
-                    f"{getattr(config, 'physical_expert_num', None)}). "
-                    f"{_requested_strategy_context(config)}"
-                )
             if skipped:
                 raise ValueError(
                     "No suitable MOE strategy found: every candidate was skipped "
                     "because its router/executor could not be imported, so this is "
                     "a missing-dependency problem rather than a configuration one. "
                     f"Skipped: {skipped}. {_requested_strategy_context(config)}"
+                )
+            if getattr(config, "has_redundant_experts", False):
+                raise ValueError(
+                    "No suitable MOE backend supports this redundant-expert configuration; "
+                    "remove --redundant_expert or select a backend supporting EPLB weights. "
+                    f"{_requested_strategy_context(config)}"
                 )
             raise ValueError(
                 "No suitable MOE strategy found for configuration. "

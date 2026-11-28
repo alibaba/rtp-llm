@@ -6,6 +6,7 @@
 #include "rtp_llm/cpp/models/HiddenStateCapturePublisher.h"
 #include "rtp_llm/cpp/models/ModelTypes.h"
 #include "rtp_llm/cpp/models/GenerationPrefillCudaGraphEligibility.h"
+#include "rtp_llm/cpp/models/eplb/ExpertBalancer.h"
 
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
 #include "rtp_llm/cpp/config/ModelConfig.h"
@@ -33,6 +34,7 @@
 #endif
 #if USING_CUDA
 #include "rtp_llm/models_py/bindings/cuda/cuda_host_utils.h"
+#include "rtp_llm/models_py/bindings/cuda/kernels/attention_input_metadata.h"
 #endif
 #include "rtp_llm/cpp/models/context_parallel/ContextParallelProcessorBase.h"
 #include "rtp_llm/models_py/bindings/core/DeviceData.h"
@@ -79,7 +81,7 @@ class PyWrappedModel: public ModelBase {
 public:
     // py_instance is `py_model` indeedly.
     PyWrappedModel(const GptModelInitParams& params,
-                   py::object                py_instance,
+                   const py::object&         py_instance,
                    bool                      is_prefill_cuda_graph_mode   = false,
                    bool                      use_spec_decoding            = false,
                    DSparkModelRole           dspark_model_role            = DSparkModelRole::NONE,
@@ -89,21 +91,27 @@ public:
                    MtpIndexerRole            mtp_indexer_role             = MtpIndexerRole::NORMAL);
     ~PyWrappedModel();
 
-    GptModelOutputs       forward(const GptModelInputs& inputs) override;
-    PPIntermediateTensors makePPWarmUpInputTensors(const GptModelInputs& inputs, bool enable_cp) override;
-    void                  releaseBuffers() override;
-    py::object&           getPyModel() {
-        return py_model_;
+    GptModelOutputs      forward(const GptModelInputs& inputs) override;
+    const torch::Tensor& proposalLogitsBuffer() const {
+        return proposal_logits_buffer_;
     }
-    torch::Tensor              getMtpTargetHiddenStates(int64_t num_tokens) override;
-    torch::Tensor              getMtpLastHiddenStates(int64_t num_tokens) override;
-    bool                       hasMtpTargetHiddenBuffer() const override;
-    void                       prepareAttentionInputs(const GptModelInputs& inputs) override;
-    void                       prepareAttentionInputs(const GptModelInputs& inputs, bool skip_forward_event_sync);
-    void                       updateKVCacheKernelBlockId(const GptModelInputs& inputs) override;
-    std::string                waitCacheStorePublication() override;
-    HiddenStateCaptureStats    hiddenStateCaptureStats() const;
-    std::optional<std::string> takeDeferredHiddenStateCaptureError() override;
+    GptModelOutputs                       forwardMicroBatched(const GptModelInputs& inputs, bool capture_hidden_states);
+    void                                  releaseBuffers() override;
+    std::optional<DSparkCapturedCapacity> capturedDSparkCapacity(int64_t batch) const override;
+    torch::Tensor                         getMtpTargetHiddenStates(int64_t num_tokens) override;
+    torch::Tensor                         getMtpLastHiddenStates(int64_t num_tokens) override;
+    bool                                  hasMtpTargetHiddenBuffer() const override;
+    void                                  prepareAttentionInputs(const GptModelInputs& inputs) override;
+    void                                  prepareAttentionInputs(const GptModelInputs& inputs,
+                                                                 bool                  skip_forward_event_sync,
+                                                                 const GptModelInputs* cache_store_host_inputs = nullptr,
+                                                                 bool                  defer_graph_prepare = false);
+    void                                  updateKVCacheKernelBlockId(const GptModelInputs& inputs) override;
+    std::string                           waitCacheStorePublication() override;
+    HiddenStateCaptureStats               hiddenStateCaptureStats() const;
+    std::optional<std::string>            takeDeferredHiddenStateCaptureError() override;
+    PPIntermediateTensors makePPWarmUpInputTensors(const GptModelInputs& inputs, bool enable_cp) override;
+    py::object& getPyModel() { return py_model_; }
     bool                       hasSpeculativeTargetCommitHooks() const override;
     std::string                prepareSpeculativeTargetCommit(const torch::Tensor& accept_len) override;
     std::string                finishSpeculativeTargetCommit(bool commit) override;
@@ -119,12 +127,11 @@ private:
 
 private:
     // Helper functions to reduce code duplication
-    torch_ext::PyAttentionInputs  buildPyAttentionInputs(const GptModelInputs& inputs);
-    torch_ext::PyEmbeddingInputs  buildPyEmbeddingInputs(const GptModelInputs& inputs);
-    torch_ext::PyMultimodalInputs buildPyMultimodalInputs(const GptModelInputs& inputs);
-    torch_ext::BertEmbeddingInputs
-                                    buildBertEmbeddingInputs(const GptModelInputs& inputs,
-                                                             const torch::Tensor&  prepared_position_ids = torch::Tensor());
+    torch_ext::PyAttentionInputs    buildPyAttentionInputs(const GptModelInputs& inputs,
+                                                           bool                  defer_device_metadata = false);
+    torch_ext::PyEmbeddingInputs    buildPyEmbeddingInputs(const GptModelInputs& inputs);
+    torch_ext::PyMultimodalInputs   buildPyMultimodalInputs(const GptModelInputs& inputs);
+    torch_ext::BertEmbeddingInputs  buildBertEmbeddingInputs(const GptModelInputs& inputs, const torch::Tensor& prepared_position_ids = torch::Tensor());
     torch_ext::AttentionInputsByTag setupKVCacheForAttentionInputs(torch_ext::PyAttentionInputs& py_attn_inputs,
                                                                    const GptModelInputs&         inputs);
     GptModelOutputs                 callForwardPostLayers(torch::Tensor         hidden_states,
@@ -158,7 +165,8 @@ private:
     void            holdInputsHostBuffers(const GptModelInputs& inputs);
     GraphBase*      selectGraphRunner(const torch_ext::PyAttentionInputs& attention_inputs) const;
     CudaGraphState& selectGraphState(const torch_ext::PyAttentionInputs& attention_inputs);
-    void            cleanupAfterConstructionFailure() noexcept;
+    std::optional<size_t> selectDSparkGraphIndex(const torch_ext::PyAttentionInputs& attention_inputs) const;
+    void                  cleanupAfterConstructionFailure() noexcept;
 
     // Member variables (formerly inherited from GptModel)
     const rtp_llm::ExecProperties                   device_props_;
@@ -178,12 +186,23 @@ private:
     torch::Tensor                                   residual_scale_fp32_;
     torch::Tensor                                   residual_scale_;
     TensorHolder                                    buffer_holder_;
+    torch::Tensor                                   proposal_logits_buffer_;
 
+    ExpertBalancer             expert_balancer_;
     std::unique_ptr<GraphBase> graph_runner_;
     std::unique_ptr<GraphBase> generation_prefill_graph_runner_;
-    py::object                 py_model_;
-    py::object                 py_forward_method_;
-    py::object                 held_attn_pyobj_;
+    // Each budget owns its buffers, graph pool, preparation flag and events.
+    // Target and commit are separate wrappers; proposal never enters this bank.
+    struct DSparkBudgetGraph {
+        std::unique_ptr<GraphBase> runner;
+        CudaGraphState             state;
+    };
+    int                                dspark_capacity_query_width_{0};
+    std::vector<DSparkCudaGraphBudget> dspark_graph_budgets_;
+    std::vector<DSparkBudgetGraph>     dspark_budget_graphs_;
+    py::object                         py_model_;
+    py::object                         py_forward_method_;
+    py::object                         held_attn_pyobj_;
     // Per-wrapper ownership, not the process-wide configuration request. Only
     // the normal main-generation wrapper can own this secondary runner.
     const bool                       owns_generation_prefill_cuda_graph_{false};
@@ -195,6 +214,7 @@ private:
     bool has_mtp_hidden_buffer_{false};
     bool has_speculative_target_commit_hooks_{false};
     bool has_speculative_target_status_reducer_{false};
+    bool supports_device_only_attention_metadata_{false};
     bool supports_micro_batch_{false};
     bool synchronize_moe_forward_{false};
     bool moe_forward_allows_graph_{true};
@@ -213,7 +233,10 @@ private:
     static constexpr int kPinnedCheckForwardCount = 3;
     int                  pinned_check_remaining_{kPinnedCheckForwardCount};
 
-    std::atomic<bool>               prepared_attention_inputs_{false};
+    std::atomic<bool> prepared_attention_inputs_{false};
+#if USING_CUDA
+    AttentionInputMetadataParams pending_attention_metadata_;
+#endif
     torch_ext::PyAttentionInputs    attention_inputs_;
     torch_ext::AttentionInputsByTag attention_inputs_by_tag_;
     CudaGraphState                  graph_state_;
@@ -222,7 +245,7 @@ private:
 
 // NOTE(wangyin): constructor can not be compiled correctly when placed in cc file.
 inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
-                                      py::object                py_instance,
+                                      const py::object&         py_instance,
                                       bool                      is_prefill_cuda_graph_mode,
                                       bool                      use_spec_decoding,
                                       DSparkModelRole           dspark_model_role,
@@ -248,6 +271,7 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
     hidden_size_(params.hidden_size),
     description_(params.description),
     cache_manager_(params.cache_manager),
+    expert_balancer_(description_.ffn_conf.moe_configs, params),
     owns_generation_prefill_cuda_graph_(shouldCreateGenerationPrefillCudaGraph(params.hw_kernel_config,
                                                                                allow_cuda_graph,
                                                                                is_prefill_cuda_graph_mode,
@@ -347,12 +371,6 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
         residual_scale_fp32_ = residual_tensor;
         residual_scale_      = residual_tensor.to(dataTypeToTorchType(description_.data_type));
     }
-    if (params.description.ffn_conf.moe_configs.has_value()) {
-        auto moe_conf         = params.description.ffn_conf.moe_configs.value();
-        overall_expert_stats_ = execCreateMoeExpertStates(
-            {layer_num_, moe_conf.ep_size, moe_conf.expert_num, moe_conf.expert_num + moe_conf.extra_expert_num});
-    }
-
     if (setenv("PYTHONUNBUFFERED", "TRUE", 1) != 0) {
         RTP_LLM_LOG_WARNING("Failed to set PYTHONUNBUFFERED environment variable on POSIX.");
     } else {
@@ -434,6 +452,7 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
         RTP_LLM_LOG_ERROR("Python model initialize failed:\n%s", e.what());
         throw;
     }
+    expert_balancer_.initialize(py_model_);
     // Registration enables the handler; only batches with selected prefill rows invoke it.
     if (py::hasattr(py_model_, "custom_output_handler")) {
         initializeCustomOutput();
@@ -442,7 +461,23 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
                                  dspark_model_role_ == DSparkModelRole::COMMIT  ? "forward_commit" :
                                                                                   "forward";
     py_forward_method_         = py_model_.attr(forward_method);
+    // NormalExecutor's cache-backed decode warmup does not set
+    // use_spec_decoding, so identify target verification from the model too.
+    const bool is_target_verify_decode = params.sp_config.type != SP_TYPE_NONE && params.sp_config.gen_num_per_cycle > 0
+                                         && !params.model_id && !is_prefill_cuda_graph_mode;
+    const bool use_dspark_budget_graphs =
+        params.parallelism_config.role_type == RoleType::DECODE && params.sp_config.type == SP_TYPE_DSPARK
+        && params.sp_config.sp_dspark_verify_mode == "packed" && params.sp_config.sp_dspark_confidence_mode == "bounded"
+        && (dspark_model_role_ == DSparkModelRole::COMMIT
+            || (dspark_model_role_ == DSparkModelRole::NONE && is_target_verify_decode));
     if (enable_cuda_graph_ && !params.kv_cache_layer_layout.has_value()) {
+        // Synthetic no-cache memory warmup explicitly opts out of graphs at
+        // construction. A served budget-graph model must not silently turn the
+        // feature off and thereby bypass its runtime graph-miss checks.
+        RTP_LLM_CHECK_WITH_INFO(!use_dspark_budget_graphs,
+                                "DSpARK %s CUDA graph requires a published KV-cache topology; "
+                                "cannot initialize bounded packed Decode with eager fallback",
+                                dspark_model_role_ == DSparkModelRole::COMMIT ? "commit" : "target");
         // No published topology means there is no trustworthy model geometry
         // for any graph role (including prefill warmup). Keep the eager path.
         RTP_LLM_LOG_WARNING(
@@ -458,6 +493,7 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
 
         // Create GraphParams from individual config fields
         GraphParams graph_params;
+        graph_params.expert_token_counts          = expert_balancer_.stable_expert_token_counts();
         graph_params.enable_cuda_graph            = params.hw_kernel_config.enable_cuda_graph;
         graph_params.enable_cuda_graph_debug_mode = params.hw_kernel_config.enable_cuda_graph_debug_mode;
         graph_params.is_prefill_cuda_graph_mode   = is_prefill_cuda_graph_mode;
@@ -481,9 +517,9 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
             graph_params.input_hidden_size = static_cast<size_t>(width);
         }
         graph_params.model_data_type = dtype;
-        // The decode scheduler caps decode batches at
-        // min(concurrency_limit, max_generate_batch_size); converge the capture
-        // side to the same bound. Decode-role DSV4 models size their MoE
+        // Keep capture within both frontend concurrency and engine capacity.
+        // DSpARK budget graphs validate scheduler coverage below before capture.
+        // Decode-role DSV4 models size their MoE
         // per-rank capacity from the (smaller) override, so capturing buckets
         // at the raw concurrency limit makes the eager probe forward exceed
         // max_tokens_per_rank and abort engine startup.
@@ -546,15 +582,19 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
         } else {
             graph_params.num_tokens_per_bs = 1;
         }
-        // Target-model decode with SP enabled is the multi-token verify path.
-        // NormalExecutor::decodeWarmUp does not set use_spec_decoding, so infer
-        // this graph role from the model/config identity as well; otherwise the
-        // Python model sees is_prefill=true and incorrectly enters prefill.
-        const bool is_target_verify_decode = params.sp_config.type != SP_TYPE_NONE
-                                             && params.sp_config.gen_num_per_cycle > 0 && !params.model_id
-                                             && !is_prefill_cuda_graph_mode;
         graph_params.is_target_verify =
             dspark_model_role_ != DSparkModelRole::NONE || use_spec_decoding || is_target_verify_decode;
+        graph_params.is_packed_target_verify =
+            params.parallelism_config.role_type == RoleType::DECODE
+            && params.sp_config.sp_dspark_verify_mode == "packed"
+            && params.sp_config.sp_dspark_confidence_mode == "bounded" && params.sp_config.sp_dspark_verify_budget >= 0
+            && params.sp_config.sp_dspark_verify_budget < params.sp_config.gen_num_per_cycle
+            && (dspark_model_role_ == DSparkModelRole::COMMIT || is_target_verify_decode);
+        if (graph_params.is_packed_target_verify) {
+            // Total query capacity is (k+1)*B; each request's live query
+            // length may still range from 1 to gamma+1.
+            graph_params.num_tokens_per_bs = params.sp_config.sp_dspark_verify_budget + 1;
+        }
         graph_params.role =
             graph_params.is_target_verify ? CudaGraphRole::TARGET_VERIFY :
             is_prefill_cuda_graph_mode    ? (params.sp_config.type == SP_TYPE_NONE ? CudaGraphRole::EMBEDDING_PREFILL :
@@ -564,8 +604,41 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
         RTP_LLM_CHECK_WITH_INFO(graph_params.kernel_block_table_width > 0,
                                 "CUDA graph requires Executor to provide a positive kernel block table width");
 
-        auto graph_runner =
-            std::make_unique<CudaGraphRunner>(graph_params, py_instance, forward_method, params.metrics_reporter);
+        if (use_dspark_budget_graphs) {
+            // Scheduler admission uses max_generate_batch_size, independently
+            // of frontend concurrency. Reject uncovered batches before capture.
+            RTP_LLM_CHECK_WITH_INFO(
+                params.runtime_config.max_generate_batch_size <= params.concurrency_config.concurrency_limit,
+                "DSpARK budget CUDA graphs require max_generate_batch_size (%ld) <= concurrency_limit (%d)",
+                params.runtime_config.max_generate_batch_size,
+                params.concurrency_config.concurrency_limit);
+            if (!graph_params.decode_capture_batch_sizes.empty()) {
+                const auto& buckets    = graph_params.decode_capture_batch_sizes;
+                const int   max_bucket = *std::max_element(buckets.begin(), buckets.end());
+                RTP_LLM_CHECK_WITH_INFO(
+                    max_bucket > 0 && static_cast<size_t>(max_bucket) >= graph_params.max_context_batch_size,
+                    "DSpARK budget CUDA graph decode buckets must cover configured request capacity");
+            }
+            dspark_graph_budgets_ =
+                makeDSparkCudaGraphBudgets(params.sp_config.gen_num_per_cycle,
+                                           params.sp_config.sp_dspark_verify_budget,
+                                           params.sp_config.sp_dspark_verify_budget_mode == "adaptive");
+            dspark_budget_graphs_.reserve(dspark_graph_budgets_.size());
+#if USING_CUDA
+            dspark_capacity_query_width_ =
+                params.parallelism_config.tp_size == 1 && params.sp_config.model_type == "deepseek_v41_dspark"
+                        && params.sp_config.sp_dspark_verify_budget_mode == "fixed" && dspark_graph_budgets_.size() == 1
+                        && dspark_graph_budgets_[0].packed && dspark_graph_budgets_[0].budget >= 0
+                        && dspark_graph_budgets_[0].budget < params.sp_config.gen_num_per_cycle ?
+                    static_cast<int>(params.sp_config.gen_num_per_cycle + 1) :
+                    0;
+#endif
+            RTP_LLM_LOG_INFO("[dspark-graph] role=%s mode=%s budgets=%zu gamma=%ld",
+                             dspark_model_role_ == DSparkModelRole::COMMIT ? "commit" : "target",
+                             params.sp_config.sp_dspark_verify_budget_mode.c_str(),
+                             dspark_graph_budgets_.size(),
+                             params.sp_config.gen_num_per_cycle);
+        }
         {
             void* nccl_comm = cuda_graph::getGraphCaptureTpNcclComm();
             cuda_graph::register_graph_capture_nccl_comm(nccl_comm,
@@ -582,7 +655,42 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
             if (mtp_indexer_role_ != MtpIndexerRole::NORMAL) {
                 py_model_.attr("set_mtp_indexer_role")(static_cast<int>(mtp_indexer_role_));
             }
-            graph_runner_.reset(CudaGraphRunner::initializeCapture(std::move(graph_runner)));
+            if (use_dspark_budget_graphs) {
+                for (const auto& budget : dspark_graph_budgets_) {
+                    auto budget_params                        = graph_params;
+                    budget_params.num_tokens_per_bs           = budget.tokensPerBatch();
+                    budget_params.dspark_capacity_query_width = dspark_capacity_query_width_;
+                    budget_params.is_packed_target_verify     = budget.packed;
+                    RTP_LLM_LOG_INFO("[dspark-graph] capture role=%s budget=%d packed=%d tokens_per_batch=%d",
+                                     dspark_model_role_ == DSparkModelRole::COMMIT ? "commit" : "target",
+                                     budget.budget,
+                                     budget.packed,
+                                     budget.tokensPerBatch());
+                    // No rank can enter the next candidate while another rank
+                    // is still warming up graph-held EP/TP collectives.
+                    syncCudaGraphCaptureRanks(params.parallelism_config, "before_dspark_budget_capture");
+                    DSparkBudgetGraph graph;
+                    graph.runner.reset(CudaGraphRunner::initializeCapture(std::make_unique<CudaGraphRunner>(
+                        budget_params, py_instance, forward_method, params.metrics_reporter)));
+                    dspark_budget_graphs_.push_back(std::move(graph));
+                }
+                syncCudaGraphCaptureRanks(params.parallelism_config, "after_dspark_budget_capture");
+            } else {
+                graph_runner_.reset(CudaGraphRunner::initializeCapture(std::make_unique<CudaGraphRunner>(
+                    graph_params, py_instance, forward_method, params.metrics_reporter)));
+            }
+        } catch (const DirtyCudaGraphCaptureError& e) {
+            // initializeCapture retains the failed runner. Other candidates
+            // also own CUDA resources and must not drain or destroy them while
+            // device capture/allocator state may be dirty. Startup fails and
+            // the process owns reclamation of all these retained runners.
+            for (auto& graph : dspark_budget_graphs_) {
+                (void)graph.runner.release();
+            }
+            RTP_LLM_LOG_ERROR("DSpARK CUDA graph capture failed with dirty device state; retaining captured budgets "
+                              "until process exit: %s",
+                              e.what());
+            throw;
         } catch (const py::error_already_set& e) {
             RTP_LLM_LOG_ERROR("Python model initialize failed (cuda_graph branch):\n%s", e.what());
             throw;
@@ -702,6 +810,12 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
         throw std::runtime_error("PyWrappedModel constructor: Python model initialization failed.");
     }
 
+    // Opt in once at initialization. Generic attention implementations can still
+    // require an exact host context_total_kv_length (e.g. fused RoPE/KV cache).
+    supports_device_only_attention_metadata_ =
+        py::hasattr(py_model_, "supports_device_only_attention_metadata")
+        && py_model_.attr("supports_device_only_attention_metadata").cast<bool>();
+
     if (enable_cache_store) {
         cache_store_async_writer_ =
             std::make_shared<CacheStoreAsyncWriter>(static_cast<int>(params.parallelism_config.local_rank),
@@ -780,6 +894,21 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
             params.metrics_reporter);
     }
 
+    // Graph initialization calls Python directly and may leave warmup counts.
+    expert_balancer_.step(true);
+#if USING_CUDA
+    if (dspark_model_role_ == DSparkModelRole::PROPOSE && enable_cuda_graph_ && device_props_.tp_size == 1
+        && weights_.lm_head && weights_.lm_head->kernel.scalar_type() == torch::kBFloat16) {
+        const int64_t rows =
+            static_cast<int64_t>(params.concurrency_config.concurrency_limit) * params.sp_config.gen_num_per_cycle;
+        try {
+            proposal_logits_buffer_ = torch::zeros({rows, weights_.lm_head->kernel.size(0)},
+                                                   weights_.lm_head->kernel.options().dtype(torch::kFloat32));
+        } catch (const c10::OutOfMemoryError& error) {
+            RTP_LLM_LOG_WARNING("Proposal logits buffer unavailable; retaining eager sampling: %s", error.what());
+        }
+    }
+#endif
     RTP_LLM_LOG_INFO("PyWrappedModel initialized done.");
     (void)construction_guard.release();
 }

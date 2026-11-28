@@ -10,7 +10,6 @@
 #include "rtp_llm/cpp/engine_base/ProposeModelEngineInitParams.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/cache/Types.h"
-#include "rtp_llm/cpp/config/EplbConfig.h"
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
 #include "rtp_llm/models_py/bindings/core/DeviceData.h"
 #include "rtp_llm/cpp/disaggregate/cache_store/NormalCacheStore.h"
@@ -93,10 +92,8 @@ public:
         return false;
     }
 
-    virtual bool updateEplbConfig(const EPLBConfig& config) {
-        return false;
-    }
-    virtual void startTimelineProfiling(const std::string& trace_name, int start_step, int num_steps) {}
+    virtual void
+    startTimelineProfiling(const std::string& trace_name, int start_step, int num_steps, bool profile_light = false) {}
 
     std::shared_ptr<KVCacheManager> getCacheManager() const;
 

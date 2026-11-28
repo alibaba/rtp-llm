@@ -1,10 +1,10 @@
 #pragma once
+#include <climits>
 #include "rtp_llm/models_py/bindings/core/Types.h"
 #include "rtp_llm/cpp/models/models_weight/Weights.h"
 #include "rtp_llm/models_py/bindings/core/CommonDefines.h"
 #include "rtp_llm/cpp/model_utils/activation_types.h"
 #include "rtp_llm/cpp/model_utils/AttentionConfig.h"
-#include "rtp_llm/cpp/models/eplb/stats/ExpertStats.h"
 #include "rtp_llm/models_py/bindings/ParamsBase.h"
 #include "rtp_llm/models_py/bindings/LinearReplay.h"
 #include "rtp_llm/models_py/bindings/core/TensorHolder.h"
@@ -130,6 +130,9 @@ struct GptModelInputs {
     // So, the model has different inference logic for target verify and normal inference.
     // To select correct inference mode, we need to set this flag manually.
     bool is_target_verify = false;
+    // V4.1 bounded verification uses packed query rows with ragged request
+    // lengths. Independent of is_target_verify, which also classifies proposal.
+    bool is_packed_target_verify = false;
 
     /** Upstream stage activations; excluded from TP input synchronization. */
     std::map<std::string, torch::Tensor> pp_intermediates;
@@ -170,6 +173,11 @@ struct GptModelOutputs {
     // this separate from all_hidden_states lets the executor distinguish a
     // real graph-instance output from the ordinary decoder hidden tensor.
     torch::Tensor mtp_target_hidden_states;
+
+    // Optional V4.1 confidence-head hidden contribution, CUDA FP32 [B*gamma, 1].
+    // Owned by this forward result; the sampler adds the previous-token Markov
+    // contribution. Undefined for disabled confidence and non-proposal roles.
+    torch::Tensor dspark_confidence_hidden_logits;
 
     // A single request-visible status. `REPLAYED` means this forward actually
     // executed a captured generation-prefill CUDA Graph; every other non-default value is
@@ -302,8 +310,6 @@ struct MoeConfigs {
     double routed_scaling_factor = 1.0;  // used in deepseek v2 and glm4 moe
 
     bool enable_eplb = false;
-    // NOTE(yinzhi): not used yet
-    EplbBalanceMethod balance_method = EplbBalanceMethod::EQUAL;
 };
 
 struct FfnConfigs {
@@ -311,11 +317,14 @@ struct FfnConfigs {
     std::optional<MoeConfigs> moe_configs = std::nullopt;
 };
 
-struct GreedySamplingBuffers {
-    torch::Tensor seed_host;
-    torch::Tensor offset_host;
-    torch::Tensor output_ids_ptrs_host;
-    size_t        max_batch_size = 0;
+// Host dispatch decisions for a batch whose row parameters already live on GPU.
+// The caller must compute these over exactly the represented request set.
+struct SamplingMode {
+    bool all_top_k_one = true, all_top_k_unlimited = true;
+    bool all_top_p_one = true, all_top_p_exact_one = true, any_top_p_one = false;
+    bool temperature_active = false, repetition_active = false, ngram_active = false;
+    bool need_do_sample = false, has_not_do_sample = false;
+    int  min_top_k = INT_MAX, max_top_k = INT_MIN;
 };
 
 struct GreedyParams {
@@ -343,11 +352,47 @@ struct GreedyParams {
     std::optional<torch::Tensor> do_sample;
 
     std::vector<at::Generator> generator;
-    GreedySamplingBuffers*     sampling_buffers = nullptr;
+
+    // Caller declares params.logits private to this sampling round (discarded
+    // afterwards): sampleGreedy may skip restoring softmax probabilities into
+    // logits and take the fused greedy top-1 path (CUDA). Default false keeps
+    // the legacy "logits become probs" in-place contract for every caller.
+    bool skip_logits_probs_restore = false;
+
+    // Caller declares that every consumer of output_all_probs treats the
+    // renormalized distribution as a point mass at the sampled token (e.g.
+    // the speculative rejection kernel's target_probs_point_mass synthesis):
+    // the fused greedy top-1 path may then skip materializing the one-hot
+    // [batch, vocab] matrix and only write the token. Default false keeps
+    // the legacy fully-materialized all_probs contract for every caller.
+    bool                         all_probs_point_mass = false;
+    int                          force_topk           = 0;
+    std::optional<torch::Tensor> output_all_probs_indices;
+    // Also return the normalized distribution when output_all_probs requests
+    // pre-filter probabilities. Otherwise reuse output_all_probs storage.
+    bool return_sampling_probs = false;
+
+    // Sampling execution consumes named tensors on the logits device.
+    // sequence_lengths contains effective lengths for all rows; only the first
+    // decoder_batch_size rows participate in the no-repeat-ngram kernel.
+    SamplingMode  mode;
+    torch::Tensor seed, offset, inverse_temperature, sequence_last_indexes, output_ids_ptrs;
+    int64_t       decoder_batch_size = 0;
 };
+
+// Select the CUDA sampling implementation; ROCm and generic use their own backend.
+bool enableCudaSampling();
+
+int64_t samplingCandidateWidth(const GreedyParams& params, const SamplingMode& mode);
 
 struct GreedyOutput {
     torch::Tensor success;
+    // True only when the sampler actually ran the token-only point-mass mode
+    // and output_all_probs was left unmaterialized; consumers must then treat
+    // the distribution as a one-hot at the sampled token. Callers must never
+    // read all_probs values when this is set.
+    bool          all_probs_point_mass = false;
+    torch::Tensor sampling_probs;
 };
 
 struct BeamSearchParams {
@@ -418,6 +463,41 @@ struct RejectionSamplingParams {
      * false so verification uses the actual proposal distribution.
      */
     bool draft_probs_point_mass = false;
+    // True when target_probs_d is a degenerate point mass on the last column
+    // of target_token_ids_d (greedy top_k==1 verification may skip
+    // materializing the one-hot matrix). The kernel then synthesizes q as
+    // one-hot(target_token) instead of reading target_probs_d, bit-identical
+    // to the materialized matrix. target_probs_d must still be defined with
+    // the [batch, num_speculative_tokens + 1, vocab] shape.
+    bool target_probs_point_mass = false;
+    // Optional [batch] bool CUDA mask. A true row receives the force-accept
+    // override: all draft tokens + the target bonus token (last column of the
+    // row's final target_token_ids_d slot) with accept count
+    // num_speculative_tokens + 1 — the exact values the legacy eager
+    // torch::where chain wrote. Only honored when finalize_outputs is true;
+    // leave undefined when no stream forces acceptance.
+    torch::Tensor force_mask_d;
+    // True folds the caller's post-rejection finalization into the kernel:
+    // the per-row force override above plus the -1 -> 0 padding reset, in the
+    // legacy order. With this flag the kernel writes every element of
+    // output_token_ids_d and output_accepted_token_num_d on every path, so
+    // callers may pass uninitialized (torch::empty) buffers. CUDA backend
+    // only; query execRejectionSamplingSupportsFinalize() before setting —
+    // ROCm/generic reject the flag loudly and keep the legacy eager chain.
+    bool finalize_outputs = false;
+    // Optional contiguous CUDA int32 [batch], each in [0, num_speculative_tokens].
+    // Only this prefix participates in rejection; all accepted uses target row
+    // L as bonus (including L=0). Undefined preserves the full-width path.
+    // CUDA only: other backends must reject a defined tensor explicitly.
+    torch::Tensor valid_draft_lengths_d;
+    // Optional DSpARK compact probabilities. Target indices are original
+    // vocabulary IDs [B, steps+1, K]; draft indices are [B, steps, K].
+    // When draft indices are absent, draft_probs_d is dense [B, steps, V].
+    torch::Tensor draft_probs_indices_d;
+    torch::Tensor target_probs_indices_d;
+    // Optional CUDA int32 [batch], written by the same rejection kernel.
+    // Counts target-verified candidates L (or full gamma), before output clipping.
+    torch::Tensor output_verified_draft_lengths_d;
 };
 
 struct RejectionSamplingLaunchConfig {
@@ -425,6 +505,28 @@ struct RejectionSamplingLaunchConfig {
     int num_speculative_tokens;
     int target_vocab_size;
     int target_token_stride;
+};
+
+// One DSpARK draft step's fused distribution build:
+//   q = softmax((logits + markov_bias) / temperature)
+// written to both the strided all-probabilities slice and a contiguous
+// sampling scratch. Replaces the eager cast/add/div_/softmax/copy_ chain.
+struct MarkovSoftmaxStepParams {
+    torch::Tensor logits;       // FP32 [B, V] row-strided view (proposal_logits.select(1, step))
+    torch::Tensor markov_bias;  // [B, V] contiguous FP32/BF16/FP16 torch::mm output (native weight dtype)
+    torch::Tensor temperature;  // FP32 [B] contiguous CUDA
+    torch::Tensor q_all_probs;  // FP32 [B, V] row-strided view (all_probabilities.select(1, step))
+    torch::Tensor q_contig;     // FP32 [B, V] contiguous sampling scratch
+};
+
+// One DSpARK draft step's fused softmax-free token for an all-greedy batch:
+//   token = first argmax of (logits + markov_bias) / temperature
+// Greedy verification accepts on exact target-token matches, so the caller
+// can publish deterministic proposals as a point mass (token_ids_are_point_mass).
+struct MarkovArgmaxStepParams {
+    torch::Tensor logits;       // FP32 [B, V] row-strided view (proposal_logits.select(1, step))
+    torch::Tensor markov_bias;  // [B, V] contiguous FP32/BF16/FP16 torch::mm output (native weight dtype)
+    torch::Tensor temperature;  // FP32 [B] contiguous CUDA
 };
 
 struct MappingDraft2TargetParams {

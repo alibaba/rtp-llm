@@ -66,6 +66,8 @@ private:
 public:
     int  multi_token_decode_total_tokens_ = 0;
     int  prefill_tokens_per_batch_        = 0;
+    using FlashInferMlaAttnParams::fillParams;
+
     void fillParams(torch_ext::PyAttentionInputs attn_inputs, int seq_size_per_block, bool forbid_realloc = false);
     void fillMultiTokenDecodeCudaGraphParams(torch::Tensor input_lengths_d,
                                              torch::Tensor prefix_lengths_d,

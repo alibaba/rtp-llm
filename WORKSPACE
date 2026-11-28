@@ -1,6 +1,7 @@
 workspace(name = "rtp_llm")
 
 load("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive")
+load("@bazel_tools//tools/build_defs/repo:git.bzl", "new_git_repository")
 
 http_archive(
     name = "io_opentelemetry_cpp",
@@ -67,6 +68,7 @@ http_deps()
 load("@rtp_deps//:git.bzl", "git_deps")
 
 git_deps()
+
 
 load("//3rdparty/xgrammar:repositories.bzl", "xgrammar_deps")
 

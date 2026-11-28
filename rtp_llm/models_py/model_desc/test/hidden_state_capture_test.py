@@ -77,7 +77,9 @@ class _MoeLayer(nn.Module):
         self.hidden_increment = hidden_increment
         self.residual_increment = residual_increment
 
-    def forward(self, hidden_states, residual, fmha_impl, kv_cache=None):
+    def forward(
+        self, hidden_states, residual, fmha_impl, kv_cache=None, expert_load=None
+    ):
         return DecodeLayerOutput(
             hidden_states + self.hidden_increment,
             residual + self.residual_increment,
@@ -170,6 +172,7 @@ def _make_inputs(
         input_ids=torch.tensor(input_ids, dtype=dtype),
         capture_hidden_states=capture_hidden_states,
         pp_intermediates={},
+        expert_token_counts=None,
     )
 
 
@@ -319,6 +322,7 @@ def _make_vl_inputs(capture_hidden_states: bool) -> SimpleNamespace:
             mm_extra_input=[torch.tensor([100.0, 100.0, 200.0, 200.0])],
         ),
         capture_hidden_states=capture_hidden_states,
+        expert_token_counts=None,
     )
 
 

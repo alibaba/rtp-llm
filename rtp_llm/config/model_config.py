@@ -172,6 +172,7 @@ class ModelConfig(CppModelConfig):
         "dspark_markov_rank",
         "dspark_sample_from_anchor",
         "dspark_share_target_lm_head",
+        "dspark_confidence_enabled",
         "dflash_mask_token_id",
         "dflash_target_layer_ids",
         "dflash_layer_types",
@@ -782,6 +783,7 @@ class ModelConfig(CppModelConfig):
         self.dspark_markov_rank: Optional[int] = None
         self.dspark_sample_from_anchor: bool = True
         self.dspark_share_target_lm_head: bool = False
+        self.dspark_confidence_enabled: bool = False
         # DFlash V1 checkpoint metadata.  Its runtime proposal width remains
         # the engine's ``gen_num_per_cycle``; the native checkpoint block size
         # is retained only for contract validation and provenance.

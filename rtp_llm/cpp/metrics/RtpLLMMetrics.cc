@@ -347,14 +347,17 @@ void RtpLLMSchedulerMetrics::report(const kmonitor::MetricsTags* tags, RtpLLMSch
 
 bool RtpLLMEngineMetrics::init(kmonitor::MetricsGroupManager* manager) {
     REGISTER_GAUGE_MUTABLE_METRIC(step_latency_us_metric, "rtp_llm_step_latency_us");
+    REGISTER_GAUGE_MUTABLE_METRIC(step_interval_us_metric, "rtp_llm_step_interval_us");
     return true;
 }
 
 void RtpLLMEngineMetrics::report(const kmonitor::MetricsTags* tags, RtpLLMEngineMetricsCollector* collector) {
     REPORT_GAUGE(step_latency_us);
+    REPORT_GAUGE(step_interval_us);
 }
 
 bool RtpLLMGrammarMetrics::init(kmonitor::MetricsGroupManager* manager) {
+    REGISTER_QPS_MUTABLE_METRIC(update_timeout_qps_metric, "rtp_llm_grammar_update_timeout_qps");
     REGISTER_QPS_MUTABLE_METRIC(compile_qps_metric, "rtp_llm_grammar_compile_qps");
     REGISTER_QPS_MUTABLE_METRIC(compile_invalid_qps_metric, "rtp_llm_grammar_compile_invalid_qps");
     REGISTER_QPS_MUTABLE_METRIC(cache_hit_qps_metric, "rtp_llm_grammar_cache_hit_qps");
@@ -366,6 +369,10 @@ bool RtpLLMGrammarMetrics::init(kmonitor::MetricsGroupManager* manager) {
     REGISTER_GAUGE_MUTABLE_METRIC(compiler_cache_budget_bytes_metric, "rtp_llm_grammar_compiler_cache_budget_bytes");
     REGISTER_GAUGE_MUTABLE_METRIC(verdict_cache_budget_bytes_metric, "rtp_llm_grammar_verdict_cache_budget_bytes");
     return true;
+}
+
+void RtpLLMGrammarMetrics::report(const kmonitor::MetricsTags* tags, RtpLLMGrammarUpdateMetricsCollector* collector) {
+    REPORT_QPS(update_timeout_qps);
 }
 
 void RtpLLMGrammarMetrics::report(const kmonitor::MetricsTags* tags, RtpLLMGrammarMetricsCollector* collector) {
@@ -542,6 +549,14 @@ bool RtpLLMSpeculativeEngineMetrics::init(kmonitor::MetricsGroupManager* manager
     REGISTER_GAUGE_MUTABLE_METRIC(sp_avg_accept_rate_metric, "rtp_llm_sp_avg_accept_rate");
     REGISTER_GAUGE_MUTABLE_METRIC(sp_avg_fix_accept_rate_metric, "rtp_llm_sp_avg_fix_accept_rate");
     REGISTER_GAUGE_MUTABLE_METRIC(sp_estimate_tpot_us_metric, "rtp_llm_sp_estimate_tpot_us");
+    REGISTER_GAUGE_MUTABLE_METRIC(verify_budget_metric, "rtp_llm_sp_verify_budget");
+    REGISTER_GAUGE_MUTABLE_METRIC(decided_draft_token_num_metric, "rtp_llm_sp_decided_draft_token_num");
+    REGISTER_GAUGE_MUTABLE_METRIC(total_verify_draft_token_num_metric, "rtp_llm_sp_total_verify_draft_token_num");
+    REGISTER_GAUGE_MUTABLE_METRIC(acceptance_metrics_dropped_metric, "rtp_llm_sp_acceptance_metrics_dropped");
+    REGISTER_GAUGE_MUTABLE_METRIC(main_thread_wait_bookkeeping_us_metric,
+                                  "rtp_llm_mtp_main_thread_wait_bookkeeping_us");
+    REGISTER_GAUGE_MUTABLE_METRIC(main_thread_wait_spec_verify_us_metric,
+                                  "rtp_llm_mtp_main_thread_wait_spec_verify_us");
     return true;
 }
 
@@ -552,14 +567,41 @@ void RtpLLMSpeculativeEngineMetrics::report(const kmonitor::MetricsTags*        
     RTP_REPORT_MUTABLE_METRIC(score_step_latency_us_metric, collector->score_step_latency_us);
     RTP_REPORT_MUTABLE_METRIC(speculative_sampler_latency_us_metric, collector->speculative_sampler_latency_us);
 
-    if (collector->total_propose_token_num > 0 && collector->total_stream_num > 0) {
+    if (collector->main_thread_wait_bookkeeping_us >= 0) {
+        RTP_REPORT_MUTABLE_METRIC(main_thread_wait_bookkeeping_us_metric, collector->main_thread_wait_bookkeeping_us);
+    }
+    if (collector->main_thread_wait_spec_verify_us >= 0) {
+        RTP_REPORT_MUTABLE_METRIC(main_thread_wait_spec_verify_us_metric, collector->main_thread_wait_spec_verify_us);
+    }
+
+    // Decisions are host metadata for the current round. Acceptance arrives
+    // asynchronously, so its denominator must use the completed round's budget.
+    if (collector->verify_budget >= 0) {
+        RTP_REPORT_MUTABLE_METRIC(verify_budget_metric, collector->verify_budget);
+        if (collector->decided_draft_token_num >= 0) {
+            RTP_REPORT_MUTABLE_METRIC(decided_draft_token_num_metric, collector->decided_draft_token_num);
+        }
+        RTP_REPORT_MUTABLE_METRIC(acceptance_metrics_dropped_metric, collector->acceptance_metrics_dropped);
+    }
+
+    double verify_draft_token_num = static_cast<double>(collector->total_verify_draft_token_num);
+    if (collector->total_verify_draft_token_num == -1) {
+        verify_draft_token_num = static_cast<double>(collector->total_stream_num) * collector->spec_steps;
+    }
+    if (collector->total_stream_num > 0 && verify_draft_token_num >= 0) {
         RTP_REPORT_MUTABLE_METRIC(total_propose_token_num_metric, collector->total_propose_token_num);
         RTP_REPORT_MUTABLE_METRIC(total_accepted_token_num_metric, collector->total_accepted_token_num);
-        double avg_accept_num = (double)collector->total_accepted_token_num / collector->total_stream_num;
+        if (collector->total_verify_draft_token_num >= 0) {
+            RTP_REPORT_MUTABLE_METRIC(total_verify_draft_token_num_metric, collector->total_verify_draft_token_num);
+        }
+        const double accepted_token_num = static_cast<double>(collector->total_accepted_token_num);
+        const double avg_accept_num     = accepted_token_num / collector->total_stream_num;
         RTP_REPORT_MUTABLE_METRIC(sp_avg_accept_token_num_metric, avg_accept_num);
-        RTP_REPORT_MUTABLE_METRIC(sp_avg_accept_rate_metric, avg_accept_num / (collector->spec_steps + 1));
-        if (collector->spec_steps > 0) {
-            RTP_REPORT_MUTABLE_METRIC(sp_avg_fix_accept_rate_metric, (avg_accept_num - 1) / collector->spec_steps);
+        RTP_REPORT_MUTABLE_METRIC(sp_avg_accept_rate_metric,
+                              accepted_token_num / (verify_draft_token_num + collector->total_stream_num));
+        if (verify_draft_token_num > 0) {
+            RTP_REPORT_MUTABLE_METRIC(sp_avg_fix_accept_rate_metric,
+                                  (accepted_token_num - collector->total_stream_num) / verify_draft_token_num);
         }
         if (avg_accept_num > 0) {
             RTP_REPORT_MUTABLE_METRIC(sp_estimate_tpot_us_metric, collector->estimateTpotUs());
@@ -1081,38 +1123,17 @@ void RtpLLMCacheReuseMetrics::report(const kmonitor::MetricsTags* tags, RtpLLMCa
 }
 
 bool RtpLLmEplbMetrics::init(kmonitor::MetricsGroupManager* manager) {
-    REGISTER_QPS_MUTABLE_METRIC(update_weights_qps_metric, "rtp_llm_update_weights_qps");
-    REGISTER_QPS_MUTABLE_METRIC(update_layer_weights_qps_metric, "rtp_llm_update_layer_weights_qps");
-    REGISTER_GAUGE_MUTABLE_METRIC(update_weights_latency_ms_metric, "rtp_llm_update_weights_latency_ms");
-    REGISTER_GAUGE_MUTABLE_METRIC(gpu_loads_metric, "rtp_llm_gpu_loads");
+    REGISTER_GAUGE_MUTABLE_METRIC(step_latency_us_metric, "rtp_llm_eplb_step_latency_us");
+    REGISTER_GAUGE_MUTABLE_METRIC(moe_lb_metric, "rtp_llm_moe_lb");
     return true;
 }
 
 void RtpLLmEplbMetrics::report(const kmonitor::MetricsTags* tags, RtpLLmEplbMetricsCollector* collector) {
-    // ep stats metrics
-    int  num_layer = collector->gpu_loads.size();
-    auto ep_tag    = kmonitor::MetricsTags("ep_rank", std::to_string(collector->ep_rank));
-    tags->MergeTags(&ep_tag);
-    for (int i = 0; i < num_layer; ++i) {
-        auto layer_tag = kmonitor::MetricsTags("layer", std::to_string(collector->layer_begin + i));
-        ep_tag.MergeTags(&layer_tag);
-        if (gpu_loads_metric) {
-            reportKmonMetric(gpu_loads_metric, &layer_tag, collector->gpu_loads[i]);
-        }
+    if (collector->step_latency_us >= 0) {
+        RTP_REPORT_MUTABLE_METRIC(step_latency_us_metric, collector->step_latency_us);
     }
-
-    // update weights metrics
-    if (collector->update_weights_qps) {
-        RTP_REPORT_MUTABLE_QPS(update_weights_qps_metric);
-        RTP_REPORT_MUTABLE_METRIC(update_weights_latency_ms_metric, collector->update_weights_latency_ms);
-
-        // report layer qps
-        auto layer_tag = kmonitor::MetricsTags("layer", std::to_string(collector->update_layer_id));
-        tags->MergeTags(&layer_tag);
-        if (update_layer_weights_qps_metric) {
-            reportKmonMetric(update_layer_weights_qps_metric, &layer_tag, 1);
-        }
-        collector->update_weights_qps = false;
+    if (collector->moe_lb >= 0) {
+        RTP_REPORT_MUTABLE_METRIC(moe_lb_metric, collector->moe_lb);
     }
 }
 

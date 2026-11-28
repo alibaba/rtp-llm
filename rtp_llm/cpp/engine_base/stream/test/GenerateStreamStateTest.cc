@@ -1,6 +1,12 @@
 
 #include "gtest/gtest.h"
 #include "gmock/gmock.h"
+#include <chrono>
+#include <future>
+#include <mutex>
+#if USING_CUDA
+#include <c10/cuda/CUDAStream.h>
+#endif
 
 #include <chrono>
 #include <future>
@@ -78,9 +84,11 @@ protected:
 
     GenerateStreamPtr createStream(const std::vector<int>& input_tokens = {1, 2, 3, 4, 5, 6},
                                    bool                    reuse_cache  = false,
-                                   RoleType                role_type    = RoleType::PDFUSION) {
-        cache_manager_ =
-            std::make_shared<KVCacheManager>(init_config(), /*warmup=*/false, /*metrics_reporter=*/nullptr);
+                                   RoleType                role_type    = RoleType::PDFUSION,
+                                   const CacheConfig*      cache_config = nullptr) {
+        cache_manager_ = std::make_shared<KVCacheManager>(cache_config ? *cache_config : init_config(),
+                                                          /*warmup=*/false,
+                                                          /*metrics_reporter=*/nullptr);
         EXPECT_TRUE(cache_manager_->init());
         ResourceContext resource_context;
         resource_context.cache_manager = cache_manager_;
@@ -125,6 +133,287 @@ TEST_F(GenerateStreamStateTest, testInitialStateIsWaiting) {
     ASSERT_FALSE(stream->isFinished());
     ASSERT_FALSE(stream->getStatus() == StreamState::RUNNING);
     ASSERT_FALSE(stream->getStatus() == StreamState::LOADING_CACHE);
+}
+
+TEST_F(GenerateStreamStateTest, testMtpSnapshotSkipsBookkeepingJoinWithinReservedCapacity) {
+    auto stream = createStream({1, 2, 3});
+    stream->setReserveStep(0);
+    stream->reportEvent(StreamEvents::CanRun);
+    ASSERT_EQ(stream->moveToNext(), StreamState::RUNNING);
+    stream->setIsContextStream(false);
+
+    GenerateStream::MtpAsyncDeviceState state;
+    state.next_seq_len_upper_bound          = 4;
+    const auto cuda_i32                     = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
+    state.next_kv_cache_block_id_gpu        = torch::ones({1, 1, 2}, cuda_i32);
+    state.next_kv_cache_kernel_block_id_gpu = torch::ones({1, 1, 2}, cuda_i32);
+    stream->setMtpAsyncDeviceState(std::move(state));
+    stream->incPendingAsyncBookkeeping();
+    auto pending_guard =
+        std::shared_ptr<void>(nullptr, [stream](void*) { stream->decPendingAsyncBookkeepingAndMaybeRelease(); });
+
+    ASSERT_EQ(stream->streamCacheResource().singleBatchNeedBlocks(4, 0), 0);
+    ASSERT_TRUE(stream->prepareMtpCacheForNextStep());
+    EXPECT_EQ(stream->moveToNext(), StreamState::RUNNING);
+    EXPECT_TRUE(stream->hasPendingAsyncBookkeeping());
+    EXPECT_TRUE(stream->hasMtpCacheSnapshot());
+    EXPECT_EQ(stream->seqLength(), 3);
+
+    // A terminal transition still defers physical release until the pending
+    // worker has stopped touching the stream, even on this scheduling path.
+    stream->reportError(ErrorCode::CANCELLED, "cancel overlapped decode");
+    EXPECT_EQ(stream->moveToNext(), StreamState::FINISHED);
+    EXPECT_TRUE(stream->isDeferredReleasePending());
+    EXPECT_FALSE(stream->streamCacheResource().isResourceReleased());
+    pending_guard.reset();
+    EXPECT_TRUE(stream->streamCacheResource().isResourceReleased());
+}
+
+TEST_F(GenerateStreamStateTest, testMtpSnapshotJoinsBookkeepingAtCapacityBoundary) {
+    auto config                        = test::makeSimpleLinearCacheConfig(1, 16, 2, DataType::TYPE_FP16);
+    config.enable_linear_cache_reclaim = true;
+    auto stream                        = createStream({1, 2, 3}, false, RoleType::PDFUSION, &config);
+    stream->setReserveStep(0);
+    stream->reportEvent(StreamEvents::CanRun);
+    ASSERT_EQ(stream->moveToNext(), StreamState::RUNNING);
+    stream->setIsContextStream(false);
+
+    GenerateStream::MtpAsyncDeviceState state;
+    state.next_seq_len_upper_bound          = 5;
+    const auto cuda_i32                     = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
+    state.next_kv_cache_block_id_gpu        = torch::ones({1, 1, 2}, cuda_i32);
+    state.next_kv_cache_kernel_block_id_gpu = torch::ones({1, 1, 2}, cuda_i32);
+    stream->setMtpAsyncDeviceState(std::move(state));
+    stream->incPendingAsyncBookkeeping();
+    auto pending_guard =
+        std::shared_ptr<void>(nullptr, [stream](void*) { stream->decPendingAsyncBookkeepingAndMaybeRelease(); });
+    ASSERT_GT(stream->streamCacheResource().singleBatchNeedBlocks(5, 0), 0);
+    ASSERT_TRUE(stream->streamCacheResource().canReclaimLinearHistory(1));
+    ASSERT_FALSE(stream->canReserveMtpCacheWithoutBookkeepingJoin(stream->getMtpAsyncDeviceState()));
+    ASSERT_FALSE(stream->prepareMtpCacheForNextStep());
+
+    auto next = std::async(std::launch::async, [stream] { return stream->moveToNext(); });
+    EXPECT_EQ(next.wait_for(std::chrono::milliseconds(20)), std::future_status::timeout);
+    // The join must happen before taking the stream mutex, so a worker can
+    // commit its accepted length and release its claim without deadlocking.
+    {
+        std::lock_guard<std::mutex> lock(*stream->mutex_);
+        stream->setSeqLength(5);
+    }
+    pending_guard.reset();
+    ASSERT_EQ(next.wait_for(std::chrono::seconds(5)), std::future_status::ready);
+    EXPECT_EQ(next.get(), StreamState::RUNNING);
+    EXPECT_FALSE(stream->hasMtpCacheSnapshot());
+    EXPECT_EQ(stream->streamCacheResource().singleBatchNeedBlocks(5, 0), 0);
+}
+
+TEST_F(GenerateStreamStateTest, testMtpUpperBoundReservationKeepsEpochAndDeviceMetadata) {
+    auto stream = createStream({1, 2, 3});
+    stream->setReserveStep(0);
+    stream->reportEvent(StreamEvents::CanRun);
+    ASSERT_EQ(stream->moveToNext(), StreamState::RUNNING);
+    stream->setIsContextStream(false);
+
+    const auto                          cuda_i32 = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
+    GenerateStream::MtpAsyncDeviceState state;
+    state.allow_async_cache_reservation     = true;
+    state.max_mtp_advance                   = 2;
+    state.previous_seq_len_upper_bound      = 3;
+    state.next_seq_len_upper_bound          = 5;
+    state.next_seq_len_gpu                  = torch::full({1}, 4, cuda_i32);  // Partial acceptance, below the bound.
+    state.next_position_ids_gpu             = torch::tensor({3, 3, 3}, cuda_i32);
+    state.engram_token_window_gpu           = torch::tensor({3, 2, 1, 0}, cuda_i32).reshape({1, 4});
+    state.next_kv_cache_block_id_gpu        = torch::ones({1, 1, 2}, cuda_i32);
+    state.next_kv_cache_kernel_block_id_gpu = torch::ones({1, 1, 2}, cuda_i32);
+    const auto epoch                        = stream->setMtpAsyncDeviceState(state);
+    stream->incPendingAsyncBookkeeping();
+    auto pending_guard =
+        std::shared_ptr<void>(nullptr, [stream](void*) { stream->decPendingAsyncBookkeepingAndMaybeRelease(); });
+    ASSERT_GT(stream->streamCacheResource().singleBatchNeedBlocks(5, 0), 0);
+    ASSERT_TRUE(stream->prepareMtpCacheForNextStep());
+    ASSERT_EQ(stream->moveToNext(), StreamState::RUNNING);
+    EXPECT_TRUE(stream->hasPendingAsyncBookkeeping());
+    const auto grown = stream->getMtpAsyncDeviceState();
+    EXPECT_EQ(grown.epoch, epoch);
+    EXPECT_EQ(grown.next_seq_len_upper_bound, 5);
+    EXPECT_EQ(grown.next_seq_len_gpu.data_ptr(), state.next_seq_len_gpu.data_ptr());
+    EXPECT_EQ(grown.next_position_ids_gpu.data_ptr(), state.next_position_ids_gpu.data_ptr());
+    EXPECT_EQ(grown.engram_token_window_gpu.data_ptr(), state.engram_token_window_gpu.data_ptr());
+    EXPECT_EQ(grown.next_kv_cache_block_id_gpu.size(2), 3);
+    EXPECT_EQ(grown.next_kv_cache_kernel_block_id_gpu.size(2), 3);
+    EXPECT_EQ(grown.cache_snapshot_host_buffers.size(), 2);
+    EXPECT_EQ(grown.next_kv_cache_kernel_block_id_gpu.data_ptr<int32_t>(),
+              grown.next_kv_cache_block_id_gpu.data_ptr<int32_t>() + grown.next_kv_cache_block_id_gpu.numel());
+    EXPECT_EQ(grown.cache_snapshot_host_buffers[1].data_ptr<int32_t>(),
+              grown.cache_snapshot_host_buffers[0].data_ptr<int32_t>() + grown.cache_snapshot_host_buffers[0].numel());
+    EXPECT_TRUE(grown.cache_snapshot_host_buffers.front().is_pinned());
+    EXPECT_TRUE(torch::equal(grown.next_kv_cache_block_id_gpu.cpu(), grown.cache_snapshot_host_buffers[0]));
+    EXPECT_TRUE(torch::equal(grown.next_kv_cache_kernel_block_id_gpu.cpu(), grown.cache_snapshot_host_buffers[1]));
+    EXPECT_EQ(state.next_kv_cache_block_id_gpu.size(2), 2);
+    EXPECT_TRUE(torch::equal(state.next_kv_cache_block_id_gpu.cpu(), torch::ones({1, 1, 2}, torch::kInt32)));
+
+    // A subsequent published acceptance invalidates replacement by a stale
+    // epoch. Its shorter actual prefix must survive the next upper-bound reset.
+    auto next_state                         = grown;
+    next_state.previous_seq_len_upper_bound = 4;
+    next_state.next_seq_len_upper_bound     = 6;
+    const auto next_epoch                   = stream->setMtpAsyncDeviceState(next_state);
+    EXPECT_FALSE(stream->replaceMtpCacheSnapshot(epoch, {}, {}, {}));
+    EXPECT_EQ(stream->getMtpAsyncDeviceState().epoch, next_epoch);
+    EXPECT_EQ(stream->getMtpAsyncDeviceState().next_seq_len_upper_bound, 6);
+    EXPECT_TRUE(stream->hasMtpCacheSnapshot());
+}
+
+TEST_F(GenerateStreamStateTest, testMtpPackedSnapshotSupportsUnequalKernelWidths) {
+    for (int factor : {1, 2, 4}) {
+        auto spec                       = test::makeResolvedMhaSpec(DataType::TYPE_FP16, 1, 1, 4);
+        spec->kernel_seq_size_per_block = 4 / factor;
+        auto config                     = test::makeSingleGroupCacheConfig(spec, CacheGroupType::FULL, 1, 16);
+        auto stream                     = createStream({1, 2, 3}, false, RoleType::PDFUSION, &config);
+        stream->setReserveStep(0);
+        stream->reportEvent(StreamEvents::CanRun);
+        ASSERT_EQ(stream->moveToNext(), StreamState::RUNNING);
+        stream->setIsContextStream(false);
+
+        const auto                          cuda_i32 = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
+        GenerateStream::MtpAsyncDeviceState state;
+        state.next_seq_len_upper_bound          = 5;
+        state.next_kv_cache_block_id_gpu        = torch::ones({1, 1, 1}, cuda_i32);
+        state.next_kv_cache_kernel_block_id_gpu = torch::ones({1, 1, factor}, cuda_i32);
+        stream->setMtpAsyncDeviceState(state);
+        state = stream->getMtpAsyncDeviceState();
+        ASSERT_TRUE(stream->reserveMtpCacheFromUpperBound(state).ok());
+        auto grown = stream->getMtpAsyncDeviceState();
+        EXPECT_EQ(grown.next_kv_cache_block_id_gpu.size(2), 2);
+        EXPECT_EQ(grown.next_kv_cache_kernel_block_id_gpu.size(2), 2 * factor);
+        EXPECT_TRUE(torch::equal(grown.next_kv_cache_block_id_gpu.cpu(), grown.cache_snapshot_host_buffers[0]));
+        EXPECT_TRUE(torch::equal(grown.next_kv_cache_kernel_block_id_gpu.cpu(), grown.cache_snapshot_host_buffers[1]));
+        EXPECT_EQ(grown.next_kv_cache_kernel_block_id_gpu.data_ptr<int32_t>(),
+                  grown.next_kv_cache_block_id_gpu.data_ptr<int32_t>() + grown.next_kv_cache_block_id_gpu.numel());
+    }
+}
+
+TEST_F(GenerateStreamStateTest, testMtpBatchedSnapshotUploadPreservesWidthsAndEpochs) {
+#if USING_CUDA
+    const torch::Stream copy_stream = c10::cuda::getStreamFromPool(false);
+#endif
+    for (int factor : {1, 2, 4}) {
+        std::optional<torch::Stream> upload_stream;
+#if USING_CUDA
+        if (factor != 1)
+            upload_stream = copy_stream;
+#endif
+        auto spec                       = test::makeResolvedMhaSpec(DataType::TYPE_FP16, 1, 1, 4);
+        spec->kernel_seq_size_per_block = 4 / factor;
+        auto config                     = test::makeSingleGroupCacheConfig(spec, CacheGroupType::FULL, 1, 128);
+        std::list<std::shared_ptr<GenerateStream>> streams;
+        std::vector<uint64_t>                      epochs;
+        const auto options = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
+        for (int row = 0; row < 7; ++row) {
+            auto stream = createStream({1, 2, 3}, false, RoleType::PDFUSION, &config);
+            stream->setReserveStep(0);
+            stream->reportEvent(StreamEvents::CanRun);
+            ASSERT_EQ(stream->moveToNext(), StreamState::RUNNING);
+            stream->setIsContextStream(false);
+            GenerateStream::MtpAsyncDeviceState state;
+            state.next_seq_len_upper_bound          = 5 + row * 4;
+            state.next_kv_cache_block_id_gpu        = torch::ones({1, 1, 1}, options);
+            state.next_kv_cache_kernel_block_id_gpu = torch::ones({1, 1, factor}, options);
+            state.batch_cache_snapshot_upload       = true;
+            epochs.push_back(stream->setMtpAsyncDeviceState(state));
+            ASSERT_TRUE(stream->reserveMtpCacheFromUpperBound(stream->getMtpAsyncDeviceState()).ok());
+            const auto pending = stream->getMtpAsyncDeviceState();
+            EXPECT_TRUE(pending.cache_snapshot_upload_pending);
+            EXPECT_EQ(pending.next_kv_cache_block_id_gpu.size(2), 1);
+            EXPECT_EQ(pending.cache_snapshot_host_buffers[0].size(2), 2 + row);
+            streams.push_back(stream);
+        }
+        GenerateStream::flushMtpCacheSnapshotUploads(streams, upload_stream);
+        size_t      row            = 0;
+        const void* shared_storage = nullptr;
+        for (const auto& stream : streams) {
+            const auto state = stream->getMtpAsyncDeviceState();
+            EXPECT_EQ(state.epoch, epochs[row]);
+            EXPECT_FALSE(state.cache_snapshot_upload_pending);
+            EXPECT_EQ(state.next_kv_cache_block_id_gpu.size(2), 2 + row);
+            EXPECT_EQ(state.next_kv_cache_kernel_block_id_gpu.size(2), (2 + row) * factor);
+            EXPECT_TRUE(torch::equal(state.next_kv_cache_block_id_gpu.cpu(), state.cache_snapshot_host_buffers[0]));
+            EXPECT_TRUE(
+                torch::equal(state.next_kv_cache_kernel_block_id_gpu.cpu(), state.cache_snapshot_host_buffers[1]));
+            const void* storage = state.next_kv_cache_block_id_gpu.storage().data_ptr().get();
+            if (shared_storage) {
+                EXPECT_EQ(shared_storage, storage);
+            }
+            shared_storage = storage;
+            ++row;
+        }
+        GenerateStream::flushMtpCacheSnapshotUploads(streams, upload_stream);  // No new allocation/upload.
+        EXPECT_EQ(streams.front()->getMtpAsyncDeviceState().next_kv_cache_block_id_gpu.storage().data_ptr().get(),
+                  shared_storage);
+    }
+}
+
+TEST_F(GenerateStreamStateTest, testMtpUpperBoundSwaGrowthPrunesOnlyBeyondRetainedTail) {
+    auto config                          = test::makeSimpleMhaCacheConfig(1, 16, 32, DataType::TYPE_INT8);
+    auto groups                          = config.topology().groups();
+    groups[0].policy                     = defaultCacheGroupPolicy(CacheGroupType::SWA);
+    groups[0].policy.sliding_window_size = 4;
+    groups[0].policy.active_tail_blocks  = 2;
+    config.setTopology(std::move(groups), config.topology().layers());
+    auto stream = createStream(std::vector<int>(31, 1), false, RoleType::PDFUSION, &config);
+    stream->setReserveStep(1);
+    stream->reportEvent(StreamEvents::CanRun);
+    ASSERT_EQ(stream->moveToNext(), StreamState::RUNNING);
+    stream->setIsContextStream(false);
+    const auto cuda_i32       = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
+    const auto tag            = config.groupTags().front();
+    bool       observed_prune = false;
+    int        host_length    = 31;
+    for (int round = 0; round < 48; ++round) {
+        GenerateStream::MtpAsyncDeviceState state = stream->getMtpAsyncDeviceState();
+        state.allow_async_cache_reservation       = true;
+        state.max_mtp_advance                     = 6;
+        state.previous_seq_len_upper_bound        = host_length;
+        state.next_seq_len_upper_bound            = host_length + 6;
+        if (!state.next_kv_cache_block_id_gpu.defined()) {
+            state.next_kv_cache_block_id_gpu        = torch::ones({1, 1, 1}, cuda_i32);
+            state.next_kv_cache_kernel_block_id_gpu = torch::ones({1, 1, 1}, cuda_i32);
+        }
+        stream->setMtpAsyncDeviceState(state);
+        stream->incPendingAsyncBookkeeping();
+        auto pending_guard =
+            std::shared_ptr<void>(nullptr, [stream](void*) { stream->decPendingAsyncBookkeepingAndMaybeRelease(); });
+        ASSERT_TRUE(stream->canReserveMtpCacheWithoutBookkeepingJoin(state));
+        ASSERT_TRUE(stream->prepareMtpCacheForNextStep());
+        ASSERT_EQ(stream->moveToNext(), StreamState::RUNNING);
+        ASSERT_TRUE(stream->hasPendingAsyncBookkeeping());
+        const auto& blocks = stream->streamCacheResource().kvCache().blocks(0, tag);
+        int         live   = 0;
+        for (size_t slot = 0; slot < blocks.size(); ++slot) {
+            if (!isNullBlockIdx(blocks[slot])) {
+                ++live;
+            } else {
+                observed_prune = true;
+                EXPECT_LT(slot + 3, blocks.size());  // Two active pages plus reserve.
+            }
+        }
+        // Retain the committed tail and reserve, plus pages for this round's
+        // conservative future bound; the future pages cannot replace the tail.
+        const int future_pages = (state.max_mtp_advance + 31) / 32;
+        EXPECT_LE(live, 2 + 1 + future_pages);
+        // Alternate partial/full acceptance; the next bound starts at the
+        // committed prefix, never at the previous round's conservative bound.
+        host_length += round % 2 == 0 ? 1 : 6;
+        stream->setSeqLength(host_length);
+    }
+    EXPECT_TRUE(observed_prune);
+
+    auto unsafe_state            = stream->getMtpAsyncDeviceState();
+    unsafe_state.max_mtp_advance = 64;
+    EXPECT_FALSE(stream->canReserveMtpCacheWithoutBookkeepingJoin(unsafe_state));
+    unsafe_state                               = stream->getMtpAsyncDeviceState();
+    unsafe_state.allow_async_cache_reservation = false;
+    EXPECT_FALSE(stream->canReserveMtpCacheWithoutBookkeepingJoin(unsafe_state));
 }
 
 TEST_F(GenerateStreamStateTest, testMallocRetryMetricsIndependentOfTerminalOutcome) {

@@ -91,11 +91,14 @@ arch_with_version_dep = select({
 })
 
 requirement([
+    "quack-kernels",
+    "flash-attn-4",
     "sentencepiece",
     "transformers",
     "pynvml",
     "tiktoken",
     "protobuf",
+    "grpcio",
     "grpcio-tools",
     "setuptools",
     "Pillow",
@@ -175,6 +178,7 @@ py_library(
     srcs = glob([
         "utils/**/*.py",
     ], exclude = _JIT_CACHE_SRCS + _JIT_CACHE_ENV_SRCS + [
+        "utils/numa.py",
         "utils/warmup.py",
         "utils/test/*.py",
         "utils/test/**/*.py",
@@ -183,6 +187,7 @@ py_library(
     deps = [
         ":request_id_generator",
         ":jit_cache_env",
+        ":numa",
         ":torch",
         ":safetensors",
         #":decord",
@@ -192,6 +197,11 @@ py_library(
         ":psutil",
         "//rtp_llm/aios/kmonitor:kmonitor_py",
     ] + arch_dep + internal_deps()
+)
+
+py_library(
+    name = "numa",
+    srcs = ["utils/numa.py"],
 )
 
 py_library(
@@ -223,8 +233,15 @@ py_library(
         "eplb/*.py",
     ]),
     deps = [
+        ":device",
+        ":torch",
         ":utils",
-    ],
+    ] + select({
+        "@//:using_cuda13_x86": [":deep_ep"],
+        "@//:using_cuda13_arm": [":deep_ep"],
+        "@//:using_cuda": [":deep_ep"],
+        "//conditions:default": [],
+    }) + triton_deps(["triton"]),
 )
 
 py_library(
@@ -335,8 +352,8 @@ py_library(
     }) + select({
         # cuda13 tests use the matching cubins from the pip lock.
         # The jit-cache wheel is installed through Requires-Dist in runtime images.
-        "@//:using_cuda13_x86": flashinfer + ["flashinfer-cubin", "nvidia-cutlass-dsl", "flash-mla", "fast-hadamard-transform", "tilelang"],
-        "@//:using_cuda13_arm": flashinfer + ["flashinfer-cubin", "nvidia-cutlass-dsl", "flash-mla", "flash-mla-legacy", "tilelang"],
+        "@//:using_cuda13_x86": flashinfer + ["flashinfer-cubin", "nvidia-cutlass-dsl", "quack-kernels", "flash-attn-4", "flash-mla", "flash-mla-legacy", "fast-hadamard-transform", "tilelang"],
+        "@//:using_cuda13_arm": flashinfer + ["flashinfer-cubin", "nvidia-cutlass-dsl", "quack-kernels", "flash-attn-4", "flash-mla", "flash-mla-legacy", "tilelang"],
         "@//:using_cuda12_9_x86": flashinfer_with_cache + flashmla,
         "@//:using_cuda12_arm": flashinfer_with_cache + ["flash-mla", "fast-hadamard-transform"],
         "@//:cuda_pre_12_9": flashinfer,
@@ -542,6 +559,7 @@ py_library(
         ":utils",
         ":config_ops",
         ":warmup",
+        ":numa",
         ":jit_cache_manager_lib",
         "//rtp_llm/models_py/kernel_tuning",
     ],
@@ -804,7 +822,7 @@ whl_reqs_frontend = [
     # The PPU vendor lock pins the transformers 4.57.1 family and carries no
     # xgrammar; mirror it so the frontend wheel metadata matches its lock.
     "@//:using_ppu": ["transformers==4.57.1"],
-    "//conditions:default": ["transformers==5.2.0", "xgrammar==0.2.5"],
+    "//conditions:default": ["transformers==5.2.0", "xgrammar==0.2.9"],
 })
 
 py_wheel(
@@ -847,7 +865,7 @@ whl_reqs_dash_sc_grpc = [
     "grpcio>=1.57.0",
     "jsonschema==4.26.0",
     "protobuf>=4.25",
-    "xgrammar==0.2.5",
+    "xgrammar==0.2.9",
 ]
 
 py_wheel(

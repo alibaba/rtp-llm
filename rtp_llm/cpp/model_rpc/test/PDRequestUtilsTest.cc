@@ -117,7 +117,7 @@ TEST(PDRequestUtilsTest, MasterEnqueuedHandoffKeyIsStablePerRequest) {
     EXPECT_NE(masterEnqueuedHandoffUniqueKey(42), masterEnqueuedHandoffUniqueKey(43));
 }
 
-TEST(PDRequestUtilsTest, PromptLogitsFallsBackEvenWithLargerWireTokenLimit) {
+TEST(PDRequestUtilsTest, PromptLogitsIsRejectedEvenWithLargerWireTokenLimit) {
     auto request = makeRequest();
     ASSERT_TRUE(checkPDSupport(request).supported);
     request.mutable_generate_config()->set_return_prompt_logits(true);

@@ -25,10 +25,88 @@ def flags(enabled):
         "DSV41_FUSED_QKV_ROPE_CACHE": str(int(enabled)),
         "DSV41_FUSED_QKV": "1",
         "DSV41_FUSED_DECODE_Q_ROPE": "1",
+        "DSV4_FP8_QUANT_KERNEL": "auto",
     }
 
 
 class DecodeQKVIntegrationCPU(unittest.TestCase):
+    def test_full_and_reindex_use_separate_projection_consumers(self):
+        from rtp_llm.models_py.modules.dsv41.fp8 import _v41_front_gemm as front
+
+        qr = torch.randn(1, 2, 128, dtype=torch.bfloat16)
+        kv = torch.randn(1, 2, 512, dtype=torch.bfloat16)
+        q = torch.randn(1, 2, 512, dtype=torch.bfloat16)
+        quantized = (torch.zeros_like(qr), torch.ones(2, 1, dtype=torch.int32))
+        head = torch.randn(2, 32, dtype=torch.bfloat16)
+        positions = torch.tensor([1, 3], dtype=torch.int32)
+        freqs = torch.ones(2, 32, dtype=torch.complex64)
+        shared_input = (object(), object())
+        index_q, prepared = object(), (object(), object(), object())
+        for is_source, pdl in (
+            (True, False),
+            (True, True),
+            (False, False),
+            (False, True),
+        ):
+            with self.subTest(is_source=is_source, pdl=pdl):
+                merged = SimpleNamespace(
+                    forward_quantized=Mock(return_value=(q, index_q)),
+                    try_forward_prepared=Mock(return_value=(q, prepared)),
+                )
+                attn = SimpleNamespace(
+                    is_index_source=True,
+                    is_kv_source=is_source,
+                    rope_head_dim=64,
+                    head_dim=512,
+                    n_heads=1,
+                    skip_post_q_norm=True,
+                    freqs_cis=freqs,
+                    wq_b=object(),
+                    kv_norm=torch.ones(512, dtype=torch.bfloat16),
+                    eps=1e-6,
+                    _lin=Mock(side_effect=AssertionError("unexpected projection")),
+                )
+                with patch.object(
+                    front, "project", return_value=(qr, kv, quantized, head)
+                ) as fused, patch.object(
+                    _v41_query_quant,
+                    "try_project_quantized_qkv",
+                    return_value=(qr, kv, quantized),
+                ) as original, patch.object(
+                    compute_qkv, "swa_kv_norm_rope", return_value=kv
+                ):
+                    result = compute_qkv.decode_compute_qkv(
+                        attn,
+                        qr,
+                        positions,
+                        freqs_cis=freqs,
+                        mega_attention=SimpleNamespace(merged_qb=merged),
+                        shared_input_quant=shared_input,
+                        qb_pdl=pdl,
+                    )
+                if is_source:
+                    fused.assert_not_called()
+                    original.assert_called_once_with(
+                        attn, qr, quantized_input=shared_input, pdl=pdl
+                    )
+                    self.assertIsNone(result.head_weights)
+                else:
+                    original.assert_not_called()
+                    fused.assert_called_once_with(
+                        attn, qr, quantized_input=shared_input, pdl=pdl
+                    )
+                    self.assertIs(result.head_weights, head)
+                if not is_source and not pdl:
+                    merged.try_forward_prepared.assert_called_once()
+                    merged.forward_quantized.assert_not_called()
+                    self.assertIs(result.index_prepared, prepared)
+                else:
+                    merged.try_forward_prepared.assert_not_called()
+                    merged.forward_quantized.assert_called_once_with(
+                        *quantized, **({"wait_pdl": True} if pdl else {})
+                    )
+                    self.assertIsNone(result.index_prepared)
+
     def test_quantized_projection_and_completed_write_are_forwarded(self):
         qr = torch.randn(1, 2, 128, dtype=torch.bfloat16)
         kv = torch.randn(1, 2, 512, dtype=torch.bfloat16)
@@ -52,19 +130,30 @@ class DecodeQKVIntegrationCPU(unittest.TestCase):
         )
         pool = torch.zeros(1, 8, 528, dtype=torch.uint8)
         slots = torch.tensor([2, 5])
+        shared_input_quant = (object(), object())
         completed = rope_cache.FusedQKVRopeCache(q.view(1, 2, 1, 512), kv, freqs)
         with patch.object(
             _v41_query_quant,
             "try_project_quantized_qkv",
             return_value=(qr, kv, quantized),
-        ), patch.object(
+        ) as project, patch.object(
             rope_cache, "try_fused_qkv_rope_cache", return_value=completed
         ) as fused, patch.object(
-            compute_qkv, "fused_rmsnorm_rope"
+            compute_qkv, "swa_kv_norm_rope"
         ) as old_norm:
             result = compute_qkv.decode_compute_qkv(
-                attn, qr, positions, freqs_cis=freqs, swa_pool=pool, swa_slots=slots
+                attn,
+                qr,
+                positions,
+                freqs_cis=freqs,
+                swa_pool=pool,
+                swa_slots=slots,
+                shared_input_quant=shared_input_quant,
+                qb_pdl=True,
             )
+        project.assert_called_once_with(
+            attn, qr, quantized_input=shared_input_quant, pdl=True
+        )
         self.assertTrue(result.swa_written)
         self.assertIs(result.qr_quantized, quantized)
         self.assertIs(result.qr, qr)
@@ -99,7 +188,7 @@ class DecodeQKVIntegrationCPU(unittest.TestCase):
         with patch.object(
             _v41_query_quant, "try_project_quantized_qkv", return_value=None
         ), patch.object(compute_qkv, "_apply_v41_q_rope") as old_rope, patch.object(
-            compute_qkv, "fused_rmsnorm_rope", return_value=normalized
+            compute_qkv, "swa_kv_norm_rope", return_value=normalized
         ) as old_norm:
             result = compute_qkv.decode_compute_qkv(
                 attn, qr, positions, swa_pool=pool, swa_slots=torch.tensor([2, 5])
@@ -114,7 +203,7 @@ class DecodeQKVIntegrationCPU(unittest.TestCase):
         self.assertTrue(torch.all(pool == 173).item())
 
 
-def native_attention(batch, span):
+def native_attention(batch, span, dim=512):
     from rtp_llm.models_py.modules.dsv41.fp8.attention_v41 import AttentionV41FP8
 
     def linear(output, inputs):
@@ -128,14 +217,14 @@ def native_attention(batch, span):
 
     angles = torch.randn(2048, 32, device="cuda")
     attn = SimpleNamespace(
-        dim=512,
+        dim=dim,
         q_lora_rank=1280,
         head_dim=512,
         rope_head_dim=64,
         n_heads=8,
         skip_post_q_norm=True,
         eps=1e-6,
-        wq_a_wkv=linear(1792, 512),
+        wq_a_wkv=linear(1792, dim),
         wq_b=linear(8 * 512, 1280),
         q_norm=(1 + torch.randn(1280, device="cuda") * 0.1).bfloat16(),
         kv_norm=(1 + torch.randn(512, device="cuda") * 0.1).bfloat16(),
@@ -144,7 +233,7 @@ def native_attention(batch, span):
         index_n_heads=8,
         index_head_dim=128,
         index_topk=4,
-        index_weights=torch.randn(8, 512, device="cuda", dtype=torch.bfloat16),
+        index_weights=torch.randn(8, dim, device="cuda", dtype=torch.bfloat16),
         is_index_source=True,
         kv_source_layer_id=0,
         layer_id=0,
@@ -152,8 +241,13 @@ def native_attention(batch, span):
         v41_config={},
         _lin=lambda layer, x: layer(x),
     )
-    attn._try_fused_qr_kv = lambda x: try_project_qr_kv(
-        attn.wq_a_wkv, x, attn.q_norm, attn.q_lora_rank, attn.eps
+    attn._try_fused_qr_kv = lambda x, quantized=None: try_project_qr_kv(
+        attn.wq_a_wkv,
+        x,
+        attn.q_norm,
+        attn.q_lora_rank,
+        attn.eps,
+        quantized_input=quantized,
     )
     attn._shared_attention = {
         "layers": {0: attn},
@@ -163,22 +257,156 @@ def native_attention(batch, span):
     attn._decode_write_swa_fp8 = lambda *args: AttentionV41FP8._decode_write_swa_fp8(
         attn, *args
     )
-    x = torch.randn(batch, span, 512, device="cuda", dtype=torch.bfloat16)
+    x = torch.randn(batch, span, dim, device="cuda", dtype=torch.bfloat16)
     positions = torch.arange(batch * span, device="cuda", dtype=torch.int32) + 32
     slots = torch.arange(batch * span, device="cuda", dtype=torch.int64) + 2
     slots[0] = -1
     return attn, x, positions, slots
 
 
-@unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
+@unittest.skipUnless(
+    torch.cuda.is_available() or os.environ.get("RTP_V41_REQUIRE_SM10X") == "1",
+    "CUDA required",
+)
 class DecodeQKVIntegrationCUDA(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        if torch.cuda.get_device_capability()[0] != 10:
+        supported = (
+            torch.cuda.is_available() and torch.cuda.get_device_capability()[0] == 10
+        )
+        if not supported:
+            if os.environ.get("RTP_V41_REQUIRE_SM10X") == "1":
+                raise AssertionError("QKV integration CI requires an SM10x GPU")
             raise unittest.SkipTest("native group-32 DeepGEMM requires Blackwell")
 
     def setUp(self):
         torch.manual_seed(418)
+
+    @torch.inference_mode()
+    def test_mhc_multinode_graph_native_fp8_to_qkv_without_requantization(self):
+        from rtp_llm.models_py.modules.dsv41.test.test_v41_mega_mhc import (
+            make_case,
+            try_fused_post_pre,
+        )
+
+        case = make_case((1, 6))
+        neighbor = make_case((1, 6))
+        initial = case["attn_out"].clone()
+        attn, _, positions, slots = native_attention(1, 6, dim=5120)
+        pool = torch.full((2, 134, 528), 173, device="cuda", dtype=torch.uint8)
+        reference_pool = pool.clone()
+
+        def fused():
+            # Adjacent layer transitions share the capture stream and barriers.
+            self.assertIsNotNone(try_fused_post_pre(**neighbor))
+            prepared = try_fused_post_pre(**case, output_fp8=True)
+            self.assertIsNotNone(prepared[4])
+            return compute_qkv.decode_compute_qkv(
+                attn,
+                prepared[1],
+                positions,
+                swa_pool=pool,
+                swa_slots=slots,
+                shared_input_quant=prepared[4],
+            )
+
+        for query_quant in ("0", "1"):
+            with patch.dict(
+                os.environ, {**flags(True), "DSV41_FUSED_QUERY_QUANT": query_quant}
+            ):
+                references = []
+                for factor in (1.0, -0.75):
+                    case["attn_out"].copy_(initial * factor)
+                    prepared = try_fused_post_pre(**case)
+                    expected = compute_qkv.decode_compute_qkv(
+                        attn,
+                        prepared[1],
+                        positions,
+                        swa_pool=reference_pool,
+                        swa_slots=slots,
+                    )
+                    references.append(
+                        (
+                            SimpleNamespace(
+                                **{
+                                    name: getattr(expected, name).clone()
+                                    for name in ("qr", "q", "kv", "freqs_cis")
+                                }
+                            ),
+                            reference_pool.clone(),
+                        )
+                    )
+                stream = torch.cuda.Stream()
+                stream.wait_stream(torch.cuda.current_stream())
+                with torch.cuda.stream(stream), patch.object(
+                    attn.wq_a_wkv,
+                    "_quantize_input",
+                    side_effect=AssertionError("native FP8 input requantized"),
+                ):
+                    fused()
+                torch.cuda.current_stream().wait_stream(stream)
+                graph = torch.cuda.CUDAGraph()
+                with patch.object(
+                    attn.wq_a_wkv,
+                    "_quantize_input",
+                    side_effect=AssertionError("native FP8 input requantized"),
+                ):
+                    with torch.cuda.graph(graph, stream=stream):
+                        result = fused()
+                # No eager HC calls between replays: they would alter barrier state.
+                for replay in range(1000):
+                    state = replay % 2
+                    case["attn_out"].copy_(initial * (1.0 if state == 0 else -0.75))
+                    graph.replay()
+                    expected, expected_pool = references[state]
+                    self.assert_qkv_equal(result, expected)
+                    torch.testing.assert_close(pool, expected_pool, rtol=0, atol=0)
+
+    @torch.inference_mode()
+    def test_tiny_native_fp8_is_consumed_with_native_underflow_policy(self):
+        from rtp_llm.models_py.modules.dsv41.test.test_v41_mega_mhc import (
+            make_case,
+            try_fused_post_pre,
+        )
+
+        case = make_case((1, 6))
+        case["norm"].weight.fill_(2**-40)
+        prepared = try_fused_post_pre(**case, output_fp8=True)
+        self.assertIsNotNone(prepared)
+        q, sf = prepared[4]
+        self.assertTrue(torch.count_nonzero(prepared[1]).item() > 0)
+        self.assertEqual(torch.count_nonzero(q.float()).item(), 0)
+        attn, _, positions, slots = native_attention(1, 6, dim=5120)
+        legacy_q, _ = attn.wq_a_wkv._quantize_input(prepared[1])
+        self.assertTrue(torch.count_nonzero(legacy_q.float()).item() > 0)
+        for query_quant in ("0", "1"):
+            with self.subTest(query_quant=query_quant), patch.dict(
+                os.environ, {**flags(True), "DSV41_FUSED_QUERY_QUANT": query_quant}
+            ):
+                pool = torch.full((2, 134, 528), 173, device="cuda", dtype=torch.uint8)
+                expected_pool = pool.clone()
+                expected = compute_qkv.decode_compute_qkv(
+                    attn,
+                    torch.zeros_like(prepared[1]),
+                    positions,
+                    swa_pool=expected_pool,
+                    swa_slots=slots,
+                )
+                with patch.object(
+                    attn.wq_a_wkv,
+                    "_quantize_input",
+                    side_effect=AssertionError("native FP8 input requantized"),
+                ):
+                    actual = compute_qkv.decode_compute_qkv(
+                        attn,
+                        prepared[1],
+                        positions,
+                        swa_pool=pool,
+                        swa_slots=slots,
+                        shared_input_quant=(q, sf),
+                    )
+                self.assert_qkv_equal(actual, expected)
+                torch.testing.assert_close(pool, expected_pool, rtol=0, atol=0)
 
     def run_path(self, attn, x, positions, slots, pool, enabled):
         with patch.dict(os.environ, flags(enabled)):
@@ -200,6 +428,33 @@ class DecodeQKVIntegrationCUDA(unittest.TestCase):
                 getattr(actual, name), getattr(expected, name), rtol=0, atol=0
             )
 
+    def assert_cache_values_equal(self, actual, expected, slots, fresh_kv):
+        # Re-encoding an already rounded MXFP8 row can choose a different
+        # exponent/payload pair with exactly the same decoded value. Compare
+        # the reader-visible values independently of the production decoder,
+        # while requiring every untouched cache byte to remain unchanged.
+        valid = slots >= 0
+        written = slots[valid].long()
+        block = written // actual.shape[1]
+        row = written % actual.shape[1]
+
+        def decoded(pool):
+            packed = pool[block, row]
+            payload = packed[:, :512].contiguous().view(torch.float8_e4m3fn)
+            scales = torch.exp2(packed[:, 512:].float() - 127)
+            return payload.float() * scales.repeat_interleave(32, dim=-1)
+
+        actual_values = decoded(actual)
+        torch.testing.assert_close(actual_values, decoded(expected), rtol=0, atol=0)
+        torch.testing.assert_close(
+            actual_values, fresh_kv.reshape(-1, 512)[valid].float(), rtol=0, atol=0
+        )
+        untouched = torch.ones(actual.shape[:2], device=actual.device, dtype=torch.bool)
+        untouched[block, row] = False
+        torch.testing.assert_close(
+            actual[untouched], expected[untouched], rtol=0, atol=0
+        )
+
     @torch.no_grad()
     def test_native_projection_cache_and_indexer_match_old_path(self):
         from rtp_llm.models_py.modules.dsv41.fp8.attention_v41 import AttentionV41FP8
@@ -218,7 +473,7 @@ class DecodeQKVIntegrationCUDA(unittest.TestCase):
                 self.assertIsNone(expected.qr_quantized)
                 self.assertIsNotNone(actual.qr_quantized)
                 self.assert_qkv_equal(actual, expected)
-                torch.testing.assert_close(pool, reference_pool, rtol=0, atol=0)
+                self.assert_cache_values_equal(pool, reference_pool, slots, actual.kv)
                 old_index_q = attn.index_wq(expected.qr)
                 new_index_q = attn.index_wq.forward_quantized(*actual.qr_quantized)
                 torch.testing.assert_close(new_index_q, old_index_q, rtol=0, atol=0)
@@ -259,7 +514,7 @@ class DecodeQKVIntegrationCUDA(unittest.TestCase):
                 graph.replay()
             torch.cuda.current_stream().wait_stream(stream)
             self.assert_qkv_equal(actual, expected)
-            torch.testing.assert_close(pool, reference_pool, rtol=0, atol=0)
+            self.assert_cache_values_equal(pool, reference_pool, slots, actual.kv)
             torch.testing.assert_close(index_q, expected_index_q, rtol=0, atol=0)
 
     @torch.no_grad()
@@ -305,7 +560,7 @@ class DecodeQKVIntegrationCUDA(unittest.TestCase):
             self.assertEqual(old_write.call_count, int(strided))
             self.assertEqual(computed[0].swa_written, not strided)
             self.assert_qkv_equal(computed[0], expected)
-            torch.testing.assert_close(pool, reference_pool, rtol=0, atol=0)
+            self.assert_cache_values_equal(pool, reference_pool, slots, computed[0].kv)
             torch.testing.assert_close(output, expected.q[:, :, 0, :], rtol=0, atol=0)
 
 

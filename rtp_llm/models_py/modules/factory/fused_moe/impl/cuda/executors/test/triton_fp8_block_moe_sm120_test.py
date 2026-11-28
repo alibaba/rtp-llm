@@ -236,6 +236,7 @@ class TritonFp8BlockMoeSm120Test(unittest.TestCase):
             payload,
             activation="SiGLU",
             apply_router_weight_on_input=False,
+            expert_load=None,
         ).fused_expert_output
 
     def _deepgemm(self, payload: ExpertForwardPayload) -> torch.Tensor:
@@ -246,6 +247,7 @@ class TritonFp8BlockMoeSm120Test(unittest.TestCase):
             a2_scale=None,
             apply_router_weight_on_input=False,
             extra_expert_args=None,
+            expert_load=None,
         ).fused_expert_output
 
     def _assert_matches_deepgemm(
@@ -695,11 +697,13 @@ class TritonFp8BlockMoeSm120Test(unittest.TestCase):
                 a2_scale=None,
                 apply_router_weight_on_input=False,
                 extra_expert_args=None,
+                expert_load=None,
             ).fused_expert_output
             actual = executor.execute_triton_fp8(
                 payload,
                 activation="SiGLU",
                 apply_router_weight_on_input=False,
+                expert_load=None,
             ).fused_expert_output
             self._assert_matches_deepgemm(actual, expected)
 
@@ -743,6 +747,7 @@ class TritonFp8BlockMoeSm120Test(unittest.TestCase):
                 a2_scale=None,
                 apply_router_weight_on_input=False,
                 extra_expert_args=None,
+                expert_load=None,
             ).fused_expert_output
             self._assert_matches_deepgemm(captured, expected)
 
@@ -808,6 +813,9 @@ class TritonFp8BlockMoeSm120Test(unittest.TestCase):
                 "num_stages": 2,
             },
             tl.bfloat16,
+            expert_token_counts=None,
+            load_topk_ids=None,
+            load_expert_offset=0,
         )
 
         reference = torch.empty_like(output)

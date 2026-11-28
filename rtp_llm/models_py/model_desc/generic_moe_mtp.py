@@ -267,6 +267,7 @@ class GenericMoeMTPModel(Glm5ModelBase):
             fmha_impl,
             prev_topk_indices,
             force_reuse_topk_indices=reuse_topk_indices,
+            expert_token_counts=inputs.expert_token_counts,
         )
 
         if (

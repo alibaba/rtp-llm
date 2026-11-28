@@ -35,6 +35,7 @@ from typing import Any, Optional
 import torch
 
 from rtp_llm.models_py.distributed.collective_torch import Group, all_gather
+from rtp_llm.models_py.modules.dsv41._cp_collectives import try_all_gather_into
 from rtp_llm.models_py.modules.dsv41._profiler import record_function_range
 from rtp_llm.models_py.modules.dsv41.cp import (
     CPContext,
@@ -277,12 +278,11 @@ class CPShardedPoolReader(CompressedKPoolReader):
             with record_function_range(
                 "dsv4.cp.all_gather.pool_reader.gather_cmp.launch"
             ):
-                work = torch.distributed.all_gather_into_tensor(
-                    gathered,
-                    local_flat,
-                    group=process_group,
-                    async_op=True,
-                )
+                work = None
+                if not try_all_gather_into(gathered, local_flat, process_group):
+                    work = torch.distributed.all_gather_into_tensor(
+                        gathered, local_flat, group=process_group, async_op=True
+                    )
             try:
                 completion_event = torch.cuda.Event()
                 completion_event.record(stream)
@@ -290,7 +290,10 @@ class CPShardedPoolReader(CompressedKPoolReader):
                 # Drain the in-flight NCCL Work before propagating; the
                 # caller never sees the pending handle, so nothing else
                 # would wait it.
-                work.wait()
+                if work is not None:
+                    work.wait()
+                else:
+                    local_flat.record_stream(stream)
                 raise
 
         return CPShardedPoolReadHandle(
@@ -351,7 +354,8 @@ class CPShardedPoolReader(CompressedKPoolReader):
     @staticmethod
     def _wait_fill_work_once(handle: CPShardedPoolReadHandle) -> None:
         if not handle.work_waited:
-            handle.work.wait()
+            if handle.work is not None:
+                handle.work.wait()
             handle.work_waited = True
 
     def _build_local_flat(

@@ -219,6 +219,8 @@ class CutlassExpertsFp8(FusedMoeExpertExecutor):
             num_tokens=M,
             hidden_size=K,
         )
+        expert_load = payload.expert_load
+        counts = expert_load.expert_token_counts if expert_load is not None else None
         get_cutlass_moe_mm_without_permute_info(
             topk_ids,
             expert_offsets,
@@ -229,6 +231,7 @@ class CutlassExpertsFp8(FusedMoeExpertExecutor):
             K,
             swap_ab_gemm1,
             swap_ab_gemm2,
+            expert_token_counts=counts,
         )
         if not per_act_token and expert_map is not None:
             c1.fill_(0)

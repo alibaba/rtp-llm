@@ -5,23 +5,61 @@
 #include "rtp_llm/cpp/config/ModelConfig.h"
 #include "rtp_llm/cpp/engine_base/grammar/RtpGrammarMatcher.h"
 #include "rtp_llm/cpp/engine_base/grammar/XGrammarBackend.h"
+#include "rtp_llm/cpp/engine_base/stream/GenerateTypes.h"
 #include "rtp_llm/cpp/models/logits_processor/BitmaskUtils.h"
+#include "rtp_llm/cpp/models/logits_processor/LogitsProcessorFactory.h"
 #include "rtp_llm/cpp/models/logits_processor/SpecLogitsProcessor.h"
 #include "rtp_llm/cpp/utils/ErrorCode.h"
+#include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
+#include "kmonitor/client/metric/GaugeMetric.h"
+#include "kmonitor/client/metric/QpsMetric.h"
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <memory>
+#include <cstdlib>
+#include <optional>
+#include <limits>
 #include <string>
 #include <utility>
 #include <vector>
 
 #include <xgrammar/tokenizer_info.h>
+#if USING_CUDA
+#include <ATen/cuda/CUDAContext.h>
+#include <cuda_runtime.h>
+#include <chrono>
+#include <future>
+#include <thread>
+#endif
 
 namespace rtp_llm {
 
 static_assert(std::is_base_of_v<BaseLogitsProcessor, GrammarLogitsProcessor>);
 namespace {
+
+class ScopedServingMetrics {
+public:
+    ScopedServingMetrics() {
+        const char* value = std::getenv("RTP_LLM_STARTUP_WARMUP_HEALTH_GATE_FILE");
+        if (value) {
+            old_gate_ = value;
+        }
+        ::unsetenv("RTP_LLM_STARTUP_WARMUP_HEALTH_GATE_FILE");
+        startKmonServiceStatus(nullptr);
+        setKmonServiceServing(true);
+    }
+    ~ScopedServingMetrics() {
+        stopKmonServiceStatus();
+        if (old_gate_) {
+            ::setenv("RTP_LLM_STARTUP_WARMUP_HEALTH_GATE_FILE", old_gate_->c_str(), 1);
+        }
+    }
+
+private:
+    std::optional<std::string> old_gate_;
+};
 
 xgrammar::TokenizerInfo makeAsciiTokenizerInfo(int vocab_size = 128) {
     std::vector<std::string> vocab;
@@ -166,6 +204,37 @@ int expectCapOk(ErrorResult<int>&& result) {
 
 }  // namespace
 
+TEST(GrammarLogitsProcessorTest, FactoryShutdownReleasesReporterAfterProcessorsDrainAndAllowsReinitialization) {
+    auto grammar_config                = grammarConfig();
+    grammar_config.tokenizer_info_json = makeAsciiTokenizerInfo().SerializeJSON();
+
+    for (int generation = 0; generation < 2; ++generation) {
+        SCOPED_TRACE(generation);
+        auto reporter = std::make_shared<kmonitor::MetricsReporter>("", "", kmonitor::MetricsTags{});
+        std::weak_ptr<kmonitor::MetricsReporter> reporter_lifetime = reporter;
+        LogitsProcessorFactory::init(ModelConfig{}, grammar_config, "", std::move(reporter));
+
+        auto input                    = std::make_shared<GenerateInput>();
+        input->input_ids              = torch::tensor({0}, torch::kInt32);
+        input->generate_config        = std::make_shared<GenerateConfig>();
+        input->generate_config->regex = "ab";
+        auto processors               = LogitsProcessorFactory::createLogitsProcessors(input, 1, 1, 0);
+        EXPECT_TRUE(processors.ok());
+        EXPECT_FALSE(reporter_lifetime.expired());
+
+        LogitsProcessorFactory::shutdown();
+        EXPECT_FALSE(reporter_lifetime.expired());
+        LogitsProcessorFactory::shutdown();
+
+        // Live processors retain the reporter for timeout metrics after backend shutdown.
+        ASSERT_TRUE(processors.ok());
+        ASSERT_EQ(processors.value().size(), 1);
+        EXPECT_FALSE(processors.value().front()->updateStatus(torch::tensor({{kA}}, torch::kInt32), 1).has_value());
+        processors.value().clear();
+        EXPECT_TRUE(reporter_lifetime.expired());
+    }
+}
+
 TEST(GrammarLogitsProcessorTest, ProcessMasksInitialDecodeState) {
     auto backend = makeBackend();
     ASSERT_TRUE(backend);
@@ -182,6 +251,395 @@ TEST(GrammarLogitsProcessorTest, ProcessMasksInitialDecodeState) {
     EXPECT_FALSE(error.has_value());
 }
 
+TEST(GrammarLogitsProcessorTest, ThreeConsecutiveTimeoutsDisableDecodeAndSpeculativeConstraints) {
+    auto proc           = makeProcessor(makeBackend(false), "a*");
+    auto initial_logits = torch::zeros({1, 128}, torch::kFloat32);
+    ASSERT_FALSE(proc->process(makeSamplerInputs(initial_logits), 0, 1).has_value());
+    expectTokenMasked(logitsVec(initial_logits), kX);
+    // Force slow updates without sleeping; only production configuration requires a positive budget.
+    proc->update_timeout_ms_            = 0;
+    const size_t               words    = SpecLogitsProcessorRequest::bitmaskWordCount(128);
+    const int32_t              drafts[] = {kA, kX};
+    std::vector<int32_t>       masks(3 * words);
+    SpecLogitsProcessorRequest request{drafts, 2, masks.data(), words, 128};
+    for (int round = 1; round <= 3; ++round) {
+        SCOPED_TRACE(round);
+        proc->update_timeout_ms_ = 0;
+        ASSERT_FALSE(proc->updateStatus(torch::tensor({{kA}}, torch::kInt32), 1).has_value());
+        EXPECT_EQ(proc->updateTimedOut(), round == 3);
+        EXPECT_TRUE(proc->isStateful());
+        EXPECT_EQ(proc->committedOutputLen(), round);
+        EXPECT_EQ(proc.matcher->numAcceptedTokens(), round);
+        proc->update_timeout_ms_ = std::numeric_limits<int>::max();
+        auto logits              = torch::zeros({1, 128}, torch::kFloat32);
+        ASSERT_FALSE(proc->process(makeSamplerInputs(logits), 0, 1).has_value());
+        if (round < 3) {
+            expectTokenAllowed(logitsVec(logits), kA);
+            expectTokenMasked(logitsVec(logits), kX);
+            EXPECT_EQ(expectCapOk(proc->prepareSpeculative(request)), 1);
+            EXPECT_FALSE(rowAllows(masks, words, 0, kX));
+        } else {
+            EXPECT_TRUE(torch::equal(logits, torch::zeros_like(logits)));
+            std::fill(masks.begin(), masks.end(), 0);
+            EXPECT_EQ(expectCapOk(proc->prepareSpeculative(request)), 2);
+            for (auto word : masks) {
+                EXPECT_EQ(word, SpecLogitsProcessorRequest::kBitmaskAllowAll);
+            }
+        }
+        // Fast verification must not reset the independent update streak.
+        EXPECT_EQ(proc->consecutive_update_timeouts_, round);
+        EXPECT_EQ(proc->consecutive_verify_timeouts_, 0);
+        // Draft accepts and rollbacks must not count as committed updates.
+        EXPECT_EQ(proc.matcher->numAcceptedTokens(), round);
+        EXPECT_EQ(proc->committedOutputLen(), round);
+    }
+    // A larger budget cannot revive the grammar. Even illegal grammar tokens
+    // advance stream parity after degradation without touching the matcher.
+    proc->update_timeout_ms_ = std::numeric_limits<int>::max();
+    ASSERT_FALSE(proc->updateStatus(torch::tensor({{kX, kB}}, torch::kInt32), 2).has_value());
+    EXPECT_TRUE(proc->updateTimedOut());
+    EXPECT_TRUE(proc->isStateful());
+    EXPECT_EQ(proc->committedOutputLen(), 5);
+    EXPECT_EQ(proc.matcher->numAcceptedTokens(), 3);
+    auto logits   = torch::arange(128, torch::kFloat32).reshape({1, 128});
+    auto original = logits.clone();
+    ASSERT_FALSE(proc->process(makeSamplerInputs(logits), 0, 1).has_value());
+    EXPECT_TRUE(torch::equal(logits, original));
+}
+
+TEST(GrammarLogitsProcessorTest, SlowSpeculativeVerificationSurvivesFastCommitsAndRestoresState) {
+    auto                             proc     = makeProcessor(makeBackend(false), "a*");
+    const size_t                     words    = SpecLogitsProcessorRequest::bitmaskWordCount(128);
+    const int32_t                    drafts[] = {kA, kX};
+    std::vector<int32_t>             masks(3 * words, 0);
+    const SpecLogitsProcessorRequest request{drafts, 2, masks.data(), words, 128};
+    proc->update_timeout_ms_ = std::numeric_limits<int>::max();
+    ASSERT_EQ(expectCapOk(proc->prepareSpeculative(request)), 1);
+    const auto expected_masks = masks;
+    for (int round = 1; round <= 3; ++round) {
+        SCOPED_TRACE(round);
+        std::fill(masks.begin(), masks.end(), 0);
+        proc->update_timeout_ms_ = 0;
+        const int cap            = expectCapOk(proc->prepareSpeculative(request));
+        EXPECT_EQ(proc->updateTimedOut(), round == 3);
+        EXPECT_TRUE(proc->isStateful());
+        EXPECT_EQ(proc->consecutive_verify_timeouts_, round);
+        EXPECT_EQ(proc->consecutive_update_timeouts_, 0);
+        EXPECT_EQ(proc.matcher->numAcceptedTokens(), round - 1);
+        EXPECT_EQ(proc->committedOutputLen(), round - 1);
+        // Even the third slow verification returns the result it computed.
+        EXPECT_EQ(cap, 1);
+        EXPECT_EQ(masks, expected_masks);
+        proc->update_timeout_ms_ = std::numeric_limits<int>::max();
+        ASSERT_FALSE(proc->updateStatus(torch::tensor({{kA}}, torch::kInt32), 1).has_value());
+        EXPECT_TRUE(proc->isStateful());
+        EXPECT_EQ(proc->committedOutputLen(), round);
+        EXPECT_EQ(proc->consecutive_verify_timeouts_, round);
+        EXPECT_EQ(proc->consecutive_update_timeouts_, 0);
+    }
+    EXPECT_EQ(proc.matcher->numAcceptedTokens(), 2);
+    EXPECT_EQ(proc->committedOutputLen(), 3);
+    auto       logits   = torch::arange(128, torch::kFloat32).reshape({1, 128});
+    const auto original = logits.clone();
+    ASSERT_FALSE(proc->process(makeSamplerInputs(logits), 0, 1).has_value());
+    EXPECT_TRUE(torch::equal(logits, original));
+    std::fill(masks.begin(), masks.end(), 0);
+    EXPECT_EQ(expectCapOk(proc->prepareSpeculative(request)), 2);
+    for (const auto word : masks) {
+        EXPECT_EQ(word, SpecLogitsProcessorRequest::kBitmaskAllowAll);
+    }
+    ASSERT_FALSE(proc->updateStatus(torch::tensor({{kX, kB}}, torch::kInt32), 2).has_value());
+    EXPECT_TRUE(proc->updateTimedOut());
+    EXPECT_TRUE(proc->isStateful());
+    EXPECT_EQ(proc->committedOutputLen(), 5);
+    EXPECT_EQ(proc.matcher->numAcceptedTokens(), 2);
+}
+
+TEST(GrammarLogitsProcessorTest, ZeroDraftVerificationTimeoutPreservesCurrentBonusRow) {
+    auto                             proc  = makeProcessor(makeBackend(false), "a*");
+    const size_t                     words = SpecLogitsProcessorRequest::bitmaskWordCount(128);
+    std::vector<int32_t>             masks(words, 0);
+    const SpecLogitsProcessorRequest request{nullptr, 0, masks.data(), words, 128};
+    proc->update_timeout_ms_ = 0;
+    for (int round = 1; round <= 3; ++round) {
+        SCOPED_TRACE(round);
+        std::fill(masks.begin(), masks.end(), 0);
+        EXPECT_EQ(expectCapOk(proc->prepareSpeculative(request)), 0);
+        EXPECT_EQ(proc->updateTimedOut(), round == 3);
+        EXPECT_EQ(proc->consecutive_verify_timeouts_, round);
+        EXPECT_EQ(proc->consecutive_update_timeouts_, 0);
+        EXPECT_TRUE(rowAllows(masks, words, 0, kA));
+        EXPECT_FALSE(rowAllows(masks, words, 0, kX));
+        EXPECT_TRUE(proc->isStateful());
+        EXPECT_EQ(proc->committedOutputLen(), 0);
+        EXPECT_EQ(proc.matcher->numAcceptedTokens(), 0);
+    }
+    std::fill(masks.begin(), masks.end(), 0);
+    EXPECT_EQ(expectCapOk(proc->prepareSpeculative(request)), 0);
+    for (const auto word : masks) {
+        EXPECT_EQ(word, SpecLogitsProcessorRequest::kBitmaskAllowAll);
+    }
+    EXPECT_EQ(proc->consecutive_verify_timeouts_, 3);
+    EXPECT_EQ(proc.matcher->numAcceptedTokens(), 0);
+}
+
+TEST(GrammarLogitsProcessorTest, DisabledGrammarIgnoresCachedTerminalMask) {
+    for (const bool verify_timeout : {false, true}) {
+        SCOPED_TRACE(verify_timeout);
+        auto proc                = makeProcessor(makeBackend(), "ab");
+        proc->update_timeout_ms_ = 0;
+        for (const int token : {kA, kB}) {
+            ASSERT_FALSE(proc->updateStatus(torch::tensor({{token}}, torch::kInt32), 1).has_value());
+        }
+        ASSERT_TRUE(matcherTerminated(*proc.matcher));
+        auto logits = torch::zeros({1, 128}, torch::kFloat32);
+        ASSERT_FALSE(proc->process(makeSamplerInputs(logits), 0, 1).has_value());
+        expectTokenAllowed(logitsVec(logits), kEos);
+        expectTokenMasked(logitsVec(logits), kX);
+
+        const size_t                     words    = SpecLogitsProcessorRequest::bitmaskWordCount(128);
+        const int32_t                    drafts[] = {kX, kX};
+        std::vector<int32_t>             masks(3 * words, 0);
+        const SpecLogitsProcessorRequest request{drafts, 2, masks.data(), words, 128};
+        if (verify_timeout) {
+            for (int round = 1; round <= 3; ++round) {
+                EXPECT_EQ(expectCapOk(proc->prepareSpeculative(request)), 0);
+                EXPECT_TRUE(rowAllows(masks, words, 0, kEos));
+                EXPECT_FALSE(rowAllows(masks, words, 0, kA));
+                EXPECT_EQ(proc->updateTimedOut(), round == 3);
+            }
+        } else {
+            ASSERT_FALSE(proc->updateStatus(torch::tensor({{kEos}}, torch::kInt32), 1).has_value());
+        }
+        ASSERT_TRUE(proc->updateTimedOut());
+        EXPECT_EQ(proc->committedOutputLen(), verify_timeout ? 2 : 3);
+        EXPECT_EQ(proc.matcher->numAcceptedTokens(), 2);
+        proc->update_timeout_ms_ = std::numeric_limits<int>::max();
+        logits.fill_(1.0f);
+        ASSERT_FALSE(proc->process(makeSamplerInputs(logits), 0, 1).has_value());
+        EXPECT_TRUE(torch::equal(logits, torch::ones_like(logits)));
+        std::fill(masks.begin(), masks.end(), 0);
+        EXPECT_EQ(expectCapOk(proc->prepareSpeculative(request)), 2);
+        for (const auto word : masks) {
+            EXPECT_EQ(word, SpecLogitsProcessorRequest::kBitmaskAllowAll);
+        }
+        ASSERT_FALSE(proc->updateStatus(torch::tensor({{kX, kB}}, torch::kInt32), 2).has_value());
+        EXPECT_TRUE(proc->updateTimedOut());
+        EXPECT_TRUE(proc->isStateful());
+        EXPECT_EQ(proc->committedOutputLen(), verify_timeout ? 4 : 5);
+        EXPECT_EQ(proc.matcher->numAcceptedTokens(), 2);
+    }
+}
+
+TEST(GrammarLogitsProcessorTest, TimelyVerificationResetsOnlyVerificationStreak) {
+    auto                             proc     = makeProcessor(makeBackend(false), "a*");
+    const size_t                     words    = SpecLogitsProcessorRequest::bitmaskWordCount(128);
+    const int32_t                    drafts[] = {kA};
+    std::vector<int32_t>             masks(2 * words);
+    const SpecLogitsProcessorRequest request{drafts, 1, masks.data(), words, 128};
+    proc->update_timeout_ms_ = 0;
+    for (int round = 0; round < 2; ++round) {
+        ASSERT_FALSE(proc->updateStatus(torch::tensor({{kA}}, torch::kInt32), 1).has_value());
+        EXPECT_EQ(expectCapOk(proc->prepareSpeculative(request)), 1);
+    }
+    EXPECT_FALSE(proc->updateTimedOut());
+    EXPECT_EQ(proc->consecutive_update_timeouts_, 2);
+    EXPECT_EQ(proc->consecutive_verify_timeouts_, 2);
+    proc->update_timeout_ms_ = std::numeric_limits<int>::max();
+    EXPECT_EQ(expectCapOk(proc->prepareSpeculative(request)), 1);
+    EXPECT_EQ(proc->consecutive_verify_timeouts_, 0);
+    EXPECT_EQ(proc->consecutive_update_timeouts_, 2);
+    proc->update_timeout_ms_ = 0;
+    EXPECT_EQ(expectCapOk(proc->prepareSpeculative(request)), 1);
+    EXPECT_EQ(proc->consecutive_verify_timeouts_, 1);
+    // A timely update resets only its own counter, leaving this verification sample.
+    proc->update_timeout_ms_ = std::numeric_limits<int>::max();
+    ASSERT_FALSE(proc->updateStatus(torch::tensor({{kA}}, torch::kInt32), 1).has_value());
+    EXPECT_EQ(proc->consecutive_update_timeouts_, 0);
+    EXPECT_EQ(proc->consecutive_verify_timeouts_, 1);
+    proc->update_timeout_ms_ = 0;
+    for (int round = 2; round <= 3; ++round) {
+        EXPECT_EQ(expectCapOk(proc->prepareSpeculative(request)), 1);
+        EXPECT_EQ(proc->updateTimedOut(), round == 3);
+    }
+}
+
+TEST(GrammarLogitsProcessorTest, VerificationErrorWinsOverThirdTimeout) {
+    auto                       proc     = makeProcessor(makeBackend(false), "a*");
+    const size_t               words    = SpecLogitsProcessorRequest::bitmaskWordCount(128);
+    const int32_t              drafts[] = {kA};
+    std::vector<int32_t>       masks(2 * words);
+    SpecLogitsProcessorRequest request{drafts, 1, masks.data(), words, 128};
+    proc->update_timeout_ms_ = 0;
+    for (int round = 0; round < 2; ++round) {
+        EXPECT_EQ(expectCapOk(proc->prepareSpeculative(request)), 1);
+    }
+    request.vocab_size = 127;
+    for (const int budget_ms : {0, std::numeric_limits<int>::max()}) {
+        SCOPED_TRACE(budget_ms);
+        proc->update_timeout_ms_ = budget_ms;
+        auto cap                 = proc->prepareSpeculative(request);
+        ASSERT_FALSE(cap.ok());
+        EXPECT_EQ(cap.status().code(), ErrorCode::GRAMMAR_VOCAB_EXCEEDS_MODEL_VOCAB);
+        EXPECT_FALSE(proc->updateTimedOut());
+        EXPECT_EQ(proc->consecutive_verify_timeouts_, 2);
+        EXPECT_EQ(proc->consecutive_update_timeouts_, 0);
+        EXPECT_EQ(proc->committedOutputLen(), 0);
+        EXPECT_EQ(proc.matcher->numAcceptedTokens(), 0);
+        EXPECT_TRUE(proc.matcher->finished());
+        EXPECT_TRUE(rowAllows(masks, words, 0, kEos));
+        EXPECT_FALSE(rowAllows(masks, words, 0, kA));
+    }
+}
+
+TEST(GrammarLogitsProcessorTest, TimelyUpdateResetsConsecutiveTimeouts) {
+    for (int slow_before_reset : {1, 2}) {
+        SCOPED_TRACE(slow_before_reset);
+        auto proc                = makeProcessor(makeBackend(false), "a*");
+        proc->update_timeout_ms_ = 0;
+        for (int i = 0; i < slow_before_reset; ++i) {
+            ASSERT_FALSE(proc->updateStatus(torch::tensor({{kA}}, torch::kInt32), 1).has_value());
+            EXPECT_EQ(proc->consecutive_update_timeouts_, i + 1);
+            EXPECT_FALSE(proc->updateTimedOut());
+        }
+        proc->update_timeout_ms_ = std::numeric_limits<int>::max();
+        ASSERT_FALSE(proc->updateStatus(torch::tensor({{kA}}, torch::kInt32), 1).has_value());
+        EXPECT_FALSE(proc->updateTimedOut());
+        EXPECT_EQ(proc->consecutive_update_timeouts_, 0);
+        proc->update_timeout_ms_ = 0;
+        for (int i = 1; i <= 3; ++i) {
+            ASSERT_FALSE(proc->updateStatus(torch::tensor({{kA}}, torch::kInt32), 1).has_value());
+            EXPECT_EQ(proc->updateTimedOut(), i == 3);
+            EXPECT_EQ(proc->consecutive_update_timeouts_, i);
+        }
+    }
+}
+
+TEST(GrammarLogitsProcessorTest, EmptyUpdatesDoNotCountOrResetTimeouts) {
+    auto proc                = makeProcessor(makeBackend(false), "a*");
+    proc->update_timeout_ms_ = 0;
+    const auto empty         = torch::empty({1, 0}, torch::kInt32);
+    for (int i = 0; i < 3; ++i) {
+        ASSERT_FALSE(proc->updateStatus(empty, 0).has_value());
+    }
+    EXPECT_FALSE(proc->updateTimedOut());
+    EXPECT_EQ(proc->consecutive_update_timeouts_, 0);
+    EXPECT_EQ(proc->consecutive_verify_timeouts_, 0);
+    EXPECT_EQ(proc->committedOutputLen(), 0);
+    for (int i = 0; i < 2; ++i) {
+        // An MTP batch with several tokens is one timed update.
+        ASSERT_FALSE(proc->updateStatus(torch::full({1, 4}, kA, torch::kInt32), 4).has_value());
+        EXPECT_FALSE(proc->updateTimedOut());
+        EXPECT_EQ(proc->consecutive_update_timeouts_, i + 1);
+    }
+    const size_t                     words    = SpecLogitsProcessorRequest::bitmaskWordCount(128);
+    const int32_t                    drafts[] = {kA};
+    std::vector<int32_t>             masks(2 * words);
+    const SpecLogitsProcessorRequest request{drafts, 1, masks.data(), words, 128};
+    for (int i = 0; i < 2; ++i) {
+        EXPECT_EQ(expectCapOk(proc->prepareSpeculative(request)), 1);
+    }
+    proc->update_timeout_ms_ = std::numeric_limits<int>::max();
+    ASSERT_FALSE(proc->updateStatus(empty, 0).has_value());
+    EXPECT_FALSE(proc->updateTimedOut());
+    EXPECT_EQ(proc->consecutive_update_timeouts_, 2);
+    EXPECT_EQ(proc->consecutive_verify_timeouts_, 2);
+    proc->update_timeout_ms_ = 0;
+    ASSERT_FALSE(proc->updateStatus(torch::tensor({{kA}}, torch::kInt32), 1).has_value());
+    EXPECT_TRUE(proc->updateTimedOut());
+    ASSERT_FALSE(proc->updateStatus(empty, 0).has_value());
+    EXPECT_TRUE(proc->updateTimedOut());
+    EXPECT_EQ(proc->consecutive_update_timeouts_, 3);
+    EXPECT_EQ(proc->consecutive_verify_timeouts_, 2);
+    EXPECT_EQ(proc->committedOutputLen(), 9);
+    EXPECT_EQ(proc.matcher->numAcceptedTokens(), 9);
+}
+
+TEST(GrammarLogitsProcessorTest, RejectedTokenIsNotHiddenByTimeout) {
+    auto proc                = makeProcessor(makeBackend(false), "a*");
+    proc->update_timeout_ms_ = 0;
+    for (int i = 0; i < 2; ++i) {
+        ASSERT_FALSE(proc->updateStatus(torch::tensor({{kA}}, torch::kInt32), 1).has_value());
+    }
+    for (const int budget_ms : {0, std::numeric_limits<int>::max()}) {
+        SCOPED_TRACE(budget_ms);
+        proc->update_timeout_ms_ = budget_ms;
+        auto error               = proc->updateStatus(torch::tensor({{kA, kX}}, torch::kInt32), 2);
+        ASSERT_TRUE(error.has_value());
+        EXPECT_EQ(error->code(), ErrorCode::GRAMMAR_PARSER_REJECTED_TOKEN);
+        EXPECT_EQ(proc.matcher->numAcceptedTokens(), 2);
+        EXPECT_EQ(proc->committedOutputLen(), 2);
+        EXPECT_FALSE(proc->updateTimedOut());
+        EXPECT_EQ(proc->consecutive_update_timeouts_, 2);
+        EXPECT_EQ(proc->consecutive_verify_timeouts_, 0);
+    }
+    proc->update_timeout_ms_ = 0;
+    ASSERT_FALSE(proc->updateStatus(torch::tensor({{kA}}, torch::kInt32), 1).has_value());
+    EXPECT_TRUE(proc->updateTimedOut());
+    EXPECT_EQ(proc->committedOutputLen(), 3);
+    EXPECT_EQ(proc.matcher->numAcceptedTokens(), 3);
+}
+
+TEST(GrammarLogitsProcessorTest, TimeoutReportsOnlyTheTransitionToDisabled) {
+    ScopedServingMetrics serving_metrics;
+    for (const bool verify_timeout : {false, true}) {
+        SCOPED_TRACE(verify_timeout);
+        auto monitor = std::make_shared<kmonitor::KMonitor>("grammar_update_test");
+        monitor->SetServiceName("");
+        auto  reporter        = std::make_shared<kmonitor::MetricsReporter>(monitor, "", kmonitor::MetricsTags());
+        auto* metrics         = reporter->getMetricsGroup<RtpLLMGrammarMetrics>();
+        auto  service_tags    = kmonTagsWithServiceStatus(&reporter->getTags());
+        auto* compile_latency =
+            dynamic_cast<kmonitor::GaugeMetric*>(metrics->compile_latency_us_metric->DeclareMetric(&service_tags));
+        auto* timeout =
+            dynamic_cast<kmonitor::QpsMetric*>(metrics->update_timeout_qps_metric->DeclareMetric(&service_tags));
+        ASSERT_NE(compile_latency, nullptr);
+        ASSERT_NE(timeout, nullptr);
+
+        auto                             proc     = makeProcessor(makeBackend(false), "a*");
+        const size_t                     words    = SpecLogitsProcessorRequest::bitmaskWordCount(128);
+        const int32_t                    drafts[] = {kA};
+        std::vector<int32_t>             masks(2 * words);
+        const SpecLogitsProcessorRequest request{drafts, 1, masks.data(), words, 128};
+        proc->metrics_reporter_  = reporter;
+        proc->update_timeout_ms_ = std::numeric_limits<int>::max();
+        ASSERT_FALSE(proc->updateStatus(torch::tensor({{kA, kA}}, torch::kInt32), 2).has_value());
+        EXPECT_FALSE(proc->updateTimedOut());
+        EXPECT_EQ(proc->committedOutputLen(), 2);
+        EXPECT_EQ(compile_latency->calculator_.Count(), 0);
+        EXPECT_EQ(timeout->value_, 0);
+
+        // A rejection without a timeout retains the existing error and emits no metric.
+        auto error = proc->updateStatus(torch::tensor({{kX}}, torch::kInt32), 1);
+        ASSERT_TRUE(error.has_value());
+        EXPECT_EQ(error->code(), ErrorCode::GRAMMAR_PARSER_REJECTED_TOKEN);
+        EXPECT_EQ(compile_latency->calculator_.Count(), 0);
+        EXPECT_EQ(timeout->value_, 0);
+
+        proc->update_timeout_ms_ = 0;
+        for (int round = 1; round <= 3; ++round) {
+            if (verify_timeout) {
+                EXPECT_EQ(expectCapOk(proc->prepareSpeculative(request)), 1);
+            } else {
+                ASSERT_FALSE(proc->updateStatus(torch::tensor({{kA}}, torch::kInt32), 1).has_value());
+            }
+            EXPECT_EQ(proc->updateTimedOut(), round == 3);
+            EXPECT_EQ(timeout->value_, round == 3 ? 1 : 0);
+        }
+        ASSERT_TRUE(proc->updateTimedOut());
+        EXPECT_EQ(compile_latency->calculator_.Count(), 0);
+        EXPECT_EQ(timeout->value_, 1);
+        ASSERT_FALSE(proc->updateStatus(torch::tensor({{kX}}, torch::kInt32), 1).has_value());
+        EXPECT_EQ(proc->committedOutputLen(), verify_timeout ? 3 : 6);
+        EXPECT_EQ(proc.matcher->numAcceptedTokens(), verify_timeout ? 2 : 5);
+        EXPECT_EQ(expectCapOk(proc->prepareSpeculative(request)), 1);
+        EXPECT_EQ(compile_latency->calculator_.Count(), 0);
+        EXPECT_EQ(timeout->value_, 1);
+        metrics->compile_latency_us_metric->UndeclareMetric(compile_latency);
+        metrics->update_timeout_qps_metric->UndeclareMetric(timeout);
+    }
+}
+
 TEST(GrammarLogitsProcessorTest, ProcessRejectsGrammarVocabExceedingModelVocab) {
     auto backend = makeBackend();
     ASSERT_TRUE(backend);
@@ -193,6 +651,51 @@ TEST(GrammarLogitsProcessorTest, ProcessRejectsGrammarVocabExceedingModelVocab) 
     ASSERT_TRUE(error.has_value());
     EXPECT_EQ(error->code(), ErrorCode::GRAMMAR_VOCAB_EXCEEDS_MODEL_VOCAB);
 }
+
+#if USING_CUDA
+TEST(GrammarLogitsProcessorTest, PendingMaskUploadSurvivesGrammarAdvance) {
+    auto backend = makeBackend();
+    ASSERT_TRUE(backend);
+    auto proc    = makeProcessor(backend, "ab");
+    auto options = torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA);
+    auto first   = torch::zeros({1, 128}, options);
+    auto second  = torch::zeros({1, 128}, options);
+    // CUDA lazy-loads packed_mask_logits on its first launch. Load it before
+    // blocking the stream, otherwise module initialization waits for the host
+    // callback and measures cold-start setup instead of async mask lifetime.
+    ASSERT_FALSE(proc->process(makeSamplerInputs(first), 0, 1).has_value());
+    first.zero_();
+    ASSERT_EQ(cudaStreamSynchronize(at::cuda::getCurrentCUDAStream().stream()), cudaSuccess);
+    std::promise<void> release;
+    auto               ready = release.get_future().share();
+    ASSERT_EQ(cudaLaunchHostFunc(
+                  at::cuda::getCurrentCUDAStream().stream(),
+                  [](void* data) { static_cast<std::shared_future<void>*>(data)->wait(); },
+                  &ready),
+              cudaSuccess);
+    std::thread releaser([&release] {
+        std::this_thread::sleep_for(std::chrono::milliseconds(500));
+        release.set_value();
+    });
+    const auto  start        = std::chrono::steady_clock::now();
+    const auto  first_error  = proc->process(makeSamplerInputs(first), 0, 1);
+    const auto  update_error = proc->updateStatus(torch::tensor({kA}, torch::kInt32).reshape({1, 1}), 1);
+    const auto  second_error = proc->process(makeSamplerInputs(second), 0, 1);
+    const auto  elapsed =
+        std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start).count();
+    releaser.join();
+    EXPECT_LT(elapsed, 250) << "grammar mask upload must not wait for preceding GPU work";
+    EXPECT_FALSE(first_error.has_value());
+    EXPECT_FALSE(update_error.has_value());
+    EXPECT_FALSE(second_error.has_value());
+    auto first_values  = logitsVec(first);
+    auto second_values = logitsVec(second);
+    expectTokenAllowed(first_values, kA);
+    expectTokenMasked(first_values, kB);
+    expectTokenMasked(second_values, kA);
+    expectTokenAllowed(second_values, kB);
+}
+#endif
 
 TEST(GrammarLogitsProcessorTest, ProcessAppliesPackedMaskOnGpuAcrossLogitDtypes) {
     auto backend = makeBackend();
@@ -380,34 +883,19 @@ TEST(GrammarLogitsProcessorTest, UpdateStatusRollsBackEntireRejectedBatch) {
     EXPECT_EQ(proc->committedOutputLen().value(), 1);
 }
 
-// Adversarial user schema: an infinite "$ref" self-reference compiles, but the
-// resulting grammar accepts nothing. The decode mask must then disallow every
-// token (rather than silently degrading to allow-all) and the first committed
-// token must be reported as rejected instead of corrupting matcher state.
-TEST(GrammarLogitsProcessorTest, DegenerateSelfReferenceMasksEverythingAndRejectsCommit) {
+// XGrammar rejects a pure self-reference during compilation. Invalid user
+// schemas must fail closed before a matcher or decode mask is installed.
+TEST(GrammarLogitsProcessorTest, DegenerateSelfReferenceIsRejectedAtCompile) {
     auto backend = makeBackend(/*terminate_without_stop_token=*/false);
     ASSERT_TRUE(backend);
-    auto proc = makeProcessorFromKey(backend,
-                                     {"json", R"json({
+    auto matcher = backend->createMatcherFromKey({"json", R"json({
   "$ref": "#/definitions/Self",
   "definitions": {
     "Self": {"$ref": "#/definitions/Self"}
   }
 })json"});
-    ASSERT_TRUE(proc.proc);
-
-    auto logits = torch::zeros({1, 128}, torch::kFloat32);
-    ASSERT_FALSE(proc->process(makeSamplerInputs(logits), 0, 1).has_value());
-    auto values = logitsVec(logits);
-    for (int token_id = 0; token_id < 128; ++token_id) {
-        expectTokenMasked(values, token_id);
-    }
-
-    auto error = proc->updateStatus(torch::tensor({static_cast<int32_t>('{')}, torch::kInt32).reshape({1, 1}), 1);
-    ASSERT_TRUE(error.has_value());
-    EXPECT_EQ(error->code(), ErrorCode::GRAMMAR_PARSER_REJECTED_TOKEN);
-    EXPECT_EQ(proc->committedOutputLen().value(), 0);
-    EXPECT_EQ(proc.matcher->numAcceptedTokens(), 0);
+    ASSERT_FALSE(matcher.ok());
+    EXPECT_NE(matcher.status().ToString().find("Circular $ref chain with no schema content"), std::string::npos);
 }
 
 // regex "ab": legal sequence is 'a' then 'b'. A fully-legal draft chain should

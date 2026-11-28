@@ -1,6 +1,10 @@
 #pragma once
 
 #include <memory>
+#include <algorithm>
+#include <functional>
+#include <chrono>
+#include <thread>
 #include <string>
 #include <iostream>
 #include "grpc++/grpc++.h"
@@ -121,12 +125,6 @@ public:
         return local_server_->CheckHealth(context, request, response);
     }
 
-    ::grpc::Status UpdateEplbConfig(::grpc::ServerContext*           context,
-                                    const UpdateEplbConfigRequestPB* request,
-                                    EmptyPB*                         response) override {
-        return local_server_->UpdateEplbConfig(context, request, response);
-    }
-
     ::grpc::Status SetPause(::grpc::ServerContext* context, const EmptyPB* request, EmptyPB* response) override {
         return local_server_->SetPause(context, request, response);
     }
@@ -151,7 +149,25 @@ public:
         return local_server_->onflightRequestNum();
     }
 
-    virtual void beginShutdown() {}
+    virtual void setExternalDrainCallbacks(std::function<void()> begin, std::function<size_t()> count) {
+        external_begin_shutdown_ = std::move(begin);
+        external_onflight_       = std::move(count);
+    }
+
+    virtual void beginShutdown() {
+        external_begin_shutdown_();
+    }
+
+    virtual bool waitForDrain(std::chrono::system_clock::time_point deadline) {
+        while (onflightRequestNum() + external_onflight_()) {
+            if (std::chrono::system_clock::now() >= deadline) {
+                return false;
+            }
+            std::this_thread::sleep_until(
+                std::min(deadline, std::chrono::system_clock::now() + std::chrono::milliseconds(20)));
+        }
+        return true;
+    }
 
     virtual void stop() {
         if (local_server_) {
@@ -166,6 +182,8 @@ public:
     }
 
 protected:
+    std::function<void()>           external_begin_shutdown_ = [] {};
+    std::function<size_t()>         external_onflight_       = [] { return size_t(0); };
     std::shared_ptr<LocalRpcServer> local_server_;
 };
 

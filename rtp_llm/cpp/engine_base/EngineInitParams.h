@@ -53,7 +53,6 @@ struct EngineInitParams {
                      rtp_llm::Weights&&                 gpt_weights,
                      py::object                         py_model       = py::none(),
                      py::object                         weight_manager = py::none(),
-                     py::object                         py_eplb        = py::none(),
                      py::object                         py_sp_model    = py::none()):
         model_id(model_id),
         model_config_(model_config),
@@ -75,7 +74,6 @@ struct EngineInitParams {
         vit_config(vit_config),
         gpt_weights(std::move(gpt_weights)),
         py_model(py_model),
-        py_eplb(py_eplb),
         py_sp_model(py_sp_model),
         weight_manager(weight_manager) {
         // default 1 minute and 1000
@@ -113,7 +111,6 @@ struct EngineInitParams {
     VitConfig                    vit_config;
     rtp_llm::Weights             gpt_weights;
     py::object                   py_model;
-    py::object                   py_eplb;
     py::object                   py_sp_model;
     py::object                   weight_manager;
     kmonitor::MetricsReporterPtr metrics_reporter = nullptr;

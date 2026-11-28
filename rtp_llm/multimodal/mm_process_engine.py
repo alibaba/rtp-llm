@@ -216,11 +216,15 @@ def _unpack_preprocess_result(payload: Any) -> Tuple[Any, float, float]:
 
 def _report_preprocess_timing(total_ms: float, download_ms: float) -> None:
     """Report the two non-overlapping preprocessing components in milliseconds."""
-    kmonitor.report(GaugeMetrics.VIT_PREPROCESS_RT_METRIC, total_ms)
-    kmonitor.report(GaugeMetrics.VIT_DOWNLOAD_RT_METRIC, download_ms)
-    kmonitor.report(
-        GaugeMetrics.VIT_PREPROCESS_OTHER_RT_METRIC, max(0.0, total_ms - download_ms)
-    )
+    try:
+        kmonitor.report(GaugeMetrics.VIT_PREPROCESS_RT_METRIC, total_ms)
+        kmonitor.report(GaugeMetrics.VIT_DOWNLOAD_RT_METRIC, download_ms)
+        kmonitor.report(
+            GaugeMetrics.VIT_PREPROCESS_OTHER_RT_METRIC,
+            max(0.0, total_ms - download_ms),
+        )
+    except Exception:
+        logging.exception("Failed to report preprocessing timing")
 
 
 def _report_preprocess_queue_size(queue_size: int) -> None:
@@ -256,7 +260,11 @@ def _report_image_count(mm_inputs: List[MultimodalInput]) -> None:
 
 def _report_vit_preprocess_samples(samples: List[VitMetricSample]) -> None:
     for sample in samples:
-        kmonitor.report(sample.metric, sample.value, sample.tags)
+        try:
+            kmonitor.report(sample.metric, sample.value, sample.tags)
+        except Exception:
+            # Telemetry must not replace a preprocessing result or public error.
+            logging.exception("Failed to report ViT preprocessing metric")
 
 
 class PreprocessExecutor:
@@ -1457,7 +1465,11 @@ class MMProcessEngine:
             # Empty URL bypasses the generic URL cache. The model cache uses the
             # trusted content hash and processor identity, and bypasses empty hashes.
             item = MMWorkItem(
-                [MultimodalInput("", MMUrlType.IMAGE)],
+                [
+                    MultimodalInput(
+                        "", MMUrlType.IMAGE, torch.empty(0), MMPreprocessConfig()
+                    )
+                ],
                 mm_timeout_ms=(
                     min(timeout_ms, self.vit_config.mm_timeout_ms)
                     if timeout_ms > 0
@@ -1465,6 +1477,13 @@ class MMProcessEngine:
                 ),
             )
             item.preprocess_result = [image]
+            estimate = self.mm_part.estimate_work(item.preprocess_result, item.mm_type)
+            if estimate is not None and not isinstance(estimate, MMWorkEstimate):
+                raise TypeError(
+                    "estimate_work must return MMWorkEstimate or None, got "
+                    f"{type(estimate).__name__}"
+                )
+            item.work_estimate = estimate
             work_items.append(item)
         self.inc_query_num()
         try:

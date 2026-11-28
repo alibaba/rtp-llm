@@ -64,6 +64,20 @@ def make_inputs(rows, k=512, *, device="cpu", strided=False, dtype=torch.int32):
 
 
 class IndexPlanCPU(unittest.TestCase):
+    def test_blackwell_family_gate_is_cached_per_device(self):
+        fused._device_supported.cache_clear()
+        self.addCleanup(fused._device_supported.cache_clear)
+        for index, capability in enumerate(
+            ((9, 0), (10, 0), (10, 1), (10, 3), (12, 0))
+        ):
+            with self.subTest(capability=capability), patch.object(
+                torch.cuda, "get_device_capability", return_value=capability
+            ) as query:
+                device = torch.device("cuda", index)
+                self.assertEqual(fused._device_supported(device), capability[0] == 10)
+                self.assertEqual(fused._device_supported(device), capability[0] == 10)
+                query.assert_called_once_with(device)
+
     def test_oracle_canonicalizes_order_preserving_duplicates_and_padding(self):
         selected = torch.tensor([[7, -3, 2, 7, -1], [-1, -1, -1, -1, -1]])
         actual, lengths = reference_plan(selected, torch.tensor([4, -1]), 10, 20, 3, 4)
@@ -132,13 +146,15 @@ class IndexPlanCPU(unittest.TestCase):
             self.assertTrue(fused.is_supported(*inputs(), 0, 32768, 0, 128))
             for change in (
                 {"dtype": torch.float32},
-                {"shape": (131073, 512)},
                 {"shape": (32, 2048)},
                 {"stride": lambda axis: 2},
             ):
                 x, p = inputs()
                 vars(x).update(change)
                 self.assertFalse(fused.is_supported(x, p, 0, 32768, 0, 128))
+            x, p = inputs()
+            x.shape, p.shape = (131073, 512), (131073,)
+            self.assertTrue(fused.is_supported(x, p, 0, 32768, 0, 128))
             for scalars in (
                 (True, 1, 0, 128),
                 (0, 1, 0, 0),
@@ -161,11 +177,8 @@ class IndexPlanCPU(unittest.TestCase):
 )
 class IndexPlanCUDA(unittest.TestCase):
     def setUp(self):
-        if fused.triton is None or torch.cuda.get_device_capability() not in (
-            (10, 0),
-            (10, 3),
-        ):
-            self.skipTest("SM100/SM103 and Triton required")
+        if fused.triton is None or torch.cuda.get_device_capability()[0] != 10:
+            self.skipTest("Blackwell SM10x and Triton required")
 
     def check(self, selected, positions, offset=0, size=4096, start=0, window=128):
         before = selected.clone(), positions.clone()
@@ -183,6 +196,19 @@ class IndexPlanCUDA(unittest.TestCase):
         for rows in (0, 1, 17, 32, 1664, 8192, 32768):
             with self.subTest(rows=rows):
                 self.check(*make_inputs(rows, device="cuda", strided=bool(rows % 2)))
+
+    def test_rows_above_old_limit_match_chunked_oracle(self):
+        rows = 131073
+        selected, positions = make_inputs(rows, device="cuda")
+        actual = fused.try_build_index_plan(selected, positions, 0, 4096, 0)
+        self.assertIsNotNone(actual)
+        for first in range(0, rows, 4096):
+            last = min(first + 4096, rows)
+            expected = reference_plan(
+                selected[first:last], positions[first:last], 0, 4096, 0
+            )
+            for got, ref in zip(actual, expected):
+                torch.testing.assert_close(got[first:last], ref, rtol=0, atol=0)
 
     def test_selection_permutation_does_not_change_attention_plan(self):
         selected, positions = make_inputs(257, device="cuda", strided=True)

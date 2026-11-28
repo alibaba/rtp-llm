@@ -24,6 +24,7 @@ from rtp_llm.models_py.modules.dsv41.bounded_replay import (
 )
 from rtp_llm.models_py.modules.dsv41.cp import CPContext, build_cp_context
 from rtp_llm.models_py.modules.dsv41.hc import build_hc_head
+from rtp_llm.models_py.utils.expert_load_monitor import expert_load_for_layer
 
 
 @dataclass
@@ -59,7 +60,6 @@ class V4Args:
     moe_inter_dim: int = 2048
     n_routed_experts: int = 256
     n_shared_experts: int = 1
-    moe_strategy: str = "auto"
     n_activated_experts: int = 6
     score_func: str = "sqrtsoftplus"
     route_scale: float = 1.5
@@ -91,6 +91,7 @@ class V4Args:
     dp_rank: int = 0
     world_size: int = 1
     world_rank: int = 0
+    fake_balance_expert: bool = False
     is_decode_role: bool = False
     # Dedicated DSpARK prefill workers execute only the commit side: target
     # features are projected into the draft SWA pools and no query/FFN/mHC
@@ -107,6 +108,8 @@ class V4Args:
     fp8_kv_cache: bool = True
     # V4.1 uses delayed mHC readout and a distinct compressed attention layout.
     v41_config: Optional[Dict] = None
+    # Routed storage and dispatch capacity; gate scores retain the logical count.
+    n_physical_experts: Optional[int] = None
 
 
 def _block_kwargs(
@@ -144,6 +147,7 @@ def _block_kwargs(
         index_topk=args.index_topk,
         moe_inter_dim=args.moe_inter_dim,
         n_routed_experts=args.n_routed_experts,
+        n_physical_experts=args.n_physical_experts,
         n_activated_experts=args.n_activated_experts,
         n_shared_experts=args.n_shared_experts,
         score_func=args.score_func,
@@ -160,9 +164,11 @@ def _block_kwargs(
         tp_rank=args.tp_rank,
         ep_size=args.ep_size,
         ep_rank=args.ep_rank,
+        dp_size=args.dp_size,
+        dp_rank=args.dp_rank,
+        fake_balance_expert=args.fake_balance_expert,
         max_tokens_per_rank=args.max_tokens_per_rank,
         is_decode_role=args.is_decode_role,
-        moe_strategy=args.moe_strategy,
         fp8_kv_cache=args.fp8_kv_cache,
         commit_only=commit_only,
     )
@@ -228,11 +234,16 @@ class V4Transformer(nn.Module):
             ]
         )
         if args.v41_config is not None and not self.commit_only:
+            from rtp_llm.models_py.modules.dsv41.hc.v41_mega_mhc import prepare_mega_mhc
+
             # Each sublayer reads the pre-mix computed by its predecessor.
             previous = None
             for layer in self.layers:
                 layer.attn_hc.set_previous(previous)
                 layer.ffn_hc.set_previous(layer.attn_hc)
+                if previous is not None:
+                    prepare_mega_mhc(previous, layer.attn_hc, layer.attn_norm)
+                prepare_mega_mhc(layer.attn_hc, layer.ffn_hc, layer.ffn_norm)
                 previous = layer.ffn_hc
 
         if self.commit_only:
@@ -296,14 +307,14 @@ class V4Transformer(nn.Module):
         self._prefill_ws_idx_w = 0
 
         # DSpARK target-feature export. The target model config fills this
-        # with 0-based layer ids (V4-Flash uses 40/41/42); the empty tuple is
+        # with 0-based layer ids (current V4-Flash uses 37/38/39); the empty tuple is
         # the no-auxiliary-tensor default for ordinary inference and MTP.
         self.capture_aux_hidden_layer_ids: tuple[int, ...] = ()
 
     def set_aux_hidden_capture_layer_ids(self, layer_ids: Sequence[int]) -> None:
         """Configure target residual-stream layers exported to DSpARK.
 
-        Each selected layer is reduced over the mHC axis *after* that layer,
+        Each selected layer's attention input is reduced over the mHC axis,
         matching the reference model's ``h.mean(dim=-2)`` semantics. Capture
         order follows ``layer_ids`` rather than model traversal order.
         """
@@ -326,7 +337,7 @@ class V4Transformer(nn.Module):
         self.capture_aux_hidden_layer_ids = capture_ids
 
     def capture_aux_hidden(self, layer_id: int, hidden: torch.Tensor) -> None:
-        """Write one selected layer's mean-pooled hidden into the shared
+        """Write one selected layer's mean-pooled attention input into the shared
         runtime buffer.
 
         In DSpARK mode the buffer rows are ``[T, len(capture_ids)*dim]``;
@@ -334,10 +345,10 @@ class V4Transformer(nn.Module):
         ``capture_aux_hidden_layer_ids`` (capture order follows the
         configured ids, not model traversal order). ``hidden`` is
         ``[T, hc, H]`` in prefill and ``[B, S, hc, H]`` in decode/verify; the
-        mHC lane is mean-reduced and token rows are flattened. The ``copy_``
-        into the fixed-address registered buffer keeps the write inside a
-        captured CUDA graph, mirroring ``_write_mtp_hidden_buffer``. In CP
-        prefill the rows intentionally stay rank-local zigzag order — the
+        mHC lane is mean-reduced and token rows are flattened. Prefill writes
+        directly into the fixed-address buffer; Decode uses ``copy_``. Both
+        writes remain inside a captured CUDA graph. In CP prefill the rows
+        intentionally stay rank-local zigzag order — the
         same semantics as the MTP pre-hc rows in this buffer.
         """
         try:
@@ -345,6 +356,32 @@ class V4Transformer(nn.Module):
         except ValueError:
             return
         buf = self._mtp_hidden_buffer
+        if hidden.ndim not in (3, 4) or hidden.shape[-2] <= 0 or hidden.shape[-1] <= 0:
+            raise ValueError(
+                "Auxiliary hidden capture requires nonempty [T,hc,H] or [B,S,hc,H]"
+            )
+        dim = hidden.shape[-1]
+        rows = hidden.numel() // (hidden.shape[-2] * dim)
+        if (
+            buf is None
+            or buf.ndim != 2
+            or buf.device != hidden.device
+            or buf.dtype != hidden.dtype
+            or rows > buf.shape[0]
+            or (segment + 1) * dim > buf.shape[1]
+        ):
+            raise ValueError(
+                "Auxiliary hidden capture buffer has incompatible shape, device, dtype or capacity"
+            )
+        if rows == 0:
+            return
+        if hidden.ndim == 3 and hidden.is_cuda:
+            from rtp_llm.models_py.modules.dsv41._aux_capture_triton import (
+                capture_aux_hidden,
+            )
+
+            capture_aux_hidden(hidden, buf, segment)
+            return
         pooled = hidden.mean(dim=-2)
         flat = pooled.reshape(-1, pooled.size(-1))
         rows, dim = flat.shape
@@ -477,6 +514,7 @@ class V4Transformer(nn.Module):
         self,
         input_ids: torch.Tensor,  # [T_total] int (== [B] for q_len=1)
         attn_metadata: "DSv4DecodeAttnMetadata",  # type: ignore[name-defined]
+        expert_token_counts: Optional[torch.Tensor],
         kv_cache=None,
     ) -> torch.Tensor:
         """Decode-only forward.
@@ -492,11 +530,27 @@ class V4Transformer(nn.Module):
             input_ids_2d = input_ids
         h = self.embed(input_ids_2d)  # [B, q_len, dim]
         h = h.unsqueeze(2).repeat(1, 1, self.hc_mult, 1)  # [B, q_len, hc, dim]
+        from rtp_llm.models_py.modules.dsv41.moe.routing_metadata import (
+            prepare_model_gate_routing_metadata,
+        )
+
+        routing_metadata = prepare_model_gate_routing_metadata(self, input_ids_2d)
+        routing_kwargs = (
+            {"routing_metadata": routing_metadata}
+            if routing_metadata is not None
+            else {}
+        )
         layer_forward_range = _profiler.make_layer_forward_range()
         for layer_idx, layer in enumerate(self.layers):
             with layer_forward_range(layer_idx):
+                expert_load = expert_load_for_layer(expert_token_counts, layer_idx)
                 h = layer.forward_decode(
-                    h, attn_metadata, input_ids_2d, kv_cache=kv_cache
+                    h,
+                    attn_metadata,
+                    input_ids_2d,
+                    kv_cache=kv_cache,
+                    expert_load=expert_load,
+                    **routing_kwargs,
                 )
         h = self._hc_head_reduce(h)  # [B, q_len, dim]
         # Framework RMSNorm wants 2D — flatten to [T_total, dim] and
@@ -507,6 +561,7 @@ class V4Transformer(nn.Module):
     def forward(
         self,
         input_ids: torch.Tensor,
+        expert_token_counts: Optional[torch.Tensor],
         start_pos=0,
         apply_lm_head: bool = True,
         kv_cache=None,
@@ -574,13 +629,16 @@ class V4Transformer(nn.Module):
             )
         self._propagate_cp_ctx(cp_ctx)
 
+        # Master switch: when MOEDBG=0 every record/begin/dump call site is
+        # skipped at the call site (no f-string formatting, no function-call
+        # overhead, no per-layer name allocation).  Read once per forward.
         h = self.embed(input_ids)  # [B, S, d]
         h = h.unsqueeze(2).repeat(1, 1, self.hc_mult, 1)  # [B, S, hc, d]
 
         # Bridge to flat Block.forward(x:[T,hc,d], input_ids:[T], positions:[T],
         # cu_seqlens:[B+1]). Standalone tests run with B==1; we flatten before
-        # the loop and restore at the end so the hc_head_reduce / norm paths
-        # below see the original [B, S, hc, d] shape.
+        # the loop and restore at the end so the hc_head_reduce / norm / rt
+        # record paths below see the original [B, S, hc, d] shape.
         h_flat = h.squeeze(0)  # [S, hc, d]
         input_ids_flat = input_ids.squeeze(0)  # [S]
         _start_pos_int = (
@@ -594,9 +652,20 @@ class V4Transformer(nn.Module):
         cu_seqlens = torch.tensor(
             [0, S], dtype=torch.int64, device=input_ids.device
         )  # [2]
+        from rtp_llm.models_py.modules.dsv41.moe.routing_metadata import (
+            prepare_model_gate_routing_metadata,
+        )
+
+        routing_metadata = prepare_model_gate_routing_metadata(self, input_ids_flat)
+        routing_kwargs = (
+            {"routing_metadata": routing_metadata}
+            if routing_metadata is not None
+            else {}
+        )
         layer_forward_range = _profiler.make_layer_forward_range()
         for li, layer in enumerate(self.layers):
             with layer_forward_range(li):
+                expert_load = expert_load_for_layer(expert_token_counts, li)
                 h_flat = layer(
                     h_flat,
                     input_ids_flat,
@@ -604,6 +673,8 @@ class V4Transformer(nn.Module):
                     cu_seqlens,
                     kv_cache=kv_cache,
                     block_tables_by_type=block_tables_by_type,
+                    **routing_kwargs,
+                    expert_load=expert_load,
                 )
         h = h_flat.unsqueeze(0)  # [1, S, hc, d]
         h = self._hc_head_reduce(h)  # [B, S, d]

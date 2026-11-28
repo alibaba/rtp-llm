@@ -106,6 +106,11 @@ class DeepSeekV41(DeepSeekV4):
         DeepSeekV4._from_hf(config, ckpt_path, config_json=text)
         config.is_deepseek_v41 = True
         config.mm_model_config.is_multimodal = True
+        image_token_id = int(raw["image_token_id"])
+        config.mm_model_config.mm_sep_tokens = [[image_token_id]]
+        config.mm_related_params.special_tokens["default_mm_token"] = (
+            "<\uff5cdeepseek_image\uff5c>"
+        )
         config.deepseek_v41_config = text
         config.mm_related_params.config["v41_config"] = raw
         config.max_seq_len = int(text["max_position_embeddings"])
@@ -129,6 +134,7 @@ class DeepSeekV41(DeepSeekV4):
 
     def _create_python_model(self):
         from rtp_llm.models_py.model_desc.deepseek_v41_model import DeepSeekV41Model
+        from rtp_llm.models_py.modules.dsv41.engram_distributed import process_runtime
 
         self.py_model = DeepSeekV41Model(
             self.model_config,
@@ -138,7 +144,11 @@ class DeepSeekV41(DeepSeekV4):
             max_generate_batch_size=self.max_generate_batch_size,
             fmha_config=self.fmha_config,
             py_hw_kernel_config=self.hw_kernel_config,
+            engram_runtime=process_runtime,
         )
+        # The native engine sizes its KV cache after model creation. Keep the
+        # target's workspace live across sizing, including without warmup.
+        self.py_model.initialize_prefill_cp_collectives(torch.device(self.device))
 
     @staticmethod
     def get_weight_cls():
@@ -164,6 +174,23 @@ class DeepSeekV41DSparkWeight(DeepSeekV4DSparkWeight):
                         f"mtp.{self._num_layers - 1}.markov_head.head.weight", identity
                     )
                 ]
+        if (
+            getattr(self.model_config, "dspark_confidence_enabled", False)
+            and not self.prefill_commit_only
+        ):
+            info.weights.append(
+                AtomicWeight(
+                    W.dspark_confidence_head,
+                    [
+                        CkptWeightInfo(
+                            f"mtp.{self._num_layers - 1}.confidence_head.proj.weight",
+                            identity,
+                        )
+                    ],
+                    identity,
+                    data_type=torch.float32,
+                )
+            )
         return info
 
 

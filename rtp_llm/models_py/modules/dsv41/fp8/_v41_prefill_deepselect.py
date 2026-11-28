@@ -1,0 +1,136 @@
+"""Native BF16/FP32 DeepSelect for V4.1 dense token K512.
+
+Scores retain their input precision. The kernel canonicalizes NaN to +inf
+before ranking and optionally filters selected nonfinite values to -1, also
+for short rows. Thus nonfinite scores consume selected slots, as in the
+existing prefill selector. Output order and membership within ties are
+unspecified; candidate-block selection has a separate contract.
+"""
+
+from __future__ import annotations
+
+import os
+from functools import lru_cache
+
+import torch
+
+from rtp_llm.ops.compute_ops import rtp_llm_ops
+
+
+@lru_cache(maxsize=None)
+def _device_supported(device: torch.device) -> bool:
+    return torch.cuda.get_device_capability(device) in ((10, 0), (10, 3))
+
+
+def is_available(
+    device: torch.device,
+    dtype: torch.dtype = torch.float32,
+    *,
+    enabled: bool | None = None,
+) -> bool:
+    # Decode has its own rollout switch; omitted overrides preserve prefill policy.
+    if enabled is None:
+        enabled = os.environ.get("DSV41_PREFILL_DEEPSELECT", "0") == "1"
+    if not enabled or torch.version.hip is not None or device.type != "cuda":
+        return False
+    if dtype == torch.bfloat16:
+        if not hasattr(rtp_llm_ops, "deepselect_bf16_dense"):
+            return False
+        available = getattr(rtp_llm_ops, "deepselect_bf16_available", None)
+    elif dtype == torch.float32:
+        available = getattr(rtp_llm_ops, "deepselect_fp32_available", None)
+    else:
+        return False
+    return available is not None and available() and _device_supported(device)
+
+
+def is_supported(logits, ends, out=None, *, filter_finite=True, enabled=None) -> bool:
+    """Metadata-only admission; no score or bound is read back to the host."""
+    # BF16 TMA requires complete 512-element tiles. Reject before probing it.
+    if logits.dtype == torch.bfloat16 and logits.ndim == 2 and logits.shape[1] % 512:
+        return False
+    if not logits.is_cuda or not is_available(
+        logits.device, logits.dtype, enabled=enabled
+    ):
+        return False
+    if not (
+        logits.ndim == 2
+        and 0 < logits.shape[0] <= 2**31 - 1
+        and 512 <= logits.shape[1] < 2**23
+        and logits.stride(1) == 1
+        and logits.stride(0) >= logits.shape[1]
+        and logits.stride(0) % (512 if logits.dtype == torch.bfloat16 else 256) == 0
+        and logits.data_ptr() % 16 == 0
+        and ends.device == logits.device
+        and ends.dtype == torch.int32
+        and ends.ndim == 1
+        and ends.numel() == logits.shape[0]
+        and ends.is_contiguous()
+        and (filter_finite or out is not None)
+    ):
+        return False
+    if logits.shape[1] % 32:
+        # TMA describes complete 128-byte rows, including the final allocation
+        # row. A strided view can end before that padding even when its stride
+        # is aligned, so check the actual storage extent without a GPU read.
+        padded_width = (logits.shape[1] + 31) // 32 * 32
+        required_elements = (
+            logits.storage_offset()
+            + (logits.shape[0] - 1) * logits.stride(0)
+            + padded_width
+        )
+        if required_elements * 4 > logits.untyped_storage().nbytes():
+            return False
+    if out is not None:
+        if not (
+            out.device == logits.device
+            and out.dtype == torch.int32
+            and out.shape == (logits.shape[0], 512)
+            and out.stride(1) == 1
+            and out.stride(0) >= 512
+            and out.stride(0) % 8 == 0
+            and out.data_ptr() % 32 == 0
+        ):
+            return False
+        storage = out.untyped_storage().data_ptr()
+        if any(t.untyped_storage().data_ptr() == storage for t in (logits, ends)):
+            return False
+    return True
+
+
+def try_select_tokens(
+    logits, ends, *, out=None, filter_finite=True, enabled=None, sorted_index=False
+):
+    """Return K512 int32 indices, or None before an unsupported launch.
+
+    Bounds are clamped in the native kernel. A caller using
+    ``filter_finite=False`` must filter in its publication epilogue. Once a
+    native launch is selected, execution errors propagate without fallback.
+    ``sorted_index`` uses the BF16 index epilogue; finite filtering must remain
+    in the caller. Valid IDs are ascending before that publication step.
+    """
+    if not is_supported(
+        logits, ends, out, filter_finite=filter_finite, enabled=enabled
+    ):
+        return None
+    if sorted_index:
+        if logits.dtype != torch.bfloat16 or filter_finite:
+            raise ValueError(
+                "Sorted DeepSelect requires BF16 and deferred finite filtering"
+            )
+        select = getattr(rtp_llm_ops, "deepselect_bf16_dense_sorted", None)
+        if select is None:
+            return None
+        select(logits, ends, out)
+        return out
+    if out is None:
+        out = torch.empty(
+            (logits.shape[0], 512), dtype=torch.int32, device=logits.device
+        )
+    select = (
+        rtp_llm_ops.deepselect_bf16_dense
+        if logits.dtype == torch.bfloat16
+        else rtp_llm_ops.deepselect_fp32
+    )
+    select(logits, ends, out, filter_finite)
+    return out

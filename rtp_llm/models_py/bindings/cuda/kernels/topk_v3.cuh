@@ -76,6 +76,17 @@ SGL_DEVICE bool is_nan(float x) {
     return (__float_as_uint(x) & 0x7fffffffu) > 0x7f800000u;
 }
 
+SGL_DEVICE bool above_coarse_threshold(float x, float upper) {
+    // The boundary above +inf (and every NaN bin) saturates at FLT_MAX
+    // or overflows to +inf. Only NaNs rank above either boundary.
+    return is_nan(x) || (upper < FLT_MAX && x >= upper);
+}
+
+SGL_DEVICE bool in_coarse_threshold(float x, float lower, float upper) {
+    // A saturated upper boundary includes +inf in the final numeric bin.
+    return x >= lower && (upper >= FLT_MAX || x < upper);
+}
+
 template<uint32_t kBits>
 SGL_DEVICE uint32_t extract_coarse_bin(float x) {
     static_assert(0 < kBits && kBits < 15);
@@ -200,14 +211,19 @@ SGL_DEVICE int32_t page_to_indices(const int32_t* __restrict__ page_table, uint3
 /// One batch element's worth of work. `emit(pos, raw_idx)` writes the selected raw
 /// index to output slot `pos`; `transform_output` then applies the page-table
 /// transform in a separate pass (and records the raw index in `raw_out` if set).
-struct TopKProblem {
-    const float* __restrict__ in;
+template<typename Score>
+struct TopKProblemT {
+    const Score* __restrict__ in;
     int32_t* __restrict__ out;      // page_indices [topk]
     int32_t* __restrict__ raw_out;  // optional raw (pre-transform) indices [topk]; nullptr if unused
     const int32_t* __restrict__ page_table;
     uint32_t topk;
     uint32_t seq_len;
     uint32_t page_bits;
+
+    SGL_DEVICE float load(uint32_t idx) const {
+        return cast<float>(in[idx]);
+    }
 
     // Write the raw selected index; the page-table transform is applied afterwards
     // by transform_output() in a separate, pipelined pass. Keeping the per-element
@@ -222,6 +238,9 @@ struct TopKProblem {
         out[t] = raw < 0 ? -1 : page_to_indices(page_table, raw, page_bits);
     }
 };
+
+// Preserve the FP32 interface used by candidate-only JIT kernels.
+using TopKProblem = TopKProblemT<float>;
 
 // ---------------------------------------------------------------------------
 // Shared configuration + tie handling (exact radix select on the threshold bin)
@@ -296,13 +315,14 @@ struct TopKConfig {
     /// coarse value interval and skip any FP32 key bytes shared by both interval
     /// endpoints. Values above the interval have already been emitted.
     /// kFullRow also handles zero and non-finite coarse thresholds.
-    template<bool kFullRow = false>
+    template<bool kFullRow = false, typename Score>
     SGL_DEVICE static void exact_boundary_scan_topk(
-        const TopKProblem& problem, TieHandleSmem* smem, float v_lo, float v_hi, uint32_t output_base) {
+        const TopKProblemT<Score>& problem, TieHandleSmem* smem, float v_lo, float v_hi, uint32_t output_base) {
         const uint32_t tx = threadIdx.x;
         if (tx == 0) {
             const uint32_t lo_key      = extract_exact_bin(v_lo);
-            const uint32_t hi_key      = extract_exact_bin(nextafterf(v_hi, -FLT_MAX));
+            const uint32_t hi_key      = extract_exact_bin(v_hi >= FLT_MAX ? std::numeric_limits<float>::infinity() :
+                                                                        nextafterf(v_hi, -FLT_MAX));
             uint32_t       prefix      = 0;
             uint32_t       first_round = 0;
 #pragma unroll
@@ -331,9 +351,9 @@ struct TopKConfig {
             const uint32_t mask   = round == 0 ? 0u : (~0u << (32u - round * 8u));
             const uint32_t shift  = 24u - round * 8u;
             for (uint32_t idx = tx; idx < problem.seq_len; idx += kBlockSize) {
-                const float    value = problem.in[idx];
+                const float    value = problem.load(idx);
                 const uint32_t key   = extract_exact_bin(value);
-                if ((kFullRow || (value >= v_lo && value < v_hi)) && (key & mask) == prefix) {
+                if ((kFullRow || in_coarse_threshold(value, v_lo, v_hi)) && (key & mask) == prefix) {
                     atomicAdd(&smem->histogram[0][(key >> shift) & 0xffu], 1u);
                 }
             }
@@ -378,8 +398,8 @@ struct TopKConfig {
         // by SM arrival, which made run-to-run output order vary.
         uint32_t my_above = 0;
         for (uint32_t idx = tx; idx < problem.seq_len; idx += kBlockSize) {
-            const float value = problem.in[idx];
-            if ((kFullRow || (value >= v_lo && value < v_hi)) && extract_exact_bin(value) > pivot) {
+            const float value = problem.load(idx);
+            if ((kFullRow || in_coarse_threshold(value, v_lo, v_hi)) && extract_exact_bin(value) > pivot) {
                 ++my_above;
             }
         }
@@ -387,8 +407,8 @@ struct TopKConfig {
         const uint32_t base_above = block_exclusive_prefix(my_above, smem->warp_sum, &smem->total_scratch[0]);
         uint32_t       run_above  = 0;
         for (uint32_t idx = tx; idx < problem.seq_len; idx += kBlockSize) {
-            const float value = problem.in[idx];
-            if ((kFullRow || (value >= v_lo && value < v_hi)) && extract_exact_bin(value) > pivot) {
+            const float value = problem.load(idx);
+            if ((kFullRow || in_coarse_threshold(value, v_lo, v_hi)) && extract_exact_bin(value) > pivot) {
                 problem.emit(output_base + base_above + run_above++, idx);
             }
         }
@@ -398,8 +418,8 @@ struct TopKConfig {
         // reproducible run to run.
         uint32_t my_eq = 0;
         for (uint32_t idx = tx; idx < problem.seq_len; idx += kBlockSize) {
-            const float value = problem.in[idx];
-            if ((kFullRow || (value >= v_lo && value < v_hi)) && extract_exact_bin(value) == pivot) {
+            const float value = problem.load(idx);
+            if ((kFullRow || in_coarse_threshold(value, v_lo, v_hi)) && extract_exact_bin(value) == pivot) {
                 ++my_eq;
             }
         }
@@ -407,8 +427,8 @@ struct TopKConfig {
         const uint32_t base_eq = block_exclusive_prefix(my_eq, smem->warp_sum, &smem->total_scratch[1]);
         uint32_t       run_eq  = 0;
         for (uint32_t idx = tx; idx < problem.seq_len; idx += kBlockSize) {
-            const float value = problem.in[idx];
-            if ((kFullRow || (value >= v_lo && value < v_hi)) && extract_exact_bin(value) == pivot) {
+            const float value = problem.load(idx);
+            if ((kFullRow || in_coarse_threshold(value, v_lo, v_hi)) && extract_exact_bin(value) == pivot) {
                 const uint32_t pos = output_base + smem->total_scratch[0] + base_eq + run_eq++;
                 if (pos < problem.topk) {
                     problem.emit(pos, idx);
@@ -421,13 +441,14 @@ struct TopKConfig {
     /// Resolve the threshold bin's ties exactly. `base` is the number of strictly
     /// "above" elements already emitted (final output starts at slot `base`);
     /// `topk` here is the number of remaining slots to fill (== global_topk - base).
+    template<typename Score>
     SGL_DEVICE static void handle_tie(  //
-        const TieValue*    tie_buffer,
-        const TopKProblem& problem,
-        const uint32_t     base,
-        const uint32_t     num_ties,
-        const uint32_t     topk,
-        TieHandleSmem*     smem) {
+        const TieValue*            tie_buffer,
+        const TopKProblemT<Score>& problem,
+        const uint32_t             base,
+        const uint32_t             num_ties,
+        const uint32_t             topk,
+        TieHandleSmem*             smem) {
         constexpr auto is_greater = [](const TieValue& a, const TieValue& b) {
             return (a.value > b.value) || (a.value == b.value && a.idx < b.idx);
         };
@@ -517,14 +538,14 @@ struct TopKConfig {
     /// Exact radix select over the tie candidates: each thread owns kItems
     /// strided elements (inactive beyond num_ties). Requires
     /// num_ties <= kItems * kBlockSize.
-    template<uint32_t kItems>
+    template<uint32_t kItems, typename Score>
     SGL_DEVICE static void radix_tie_select(  //
-        const TieValue*    tie_buffer,
-        const TopKProblem& problem,
-        const uint32_t     base,
-        const uint32_t     num_ties,
-        const uint32_t     topk,
-        TieHandleSmem*     smem) {
+        const TieValue*            tie_buffer,
+        const TopKProblemT<Score>& problem,
+        const uint32_t             base,
+        const uint32_t             num_ties,
+        const uint32_t             topk,
+        TieHandleSmem*             smem) {
         const auto tx      = threadIdx.x;
         const auto lane_id = tx % kWarpSize;
         const auto warp_id = tx / kWarpSize;
@@ -684,30 +705,45 @@ struct TopKRadixBase: TopKConfig {
     };
 
 protected:
-    template<bool kAlignedInput, typename F>
-    SGL_DEVICE static void for_each_input(const float* __restrict__ in, uint32_t seq_len, F&& fn) {
+    // Keep four elements per lane for both input dtypes, so dispatch, traversal,
+    // ties and output order match FP32 TopK on an exact BF16-to-FP32 cast.
+    // The FP32 specialization retains its original 16-byte vector load.
+    template<bool kAlignedInput, typename Score>
+    SGL_DEVICE static vec_t load_vector(const Score* in, uint32_t vi) {
+        AlignedVector<Score, kVecSize> input;
+        if constexpr (kAlignedInput) {
+            input.load(in, vi);
+        } else {
+            input.load_unaligned(in, vi);
+        }
+        if constexpr (std::is_same_v<Score, float>) {
+            return input;
+        } else {
+            vec_t result;
+#pragma unroll
+            for (uint32_t j = 0; j < kVecSize; ++j) {
+                result[j] = cast<float>(input[j]);
+            }
+            return result;
+        }
+    }
+
+    template<bool kAlignedInput, typename Score, typename F>
+    SGL_DEVICE static void for_each_input(const Score* __restrict__ in, uint32_t seq_len, F&& fn) {
         const auto     tx       = threadIdx.x;
         const uint32_t num_full = seq_len / kVecSize;  // fully-in-bounds vectors
 
         vec_t    next_vec;
         uint32_t vi = tx;
         if (vi < num_full) {
-            if constexpr (kAlignedInput) {
-                next_vec.load(in, vi);
-            } else {
-                next_vec.load_unaligned(in, vi);
-            }
+            next_vec = load_vector<kAlignedInput>(in, vi);
         }
         while (vi < num_full) {
             const auto cur  = next_vec;
             const auto base = vi * kVecSize;
             vi += kBlockSize;
             if (vi < num_full) {
-                if constexpr (kAlignedInput) {
-                    next_vec.load(in, vi);
-                } else {
-                    next_vec.load_unaligned(in, vi);
-                }
+                next_vec = load_vector<kAlignedInput>(in, vi);
             }
 #pragma unroll
             for (uint32_t j = 0; j < kVecSize; ++j) {
@@ -720,7 +756,7 @@ protected:
         const uint32_t tail_start = num_full * kVecSize;
         if (tx < seq_len - tail_start) {
             const auto idx = tail_start + tx;
-            fn(in[idx], idx);
+            fn(cast<float>(in[idx]), idx);
         }
     }
 
@@ -775,8 +811,8 @@ struct TopKRegister: TopKRadixBase<12> {
     static constexpr uint32_t kMaxSeqLen = kBlockSize * kVecSize * kLocalVecs;
     using Smem                           = typename TopKRadixBase<12>::Smem;
 
-    template<bool kUsePDL, bool kAlignedInput>
-    SGL_DEVICE static void forward(const TopKProblem problem, void* _smem) {
+    template<bool kUsePDL, bool kAlignedInput, typename Score>
+    SGL_DEVICE static void forward(const TopKProblemT<Score> problem, void* _smem) {
         const auto tx   = threadIdx.x;
         const auto smem = static_cast<Smem*>(_smem);
 
@@ -809,11 +845,7 @@ struct TopKRegister: TopKRadixBase<12> {
             const auto vi = tx + kBlockSize * i;
             if (vi >= num_full)
                 break;
-            if constexpr (kAlignedInput) {
-                local_vecs[i].load(problem.in, vi);
-            } else {
-                local_vecs[i].load_unaligned(problem.in, vi);
-            }
+            local_vecs[i] = load_vector<kAlignedInput>(problem.in, vi);
         }
 #pragma unroll
         for (uint32_t i = 0; i < kLocalVecs; ++i) {
@@ -826,7 +858,7 @@ struct TopKRegister: TopKRadixBase<12> {
         }
         if (tx >= kBlockSize - tail) {
             const uint32_t idx = tail_start + tx - (kBlockSize - tail);
-            atomicAdd(&smem->histogram[extract_coarse_bin<kHistBits>(problem.in[idx])], 1);
+            atomicAdd(&smem->histogram[extract_coarse_bin<kHistBits>(problem.load(idx))], 1);
         }
         __syncthreads();
 
@@ -842,7 +874,7 @@ struct TopKRegister: TopKRadixBase<12> {
         }
         const auto v_hi     = coarse_bin_lower_bound<kHistBits>(threshold_bin + 1);
         const auto v_lo     = coarse_bin_lower_bound<kHistBits>(threshold_bin);
-        const auto is_above = [&](float val) { return is_nan(val) || val >= v_hi; };
+        const auto is_above = [&](float val) { return above_coarse_threshold(val, v_hi); };
         // Deterministic positions: count per thread, take a thread-order block
         // prefix, then emit/append in the same iteration order. The atomicAdd
         // version ordered both the above-threshold emissions and the tie-buffer
@@ -866,7 +898,7 @@ struct TopKRegister: TopKRadixBase<12> {
             }
         }
         if (tx >= kBlockSize - tail) {
-            const auto val = problem.in[tail_start + tx - (kBlockSize - tail)];
+            const auto val = problem.load(tail_start + tx - (kBlockSize - tail));
             if (is_above(val))
                 ++my_gt;
             else if (val >= v_lo)
@@ -900,7 +932,7 @@ struct TopKRegister: TopKRadixBase<12> {
         }
         if (tx >= kBlockSize - tail) {
             const uint32_t idx = tail_start + tx - (kBlockSize - tail);
-            collect(problem.in[idx], idx);
+            collect(problem.load(idx), idx);
         }
 
         // Phase 4: Handle ties.
@@ -927,11 +959,178 @@ struct TopKRegister: TopKRadixBase<12> {
 // ---------------------------------------------------------------------------
 
 struct TopKStreaming: TopKRegister<2> {
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ == 1030
+private:
+    template<bool Aligned, typename Callback>
+    SGL_DEVICE static void visit_pairs(const __nv_bfloat16* in, uint32_t seq_len, Callback&& callback) {
+        using Vector             = AlignedVector<__nv_bfloat16, kVecSize>;
+        const uint32_t threads_x = threadIdx.x;
+        const uint32_t full      = seq_len / kVecSize;
+        uint32_t       vec       = threads_x;
+        Vector         prefetched;
+        const auto     read = [&](Vector& value, uint32_t i) {
+            if constexpr (Aligned)
+                value.load(in, i);
+            else
+                value.load_unaligned(in, i);
+        };
+        if (vec < full)
+            read(prefetched, vec);
+        while (vec < full) {
+            const Vector   current = prefetched;
+            const uint32_t base    = vec * kVecSize;
+            vec += kBlockSize;
+            if (vec < full)
+                read(prefetched, vec);
+            callback(__halves2bfloat162(current[0], current[1]), base);
+            callback(__halves2bfloat162(current[2], current[3]), base + 2);
+        }
+    }
+
+    template<bool Aligned>
+    SGL_DEVICE static void
+    collect_from_masks(const TopKProblemT<__nv_bfloat16>& problem, Smem* smem, float v_lo, float v_hi) {
+        const auto high    = __bfloat162bfloat162(__float2bfloat16_ru(v_hi));
+        const auto low     = __bfloat162bfloat162(__float2bfloat16_ru(v_lo));
+        const auto pack    = [](uint32_t mask) { return (mask & 1u) | ((mask >> 15) & 2u); };
+        uint32_t   greater = 0;
+        uint32_t   equal   = 0;
+        uint32_t   shift   = 0;
+        visit_pairs<Aligned>(problem.in, problem.seq_len, [&](const __nv_bfloat162 x, uint32_t) {
+            const uint32_t gt = v_hi < FLT_MAX ? __hgeu2_mask(x, high) : __hneu2_mask(x, x);
+            const uint32_t eq = __hge2_mask(x, low) & ~gt;
+            greater |= pack(gt) << shift;
+            equal |= pack(eq) << shift;
+            shift += 2;
+        });
+
+        const uint32_t tail       = problem.seq_len / kVecSize * kVecSize;
+        const uint32_t lane       = threadIdx.x;
+        const bool     has_tail   = lane < problem.seq_len - tail;
+        const float    tail_score = has_tail ? problem.load(tail + lane) : 0.0f;
+        const bool     tail_gt    = has_tail && above_coarse_threshold(tail_score, v_hi);
+        const bool     tail_eq    = has_tail && !tail_gt && tail_score >= v_lo;
+
+        // At most 32768 entries. The two counts never carry across 16-bit fields.
+        __syncthreads();
+        const uint32_t count  = (__popc(greater) + tail_gt) | ((__popc(equal) + tail_eq) << 16);
+        const uint32_t prefix = block_exclusive_prefix(count, smem->warp_sum, &smem->threshold_bin);
+        if (lane == 0) {
+            smem->count_gt = smem->threshold_bin & 0xffffu;
+            smem->count_eq = smem->threshold_bin >> 16;
+        }
+
+        // Preserve thread-major and then vector-major order, including the tail.
+        const auto input_index = [&](uint32_t bit) {
+            return (bit / kVecSize * kBlockSize + lane) * kVecSize + bit % kVecSize;
+        };
+        uint32_t pos_gt = prefix & 0xffffu;
+        uint32_t pos_eq = prefix >> 16;
+        while (greater != 0 && pos_gt < problem.topk) {
+            const uint32_t bit = __ffs(greater) - 1;
+            greater &= greater - 1;
+            problem.emit(pos_gt++, input_index(bit));
+        }
+        while (equal != 0 && pos_eq < kMaxNumTie) {
+            const uint32_t bit = __ffs(equal) - 1;
+            equal &= equal - 1;
+            const uint32_t idx         = input_index(bit);
+            smem->tie.values[pos_eq++] = {problem.load(idx), idx};
+        }
+        if (tail_gt && pos_gt < problem.topk) {
+            problem.emit(pos_gt, tail + lane);
+        }
+        if (tail_eq && pos_eq < kMaxNumTie) {
+            smem->tie.values[pos_eq] = {tail_score, tail + lane};
+        }
+    }
+
+    template<bool Aligned, unsigned kLongMaskWords>
+    SGL_DEVICE static void
+    collect_from_long_masks(const TopKProblemT<__nv_bfloat16>& problem, Smem* smem, float v_lo, float v_hi) {
+        const auto high = __bfloat162bfloat162(__float2bfloat16_ru(v_hi));
+        const auto low  = __bfloat162bfloat162(__float2bfloat16_ru(v_lo));
+        const auto pack = [](uint32_t mask) { return (mask & 1u) | ((mask >> 15) & 2u); };
+        // Cache classifications so only boundary ties reload their score.
+        uint32_t    greater[kLongMaskWords]{};
+        uint32_t    equal[kLongMaskWords]{};
+        const auto* in         = problem.in;
+        using Vector           = AlignedVector<__nv_bfloat16, kVecSize>;
+        const uint32_t vectors = problem.seq_len / kVecSize;
+#pragma unroll
+        for (unsigned word = 0; word < kLongMaskWords; ++word) {
+#pragma unroll
+            for (unsigned index = 0; index < 8; ++index) {
+                const uint32_t vec = threadIdx.x + (word * 8 + index) * kBlockSize;
+                if (vec < vectors) {
+                    Vector values;
+                    if constexpr (Aligned)
+                        values.load(in, vec);
+                    else
+                        values.load_unaligned(in, vec);
+                    const auto     first  = __halves2bfloat162(values[0], values[1]);
+                    const auto     second = __halves2bfloat162(values[2], values[3]);
+                    const uint32_t hi_a   = v_hi < FLT_MAX ? __hgeu2_mask(first, high) : __hneu2_mask(first, first);
+                    const uint32_t hi_b   = v_hi < FLT_MAX ? __hgeu2_mask(second, high) : __hneu2_mask(second, second);
+                    const uint32_t lo_a   = __hge2_mask(first, low) & ~hi_a;
+                    const uint32_t lo_b   = __hge2_mask(second, low) & ~hi_b;
+                    greater[word] |= (pack(hi_a) | (pack(hi_b) << 2)) << (4 * index);
+                    equal[word] |= (pack(lo_a) | (pack(lo_b) << 2)) << (4 * index);
+                }
+            }
+        }
+
+        const uint32_t tail       = problem.seq_len / kVecSize * kVecSize;
+        const uint32_t lane       = threadIdx.x;
+        const bool     has_tail   = lane < problem.seq_len - tail;
+        const float    tail_score = has_tail ? problem.load(tail + lane) : 0.0f;
+        const bool     tail_gt    = has_tail && above_coarse_threshold(tail_score, v_hi);
+        const bool     tail_eq    = has_tail && !tail_gt && tail_score >= v_lo;
+
+        uint32_t n_gt = tail_gt;
+        uint32_t n_eq = tail_eq;
+#pragma unroll
+        for (unsigned word = 0; word < kLongMaskWords; ++word) {
+            n_gt += __popc(greater[word]);
+            n_eq += __popc(equal[word]);
+        }
+        __syncthreads();
+        uint32_t   pos_gt      = block_exclusive_prefix(n_gt, smem->warp_sum, &smem->count_gt);
+        uint32_t   pos_eq      = block_exclusive_prefix(n_eq, smem->warp_sum, &smem->count_eq);
+        const auto input_index = [&](uint32_t bit) {
+            return (bit / kVecSize * kBlockSize + lane) * kVecSize + bit % kVecSize;
+        };
+#pragma unroll
+        for (unsigned word = 0; word < kLongMaskWords; ++word) {
+            uint32_t gt = greater[word];
+            uint32_t eq = equal[word];
+            while (gt && pos_gt < problem.topk) {
+                const uint32_t bit = __ffs(gt) - 1;
+                gt &= gt - 1;
+                problem.emit(pos_gt++, input_index(32 * word + bit));
+            }
+            while (eq && pos_eq < kMaxNumTie) {
+                const uint32_t bit = __ffs(eq) - 1;
+                eq &= eq - 1;
+                const uint32_t idx         = input_index(32 * word + bit);
+                smem->tie.values[pos_eq++] = {problem.load(idx), idx};
+            }
+        }
+        if (tail_gt && pos_gt < problem.topk) {
+            problem.emit(pos_gt, tail + lane);
+        }
+        if (tail_eq && pos_eq < kMaxNumTie) {
+            smem->tie.values[pos_eq] = {tail_score, tail + lane};
+        }
+    }
+#endif
 public:
     static constexpr uint32_t kMaxSeqLen = std::numeric_limits<uint32_t>::max();
+    template<unsigned Words>
+    static constexpr uint32_t kLongMaskMaxSeqLen = kBlockSize * 32 * Words;
 
-    template<bool kUsePDL, bool kAlignedInput>
-    SGL_DEVICE static void forward(const TopKProblem problem, void* _smem) {
+    template<bool kUsePDL, bool kAlignedInput, unsigned kLongMaskWords = 0, typename Score>
+    SGL_DEVICE static void forward(const TopKProblemT<Score> problem, void* _smem) {
         const auto tx   = threadIdx.x;
         const auto smem = static_cast<Smem*>(_smem);
 
@@ -962,44 +1161,29 @@ public:
         // element is "above" iff val >= v_hi (bin > threshold) and a "tie" iff
         // v_lo <= val < v_hi (bin == threshold). This drops the F2F + bit-twiddle from
         // the second full pass over the input.
-        const auto threshold_bin = smem->threshold_bin;
+        const auto  threshold_bin = smem->threshold_bin;
         if (__builtin_expect(coarse_bin_needs_exact_scan<kHistBits>(threshold_bin), false)) {
             exact_boundary_scan_topk<true>(problem, &smem->tie.handle, 0.0f, 0.0f, 0);
             return;
         }
-        const float v_hi = coarse_bin_lower_bound<kHistBits>(threshold_bin + 1);
-        const float v_lo = coarse_bin_lower_bound<kHistBits>(threshold_bin);
-        const auto  topk = problem.topk;
-        // Deterministic positions: one extra counting sweep, a thread-order
-        // block prefix, then emit/append in the same iteration order. The
-        // atomicAdd version ordered emissions and tie-buffer fill by SM arrival
-        // (run-to-run output order and tie membership varied).
-        uint32_t my_gt = 0;
-        uint32_t my_eq = 0;
-        for_each_input<kAlignedInput>(problem.in, problem.seq_len, [&](float val, uint32_t) {
-            if (is_nan(val) || val >= v_hi)
-                ++my_gt;
-            else if (val >= v_lo)
-                ++my_eq;
-        });
-        __syncthreads();  // warp_sum scratch is dead past find_threshold
-        const auto base_gt = block_exclusive_prefix(my_gt, smem->warp_sum, &smem->count_gt);
-        const auto base_eq = block_exclusive_prefix(my_eq, smem->warp_sum, &smem->count_eq);
-        uint32_t   run_gt  = 0;
-        uint32_t   run_eq  = 0;
-        for_each_input<kAlignedInput>(problem.in, problem.seq_len, [&](float val, uint32_t idx) {
-            if (is_nan(val) || val >= v_hi) {
-                const auto pos = base_gt + run_gt++;
-                if (pos < topk) [[likely]] {
-                    problem.emit(pos, idx);
-                }
-            } else if (val >= v_lo) {
-                const auto pos = base_eq + run_eq++;
-                if (pos < kMaxNumTie) [[likely]] {
-                    smem->tie.values[pos] = {val, idx};
-                }
+        const float v_hi          = coarse_bin_lower_bound<kHistBits>(threshold_bin + 1);
+        const float v_lo          = coarse_bin_lower_bound<kHistBits>(threshold_bin);
+        const auto  topk          = problem.topk;
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ == 1030
+        if constexpr (std::is_same_v<Score, __nv_bfloat16>) {
+            // Each thread keeps at most 32 classifications in its two masks.
+            if (topk == 512 && problem.seq_len <= kBlockSize * 32) {
+                collect_from_masks<kAlignedInput>(problem, smem, v_lo, v_hi);
+            } else if constexpr (kLongMaskWords != 0) {
+                collect_from_long_masks<kAlignedInput, kLongMaskWords>(problem, smem, v_lo, v_hi);
+            } else {
+                collect<kAlignedInput>(problem, smem, v_lo, v_hi);
             }
-        });
+        } else
+#endif
+        {
+            collect<kAlignedInput>(problem, smem, v_lo, v_hi);
+        }
 
         // Phase 4: Handle ties. Drive the output layout from the *collect* counts so it
         // is self-consistent with the fp32 classification above (rather than the fp16
@@ -1019,6 +1203,104 @@ public:
         const auto remain_topk = above_count < topk ? topk - above_count : 0;
         const auto tie_count   = min(equal_count, kMaxNumTie);
         handle_tie(smem->tie.values, problem, above_count, tie_count, remain_topk, &smem->tie.handle);
+    }
+
+private:
+    template<bool kAlignedInput, typename Score>
+    SGL_DEVICE static void collect(const TopKProblemT<Score>& problem, Smem* smem, float v_lo, float v_hi) {
+        const auto tx   = threadIdx.x;
+        const auto topk = problem.topk;
+        // Deterministic positions: one extra counting sweep, a thread-order
+        // block prefix, then emit/append in the same iteration order. The
+        // atomicAdd version ordered emissions and tie-buffer fill by SM arrival
+        // (run-to-run output order and tie membership varied).
+        uint32_t my_gt = 0;
+        uint32_t my_eq = 0;
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ == 1030
+        // A BF16 score is >= the FP32 boundary iff it is >= its BF16 ceiling.
+        const auto high         = __bfloat162bfloat162(__float2bfloat16_ru(v_hi));
+        const auto low          = __bfloat162bfloat162(__float2bfloat16_ru(v_lo));
+        const auto greater_mask = [&](const __nv_bfloat162 x) {
+            return v_hi < FLT_MAX ? __hgeu2_mask(x, high) : __hneu2_mask(x, x);
+        };
+        const uint32_t tail = problem.seq_len / kVecSize * kVecSize;
+        if constexpr (std::is_same_v<Score, __nv_bfloat16>) {
+            visit_pairs<kAlignedInput>(problem.in, problem.seq_len, [&](const __nv_bfloat162 x, uint32_t) {
+                const uint32_t gt = greater_mask(x);
+                const uint32_t eq = __hge2_mask(x, low) & ~gt;
+                my_gt += __popc(gt & 0x10001u);
+                my_eq += __popc(eq & 0x10001u);
+            });
+            if (tx < problem.seq_len - tail) {
+                const float x  = problem.load(tail + tx);
+                const bool  gt = above_coarse_threshold(x, v_hi);
+                my_gt += gt;
+                my_eq += !gt && x >= v_lo;
+            }
+        } else
+#endif
+        {
+            for_each_input<kAlignedInput>(problem.in, problem.seq_len, [&](float val, uint32_t) {
+                if (above_coarse_threshold(val, v_hi))
+                    ++my_gt;
+                else if (val >= v_lo)
+                    ++my_eq;
+            });
+        }
+        __syncthreads();  // warp_sum scratch is dead past find_threshold
+        const auto base_gt = block_exclusive_prefix(my_gt, smem->warp_sum, &smem->count_gt);
+        const auto base_eq = block_exclusive_prefix(my_eq, smem->warp_sum, &smem->count_eq);
+        uint32_t   run_gt  = 0;
+        uint32_t   run_eq  = 0;
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ == 1030
+        if constexpr (std::is_same_v<Score, __nv_bfloat16>) {
+            const auto emit_gt = [&](uint32_t idx) {
+                const uint32_t pos = base_gt + run_gt++;
+                if (pos < topk)
+                    problem.emit(pos, idx);
+            };
+            const auto emit_eq = [&](const __nv_bfloat16 x, uint32_t idx) {
+                const uint32_t pos = base_eq + run_eq++;
+                if (pos < kMaxNumTie)
+                    smem->tie.values[pos] = {cast<float>(x), idx};
+            };
+            visit_pairs<kAlignedInput>(problem.in, problem.seq_len, [&](const __nv_bfloat162 x, uint32_t base) {
+                const uint32_t gt = greater_mask(x);
+                const uint32_t eq = __hge2_mask(x, low) & ~gt;
+                if (gt & 1u)
+                    emit_gt(base);
+                else if (eq & 1u)
+                    emit_eq(__low2bfloat16(x), base);
+                if (gt & 0x10000u)
+                    emit_gt(base + 1);
+                else if (eq & 0x10000u)
+                    emit_eq(__high2bfloat16(x), base + 1);
+            });
+            if (tx < problem.seq_len - tail) {
+                const auto  x     = problem.in[tail + tx];
+                const float value = cast<float>(x);
+                if (above_coarse_threshold(value, v_hi))
+                    emit_gt(tail + tx);
+                else if (value >= v_lo)
+                    emit_eq(x, tail + tx);
+            }
+        } else
+#endif
+        {
+            for_each_input<kAlignedInput>(problem.in, problem.seq_len, [&](float val, uint32_t idx) {
+                if (above_coarse_threshold(val, v_hi)) {
+                    const auto pos = base_gt + run_gt++;
+                    if (pos < topk) [[likely]] {
+                        problem.emit(pos, idx);
+                    }
+                } else if (val >= v_lo) {
+                    const auto pos = base_eq + run_eq++;
+                    if (pos < kMaxNumTie) [[likely]] {
+                        smem->tie.values[pos] = {val, idx};
+                    }
+                }
+            });
+        }
     }
 };
 
@@ -1046,14 +1328,14 @@ public:
     // Process one batch element per cluster. There is no trailing barrier, so
     // the kernel performs cluster.sync() after each forward(). Writes raw indices
     // to out; the kernel's transform pass applies the page-table transform.
-    template<bool kUsePDL, bool kAlignedInput>
-    SGL_DEVICE static void forward(TopKProblem problem, void* _smem) {
+    template<bool kUsePDL, bool kAlignedInput, typename Score>
+    SGL_DEVICE static void forward(TopKProblemT<Score> problem, void* _smem) {
         forward_impl<kUsePDL, kAlignedInput>(problem, _smem);
     }
 
 private:
-    template<bool kUsePDL, bool kAlignedInput>
-    SGL_DEVICE static void forward_impl(TopKProblem problem, void* _smem) {
+    template<bool kUsePDL, bool kAlignedInput, typename Score>
+    SGL_DEVICE static void forward_impl(TopKProblemT<Score> problem, void* _smem) {
         const auto tx         = threadIdx.x;
         const auto smem       = static_cast<Smem*>(_smem);
         const auto cluster    = cg::this_cluster();
@@ -1131,7 +1413,7 @@ private:
         uint32_t my_gt = 0;
         uint32_t my_eq = 0;
         for_each_input<kAlignedInput>(problem.in, local_seq_len, [&](float val, uint32_t) {
-            if (is_nan(val) || val >= v_hi)
+            if (above_coarse_threshold(val, v_hi))
                 ++my_gt;
             else if (val >= v_lo)
                 ++my_eq;
@@ -1143,7 +1425,7 @@ private:
         uint32_t   run_eq  = 0;
         for_each_input<kAlignedInput>(problem.in, local_seq_len, [&](float val, uint32_t local_idx) {
             const auto idx = chunk_start + local_idx;
-            if (is_nan(val) || val >= v_hi) {
+            if (above_coarse_threshold(val, v_hi)) {
                 const auto pos = base_gt + run_gt++;
                 if (pos < topk) [[likely]] {
                     // rank 0's slots [0, a0) are final; other ranks stage raw indices and

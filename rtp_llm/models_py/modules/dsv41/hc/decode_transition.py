@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import os
-from typing import NamedTuple
+from typing import Callable, NamedTuple
 
 import torch
 
@@ -22,7 +22,7 @@ class PendingDecodePost(NamedTuple):
         return self.previous.post(self.output, self.residual, self.post, self.comb)
 
 
-def _enabled() -> bool:
+def cross_layer_mhc_enabled() -> bool:
     return (
         os.environ.get("DSV41_FUSED_CROSS_LAYER_MHC", "1") == "1"
         and os.environ.get("DSV41_MEGA_MHC", "1") != "0"
@@ -35,13 +35,9 @@ def _plain_decode_block(layer) -> bool:
     return type(layer) is Block
 
 
-def can_defer_decode_post(layer, next_layer, preserve_output: bool) -> bool:
+def has_delayed_post_connection(layer, next_layer) -> bool:
     if (
-        preserve_output
-        or not _enabled()
-        or not _plain_decode_block(layer)
-        or not _plain_decode_block(next_layer)
-        or next_layer.engram is not None
+        next_layer.engram is not None
         or type(layer.ffn_hc) is not DelayedHCUnit
         or type(next_layer.attn_hc) is not DelayedHCUnit
     ):
@@ -50,18 +46,42 @@ def can_defer_decode_post(layer, next_layer, preserve_output: bool) -> bool:
     return previous is not None and previous() is layer.ffn_hc
 
 
+def can_defer_decode_post(layer, next_layer, preserve_output: bool) -> bool:
+    return (
+        not preserve_output
+        and cross_layer_mhc_enabled()
+        and _plain_decode_block(layer)
+        and _plain_decode_block(next_layer)
+        and has_delayed_post_connection(layer, next_layer)
+    )
+
+
+def _can_quantize_attention_input(layer, x, attn_fn) -> bool:
+    if attn_fn is not None:
+        return False
+    from rtp_llm.models_py.modules.dsv41._v41_fused_qkv import is_supported
+    from rtp_llm.models_py.modules.dsv41.fp8.attention_v41 import AttentionV41FP8
+
+    attn = layer.attn
+    return type(attn) is AttentionV41FP8 and is_supported(
+        getattr(attn, "wq_a_wkv", None), x, attn.q_norm, attn.q_lora_rank
+    )
+
+
 def forward_decode_layer(
     layer,
     hidden: torch.Tensor | PendingDecodePost,
     attn_metadata,
     input_ids: torch.Tensor,
-    *,
+    expert_load,
     next_layer=None,
     preserve_output: bool = False,
     kv_cache=None,
     attn_fn=None,
+    routing_metadata=None,
+    capture_input: Callable[[torch.Tensor], None] | None = None,
 ) -> torch.Tensor | PendingDecodePost:
-    """Fuse only an unobserved layer boundary; retain the old call otherwise.
+    """Resolve the layer entry, optionally capture it, then run the block.
 
     Pending tensors live in this invocation's layer loop. Graph capture records
     their producer and consumer on the current stream; replay does not reuse a
@@ -69,7 +89,11 @@ def forward_decode_layer(
     """
     prepared = None
     if isinstance(hidden, PendingDecodePost):
-        if _enabled() and _plain_decode_block(layer) and layer.engram is None:
+        if (
+            cross_layer_mhc_enabled()
+            and _plain_decode_block(layer)
+            and layer.engram is None
+        ):
             prepared = try_fused_post_pre(
                 hidden.output,
                 hidden.residual,
@@ -78,13 +102,23 @@ def forward_decode_layer(
                 hidden.previous,
                 layer.attn_hc,
                 layer.attn_norm,
+                use_prepared=True,
+                output_fp8=_can_quantize_attention_input(layer, hidden.output, attn_fn),
             )
         hidden = hidden.materialize() if prepared is None else prepared[0]
+    # MegaMHC already produces the same layer-entry residual needed by aux
+    # capture. Observe it before forward_decode can inject Engram or reuse it.
+    if capture_input is not None:
+        capture_input(hidden)
     defer_post = can_defer_decode_post(layer, next_layer, preserve_output)
     kwargs = {"kv_cache": kv_cache}
+    if routing_metadata is not None:
+        kwargs["routing_metadata"] = routing_metadata
     if attn_fn is not None:
         kwargs["attn_fn"] = attn_fn
     if prepared is not None or defer_post:
         kwargs["_prepared_attn"] = prepared
         kwargs["_defer_ffn_post"] = defer_post
-    return layer.forward_decode(hidden, attn_metadata, input_ids, **kwargs)
+    return layer.forward_decode(
+        hidden, attn_metadata, input_ids, expert_load=expert_load, **kwargs
+    )

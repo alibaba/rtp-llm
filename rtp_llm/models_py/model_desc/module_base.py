@@ -132,6 +132,10 @@ class GptModelBase(nn.Module):
         """Build this model's stage-boundary inputs for stage-local PP warmup."""
         return {"hidden_states": hidden_template}
 
+    def get_eplb_layers(self):
+        """Return the model's initialized, layer-indexed EPLB descriptors."""
+        raise NotImplementedError(f"{type(self).__name__} does not support EPLB")
+
     def initialize(self, init_resource: PyModelInitResources) -> bool:
         self.kv_cache = init_resource.kv_cache
         if self.kv_cache is not None:

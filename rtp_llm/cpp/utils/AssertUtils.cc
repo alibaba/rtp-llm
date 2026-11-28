@@ -6,7 +6,7 @@ namespace rtp_llm {
     auto error_msg = std::string("[ERROR] ") + info + " Assertion fail: " + file + ":" + std::to_string(line) + " \n";
     fflush(stdout);
     fflush(stderr);
-    throw RTP_EXCEPTION(error_msg);
+    throw RTP_EXCEPTION("%s", error_msg.c_str());
 }
 
 [[noreturn]] void myAssert(const char* const file, int const line, std::string const& info) {

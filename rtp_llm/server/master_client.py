@@ -546,8 +546,8 @@ class MasterClient:
         """Probe hashes, then submit only missing media when routing requires them.
 
         With media input, an unsupported hash RPC returns None so the caller can
-        clear the ViT affinity pin and use the legacy embedding route. Required
-        hash acquisition errors and timeouts still fail the request.
+        clear the ViT affinity pin. PD admission still requires routing hashes;
+        hash acquisition errors and timeouts fail the request.
         """
         started = time.monotonic()
         unique_keys = list(dict.fromkeys(keys))

@@ -20,10 +20,17 @@ from contextlib import ExitStack, contextmanager, nullcontext
 from dataclasses import fields, replace
 from datetime import timedelta
 from pathlib import Path
+from typing import Optional
 from unittest import mock
 
+import numpy as np
 import torch
 import torch.nn.functional as F
+
+from rtp_llm.models_py.utils.expert_load_monitor import (
+    ExpertLoadContext,
+    expert_load_for_layer,
+)
 
 
 def _load_helpers():
@@ -100,6 +107,7 @@ def _swa_owner(bounded):
         "_prefill_chunk_meta",
         "_forward_prefill",
         "_prefill_produce",
+        "_prefill_produce_source",
         "_prefill_query",
     }
     methods = [
@@ -111,7 +119,6 @@ def _swa_owner(bounded):
         "__package__": "rtp_llm.models_py.modules.dsv41.fp8",
         "torch": torch,
         "F": F,
-        "_use_small_cp_x_gather": lambda ctx: False,
         "prefill_index_plan": _INDEX_PLAN,
         "prefill_kv_workspace": _KV_WORKSPACE,
     }
@@ -133,9 +140,10 @@ def _swa_owner(bounded):
         _swa_prefill_concat=mock.Mock(
             side_effect=AssertionError("unexpected cached prefix read")
         ),
-        _can_fuse_swa_fresh=mock.Mock(return_value=False),
+        _prepare_swa_fresh_store=mock.Mock(return_value=None),
         _prefill_write_swa_fp8_paged=mock.Mock(),
         _prefill_sparse_attention=mock.Mock(),
+        _prefill_output_buffer=mock.Mock(return_value=None),
     )
     for name in names:
         setattr(owner, name, types.MethodType(namespace[name], owner))
@@ -334,8 +342,13 @@ def _batch_compact_oracle(full, lengths, rank):
     return torch.cat(outputs)
 
 
-_CED.host_block_tables = lambda cache, attn: getattr(
-    attn, "kv_cache_block_id_host", None
+_CED.as_attention_inputs_by_tag = lambda attn, cache: (
+    {
+        tag: types.SimpleNamespace(kv_cache_block_id=attn.kv_cache_block_id_host[i])
+        for i, tag in enumerate(cache.group_tags)
+    }
+    if hasattr(attn, "kv_cache_block_id_host")
+    else {}
 )
 
 
@@ -522,6 +535,25 @@ class CedCreationTest(_SingleThreadTest):
                     )
                     self.assertTrue(torch.equal(ctx.gather_restore_positions, selected))
                     cache.get_layer_cache.assert_called_once_with(21, _CED.SWA_KV)
+
+    def test_exact_checkpoint_uses_selected_pool_without_group_padding(self):
+        model, ctx, attn, cache = self.fixture(prefix=16387)
+        selected = attn.kv_cache_block_id_host[1]
+        inputs_by_tag = {
+            cache.group_tags[0]: types.SimpleNamespace(
+                kv_cache_block_id=torch.full((1, selected.shape[1] + 17), 99)
+            ),
+            cache.group_tags[1]: types.SimpleNamespace(kv_cache_block_id=selected),
+        }
+        with mock.patch.object(
+            _CED, "as_attention_inputs_by_tag", return_value=inputs_by_tag
+        ):
+            plan = _CED.CEDPlan.create(model, ctx, attn, cache)
+        self.assertIsNotNone(plan)
+        expected = _CED.checkpoint_positions(
+            ctx.prefix_length, ctx.seq_len_full, selected[0].tolist(), 512, 136
+        )
+        self.assertTrue(torch.equal(plan.context.gather_restore_positions, expected))
 
     def test_native_tma_aligned_stride_preserves_136_ring_entries(self):
         for dtype in (torch.uint8, torch.bfloat16, torch.int32):
@@ -780,6 +812,156 @@ class CedCreationTest(_SingleThreadTest):
         self.assertFalse(_CED._supported_model(model))
 
 
+class CedTransportDispatchTest(unittest.TestCase):
+    def test_one_rank_denial_keeps_the_entire_group_off_the_symmetric_backend(self):
+        import torch.distributed._symmetric_memory as symmetric_memory
+
+        ranks = tuple(str(rank) for rank in range(4))
+        reachable = set(ranks)
+        available = [("node", rank, reachable, True) for rank in ranks]
+        cases = (
+            (
+                "cp_rank_mismatch",
+                [[("node", "0", reachable, False), *available[1:]]],
+                0,
+                0,
+            ),
+            ("missing_op", [available[:3] + [("node", "3", reachable, False)]], 0, 0),
+            (
+                "old_copy_runtime",
+                [[("node", "0", reachable, False), *available[1:]]],
+                0,
+                0,
+            ),
+            (
+                "missing_peer",
+                [available[:3] + [("node", "3", reachable - {"2"}, True)]],
+                0,
+                0,
+            ),
+            ("allocation_denied", [available, [True, False, True, True]], 1, 0),
+            (
+                "no_multicast",
+                [available, [True] * 4, [True, False, True, True]],
+                1,
+                1,
+            ),
+        )
+        for reason, votes, expected_allocations, expected_rendezvous in cases:
+            cp_rank = 1 if reason == "cp_rank_mismatch" else 0
+            with self.subTest(reason=reason), ExitStack() as stack:
+                runtime = mock.Mock()
+                runtime.cudaDriverGetVersion.return_value = (0, 13020)
+                runtime.cudaRuntimeGetVersion.return_value = (
+                    0,
+                    12080 if reason == "old_copy_runtime" else 13020,
+                )
+                runtime.cudaMemcpyFlags.cudaMemcpyFlagPreferOverlapWithCompute = 1
+                stack.enter_context(
+                    mock.patch.dict(
+                        sys.modules,
+                        {"cuda.bindings": types.SimpleNamespace(runtime=runtime)},
+                    )
+                )
+                stack.enter_context(
+                    mock.patch.object(
+                        torch.cuda,
+                        "get_device_properties",
+                        side_effect=lambda device: types.SimpleNamespace(
+                            uuid=str(
+                                device.index
+                                if isinstance(device, torch.device)
+                                else device
+                            ),
+                            major=10,
+                        ),
+                    )
+                )
+                stack.enter_context(
+                    mock.patch.object(torch.cuda, "device_count", return_value=4)
+                )
+                stack.enter_context(
+                    mock.patch.object(
+                        torch.cuda, "can_device_access_peer", return_value=True
+                    )
+                )
+                stack.enter_context(
+                    mock.patch.object(
+                        torch.ops,
+                        "symm_mem",
+                        types.SimpleNamespace(
+                            multimem_all_gather_out=object(),
+                            one_shot_all_reduce_copy_out=object(),
+                        ),
+                    )
+                )
+                agreement = stack.enter_context(
+                    mock.patch.object(_CED._cp_collectives, "_all", side_effect=votes)
+                )
+                allocate = stack.enter_context(
+                    mock.patch.object(symmetric_memory, "empty", return_value=object())
+                )
+                rendezvous = stack.enter_context(
+                    mock.patch.object(
+                        symmetric_memory,
+                        "rendezvous",
+                        return_value=types.SimpleNamespace(multicast_ptr=1),
+                    )
+                )
+                workspace = _CED._cp_collectives._initialize(
+                    types.SimpleNamespace(
+                        group_name="tp", rank=lambda: 0, size=lambda: 4
+                    ),
+                    torch.device("cuda", 0),
+                    cp_rank=cp_rank,
+                )
+                self.assertIsNone(workspace)
+                self.assertEqual(agreement.call_count, len(votes))
+                self.assertEqual(
+                    agreement.call_args_list[0].args[1][1:],
+                    ("0", reachable, cp_rank == 0 and reason != "old_copy_runtime"),
+                )
+                self.assertEqual(allocate.call_count, expected_allocations)
+                self.assertEqual(rendezvous.call_count, expected_rendezvous)
+
+    def test_peer_transport_keeps_rank_order_and_transposes_restore(self):
+        matrix = ((0, 2, 0, 0), (0, 0, 0, 0), (0, 1, 0, 0), (0, 0, 0, 0))
+        group = object()
+        exchange = _CED._RowExchange(
+            original_rows=2,
+            compact_rows=3,
+            send_indices=torch.empty(0, dtype=torch.long),
+            receive_positions=torch.tensor([2, 0, 1]),
+            send_sizes=matrix[1],
+            receive_sizes=tuple(row[1] for row in matrix),
+            group=group,
+            splits_matrix=matrix,
+        )
+        directions = []
+
+        def transport(received, value, actual_group, actual_matrix, *, rows, transpose):
+            send = value.index_select(0, rows)
+            self.assertIs(actual_group, group)
+            self.assertIs(actual_matrix, matrix)
+            directions.append(transpose)
+            if transpose:
+                self.assertEqual(received.numel(), 0)
+                self.assertEqual(send.tolist(), [5, 6, 7])
+            else:
+                self.assertEqual(send.numel(), 0)
+                received.copy_(torch.tensor([5, 6, 7]))
+            return True
+
+        with mock.patch.object(
+            _CED._cp_collectives, "try_all_to_all_into", side_effect=transport
+        ), mock.patch.object(torch.distributed, "all_to_all_single") as fallback:
+            compact = exchange.compact(torch.tensor([0, 0]))
+            self.assertEqual(compact.tolist(), [6, 7, 5])
+            self.assertEqual(exchange.restore(compact).tolist(), [0, 0])
+        self.assertEqual(directions, [False, True])
+        fallback.assert_not_called()
+
+
 class CedBatchedBoundedReplayTest(_SingleThreadTest):
     # Only admission's CUDA/process-group checks are mocked. Layout and every
     # payload transformation execute the production CPU tensor implementation.
@@ -822,10 +1004,46 @@ class CedBatchedBoundedReplayTest(_SingleThreadTest):
             plans.append(plan)
         return plans, ranks, info
 
+    def test_b4_reuse95k_routes_last_128_rows_from_rank_zero(self):
+        plans, _, _ = self.plans((5120,) * 4, (97280,) * 4)
+        matrix = ((128, 128, 128, 128), (0, 0, 0, 0), (0, 0, 0, 0), (0, 0, 0, 0))
+        for rank, plan in enumerate(plans):
+            exchange = plan.exchange
+            self.assertEqual(exchange.splits_matrix, matrix)
+            self.assertEqual(exchange.send_sizes, matrix[rank])
+            self.assertEqual(exchange.receive_sizes, (128, 0, 0, 0))
+
     def test_b1_b2_b32_create_actual_per_request_tail_and_keep_write_geometry(self):
         for lengths, prefixes in self.cases():
             with self.subTest(lengths=lengths, prefixes=prefixes):
-                plans, _, _ = self.plans(lengths, prefixes)
+                plans, source_rows, info = self.plans(lengths, prefixes)
+                global_rows = torch.full_like(info.prefill_qkv_padding_mask, -1)
+                global_rows[info.prefill_qkv_padding_mask.bool()] = torch.arange(
+                    sum(lengths), dtype=global_rows.dtype
+                )
+                original_owner = {
+                    position: rank
+                    for rank, rows in enumerate(source_rows)
+                    for position in global_rows[rows].tolist()
+                    if position >= 0
+                }
+                compact_rows = [
+                    _batch_compact_oracle(
+                        torch.arange(1, sum(lengths) + 1), lengths, rank
+                    )
+                    for rank in range(4)
+                ]
+                matrix = [[0] * 4 for _ in range(4)]
+                for destination, rows in enumerate(compact_rows):
+                    for position in rows.tolist():
+                        if position:
+                            matrix[original_owner[position - 1]][destination] += 1
+                matrix = tuple(tuple(row) for row in matrix)
+                for rank, plan in enumerate(plans):
+                    self.assertEqual(plan.exchange.splits_matrix, matrix)
+                    self.assertEqual(
+                        plan.exchange.receive_sizes, tuple(row[rank] for row in matrix)
+                    )
                 starts = tuple(max(0, n - 128) for n in lengths)
                 selected, absolute, request_ids, offset = [], [], [], 0
                 for req, (length, prefix) in enumerate(zip(lengths, prefixes)):
@@ -963,6 +1181,7 @@ class CedBatchedBoundedReplayTest(_SingleThreadTest):
                         )
 
                     def restore_receive(out, send, **kwargs):
+                        self.assertTrue(send.is_contiguous())
                         torch.testing.assert_close(send, inverse_sends[rank])
                         self.assertEqual(
                             kwargs["input_split_sizes"],
@@ -1096,6 +1315,7 @@ class CedLayoutTest(_SingleThreadTest):
                     destinations = []
 
                     def receive(destination, send, **kwargs):
+                        self.assertTrue(send.is_contiguous())
                         destinations.append(destination)
                         destination.copy_(
                             expected.index_select(0, exchange.receive_positions)
@@ -1340,6 +1560,222 @@ class CedVectorizedLayoutParityTest(_SingleThreadTest):
                 self.assertEqual(actual.dtype, torch.int64)
                 self.assertTrue(torch.equal(actual, expected))
                 self.assertTrue((actual[1:] > actual[:-1]).all())
+
+
+class CedHostLayoutTest(_SingleThreadTest):
+    def setUp(self):
+        super().setUp()
+        environment = mock.patch.dict(os.environ, {"DSV41_CED_VECTOR_LAYOUT": "1"})
+        environment.start()
+        self.addCleanup(environment.stop)
+
+    def assert_layout_equal(self, reference, actual):
+        checker = CedVectorizedLayoutParityTest()
+        checker.compare([[actual], [reference]])
+        for left, right in zip(reference, actual):
+            if isinstance(left, tuple):
+                tensors = zip(
+                    (t for pair in left for t in pair),
+                    (t for pair in right for t in pair),
+                )
+            else:
+                tensors = (
+                    (getattr(left, f.name), getattr(right, f.name))
+                    for f in fields(left)
+                    if isinstance(getattr(left, f.name), torch.Tensor)
+                )
+            for a, b in tensors:
+                if a.is_contiguous():
+                    self.assertEqual(a.stride(), b.stride())
+                else:
+                    self.assertTrue(b.is_contiguous())
+                # Packed metadata uses aligned views into one allocation;
+                # absolute storage offsets are not part of the row contract.
+                self.assertEqual(a.device, b.device)
+
+    def test_target_builds_selected_rows_without_full_tensor_indexing(self):
+        lengths, prefixes = (4096,) * 16, (28672,) * 16
+        ranks, info = _batch_cp4_layout(lengths)
+        selected = _CED._bounded_replay_selected(lengths, (3968,) * 16)
+        for rank in range(4):
+            ctx = _CP.build_cp_context(
+                info,
+                cp_size=4,
+                cp_rank=rank,
+                chunk_length=len(ranks[rank]),
+                device=torch.device("cpu"),
+                position_offset=torch.tensor(prefixes, dtype=torch.int64),
+                kv_cache_sharded=True,
+            )
+            expected = _CED._query_layout_fallback(
+                ctx, selected, None, keep_candidate_rows=True
+            )
+            with (
+                mock.patch.object(
+                    _CED,
+                    "_query_layout_fallback",
+                    side_effect=AssertionError("fallback"),
+                ),
+                mock.patch.object(
+                    torch, "repeat_interleave", side_effect=AssertionError("full rows")
+                ),
+                mock.patch.object(
+                    torch, "nonzero", side_effect=AssertionError("full mask")
+                ),
+            ):
+                actual_selected = _CED._bounded_replay_selected(lengths, (3968,) * 16)
+                actual = _CED._query_layout(
+                    ctx, actual_selected, None, keep_candidate_rows=True
+                )
+            self.assert_layout_equal(expected, actual)
+            self.assertEqual(actual[0].chunk_length, 512)
+
+    def test_permuted_restore_and_noncanonical_mask_preserve_fallback(self):
+        selected = torch.tensor([0, 9, 18, 27, 36, 45, 54, 63, 64])
+        for rank in range(4):
+            ctx, _ = _context(65, rank, 16387, permuted=True)
+            for noncanonical in (False, True):
+                if noncanonical:
+                    ctx.cp_info.prefill_qkv_padding_mask = (
+                        ctx.cp_info.prefill_qkv_padding_mask.roll(1)
+                    )
+                expected = _CED._query_layout_fallback(
+                    ctx, selected, None, keep_candidate_rows=True
+                )
+                with mock.patch.object(
+                    _CED, "_query_layout_fallback", wraps=_CED._query_layout_fallback
+                ) as fallback:
+                    actual = _CED._query_layout(
+                        ctx, selected, None, keep_candidate_rows=True
+                    )
+                self.assertEqual(fallback.call_count, int(noncanonical))
+                self.assert_layout_equal(expected, actual)
+
+    def test_packed_upload_preserves_types_strides_and_independent_forward_storage(
+        self,
+    ):
+        arrays = (
+            np.arange(27, dtype=np.int64)[1::3],
+            np.array([True, False, True], dtype=np.bool_),
+            np.arange(14, dtype=np.int32)[::2],
+            np.empty(0, dtype=np.int64),
+            np.arange(6, dtype=np.int64)[::-1],
+        )
+        values, host = _CED._upload_layout_arrays(arrays, torch.device("cpu"))
+        later, later_host = _CED._upload_layout_arrays(arrays, torch.device("cpu"))
+        self.assertNotEqual(host.data_ptr(), later_host.data_ptr())
+        for value, array, unchanged in zip(values, arrays, later):
+            self.assertTrue(np.array_equal(value.numpy(), array))
+            self.assertEqual(value.numpy().dtype, array.dtype)
+            self.assertEqual(value.stride(), (1,))
+            self.assertEqual(value.untyped_storage().data_ptr(), host.data_ptr())
+            self.assertEqual(value.storage_offset() * value.element_size() % 16, 0)
+            value.zero_()
+            self.assertTrue(np.array_equal(unchanged.numpy(), array))
+
+    def test_packed_layout_all_ranks_and_ragged_noncontiguous_selection(self):
+        lengths, prefixes = (1, 7, 129, 513), (0, 31, 30723, 8191)
+        chosen = torch.tensor([0, 1, 7, 8, 19, 136, 137, 150, 649])
+        # A real, noncontiguous host selection must not be read as packed bytes.
+        selected_storage = torch.full((2 * chosen.numel(),), -1, dtype=torch.int64)
+        selected_storage[::2] = chosen
+        selected = selected_storage[::2]
+        saw_empty_peer = False
+        for cp in (1, 2, 4):
+            rank_parts, masks, chunks, offset = [[] for _ in range(cp)], [], [], 0
+            for length in lengths:
+                padded = ((length + 2 * cp - 1) // (2 * cp)) * (2 * cp)
+                halves = torch.arange(padded).chunk(2 * cp)
+                for rank in range(cp):
+                    rank_parts[rank].append(
+                        torch.cat((halves[rank], halves[2 * cp - 1 - rank])) + offset
+                    )
+                masks.append((torch.arange(padded) < length).int())
+                chunks.append(padded // cp)
+                offset += padded
+            ranks = [torch.cat(parts) for parts in rank_parts]
+            for permuted in (False, True):
+                source = (
+                    [positions.flip(0) for positions in reversed(ranks)]
+                    if permuted
+                    else ranks
+                )
+                info = types.SimpleNamespace(
+                    prefill_qkv_padding_mask=torch.cat(masks),
+                    prefill_qkv_restore_indice=torch.argsort(torch.cat(source)).int(),
+                    prefill_actual_input_lengths_cpu=torch.tensor(
+                        lengths, dtype=torch.int32
+                    ),
+                    prefill_cp_chunk_lengths=torch.tensor(chunks, dtype=torch.int32),
+                )
+                for rank in range(cp):
+                    with self.subTest(cp=cp, rank=rank, permuted=permuted):
+                        ctx = _CP.build_cp_context(
+                            info,
+                            cp_size=cp,
+                            cp_rank=rank,
+                            chunk_length=len(ranks[rank]),
+                            device=torch.device("cpu"),
+                            position_offset=torch.tensor(prefixes, dtype=torch.int64),
+                            kv_cache_sharded=cp > 1,
+                        )
+                        reference = _CED._query_layout_fallback(
+                            ctx, selected, None, keep_candidate_rows=True
+                        )
+                        actual = _CED._host_query_layout(
+                            ctx, selected, None, keep_candidate_rows=True
+                        )
+                        self.assertIsNotNone(actual)
+                        self.assert_layout_equal(reference, actual)
+                        context, exchange, groups = actual
+                        self.assertEqual(
+                            exchange.splits_matrix, reference[1].splits_matrix
+                        )
+                        self.assertEqual(
+                            exchange.send_sizes, exchange.splits_matrix[rank]
+                        )
+                        self.assertEqual(
+                            exchange.receive_sizes,
+                            tuple(row[rank] for row in exchange.splits_matrix),
+                        )
+                        owner = exchange._layout_host_buffer.data_ptr()
+                        for value in (
+                            exchange.send_indices,
+                            exchange.receive_positions,
+                            context.relative_positions,
+                            context.global_positions,
+                            context.local_is_real,
+                            context.unpad_restore,
+                            context.req_id_per_token,
+                            context.gather_restore_positions,
+                            *(v for pair in groups for v in pair),
+                        ):
+                            self.assertEqual(value.untyped_storage().data_ptr(), owner)
+                            self.assertEqual(
+                                value.storage_offset() * value.element_size() % 16, 0
+                            )
+                        saw_empty_peer |= (
+                            0 in exchange.send_sizes or 0 in exchange.receive_sizes
+                        )
+        self.assertTrue(saw_empty_peer)
+
+    def test_invalid_selection_retains_exception_type_and_message(self):
+        ctx, _ = _context(65, 0)
+        for selected in (
+            torch.empty(0, dtype=torch.int64),
+            torch.tensor([-1, 0]),
+            torch.tensor([0, 65]),
+            torch.tensor([[1, 3]]),
+        ):
+            with self.subTest(selected=selected):
+                try:
+                    _CED._query_layout_fallback(ctx, selected, None)
+                except Exception as expected:
+                    with self.assertRaises(type(expected)) as actual:
+                        _CED._query_layout(ctx, selected, None)
+                    self.assertEqual(str(actual.exception), str(expected))
+                else:
+                    self.fail("invalid fixture unexpectedly accepted")
 
 
 class V41KVWorkspaceTest(_SingleThreadTest):
@@ -1670,9 +2106,16 @@ class CedCandidatePublicationTest(_SingleThreadTest):
 
             state = dict(
                 logging=logging,
-                host_block_tables=lambda *args: None,
+                host_swa_tables={},
                 layer_calls=[layer(i) for i in range(40)],
+                use_prefill_fast_path=False,
+                routing_metadata=None,
+                routing_kwargs={},
+                engram_prefetch=None,
+                expert_token_counts=None,
+                expert_load_for_layer=expert_load_for_layer,
                 ced_in_l20=False,
+                ced_requested=False,
                 ced_tail=None if absent else plan,
                 prefill_write_by_region=None,
                 attn_inputs=None,
@@ -1684,12 +2127,15 @@ class CedCandidatePublicationTest(_SingleThreadTest):
                 positions=None,
                 cu_seqlens=None,
                 v4=types.SimpleNamespace(
-                    _propagate_cp_ctx=lambda cp: None, swa_bounded_replay=False
+                    layers=[torch.nn.Module() for _ in range(40)],
+                    _propagate_cp_ctx=lambda cp: None,
+                    swa_bounded_replay=False,
                 ),
                 kv_cache=None,
                 block_tables_by_type=None,
                 ws=None,
                 capture_ids=(),
+                _rt_on=False,
                 write_cache_store_impl=None,
                 release_v41_prefill_shared=lambda *a: None,
                 clear_prefill_meta_shared_fp8=lambda *a: None,
@@ -1730,6 +2176,41 @@ def _l20_common(ctx, freqs):
 
 
 class CedRouterProjectionTest(_SingleThreadTest):
+    def test_native_route_uses_original_peer_rows_and_invalid_padding(self):
+        plan, _ = _plan(129, 0, torch.arange(1, 129))
+        plan.exchange.receive_sizes = (1, 0, 1, 0)
+        plan.indexer_groups = (
+            (torch.tensor([2]), torch.tensor([5])),
+            (torch.tensor([0]), torch.tensor([9])),
+        )
+        x = torch.tensor([[13.0], [17.0], [19.0]])
+        physical = torch.tensor([[31]], dtype=torch.int32)
+        count = torch.tensor([1], dtype=torch.int32)
+        ffn = types.SimpleNamespace(
+            gate=types.SimpleNamespace(topk=1),
+            eplb_layer=types.SimpleNamespace(
+                logical_to_physical=physical, logical_count=count
+            ),
+        )
+
+        def native(full, gate, owner, *, to_physical_map, logical_count):
+            self.assertIs(gate, ffn.gate)
+            self.assertIs(to_physical_map, physical)
+            self.assertIs(logical_count, count)
+            self.assertEqual(full.shape[0], plan.original_context.chunk_length)
+            ids = (owner * 100 + torch.arange(full.shape[0]))[:, None]
+            return full, ids
+
+        name = "rtp_llm.models_py.modules.dsv41.moe.mega_gate"
+        with mock.patch.dict(
+            sys.modules, {name: types.SimpleNamespace(mega_gate=native)}
+        ):
+            with plan.original_native_routing(ffn):
+                weights, ids = ffn._ced_native_routing(x)
+        torch.testing.assert_close(weights, torch.tensor([[13.0], [0.0], [19.0]]))
+        torch.testing.assert_close(ids, torch.tensor([[209], [-1], [5]]))
+        self.assertFalse(hasattr(ffn, "_ced_native_routing"))
+
     @staticmethod
     def _ffn(gate, rows_per_chunk=16384, enabled=True):
         return types.SimpleNamespace(
@@ -1739,11 +2220,9 @@ class CedRouterProjectionTest(_SingleThreadTest):
         )
 
     @staticmethod
-    def _gate(fused_gate: bool = False):
+    def _gate():
         # Execute the production gate without importing native model bindings.
-        path = (
-            Path(_CED.__file__).parents[2] / "factory/fused_moe/utils/fp8_fp4/gate.py"
-        )
+        path = Path(_CED.__file__).parent.parent / "moe/gate.py"
         tree = ast.parse(path.read_text())
         nodes = [
             node
@@ -1752,14 +2231,7 @@ class CedRouterProjectionTest(_SingleThreadTest):
             and node.name in ("Gate", "_select_routes_with_nonfinite_fallback")
         ]
         ns = dict(
-            torch=torch,
-            nn=torch.nn,
-            F=F,
-            os=os,
-            _use_fused_gate=(lambda *a: True) if fused_gate else (lambda *a: False),
-            ExpertGatePayload=lambda **kw: types.SimpleNamespace(
-                norm_eps=1.0e-12, **kw
-            ),
+            torch=torch, nn=torch.nn, F=F, os=os, _use_fused_gate=lambda *a: False
         )
         prefix = ast.parse("from __future__ import annotations").body
         exec(
@@ -1777,7 +2249,145 @@ class CedRouterProjectionTest(_SingleThreadTest):
         gate.topk = 2
         gate.score_func = "softmax"
         gate.route_scale = 1.0
+        gate._dbg_prefix = None
         return gate
+
+    @staticmethod
+    def _reference_router_chunk_groups(plan, rows_per_chunk, *, gate_rows=0):
+        groups = []
+        for compact_rows, original_rows in plan.exchange.projection_groups_host:
+            chunks = {}
+            for dst, src in zip(compact_rows, original_rows):
+                outer_start = src // rows_per_chunk * rows_per_chunk
+                stop = min(
+                    outer_start + rows_per_chunk, plan.original_context.chunk_length
+                )
+                start = outer_start
+                if gate_rows > 0:
+                    start += (src - outer_start) // gate_rows * gate_rows
+                    stop = min(stop, start + gate_rows)
+                destinations, sources = chunks.setdefault((start, stop), ([], []))
+                destinations.append(dst)
+                sources.append(src - start)
+            groups.extend(
+                (destinations, sources, stop - start)
+                for (start, stop), (destinations, sources) in chunks.items()
+            )
+        return groups
+
+    def _assert_router_groups_equal(self, actual, expected):
+        self.assertEqual(len(actual), len(expected))
+        for (dst, src, span), (expected_dst, expected_src, expected_span) in zip(
+            actual, expected
+        ):
+            self.assertEqual(dst.dtype, torch.int64)
+            self.assertEqual(src.dtype, torch.int64)
+            self.assertEqual(dst.tolist(), expected_dst)
+            self.assertEqual(src.tolist(), expected_src)
+            self.assertEqual(span, expected_span)
+
+    def test_router_chunk_groups_match_reference_order_owners_and_ragged_chunks(self):
+        cases = [
+            ((), 64, 32, 0),
+            ((((), ()),), 64, 32, 0),
+            (
+                (((10, 3, 7, 20), (70, 5, 71, 6)), ((1, 2), (10, 70))),
+                96,
+                32,
+                0,
+            ),
+            ((((10, 3, 7, 20, 33), (94, 40, 6, 41, 63)),), 95, 32, 8),
+            ((((1, 2, 3), (4, 5)),), 64, 32, 0),
+        ]
+        rng = np.random.default_rng(1234)
+        for _ in range(12):
+            host_groups = []
+            for _ in range(int(rng.integers(0, 4))):
+                count = int(rng.integers(0, 900))
+                host_groups.append(
+                    (
+                        tuple(rng.permutation(count)),
+                        tuple(rng.integers(0, 32768, count)),
+                    )
+                )
+            cases.append(
+                (
+                    tuple(host_groups),
+                    32768,
+                    int(rng.choice([16384, 32768, 32767])),
+                    int(rng.choice([0, 4096, 32768])),
+                )
+            )
+        for case, (host_groups, length, rows, gate_rows) in enumerate(cases):
+            with self.subTest(case=case):
+                plan = _CED.CEDPlan(
+                    original_context=types.SimpleNamespace(chunk_length=length),
+                    context=types.SimpleNamespace(global_positions=torch.empty(0)),
+                    cu_seqlens=torch.empty(0),
+                    exchange=types.SimpleNamespace(projection_groups_host=host_groups),
+                    indexer_groups=(),
+                    _capture_ids=(),
+                )
+                with mock.patch.object(
+                    _CED, "_upload_layout_arrays", wraps=_CED._upload_layout_arrays
+                ) as upload:
+                    actual = plan._router_chunk_groups(rows, gate_rows=gate_rows)
+                self._assert_router_groups_equal(
+                    actual,
+                    self._reference_router_chunk_groups(
+                        plan, rows, gate_rows=gate_rows
+                    ),
+                )
+                self.assertEqual(upload.call_count, int(bool(actual)))
+
+    def test_router_real_cp4_maps_share_one_upload_and_retain_both_host_slabs(self):
+        for length in (131072, 131073):
+            owners, _ = _cp4_layout(length)
+            original_m = len(owners[0])
+            local_rows = [
+                0,
+                1,
+                16382,
+                16383,
+                16384,
+                16385,
+                original_m - 2,
+                original_m - 1,
+            ]
+            selected = torch.cat([rows[local_rows] for rows in owners])
+            selected = selected[selected < length].sort().values
+            for rank in range(4):
+                with self.subTest(length=length, rank=rank):
+                    plan, _ = _plan(length, rank, selected, candidate_publication=True)
+                    slabs = []
+                    for gate_rows in (0, 8192):
+                        with mock.patch.object(
+                            _CED,
+                            "_upload_layout_arrays",
+                            wraps=_CED._upload_layout_arrays,
+                        ) as upload:
+                            actual = plan._router_chunk_groups(
+                                16384, gate_rows=gate_rows
+                            )
+                        upload.assert_called_once()
+                        self._assert_router_groups_equal(
+                            actual,
+                            self._reference_router_chunk_groups(
+                                plan, 16384, gate_rows=gate_rows
+                            ),
+                        )
+                        slabs.append(plan._router_groups_host[-1])
+                        for dst, src, _ in actual:
+                            self.assertEqual(
+                                dst.untyped_storage().data_ptr(), slabs[-1].data_ptr()
+                            )
+                            self.assertEqual(
+                                src.untyped_storage().data_ptr(), slabs[-1].data_ptr()
+                            )
+                    self.assertEqual(len(plan._router_groups_host), 2)
+                    for retained, uploaded in zip(plan._router_groups_host, slabs):
+                        self.assertIs(retained, uploaded)
+                    self.assertNotEqual(slabs[0].data_ptr(), slabs[1].data_ptr())
 
     def test_router_scope_restores_absent_none_and_nested_callbacks_on_exception(self):
         outer, _ = _plan(
@@ -1969,27 +2579,19 @@ class CedRouterProjectionTest(_SingleThreadTest):
                     self.assertEqual(observed, {stop - start for start, stop in spans})
 
     def test_router_scope_follows_actual_moe_chunk_policy(self):
-        path = (
-            Path(_CED.__file__).parents[2]
-            / "factory/fused_moe/utils/fp8_fp4/chunked_layer.py"
-        )
+        path = Path(_CED.__file__).parent.parent / "moe/moe_layer.py"
         cls = next(
             n
             for n in ast.parse(path.read_text()).body
-            if isinstance(n, ast.ClassDef) and n.name == "ChunkedFp8Fp4MoeLayer"
+            if isinstance(n, ast.ClassDef) and n.name == "MoE"
         )
         method = next(
             n
             for n in cls.body
             if isinstance(n, ast.FunctionDef) and n.name == "_should_chunk"
         )
-        helper = next(
-            n
-            for n in ast.parse(path.read_text()).body
-            if isinstance(n, ast.FunctionDef) and n.name == "_should_chunk_moe"
-        )
-        ns = dict(torch=torch)
-        exec(compile(ast.Module(body=[helper], type_ignores=[]), str(path), "exec"), ns)
+        enabled = mock.Mock(return_value=True)
+        ns = dict(torch=torch, chunked_moe_enabled=enabled)
         exec(compile(ast.Module(body=[method], type_ignores=[]), str(path), "exec"), ns)
         plan, _ = _plan(
             131072, 0, torch.arange(130944, 131072), candidate_publication=True
@@ -1998,20 +2600,17 @@ class CedRouterProjectionTest(_SingleThreadTest):
         ffn = types.SimpleNamespace(
             gate=gate,
             max_tokens_per_rank=16384,
-            chunking_enabled=True,
             _is_decode_role=False,
+            _strategy=types.SimpleNamespace(name="mega"),
         )
         ffn._should_chunk = types.MethodType(ns["_should_chunk"], ffn)
-        # Decode and CUDA-graph capture cannot chunk, so their budgets must
-        # already cover the batch; capacity overflow is a hard error there.
-        for policy, decode, capture, max_tokens, expect_chunk in (
-            (True, False, False, 16384, True),
-            (False, False, False, 16384, False),
-            (True, True, False, 131072, False),
-            (True, False, True, 131072, False),
+        for policy, decode, capture, expect_chunk in (
+            (True, False, False, True),
+            (False, False, False, False),
+            (True, True, False, False),
+            (True, False, True, False),
         ):
-            ffn.chunking_enabled = policy
-            ffn.max_tokens_per_rank = max_tokens
+            enabled.return_value = policy
             ffn._is_decode_role = decode
             with mock.patch.object(
                 torch.cuda, "is_available", return_value=True
@@ -2020,6 +2619,13 @@ class CedRouterProjectionTest(_SingleThreadTest):
             ), mock.patch.object(
                 plan, "_router_chunk_groups", wraps=plan._router_chunk_groups
             ) as groups:
+                if not expect_chunk:
+                    with self.assertRaisesRegex(
+                        ValueError, "exceeds max_tokens_per_rank=16384"
+                    ):
+                        plan._prepare_router_projection(ffn)
+                    groups.assert_not_called()
+                    continue
                 plan._prepare_router_projection(ffn)
                 prepared_calls = groups.call_count
                 with plan.router_projection(ffn):
@@ -2082,10 +2688,14 @@ class CedRouterProjectionTest(_SingleThreadTest):
         gate = self._gate()
         x = torch.ones(4, 5, dtype=torch.bfloat16)
         projected = torch.tensor([[1.0, 3.0, -1.0]]).expand(4, -1)
+        parent = types.ModuleType("rtp_llm.models_py.modules.dsv41")
+        parent._record_tensor = types.SimpleNamespace(ENABLED=False)
         for fp32 in ("0", "1"):
             callback = mock.Mock(side_effect=lambda x, w: projected.to(x.dtype))
             gate._ced_row_projection = callback
-            with mock.patch.dict(os.environ, {"MOE_GATE_FP32": fp32}):
+            with mock.patch.dict(os.environ, DSV4_GATE_FP32=fp32), mock.patch.dict(
+                sys.modules, {parent.__name__: parent}
+            ):
                 weights, indices = gate(x)
             callback.assert_called_once()
             dtype = torch.float32 if fp32 == "1" else torch.bfloat16
@@ -2097,21 +2707,10 @@ class CedRouterProjectionTest(_SingleThreadTest):
             self.assertTrue(torch.equal(indices, expected_indices))
 
     def test_mega_and_mega_se_gate_pack_consume_gate_projection(self):
-        root = Path(_CED.__file__).parents[2] / "factory/fused_moe/impl/cuda/executors"
-        base_path = root / "mega_moe.py"
-        base_cls = next(
-            n
-            for n in ast.parse(base_path.read_text()).body
-            if isinstance(n, ast.ClassDef) and n.name == "MegaMoeExecutor"
-        )
-        method = next(
-            n
-            for n in base_cls.body
-            if isinstance(n, ast.FunctionDef) and n.name == "forward_gate_pack"
-        )
-        for filename, classname in (
-            ("mega_moe.py", "MegaMoeExecutor"),
-            ("mega_moe_se.py", "MegaMoeSEExecutor"),
+        root = Path(_CED.__file__).parent.parent / "moe/strategies"
+        for filename, classname, getter in (
+            ("mega.py", "MegaMoEStrategy", "_get_gate_pack_kernels"),
+            ("mega_se.py", "MegaMoEStrategySE", "_get_mega_se_gate_pack_kernels"),
         ):
             path = root / filename
             cls = next(
@@ -2119,46 +2718,25 @@ class CedRouterProjectionTest(_SingleThreadTest):
                 for n in ast.parse(path.read_text()).body
                 if isinstance(n, ast.ClassDef) and n.name == classname
             )
-            stage_method = next(
+            method = next(
                 n
                 for n in cls.body
-                if isinstance(n, ast.FunctionDef) and n.name == "_stage_kernel_inputs"
+                if isinstance(n, ast.FunctionDef) and n.name == "forward_with_gate_pack"
             )
-            pack, stage = mock.Mock(), mock.Mock()
+            pack = mock.Mock()
             ns = dict(
                 torch=torch,
-                ExpertGatePayload=types.SimpleNamespace,
-                stage_shared_fp8_input_scales=stage,
+                record_function_range=lambda *a: nullcontext(),
+                sync_cuda_graph_warmup_ranks=lambda *a: None,
+                FP4_BLOCK=32,
             )
+            ns[getter] = lambda: (pack, pack, None)
             exec(
-                compile(
-                    ast.Module(body=[method, stage_method], type_ignores=[]),
-                    str(path),
-                    "exec",
-                ),
+                compile(ast.Module(body=[method], type_ignores=[]), str(path), "exec"),
                 ns,
             )
-            packages = {}
-            for name in (
-                "rtp_llm",
-                "rtp_llm.models_py",
-                "rtp_llm.models_py.triton_kernels",
-                "rtp_llm.models_py.triton_kernels.moe",
-            ):
-                module = types.ModuleType(name)
-                module.__path__ = []
-                packages[name] = module
-            input_pack = types.ModuleType(
-                "rtp_llm.models_py.triton_kernels.moe.mega_moe_input_pack"
-            )
-            input_pack.fused_pack_mega_moe_gate_inputs = pack
-            packages[input_pack.__name__] = input_pack
-            se_pack = types.ModuleType(
-                "rtp_llm.models_py.triton_kernels.moe.mega_moe_se_input_pack"
-            )
-            se_pack.stage_mega_moe_se_shared_l1_scales = stage
-            packages[se_pack.__name__] = se_pack
             buf = types.SimpleNamespace(
+                num_max_tokens_per_rank=4,
                 x=torch.empty(4, 5),
                 x_sf=torch.empty(4, 1),
                 topk_idx=torch.empty(4, 2),
@@ -2166,45 +2744,122 @@ class CedRouterProjectionTest(_SingleThreadTest):
                 shared_l1_acts_sf=torch.empty(4, 1),
             )
             owner = types.SimpleNamespace(
-                supports_gate_pack=True,
                 _mega_buf=buf,
                 _mega_y=torch.zeros(4, 5),
+                _mega_l1_w=None,
+                _mega_l1_sf=None,
+                _mega_l2_w=None,
+                _mega_l2_sf=None,
+                cfg=types.SimpleNamespace(layer_id=20, swiglu_limit=0, ep_rank=0),
+                fake_balance_expert=None,
+                _maybe_pre_kernel_barrier=lambda *a: None,
                 _validate_capacity=lambda *a: None,
+                finalize_routing=lambda *a: None,
                 _block_m=lambda *a: 128,
                 _launch=mock.Mock(),
             )
-            owner._stage_kernel_inputs = types.MethodType(
-                ns["_stage_kernel_inputs"], owner
+            owner._gate_pack_views = lambda tokens: (
+                buf.x[:tokens],
+                buf.x_sf[:tokens],
+                buf.topk_idx[:tokens],
+                buf.topk_weights[:tokens],
+                owner._mega_y[:tokens],
             )
-            gate = self._gate(fused_gate=True)
+            gate = self._gate()
             scores = torch.full((4, 3), 7, dtype=torch.bfloat16)
             gate._ced_row_projection = mock.Mock(return_value=scores)
-            x = torch.ones(4, 5, dtype=torch.bfloat16)
+            dg = types.ModuleType("deep_gemm")
+            dg.fp8_fp4_mega_moe = mock.Mock()
             for hash_gate in (False, True):
                 gate.hash = hash_gate
                 gate.tid2eid = torch.zeros(4, 2, dtype=torch.long)
                 gate._ced_row_projection.reset_mock()
                 pack.reset_mock()
-                stage.reset_mock()
-                payload = gate.prepare_gate_payload(x, torch.arange(4))
-                with mock.patch.dict(sys.modules, packages):
-                    ns["forward_gate_pack"](owner, x, payload)
+                with mock.patch.dict(sys.modules, deep_gemm=dg):
+                    ns["forward_with_gate_pack"](
+                        owner,
+                        torch.ones(4, 5, dtype=torch.bfloat16),
+                        gate,
+                        torch.arange(4),
+                        expert_load=None,
+                    )
                 gate._ced_row_projection.assert_called_once()
-                self.assertIs(payload.scores, scores)
                 pack.assert_called_once()
                 self.assertIs(pack.call_args.args[1], scores)
-                self.assertEqual(
-                    pack.call_args.kwargs["input_ids"] is not None, hash_gate
-                )
-                if filename == "mega_moe_se.py":
-                    stage.assert_called_once_with(
-                        buf.x_sf, buf.shared_l1_acts_sf, 4, 128
-                    )
-                else:
-                    stage.assert_not_called()
 
 
 class CedEncoderSplitTest(_SingleThreadTest):
+    def test_domain_transition_releases_cached_attention_plan_views(self):
+        path = Path(_CED.__file__).parent.parent / "prefill_workspace.py"
+        spec = importlib.util.spec_from_file_location("ced_workspace_lifetime", path)
+        workspace_module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(workspace_module)
+        for split_l20 in (False, True):
+            with self.subTest(split_l20=split_l20):
+                workspace = workspace_module.PrefillWorkspace(
+                    torch.device("cpu"),
+                    q_rows=4,
+                    q_dim=4,
+                    reserve_cp=False,
+                    align_bytes=1,
+                )
+                indices = torch.zeros((4, 640), dtype=torch.int32)
+                lengths = torch.ones(4, dtype=torch.int32)
+                previous = weakref.ref(indices)
+                workspace.attention_metadata(
+                    torch.ones((4, 2), dtype=torch.complex64), indices, lengths, 4, 2
+                )
+                shared = {
+                    "prefill_index_plan": (object(), indices, lengths),
+                    "topk": {20: torch.ones((4, 2), dtype=torch.int32)},
+                    "candidates": None,
+                }
+                del indices, lengths
+                self.assertIsNotNone(previous())
+                attn = types.SimpleNamespace(
+                    _shared_attention=shared,
+                    _prefill_meta_shared=types.SimpleNamespace(workspace=workspace),
+                )
+                block = types.SimpleNamespace(
+                    attn=attn,
+                    attn_hc=types.SimpleNamespace(pre_mix_out=torch.ones(4, 2)),
+                    ffn_hc=types.SimpleNamespace(pre_mix_out=torch.ones(4, 2)),
+                )
+                model = types.SimpleNamespace(layers=[None] * 20 + [block])
+                plan, _ = _plan(129, 0, torch.arange(1, 129))
+                # Only isolate transport; execute the complete transition and
+                # real workspace cache, including both strong ownership chains.
+                plan.exchange.compact = lambda tensor: tensor
+                hidden, ids = torch.ones(4, 2), torch.arange(4)
+                if split_l20:
+                    plan.compact_l20(block, hidden, hidden, hidden, ids)
+                else:
+                    plan.compact(model, hidden, ids, shared)
+                self.assertIsNone(previous())
+                self.assertIsNone(workspace._attention_metadata)
+                self.assertNotIn("prefill_index_plan", shared)
+
+    def test_early_admission_waits_before_reading_peer_vote(self):
+        for accepted in (True, False):
+            with self.subTest(accepted=accepted):
+                plan, _ = _plan(129, 0, torch.arange(1, 129))
+                references = ((32, 32768, True),)
+                ready = torch.ones((), dtype=torch.int32)
+
+                def complete():
+                    ready.fill_(accepted)
+
+                work = mock.Mock()
+                work.wait.side_effect = complete
+                plan._early_admission = (ready, work, references)
+                self.assertEqual(
+                    plan.prepare_early_indexer(None, None, None),
+                    references if accepted else None,
+                )
+                work.wait.assert_called_once_with()
+                self.assertIsNone(plan._early_admission)
+                self.assertEqual(plan.early_indexer_fallback, not accepted)
+
     def test_split_minimum_counts_fresh_rows_before_model_checks_or_uploads(self):
         for fresh in (129, 16384, 32768, 65535):
             for prefix in (0, 131072):
@@ -2260,6 +2915,7 @@ class CedEncoderSplitTest(_SingleThreadTest):
             block.attn_hc,
             block.ffn_hc,
             block.ffn_norm,
+            use_prepared=True,
             original_tokens=16384,
             compact_tokens=32,
         )
@@ -2267,6 +2923,16 @@ class CedEncoderSplitTest(_SingleThreadTest):
         self.assertFalse(plan.can_split_l20(v4))
         supports_mhc.return_value = True
         supports_mhc.reset_mock()
+        # The FFN uses the synchronized pre-compaction plan. A tiny local
+        # compact batch can still be chunked and cannot use global row maps.
+        with mock.patch(
+            "rtp_llm.models_py.modules.factory.fused_moe.utils.fp8_fp4.chunked_layer.planned_moe_tokens",
+            return_value=32768,
+        ):
+            block.ffn._should_chunk.side_effect = lambda tokens: tokens > 16384
+            self.assertFalse(plan.can_split_l20(v4))
+            block.ffn._should_chunk.assert_called_with(32768)
+        block.ffn._should_chunk.side_effect = None
         block.ffn._should_chunk.return_value = True
         self.assertFalse(plan.can_split_l20(v4))
         block.ffn._should_chunk.return_value = False
@@ -2303,7 +2969,7 @@ class CedEncoderSplitTest(_SingleThreadTest):
                 cp_on=False,
                 cp_ctx=None,
                 any_cont=bool(prefix),
-                topk_idxs=torch.tensor([[[0, -1], [1, 0]]]),
+                topk_idxs=torch.tensor([[0, -1], [1, 0]], dtype=torch.int32),
                 swa_meta=types.SimpleNamespace(
                     combined_indices=torch.tensor([[127, 126], [128, 127]]),
                     combined_lens=torch.tensor([2, 2]),
@@ -2311,7 +2977,8 @@ class CedEncoderSplitTest(_SingleThreadTest):
                 ),
             )
             qkv = types.SimpleNamespace(
-                kv_full=torch.arange(4).reshape(2, 2).bfloat16()
+                kv_full=torch.arange(4).reshape(2, 2).bfloat16(),
+                qr=torch.empty(2, 2),
             )
             source = qkv.kv_full.clone()
             concat = torch.empty(prefix + 2, 2)
@@ -2347,9 +3014,7 @@ class CedEncoderSplitTest(_SingleThreadTest):
             expected_kv = concat if prefix else qkv.kv_full
             self.assertEqual(launch["kv"].data_ptr(), expected_kv.data_ptr())
             expected_indices = (
-                common.swa_meta.combined_indices
-                if prefix
-                else common.topk_idxs.squeeze(0)
+                common.swa_meta.combined_indices if prefix else common.topk_idxs
             )
             self.assertTrue(torch.equal(launch["indices"].squeeze(1), expected_indices))
             self.assertTrue(torch.equal(qkv.kv_full, source))
@@ -2368,11 +3033,16 @@ class CedEncoderSplitTest(_SingleThreadTest):
         )
         shared, seen, writes, captures = {}, [], [], []
         original = plan.original_context
+        expert_token_counts = torch.zeros((40, 3), dtype=torch.int32)
 
         def layer(i):
             def call(h, ids, positions, cu, **kwargs):
                 self.assertNotIn("ced_candidate_rows", shared)
                 self.assertNotEqual(i, 20)
+                self.assertEqual(
+                    kwargs["expert_load"].expert_token_counts.data_ptr(),
+                    expert_token_counts[i].data_ptr(),
+                )
                 expected_ctx = original if i < 20 else plan.context
                 self.assertEqual(h.shape[0], expected_ctx.chunk_length)
                 self.assertIs(positions, expected_ctx.global_positions)
@@ -2383,13 +3053,17 @@ class CedEncoderSplitTest(_SingleThreadTest):
 
         def split(h, ids, positions, supplied_plan, **kwargs):
             self.assertIs(supplied_plan, plan)
+            self.assertEqual(
+                kwargs["expert_load"].expert_token_counts.data_ptr(),
+                expert_token_counts[20].data_ptr(),
+            )
             self.assertIs(positions, original.global_positions)
             self.assertNotIn("ced_candidate_rows", shared)
             seen.append(20)
             return h[:32], ids[:32]
 
-        layers = [layer(i) for i in range(40)]
-        layers[20] = types.SimpleNamespace(forward_prefill_ced_l20=split)
+        layers = [torch.nn.Module() for _ in range(40)]
+        layers[20].forward_prefill_ced_l20 = split
         v4 = types.SimpleNamespace(
             layers=layers,
             swa_bounded_replay=False,
@@ -2399,9 +3073,16 @@ class CedEncoderSplitTest(_SingleThreadTest):
         rebuild = mock.Mock()
         state = dict(
             logging=logging,
-            host_block_tables=lambda *args: None,
+            host_swa_tables={},
             layer_calls=[layer(i) for i in range(40)],
+            use_prefill_fast_path=False,
+            routing_metadata=None,
+            routing_kwargs={},
+            engram_prefetch=None,
+            expert_token_counts=expert_token_counts,
+            expert_load_for_layer=expert_load_for_layer,
             ced_in_l20=True,
+            ced_requested=False,
             ced_tail=plan,
             prefill_write_by_region=None,
             attn_inputs=None,
@@ -2418,6 +3099,7 @@ class CedEncoderSplitTest(_SingleThreadTest):
             block_tables_by_type=object(),
             ws=object(),
             capture_ids=(37, 38, 39),
+            _rt_on=False,
             write_cache_store_impl=writes.append,
             release_v41_prefill_shared=lambda *a: None,
             clear_prefill_meta_shared_fp8=mock.Mock(),
@@ -2466,8 +3148,8 @@ class CedEncoderSplitTest(_SingleThreadTest):
         owner._prefill_compute_qkv = mock.Mock(return_value=qkv)
         old_prefix = torch.full((127, 2), 7.0)
 
-        def snapshot(qkv, common, *, fuse_cache_write=False):
-            self.assertFalse(fuse_cache_write)
+        def snapshot(qkv, common, *, fresh_store=None):
+            self.assertIsNone(fresh_store)
             events.append("read-prefix")
             return [torch.cat((old_prefix, qkv.kv_full))], [16384 - 127]
 
@@ -2510,15 +3192,22 @@ class CedEncoderSplitTest(_SingleThreadTest):
             return_value=torch.tensor([[0, -1]], dtype=torch.int32).expand(32, -1)
         )
         qkv = types.SimpleNamespace(qr=torch.empty(32, 2), kv_full=object())
-        owner._prefill_query(torch.empty(32, 2), common, qkv, [swa], [swstart])
+        weights = torch.empty(32, 1)
+        # The CPU fixture takes the eager index plan with no normalized input.
+        owner._prefill_query(
+            None, common, qkv, [swa], [swstart], indexer_weights=weights
+        )
+        self.assertIs(
+            owner._select_indices.call_args.kwargs["indexer_weights"], weights
+        )
         launch = owner._prefill_sparse_attention.call_args.kwargs
         self.assertEqual(launch["kv"].shape, (end + 256, 1, 2))
         for row, pos in enumerate(query_ctx.global_positions.tolist()):
-            indices = launch["indices"][row, 0]
+            indices = launch["indices"][row]
             expected = [0] + [end + p - swstart for p in range(pos - 127, pos + 1)]
             self.assertEqual(indices[:129].tolist(), expected)
         self.assertEqual(query_ctx.global_positions[0].item(), end - 128)
-        first_swa = launch["indices"][0, 0, 1].item()
+        first_swa = launch["indices"][0, 1].item()
         self.assertEqual(launch["kv"][first_swa, 0, 0].item(), end - 255)
         owner._prefill_write_swa_fp8_paged.assert_not_called()
         self.assertIsNone(common.cp_ctx.swa_replay_start)
@@ -2528,7 +3217,13 @@ class CedEncoderSplitTest(_SingleThreadTest):
         self,
     ):
         root = Path(_CED.__file__).parent.parent
-        ns = {"torch": torch, "F": F, "Tuple": tuple}
+        ns = {
+            "torch": torch,
+            "F": F,
+            "Tuple": tuple,
+            "Optional": Optional,
+            "ExpertLoadContext": ExpertLoadContext,
+        }
         fallback = ast.parse((root / "hc/fallback_impl.py").read_text())
         nodes = [
             next(
@@ -2626,7 +3321,10 @@ class CedEncoderSplitTest(_SingleThreadTest):
             expected_ffn_readout = ns["collapse_delayed"](
                 expected_residual, original_mix[rows]
             )
-            common = _l20_common(plan.original_context, torch.arange(256)[:, None])
+            freqs = torch.arange(1024)[:, None]
+            common = _l20_common(
+                plan.original_context, freqs[plan.original_context.global_positions]
+            )
             fullkv = torch.arange(1024 * 3).reshape(1024, 3).bfloat16()
             QKV = namedtuple("QKV", "qr q kv_full")
             events = []
@@ -2635,6 +3333,7 @@ class CedEncoderSplitTest(_SingleThreadTest):
                 _shared_attention={"global": {20: global_state}},
                 _cp_ctx=plan.original_context,
                 index_weights=torch.ones(1, 3, dtype=torch.bfloat16),
+                freqs_cis=freqs,
                 can_fuse_prefill_attn_norm_input_quant=lambda *args: False,
                 _set_compressor_pool_context=lambda: events.append("bind"),
                 _clear_compressor_pool_context=lambda: events.append("clear"),
@@ -2647,9 +3346,10 @@ class CedEncoderSplitTest(_SingleThreadTest):
                 self.assertTrue(torch.equal(x, expected_norm))
                 return common, QKV(x.clone(), None, fullkv), [fullkv], [0], None
 
-            def query(x, meta, qkv, swa, starts):
+            def query(x, meta, qkv, swa, starts, *, indexer_weights):
                 events.append("query")
-                self.assertEqual(x.shape[0], 32)
+                self.assertIsNone(x)
+                self.assertEqual(qkv.qr.shape[0], 32)
                 self.assertEqual(meta.request_row_slices, (slice(0, 32),))
                 self.assertTrue(torch.equal(meta.freqs_cis, common.freqs_cis[rows]))
                 self.assertIs(meta.workspace, common.workspace)
@@ -2661,24 +3361,16 @@ class CedEncoderSplitTest(_SingleThreadTest):
                 self.assertIs(qkv.kv_full, fullkv)
                 self.assertIs(swa[0], fullkv)
                 self.assertIs(attn._shared_attention["global"][20], global_state)
-                projection = attn._shared_attention["ced_indexer_projection"]
-                with mock.patch.object(_CED.F, "linear", wraps=F.linear) as linear:
-                    raw_index_weights = projection(x, attn.index_weights)
-                    self.assertTrue(
-                        all(
-                            call.args[0].shape[0] == 256
-                            for call in linear.call_args_list
-                        )
-                    )
-                self.assertTrue(
-                    torch.equal(
-                        raw_index_weights,
-                        F.linear(expected_norm, attn.index_weights)[rows],
-                    )
+                self.assertEqual(
+                    attn._shared_attention["ced_indexer_projection"],
+                    plan.project_indexer_weights,
+                )
+                torch.testing.assert_close(
+                    indexer_weights, F.linear(expected_norm, attn.index_weights)[rows]
                 )
                 if fail:
                     raise RuntimeError("query failure")
-                return x * 0.5
+                return qkv.qr * 0.5
 
             @contextmanager
             def bind(attn, *args, **kwargs):
@@ -2692,7 +3384,8 @@ class CedEncoderSplitTest(_SingleThreadTest):
             attn._prefill_produce, attn._prefill_query = produce, query
             gate = CedRouterProjectionTest._gate()
 
-            def ffn(x, ids):
+            def ffn(x, ids, expert_load):
+                self.assertIsNone(expert_load)
                 self.assertEqual(gate._ced_row_projection, plan.project_indexer_weights)
                 return x * 0.25
 
@@ -2724,12 +3417,17 @@ class CedEncoderSplitTest(_SingleThreadTest):
                 if fail:
                     with self.assertRaisesRegex(RuntimeError, "query failure"):
                         ns["forward_prefill_ced_l20"](
-                            block, hidden, ids, common.position_ids, plan
+                            block,
+                            hidden,
+                            ids,
+                            common.position_ids,
+                            plan,
+                            expert_load=None,
                         )
                     block.ffn.assert_not_called()
                 else:
                     result, result_ids = ns["forward_prefill_ced_l20"](
-                        block, hidden, ids, common.position_ids, plan
+                        block, hidden, ids, common.position_ids, plan, expert_load=None
                     )
                     self.assertEqual(result.shape, (32, 4, 3))
                     self.assertTrue(torch.equal(result_ids, ids[rows]))
@@ -2754,6 +3452,75 @@ class CedEncoderSplitTest(_SingleThreadTest):
                     ).bfloat16(),
                 )
             )
+
+    def test_l20_veto_keeps_stage0_prepared_megamoe(self):
+        path = Path(_CED.__file__).parent.parent / "block.py"
+        block_class = next(
+            n
+            for n in ast.parse(path.read_text()).body
+            if isinstance(n, ast.ClassDef) and n.name == "Block"
+        )
+        method = next(
+            n
+            for n in block_class.body
+            if isinstance(n, ast.FunctionDef) and n.name == "forward_prefill_ced_l20"
+        )
+        x, ids, positions = object(), object(), object()
+        ffn, attn = mock.Mock(), mock.Mock()
+        attn.can_fuse_prefill_attn_norm_input_quant.return_value = False
+        attn._prefill_produce.return_value = (None,) * 5
+        plan = mock.Mock(early_indexer=True, early_indexer_fallback=False)
+        plan.original_context.chunk_length = 256
+        plan.candidate_publication.return_value = nullcontext()
+
+        def veto(*args):
+            plan.early_indexer_fallback = True
+
+        plan.prepare_early_indexer.side_effect = veto
+        hc_pre = mock.Mock(return_value=(x, None, None))
+        hc_post = mock.Mock(return_value=x)
+        block = types.SimpleNamespace(
+            attn=attn,
+            attn_norm=mock.Mock(),
+            ffn=ffn,
+            _prefill_fast_hc_impls=lambda: (hc_pre, hc_pre, hc_post, hc_post),
+            _try_mega_mhc=mock.Mock(return_value=(x, x, None, None)),
+            _sync_after_first_cp_prefill_attention=mock.Mock(),
+        )
+        scope = dict(
+            Optional=Optional,
+            ExpertLoadContext=ExpertLoadContext,
+            MoE=type(ffn),
+            nullcontext=nullcontext,
+            _prefill_fast_norm=lambda norm, value: value,
+        )
+        exec(
+            compile(ast.Module(body=[method], type_ignores=[]), str(path), "exec"),
+            scope,
+        )
+        with mock.patch.dict(
+            sys.modules,
+            {
+                "rtp_llm.models_py.modules.dsv41.fp8.attention": types.SimpleNamespace(
+                    bind_attn_cache=lambda *args, **kwargs: nullcontext()
+                )
+            },
+        ):
+            result = scope["forward_prefill_ced_l20"](
+                block, x, ids, positions, plan, None
+            )
+        prepared = ffn.prepare_mhc_inputs.return_value
+        block._try_mega_mhc.assert_called_once_with(
+            attn._prefill_query.return_value,
+            x,
+            None,
+            None,
+            original_tokens=None,
+            moe_inputs=prepared,
+        )
+        ffn.assert_called_once_with(x, ids, expert_load=None, mhc_inputs=prepared)
+        plan.compact_l20.assert_not_called()
+        self.assertEqual(result, (x, ids))
 
 
 class BoundedSwaConsumerTest(_SingleThreadTest):
@@ -2903,14 +3670,14 @@ class BoundedSwaConsumerTest(_SingleThreadTest):
         for length in (128, 256):
             owner, common, qkv = self.fixture(length=length, compact=False)
             buffers, starts = owner._swa_prefill_workspace(qkv, common)
-            self.assertEqual(starts, [common.cp_ctx.prefix_length])
+            self.assertSequenceEqual(starts, [common.cp_ctx.prefix_length])
             self.assertEqual(buffers[0].data_ptr(), qkv.kv_full.data_ptr())
             self.assertEqual(buffers[0].shape[0], length)
             owner._swa_prefill_concat.assert_not_called()
         for length in (127, 128):
             cold, common, qkv = self.fixture(length=length, prefix=0, compact=False)
             buffers, starts = cold._swa_prefill_workspace(qkv, common)
-            self.assertEqual(starts, [0])
+            self.assertSequenceEqual(starts, [0])
             self.assertEqual(len(buffers[0]), length)
             cold._swa_prefill_concat.assert_not_called()
 
@@ -2922,9 +3689,7 @@ class BoundedSwaConsumerTest(_SingleThreadTest):
         buffers, starts = owner._swa_prefill_workspace(qkv, common)
         self.assertEqual(starts, [prefix - 127])
         self.assertEqual(buffers[0].shape[0], 385 + 127)
-        owner._swa_prefill_concat.assert_called_once_with(
-            qkv, common, fuse_cache_write=False
-        )
+        owner._swa_prefill_concat.assert_called_once_with(qkv, common, fresh_store=None)
         cold, common, qkv = self.fixture(prefix=0, compact=False, bounded=False)
         buffers, starts = cold._swa_prefill_workspace(qkv, common)
         self.assertEqual(starts, [0])
@@ -3212,7 +3977,9 @@ def _exercise_l20_transport(rank, device, group):
         assert shared["global"][20][0] == (global_kv, global_keys)
         assert not any(key in shared for key in _CED._DERIVED_KEYS)
         common = _l20_common(plan.original_context, freqs[rows])
-        query = plan.l20_query_metadata(common)
+        freqs_table = freqs.new_zeros((prefix + freqs.shape[0], 1))
+        freqs_table[prefix:] = freqs
+        query = plan.l20_query_metadata(common, freqs_table)
         torch.testing.assert_close(
             query.freqs_cis, _compact_oracle(freqs, selected, rank), rtol=0, atol=0
         )
@@ -3438,7 +4205,10 @@ def _explicit_truncated_swa_decoder(
 
 class BoundedReplayApproximationTest(_SingleThreadTest):
     def test_actual_dspark_indices_read_only_live128_and_current_queries(self):
-        path = Path(_CP.__file__).parents[2] / "model_desc/deepseek_v4_dspark_model.py"
+        path = (
+            Path(_CP.__file__).parents[2]
+            / "model_desc/deepseek_v41_base_dspark_model.py"
+        )
         tree = ast.parse(path.read_text())
         cls = next(
             n

@@ -5,6 +5,17 @@ package(default_visibility = ["//rtp_llm:__subpackages__"])
 
 copy_all_so()
 
+copy_so("//:fabric_memory")
+
+filegroup(
+    name = "fabric_memory_libs",
+    srcs = select({
+        "//:using_cuda13_arm": [":libfabric_memory_so"],
+        "//:using_cuda13_x86": [":libfabric_memory_so"],
+        "//conditions:default": [],
+    }),
+)
+
 copy_so("//rtp_llm/models_py:marlin_nvfp4")
 
 filegroup(
@@ -56,6 +67,7 @@ filegroup(
     name = "libs",
     srcs = [],
     data = [
+        ":fabric_memory_libs",
         ":marlin_nvfp4",
         ":copy_nvcomp_lib",
         ":copy_hf3fs_libs",
@@ -69,6 +81,7 @@ filegroup(
     name = "whl_package_libs",
     srcs = [],
     data = [
+        ":fabric_memory_libs",
         ":marlin_nvfp4",
         ":copy_nvcomp_lib",
         ":copy_hf3fs_libs",

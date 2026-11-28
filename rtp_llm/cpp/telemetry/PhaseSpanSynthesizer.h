@@ -258,49 +258,61 @@ inline void synthesizePhaseSpans(const opentelemetry::nostd::shared_ptr<opentele
             parent_span->SetAttribute(kAttrRtpLlmPrefillCacheExposedWaitUs, timing.cache_exposed_wait_us);
         } catch (...) {}
     }
-    // Only enqueue-to-CanRun is unambiguously admission queueing.
-    // RUNNING-to-dispatch can include host preparation, so it is not queue time.
-    if (role != PhaseRole::Decode && timing.prefill_forward_time_us > 0 && timing.prefill_forward_time_us <= end
-        && timing.running_started) {
-        const auto enqueue  = timing.scheduler_enqueue_time_us;
-        const auto can_run  = timing.can_run_time_us;
-        const auto kv_ready = timing.kv_ready_time_us;
-        const auto running  = timing.running_started_time_us;
-        const auto dispatch = timing.prefill_dispatch_time_us;
-        const auto forward  = timing.prefill_forward_time_us;
-        if (enqueue >= begin && enqueue <= can_run && can_run <= running && running <= dispatch
-            && dispatch <= forward) {
-            try {
+    // Enqueue-to-CanRun is independently valid even if later engine milestones
+    // are missing. Keep the observable queue time instead of dropping all phases.
+    if (role != PhaseRole::Decode) {
+        const auto enqueue       = timing.scheduler_enqueue_time_us;
+        const auto can_run       = timing.can_run_time_us;
+        const auto kv_ready      = timing.kv_ready_time_us;
+        const auto running       = timing.running_started_time_us;
+        const auto dispatch      = timing.prefill_dispatch_time_us;
+        const auto forward       = timing.prefill_forward_time_us;
+        const bool queue_valid   = enqueue >= begin && enqueue <= can_run && can_run <= end;
+        const bool running_valid = timing.running_started && can_run <= running && running <= end;
+        const bool forward_valid =
+            forward > 0 && forward <= end && running_valid && running <= dispatch && dispatch <= forward;
+        const bool cache_valid = can_run <= kv_ready && kv_ready <= dispatch;
+        const bool release_valid =
+            timing.prefill_previous_release_us == 0 || timing.prefill_previous_release_us <= dispatch;
+        try {
+            if (queue_valid) {
                 parent_span->SetAttribute(kAttrRtpLlmPrefillAdmissionQueueWaitUs, can_run - enqueue);
-                if (can_run <= kv_ready && kv_ready <= dispatch
-                    && (timing.prefill_previous_release_us == 0 || timing.prefill_previous_release_us <= dispatch)) {
-                    const auto release = std::max(kv_ready, timing.prefill_previous_release_us);
-                    parent_span->SetAttribute(kAttrRtpLlmPrefillKvCacheAcquireWallUs, kv_ready - can_run);
-                    parent_span->SetAttribute(kAttrRtpLlmPrefillEarlyBatchPrepareWallUs, int64_t{0});
-                    parent_span->SetAttribute(kAttrRtpLlmPrefillPreviousBatchWaitUs, release - kv_ready);
-                    parent_span->SetAttribute(kAttrRtpLlmPrefillFinalPrepareWallUs, forward - release);
-                    detail::synthesizeChildSpan(
-                        parent_span, "prefill_admission_queue", enqueue, can_run - enqueue, timing.request_id, nullptr);
-                    detail::synthesizeChildSpan(parent_span,
-                                                "prefill_kv_cache_acquire",
-                                                can_run,
-                                                kv_ready - can_run,
-                                                timing.request_id,
-                                                nullptr);
-                    detail::synthesizeChildSpan(parent_span,
-                                                "prefill_previous_batch_wait",
-                                                kv_ready,
-                                                release - kv_ready,
-                                                timing.request_id,
-                                                nullptr);
-                    detail::synthesizeChildSpan(
-                        parent_span, "prefill_final_prepare", release, forward - release, timing.request_id, nullptr);
-                }
-                if (timing.cache_exposed_wait_us == 0) {
+                detail::synthesizeChildSpan(
+                    parent_span, "prefill_admission_queue", enqueue, can_run - enqueue, timing.request_id, nullptr);
+                if (timing.cache_exposed_wait_us == 0 && timing.running_started) {
                     parent_span->SetAttribute(kAttrRtpLlmPrefillCacheExposedWaitUs, int64_t{0});
                 }
-            } catch (...) {}
-        }
+            }
+            if (queue_valid && forward_valid && cache_valid && release_valid) {
+                const auto release = std::max(kv_ready, timing.prefill_previous_release_us);
+                parent_span->SetAttribute(kAttrRtpLlmPrefillKvCacheAcquireWallUs, kv_ready - can_run);
+                parent_span->SetAttribute(kAttrRtpLlmPrefillEarlyBatchPrepareWallUs, int64_t{0});
+                parent_span->SetAttribute(kAttrRtpLlmPrefillPreviousBatchWaitUs, release - kv_ready);
+                parent_span->SetAttribute(kAttrRtpLlmPrefillFinalPrepareWallUs, forward - release);
+                detail::synthesizeChildSpan(
+                    parent_span, "prefill_kv_cache_acquire", can_run, kv_ready - can_run, timing.request_id, nullptr);
+                detail::synthesizeChildSpan(parent_span,
+                                            "prefill_previous_batch_wait",
+                                            kv_ready,
+                                            release - kv_ready,
+                                            timing.request_id,
+                                            nullptr);
+                detail::synthesizeChildSpan(
+                    parent_span, "prefill_final_prepare", release, forward - release, timing.request_id, nullptr);
+            } else if (request_ok && timing.generation_done) {
+                const char* reason = !queue_valid            ? "queue_order_invalid" :
+                                     !timing.running_started ? "running_missing" :
+                                     !running_valid          ? "running_order_invalid" :
+                                     forward <= 0            ? "forward_missing" :
+                                     forward > end           ? "forward_after_synthesis_end" :
+                                     dispatch <= 0           ? "dispatch_missing" :
+                                     dispatch < running      ? "dispatch_before_running" :
+                                     dispatch > forward      ? "dispatch_after_forward" :
+                                     !cache_valid            ? "kv_ready_order_invalid" :
+                                                               "previous_release_after_dispatch";
+                parent_span->SetAttribute(kAttrRtpLlmPrefillTimingError, reason);
+            }
+        } catch (...) {}
     }
 
     constexpr auto kError = opentelemetry::trace::StatusCode::kError;

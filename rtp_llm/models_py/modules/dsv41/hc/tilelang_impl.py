@@ -6,7 +6,9 @@ import torch
 
 from rtp_llm.models_py.modules.dsv41.hc.base import HCHeadBase, HCUnitBase
 from rtp_llm.models_py.modules.dsv41.hc.mhc_tilelang import (
+    tk_mhc_head,
     tk_mhc_head_fused,
+    tk_mhc_head_fused_enabled,
     tk_mhc_post,
     tk_mhc_pre,
 )
@@ -34,6 +36,10 @@ class TileLangHCUnit(HCUnitBase):
                 sinkhorn_eps=self.hc_eps,
                 sinkhorn_iters=self.hc_sinkhorn_iters,
                 hc_mult=self.hc_mult,
+            )
+        if out is None:
+            raise RuntimeError(
+                f"TileLang mHC pre unavailable for shape={tuple(x.shape)}"
             )
         y, post, comb = out
         return (
@@ -74,6 +80,10 @@ class TileLangHCUnit(HCUnitBase):
                 hc_mult=self.hc_mult,
                 out=tk_residual,
             )
+        if out is None:
+            raise RuntimeError(
+                f"TileLang mHC post unavailable for shape={tuple(residual.shape)}"
+            )
         return squeeze_hc_batch(out, wrapped, name="mhc_post output")
 
 
@@ -85,13 +95,28 @@ class TileLangHCHead(HCHeadBase):
         # Do not materialize non-contiguous views here; that would add a hidden
         # copy to every head reduce on mis-laid-out inputs.
         with torch.inference_mode():
-            out = tk_mhc_head_fused(
-                tk_x,
-                self.fn,
-                self.scale,
-                self.base,
-                norm_eps=self.norm_eps,
-                pre_eps=self.hc_eps,
-                hc_mult=self.hc_mult,
+            if tk_mhc_head_fused_enabled():
+                out = tk_mhc_head_fused(
+                    tk_x,
+                    self.fn,
+                    self.scale,
+                    self.base,
+                    norm_eps=self.norm_eps,
+                    pre_eps=self.hc_eps,
+                    hc_mult=self.hc_mult,
+                )
+            else:
+                out = tk_mhc_head(
+                    tk_x,
+                    self.fn,
+                    self.scale,
+                    self.base,
+                    norm_eps=self.norm_eps,
+                    pre_eps=self.hc_eps,
+                    hc_mult=self.hc_mult,
+                )
+        if out is None:
+            raise RuntimeError(
+                f"TileLang mHC head unavailable for shape={tuple(x.shape)}"
             )
         return squeeze_hc_batch(out, wrapped, name="mhc_head output")

@@ -31,7 +31,6 @@ from rtp_llm.config.py_config_modules import PyEnvConfigs
 from rtp_llm.config.uvicorn_config import get_uvicorn_logging_config
 from rtp_llm.distribute.distributed_server import (
     get_dp_rpc_addresses,
-    get_eplb_stage_root_addresses,
 )
 from rtp_llm.embedding.embedding_type import TYPE_STR, EmbeddingType
 from rtp_llm.frontend.frontend_server import FrontendServer
@@ -425,17 +424,10 @@ class FrontendApp(object):
         # Compute all DP addresses for broadcast operations (e.g. update_scheduler_info)
         dp_addresses = get_dp_rpc_addresses(py_env_configs)
         client_config = self.py_env_configs.grpc_config.get_client_config()
-        # Resolve stage roots only on PP EPLB updates, after backend bootstrap.
-        eplb_address_resolver = None
-        if py_env_configs.parallelism_config.pp_size > 1:
-            eplb_address_resolver = lambda: get_eplb_stage_root_addresses(
-                py_env_configs
-            )
         self.grpc_client = GrpcClientWrapper(
             self.server_config.rpc_server_port,
             dp_addresses=dp_addresses,
             client_config=client_config,
-            eplb_address_resolver=eplb_address_resolver,
         )
 
         logging.info(
@@ -445,14 +437,18 @@ class FrontendApp(object):
 
     async def _wait_backend_health_ready_impl(self) -> None:
         """Loop until backend gRPC health_check returns ok (used when PD 不分离)."""
-        if self.frontend_server.is_embedding:
-            return
         timeout_s = 3600
         deadline = time.monotonic() + timeout_s
         while time.monotonic() < deadline:
             try:
-                response = await self.grpc_client.post_request("health_check", {})
-                if response.get("status") == "ok":
+                if self.frontend_server.is_embedding:
+                    # Each worker must reconnect its own pooled channel before
+                    # accepting requests; another worker's health is insufficient.
+                    ready = await self.frontend_server._embedding_endpoint.health_check()
+                else:
+                    response = await self.grpc_client.post_request("health_check", {})
+                    ready = response.get("status") == "ok"
+                if ready:
                     logging.info(
                         "Backend health_check ready, starting frontend rank_id=%s frontend_server_id=%s",
                         self.server_config.rank_id,
@@ -874,13 +870,6 @@ class FrontendApp(object):
                 )
             finally:
                 allocator_dump_guard.finish()
-
-        # request format: {"mode": "NONE", "update_time": 5000}
-        @app.post("/update_eplb_config")
-        async def update_eplb_config(req: Union[str, Dict[Any, Any]], request: Request):
-            check_not_draining(request)
-            result = await self.grpc_client.post_request("update_eplb_config", req)
-            return result
 
         @app.post("/")
         async def inference(req: Union[str, Dict[Any, Any]], raw_request: RawRequest):

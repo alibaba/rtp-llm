@@ -6,45 +6,24 @@ twice — once for Attention and once for MoE FFN.
 
 import logging
 import os
+from contextlib import nullcontext
 from typing import Callable, Dict, Optional, Tuple
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 from rtp_llm.models_py.modules import RMSNorm
-from rtp_llm.models_py.modules.dsv41 import _profiler
-from rtp_llm.models_py.modules.dsv41.chunk_env import chunked_moe_enabled
 from rtp_llm.models_py.modules.dsv41.fp8.attention import (
     AttentionFP8,
     CommitOnlyAttentionFP8,
 )
 from rtp_llm.models_py.modules.dsv41.hc import build_hc_unit
-from rtp_llm.models_py.modules.factory.fused_moe.utils.fp8_fp4.chunked_layer import (
-    ChunkedFp8Fp4MoeLayer,
-)
-from rtp_llm.models_py.modules.factory.fused_moe.utils.fp8_fp4.weight_adapter import (
-    adapt_split_moe_weights,
-)
-from rtp_llm.utils.model_weight import W
+from rtp_llm.models_py.modules.dsv41.moe import MoE
+from rtp_llm.models_py.modules.dsv41.moe.routing_metadata import GateRoutingMetadata
+from rtp_llm.models_py.utils.expert_load_monitor import ExpertLoadContext
 
 _PrefillFastHCImpls = Tuple[Callable, Callable, Callable, Callable]
-
-_MOE_WEIGHT_NAMES = {
-    "routed_gate": W.v4_routed_w1_w,
-    "routed_gate_scale": W.v4_routed_w1_s,
-    "routed_up": W.v4_routed_w3_w,
-    "routed_up_scale": W.v4_routed_w3_s,
-    "routed_down": W.v4_routed_w2_w,
-    "routed_down_scale": W.v4_routed_w2_s,
-    "router": W.v4_router_w,
-    "router_bias": W.v4_router_bias,
-    "router_tid2eid": W.v4_router_tid2eid,
-    "router_bias_vl": W.v4_router_bias_vl,
-    "shared_gate_up": W.v4_shared_w13_w,
-    "shared_gate_up_scale": W.v4_shared_w13_s,
-    "shared_down": W.v4_shared_w2_w,
-    "shared_down_scale": W.v4_shared_w2_s,
-}
 
 
 def _prefill_fast_norm(norm: nn.Module, x: torch.Tensor) -> torch.Tensor:
@@ -57,6 +36,7 @@ def _prefill_fast_norm(norm: nn.Module, x: torch.Tensor) -> torch.Tensor:
 
 
 class Block(nn.Module):
+
     def __init__(
         self,
         layer_id: int,
@@ -100,11 +80,14 @@ class Block(nn.Module):
         ep_rank: int = 0,
         max_tokens_per_rank: int = 8192,
         is_decode_role: bool = False,
-        moe_strategy: str = "auto",
         fp8_kv_cache: bool = False,
         commit_only: bool = False,
         v41_config: Optional[Dict] = None,
         shared_attention: Optional[Dict] = None,
+        dp_size: int = 1,
+        dp_rank: int = 0,
+        fake_balance_expert: bool = False,
+        n_physical_experts: Optional[int] = None,
     ):
         super().__init__()
         self.layer_id = layer_id
@@ -171,16 +154,12 @@ class Block(nn.Module):
             self.ffn_hc = None
             self._prefill_fast_hc_impls_cached = None
             return
-        if layer_weights is None:
-            raise ValueError("Block requires per-layer weights")
-        adapt_split_moe_weights(
-            layer_weights, moe_inter_dim, n_shared_experts, _MOE_WEIGHT_NAMES
-        )
-        self.ffn = ChunkedFp8Fp4MoeLayer(
+        self.ffn = MoE(
             layer_id=layer_id,
             dim=dim,
             moe_inter_dim=moe_inter_dim,
             n_routed_experts=n_routed_experts,
+            n_physical_experts=n_physical_experts,
             n_activated_experts=n_activated_experts,
             n_shared_experts=n_shared_experts,
             score_func=score_func,
@@ -193,11 +172,9 @@ class Block(nn.Module):
             ep_rank=ep_rank,
             max_tokens_per_rank=max_tokens_per_rank,
             is_decode_role=is_decode_role,
-            strategy=moe_strategy,
-            chunking_enabled=chunked_moe_enabled(),
-            model_type="deepseek_v41",
-            moe_w1_layout="gate_up",
-            record_function_scope=_profiler.moe_record_function_scope,
+            dp_size=dp_size,
+            dp_rank=dp_rank,
+            fake_balance_expert=fake_balance_expert,
         )
         if v41_config is not None and not is_decode_role:
             self.ffn.gate._prefill_gate_chunk_rows = 32768
@@ -206,6 +183,8 @@ class Block(nn.Module):
         # into ``RMSNorm`` at construction time.  Norms here see 2D inputs
         # ``[T, dim]`` from the hc_pre output, so framework ``RMSNorm``
         # (which expects 2D) drops in directly.
+        from rtp_llm.utils.model_weight import W
+
         self.attn_norm = RMSNorm(layer_weights[W.v4_attn_norm], norm_eps)
         self.ffn_norm = RMSNorm(layer_weights[W.v4_ffn_norm], norm_eps)
 
@@ -245,9 +224,9 @@ class Block(nn.Module):
             return
         if os.environ.get("DSV4_CP_SYNC_AFTER_ATTN_ONCE", "0") == "0":
             return
-        if self.ffn.strategy_name not in (
-            "mega_moe",
-            "mega_moe_se",
+        if getattr(getattr(self.ffn, "_strategy", None), "name", "") not in (
+            "mega",
+            "mega_se",
         ):
             return
         if getattr(self.attn, "_cp_ctx", None) is None:
@@ -294,7 +273,7 @@ class Block(nn.Module):
         return impls
 
     def prefill_fast_callable(self):
-        if self.engram is not None:
+        if self.engram is not None and getattr(self.attn, "v41_config", None) is None:
             return None
         if not isinstance(self.attn, AttentionFP8):
             return None
@@ -313,7 +292,9 @@ class Block(nn.Module):
             self.engram_token_mask,
         ).reshape(shape)
 
-    def _try_mega_mhc(self, attn_out, residual, post, comb, *, original_tokens=None):
+    def _try_mega_mhc(
+        self, attn_out, residual, post, comb, *, original_tokens=None, moe_inputs=None
+    ):
         """Fuse the intra-layer delayed mHC seam and FFN RMSNorm."""
         from rtp_llm.models_py.modules.dsv41.hc.v41_mega_mhc import try_fused_post_pre
 
@@ -325,7 +306,12 @@ class Block(nn.Module):
             self.attn_hc,
             self.ffn_hc,
             self.ffn_norm,
+            use_prepared=True,
             original_tokens=original_tokens,
+            # Post-HC already owns this residual. Match the cross-layer policy
+            # so long prefill does not retain a second full HC activation.
+            reuse_residual=residual.numel() * residual.element_size() > 1 << 30,
+            **({"moe_inputs": moe_inputs} if moe_inputs is not None else {}),
         )
 
     def prefill_fast_attn_pre(self, x: torch.Tensor):
@@ -370,9 +356,12 @@ class Block(nn.Module):
         return residual, x_pre, post, comb
 
     def prefill_fast_ffn_body(
-        self, x_pre: torch.Tensor, input_ids: torch.Tensor
+        self,
+        x_pre: torch.Tensor,
+        input_ids: torch.Tensor,
+        expert_load: Optional[ExpertLoadContext],
     ) -> torch.Tensor:
-        return self.ffn(x_pre, input_ids)
+        return self.ffn(x_pre, input_ids, expert_load=expert_load)
 
     def prefill_fast_ffn_post(
         self,
@@ -389,11 +378,12 @@ class Block(nn.Module):
         x: torch.Tensor,  # [B, 1, hc, dim]
         attn_metadata: "DSv4DecodeAttnMetadata",  # type: ignore[name-defined]
         input_ids: torch.Tensor,  # [B, 1]
+        expert_load: Optional[ExpertLoadContext],
         kv_cache=None,
         attn_fn=None,
-        *,
         _prepared_attn=None,
         _defer_ffn_post: bool = False,
+        routing_metadata: Optional[GateRoutingMetadata] = None,
     ):
         """Decode-only block forward — mirrors prefill ``forward`` but
         delegates attention to ``Attention.forward_decode``. Both paths share
@@ -404,23 +394,44 @@ class Block(nn.Module):
         the single authority; the DSpARK draft substitutes its non-causal
         fixed-block attention this way instead of copying the block body.
         """
+
         # Attention path
+        shared_input_quant = None
         if _prepared_attn is None:
             x = self._inject_engram(x)
             residual = x
-            x_pre, post, comb = self.attn_hc.pre(x)
+            x_pre, post, comb = self.attn_hc.pre(x, dbg_tag=None)
             # Framework RMSNorm wants 2D; attention consumes [B, q_len, dim].
             bsz, q_len, dim_ = x_pre.shape
             x_pre = self.attn_norm(x_pre.reshape(bsz * q_len, dim_)).view(
                 bsz, q_len, dim_
             )
         else:
-            residual, x_pre, post, comb = _prepared_attn
+            residual, x_pre, post, comb = _prepared_attn[:4]
+            if len(_prepared_attn) == 5:
+                shared_input_quant = _prepared_attn[4]
         if attn_fn is not None:
             attn_out = attn_fn(x_pre)
         else:
-            attn_out = self.attn.forward_decode(x_pre, attn_metadata, kv_cache=kv_cache)
-        fused_mhc = self._try_mega_mhc(attn_out, residual, post, comb)
+            attn_out = self.attn.forward_decode(
+                x_pre,
+                attn_metadata,
+                kv_cache=kv_cache,
+                **(
+                    {"shared_input_quant": shared_input_quant}
+                    if shared_input_quant is not None
+                    else {}
+                ),
+            )
+        moe_inputs = (
+            self.ffn.prepare_mhc_inputs(attn_out) if routing_metadata is None and type(self.ffn) is MoE else None
+        )
+        fused_mhc = (
+            self._try_mega_mhc(attn_out, residual, post, comb, **{'moe_inputs': moe_inputs} if moe_inputs is not None else {})
+        )
+        if fused_mhc is None:
+            # Merely obtaining the buffer views does not prepare their data.
+            moe_inputs = None
         x = (
             self.attn_hc.post(attn_out, residual, post, comb)
             if fused_mhc is None
@@ -430,14 +441,28 @@ class Block(nn.Module):
         # FFN path — MoE has no per-step state, reuse existing forward
         residual = x
         if fused_mhc is None:
-            x_pre, post, comb = self.ffn_hc.pre(x)
+            x_pre, post, comb = self.ffn_hc.pre(x, dbg_tag=None)
             bsz, q_len, dim_ = x_pre.shape
             x_pre = self.ffn_norm(x_pre.reshape(bsz * q_len, dim_)).view(
                 bsz, q_len, dim_
             )
         else:
             _, x_pre, post, comb = fused_mhc
-        ffn_out = self.ffn(x_pre, input_ids)
+        if moe_inputs is not None:
+            ffn_out = self.ffn(
+                x_pre, input_ids, expert_load=expert_load, mhc_inputs=moe_inputs
+            )
+        else:
+            ffn_out = (
+                self.ffn(x_pre, input_ids, expert_load=expert_load)
+                if routing_metadata is None
+                else self.ffn(
+                    x_pre,
+                    input_ids,
+                    expert_load=expert_load,
+                    routing_metadata=routing_metadata,
+                )
+            )
         if _defer_ffn_post:
             from rtp_llm.models_py.modules.dsv41.hc.decode_transition import (
                 PendingDecodePost,
@@ -453,8 +478,10 @@ class Block(nn.Module):
         input_ids: Optional[torch.Tensor],  # [T]
         positions: torch.Tensor,  # [T] int64
         cu_seqlens: torch.Tensor,  # [B+1] int64
+        expert_load: Optional[ExpertLoadContext],
         kv_cache=None,
         block_tables_by_type=None,
+        routing_metadata: Optional[GateRoutingMetadata] = None,
     ) -> torch.Tensor:
         """Prefill fast path for the FP8 production path.
 
@@ -473,6 +500,12 @@ class Block(nn.Module):
                 cu_seqlens,
                 kv_cache=kv_cache,
                 block_tables_by_type=block_tables_by_type,
+                **(
+                    {"routing_metadata": routing_metadata}
+                    if routing_metadata is not None
+                    else {}
+                ),
+                expert_load=expert_load,
             )
         return fast_call(
             x,
@@ -481,6 +514,12 @@ class Block(nn.Module):
             cu_seqlens,
             kv_cache=kv_cache,
             block_tables_by_type=block_tables_by_type,
+            **(
+                {"routing_metadata": routing_metadata}
+                if routing_metadata is not None
+                else {}
+            ),
+            expert_load=expert_load,
         )
 
     def _forward_prefill_fast_fp8(
@@ -489,8 +528,12 @@ class Block(nn.Module):
         input_ids: Optional[torch.Tensor],
         positions: torch.Tensor,
         cu_seqlens: torch.Tensor,
+        expert_load: Optional[ExpertLoadContext],
         kv_cache=None,
         block_tables_by_type=None,
+        routing_metadata: Optional[GateRoutingMetadata] = None,
+        _prepared_attn=None,
+        _defer_ffn_post: bool = False,
     ) -> torch.Tensor:
         """Validated FP8 prefill fast body.
 
@@ -506,9 +549,20 @@ class Block(nn.Module):
             ffn_hc_post,
         ) = self._prefill_fast_hc_impls()
 
-        residual = x
-        x_pre, post, comb = attn_hc_pre(x)
-        if self.attn.can_fuse_prefill_attn_norm_input_quant(
+        if _prepared_attn is None:
+            x = self._inject_engram(x)
+        if _prepared_attn is not None:
+            residual, x_pre, post, comb = _prepared_attn
+            attn_out = self.attn(
+                x_pre,
+                positions,
+                kv_cache=kv_cache,
+                block_tables_by_type=block_tables_by_type,
+            )
+        else:
+            residual = x
+            x_pre, post, comb = attn_hc_pre(x)
+        if _prepared_attn is None and self.attn.can_fuse_prefill_attn_norm_input_quant(
             x_pre, self.attn_norm.weight.data
         ):
             x_pre, shared_input_quant = self.attn.prefill_fused_attn_norm_input_quant(
@@ -523,7 +577,7 @@ class Block(nn.Module):
                 kv_cache=kv_cache,
                 block_tables_by_type=block_tables_by_type,
             )
-        else:
+        elif _prepared_attn is None:
             x_pre = _prefill_fast_norm(self.attn_norm, x_pre)
             attn_out = self.attn(
                 x_pre,
@@ -531,7 +585,16 @@ class Block(nn.Module):
                 kv_cache=kv_cache,
                 block_tables_by_type=block_tables_by_type,
             )
-        fused_mhc = self._try_mega_mhc(attn_out, residual, post, comb)
+        moe_inputs = (
+            self.ffn.prepare_mhc_inputs(attn_out)
+            if routing_metadata is None and type(self.ffn) is MoE
+            else None
+        )
+        fused_mhc = self._try_mega_mhc(
+            attn_out, residual, post, comb, moe_inputs=moe_inputs
+        )
+        if fused_mhc is None:
+            moe_inputs = None
         x = (
             attn_hc_post(attn_out, residual, post, comb)
             if fused_mhc is None
@@ -545,11 +608,36 @@ class Block(nn.Module):
             x_pre = _prefill_fast_norm(self.ffn_norm, x_pre)
         else:
             _, x_pre, post, comb = fused_mhc
-        ffn_out = self.ffn(x_pre, input_ids)
+        if moe_inputs is not None:
+            ffn_out = self.ffn(
+                x_pre, input_ids, expert_load=expert_load, mhc_inputs=moe_inputs
+            )
+        elif routing_metadata is None:
+            ffn_out = self.ffn(x_pre, input_ids, expert_load=expert_load)
+        else:
+            ffn_out = self.ffn(
+                x_pre,
+                input_ids,
+                expert_load=expert_load,
+                routing_metadata=routing_metadata,
+            )
+        if _defer_ffn_post:
+            from rtp_llm.models_py.modules.dsv41.hc.decode_transition import (
+                PendingDecodePost,
+            )
+
+            return PendingDecodePost(ffn_out, residual, post, comb, self.ffn_hc)
         return ffn_hc_post(ffn_out, residual, post, comb)
 
     def forward_prefill_ced_l20(
-        self, x, input_ids, positions, plan, *, kv_cache=None, block_tables_by_type=None
+        self,
+        x,
+        input_ids,
+        positions,
+        plan,
+        expert_load: Optional[ExpertLoadContext],
+        kv_cache=None,
+        block_tables_by_type=None,
     ):
         """Full L20 source writes, then compact queries and residual/FFN state."""
         from rtp_llm.models_py.modules.dsv41.fp8.attention import bind_attn_cache
@@ -573,25 +661,94 @@ class Block(nn.Module):
                     x_pre, positions, shared_quant
                 )
                 del shared_quant
-                residual, post, comb, input_ids = plan.compact_l20(
-                    self, residual, post, comb, input_ids
+                references = (
+                    plan.prepare_early_indexer(self.attn, self.ffn, x_pre)
+                    if plan.early_indexer
+                    else None
                 )
-                x_pre = plan.exchange.compact(x_pre)
-                qkv = qkv._replace(qr=plan.exchange.compact(qkv.qr))
-                common = plan.l20_query_metadata(common)
-                with bind_attn_cache(self.attn, cp_ctx=common.cp_ctx):
-                    attn_out = self.attn._prefill_query(
-                        x_pre, common, qkv, swa, swa_starts
+                if plan.early_indexer_fallback:
+                    with plan.candidate_publication(self.attn._shared_attention):
+                        attn_out = self.attn._prefill_query(
+                            x_pre, common, qkv, swa, swa_starts
+                        )
+                else:
+                    # Match the full source GEMM shape, then exchange only its
+                    # per-head weights instead of the normalized hidden rows.
+                    weight = self.attn.index_weights
+                    indexer_weights = (
+                        F.linear(x_pre, weight)
+                        if plan.exchange.send_sizes and any(plan.exchange.send_sizes)
+                        else x_pre.new_empty((x_pre.shape[0], weight.shape[0]))
                     )
+                    del x_pre
+                    residual, post, comb, input_ids = plan.compact_l20(
+                        self, residual, post, comb, input_ids
+                    )
+                    indexer_weights = plan.exchange.compact(indexer_weights)
+                    compact_qr = (
+                        None if qkv.qr is None else plan.exchange.compact(qkv.qr)
+                    )
+                    compact_qr_q = None
+                    if getattr(qkv, "qr_quantized", None) is not None:
+                        q8, sf = qkv.qr_quantized
+                        c_q8 = plan.exchange.compact(q8.view(torch.uint8)).view(
+                            q8.dtype
+                        )
+                        c_sf_rm = plan.exchange.compact(sf.contiguous())
+                        t_c = c_sf_rm.shape[0]
+                        padded_t = (t_c + 3) // 4 * 4
+                        c_sf = torch.empty_strided(
+                            (padded_t, c_sf_rm.shape[1]),
+                            (1, padded_t or 1),
+                            device=c_sf_rm.device,
+                            dtype=c_sf_rm.dtype,
+                        )
+                        if padded_t != t_c:
+                            c_sf = c_sf[:t_c]
+                        if t_c:
+                            c_sf.copy_(c_sf_rm)
+                        compact_qr_q = (c_q8, c_sf)
+                    if hasattr(qkv, "qr_quantized"):
+                        qkv = qkv._replace(qr=compact_qr, qr_quantized=compact_qr_q)
+                    else:
+                        qkv = qkv._replace(qr=compact_qr)
+                    common = plan.l20_query_metadata(common, self.attn.freqs_cis)
+                    shared = self.attn._shared_attention
+                    if references is not None:
+                        shared["ced_l20_references"] = references
+                    try:
+                        with bind_attn_cache(self.attn, cp_ctx=common.cp_ctx):
+                            attn_out = self.attn._prefill_query(
+                                None,
+                                common,
+                                qkv,
+                                swa,
+                                swa_starts,
+                                indexer_weights=indexer_weights,
+                            )
+                    finally:
+                        shared.pop("ced_l20_references", None)
+                    del indexer_weights
                 del qkv, swa
             finally:
                 self.attn._clear_compressor_pool_context()
+        # Stage0 can preserve its normal prepared MegaMoE inputs on fallback.
+        moe_inputs = (
+            self.ffn.prepare_mhc_inputs(attn_out)
+            if plan.early_indexer_fallback and type(self.ffn) is MoE
+            else None
+        )
         fused = self._try_mega_mhc(
             attn_out,
             residual,
             post,
             comb,
-            original_tokens=plan.original_context.chunk_length,
+            original_tokens=(
+                None
+                if plan.early_indexer_fallback
+                else plan.original_context.chunk_length
+            ),
+            **({"moe_inputs": moe_inputs} if moe_inputs is not None else {}),
         )
         x = attn_post(attn_out, residual, post, comb) if fused is None else fused[0]
         self._sync_after_first_cp_prefill_attention()
@@ -601,8 +758,19 @@ class Block(nn.Module):
             x_pre = _prefill_fast_norm(self.ffn_norm, x_pre)
         else:
             _, x_pre, post, comb = fused
-        with plan.router_projection(self.ffn):
-            ffn_out = self.ffn(x_pre, input_ids)
+        if plan.early_indexer_fallback:
+            routing = nullcontext()
+        elif plan.early_indexer:
+            routing = plan.original_native_routing(self.ffn)
+        else:
+            routing = plan.router_projection(self.ffn)
+        with routing:
+            if fused is not None and moe_inputs is not None:
+                ffn_out = self.ffn(
+                    x_pre, input_ids, expert_load=expert_load, mhc_inputs=moe_inputs
+                )
+            else:
+                ffn_out = self.ffn(x_pre, input_ids, expert_load=expert_load)
         return ffn_post(ffn_out, residual, post, comb), input_ids
 
     def forward(
@@ -611,8 +779,10 @@ class Block(nn.Module):
         input_ids: Optional[torch.Tensor],  # [T]
         positions: torch.Tensor,  # [T] int64
         cu_seqlens: torch.Tensor,  # [B+1] int64
+        expert_load: Optional[ExpertLoadContext],
         kv_cache=None,
         block_tables_by_type=None,
+        routing_metadata: Optional[GateRoutingMetadata] = None,
     ) -> torch.Tensor:
         """Flat per-block forward — accepts ``[T, hc, dim]`` hidden and 1D
         ``input_ids`` / ``positions`` / ``cu_seqlens``, matching the vLLM
@@ -627,20 +797,15 @@ class Block(nn.Module):
         to ``int(start_pos)``), so the single-request case is bit-equal
         to the pre-batched behavior.
         """
+
         # Engram updates all residual streams before the delayed mHC projection.
         x = self._inject_engram(x)
         # Attention path
         residual = x
-        x_pre, post, comb = self.attn_hc.pre(
-            x
-        )  # [T, dim], [T, hc, 1], [T, hc, hc]
+        x_pre, post, comb = self.attn_hc.pre(x, dbg_tag=None)  # [T, dim], [T, hc, 1], [T, hc, hc]
         shared_input_quant = None
         if (
-            isinstance(self.attn, AttentionFP8)
-            and getattr(self.attn, "v41_config", None) is not None
-            and self.attn.can_fuse_prefill_attn_norm_input_quant(
-                x_pre, self.attn_norm.weight.data
-            )
+            isinstance(self.attn, AttentionFP8) and getattr(self.attn, 'v41_config', None) is not None and self.attn.can_fuse_prefill_attn_norm_input_quant(x_pre, self.attn_norm.weight.data)
         ):
             x_pre, shared_input_quant = self.attn.prefill_fused_attn_norm_input_quant(
                 x_pre, self.attn_norm.weight.data, self.attn_norm.variance_epsilon
@@ -720,7 +885,9 @@ class Block(nn.Module):
                 attn_out = attn_out_padded.reshape(T, D)
             else:
                 attn_out = attn_out_padded[b_idx, s_idx]  # [T, dim]
-        fused_mhc = self._try_mega_mhc(attn_out, residual, post, comb)
+        fused_mhc = (
+            self._try_mega_mhc(attn_out, residual, post, comb)
+        )
         x = (
             self.attn_hc.post(attn_out, residual, post, comb)
             if fused_mhc is None
@@ -731,7 +898,7 @@ class Block(nn.Module):
         # FFN path
         residual = x
         if fused_mhc is None:
-            x_pre, post, comb = self.ffn_hc.pre(x)  # [T, dim], ...
+            x_pre, post, comb = self.ffn_hc.pre(x, dbg_tag=None)  # [T, dim], ...
             x_pre = self.ffn_norm(x_pre)  # [T, dim]
         else:
             _, x_pre, post, comb = fused_mhc
@@ -740,7 +907,16 @@ class Block(nn.Module):
             if input_ids is not None
             else torch.zeros(x.size(0), dtype=torch.long, device=x.device)
         )
-        ffn_out = self.ffn(x_pre, ffn_in_ids)  # [T, dim]
+        ffn_out = (
+            self.ffn(x_pre, ffn_in_ids, expert_load=expert_load)
+            if routing_metadata is None
+            else self.ffn(
+                x_pre,
+                ffn_in_ids,
+                expert_load=expert_load,
+                routing_metadata=routing_metadata,
+            )
+        )  # [T, dim]
         x = self.ffn_hc.post(ffn_out, residual, post, comb)  # [T, hc, dim]
         return x  # [T, hc, dim]
 

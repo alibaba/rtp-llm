@@ -11,7 +11,7 @@ namespace torch_ext {
 // the coarse threshold bin overflows the fixed candidate buffer.
 //
 // Contract:
-//   logits   : [num_rows, stride] float32, contiguous in stride
+//   logits   : [num_rows, stride] float32/bfloat16, contiguous in stride
 //   lengths  : [num_rows]         int32   — per-row valid count, clamped on
 //                                            device to [0, max_seq_len]; entries
 //                                            past the clamped length are -1
@@ -26,11 +26,34 @@ namespace torch_ext {
 //   * Only CUDA — ROCm path raises.
 //   * ``num_rows`` corresponds to ``B * S`` after flattening the leading
 //     dims of the indexer ``score [B, S, T_max]`` tensor.
+//   * BF16 values are promoted exactly to FP32 in registers; selection matches
+//     an explicit logits.float() with no full-sized FP32 temporary.
 void topk_v3(const torch::Tensor& logits,
              const torch::Tensor& lengths,
-             torch::Tensor& output,
-             torch::Tensor& workspace,
-             int64_t k,
-             int64_t max_seq_len);
+             torch::Tensor&       output,
+             torch::Tensor&       workspace,
+             int64_t              k,
+             int64_t              max_seq_len);
+
+// Same selection, then replace selected NaN/+inf/-inf entries with -1. Does
+// not refill filtered slots; this includes rows with length <= k.
+void dsv41_topk_v3_finite(const torch::Tensor& logits,
+                          const torch::Tensor& lengths,
+                          torch::Tensor&       output,
+                          torch::Tensor&       workspace,
+                          int64_t              k,
+                          int64_t              max_seq_len);
+
+// Select the original kernel family when executing only retained source rows.
+// Bounds and strides still describe the actual score tensor.
+void dsv41_topk_v3_with_reference(const torch::Tensor& scores,
+                                  const torch::Tensor& lengths,
+                                  torch::Tensor&       output,
+                                  torch::Tensor&       workspace,
+                                  int64_t              k,
+                                  int64_t              max_seq_len,
+                                  int64_t              reference_rows,
+                                  int64_t              reference_width,
+                                  bool                 filter_finite);
 
 }  // namespace torch_ext

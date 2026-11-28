@@ -314,6 +314,23 @@ protected:
             while (reader->Read(&response)) {}
             return reader->Finish();
         });
+        if (kind == Handler::PREFILL_LOCAL || kind == Handler::PREFILL_SINGLE_TOKEN) {
+            const bool returned = call.wait_for(std::chrono::seconds(2)) == std::future_status::ready;
+            if (!returned) {
+                client.TryCancel();
+            }
+            ASSERT_TRUE(returned) << "unsupported PD request must fail before execution";
+            const auto status = call.get();
+            ErrorDetailsPB details;
+            ASSERT_TRUE(details.ParseFromString(status.error_details())) << status.error_message();
+            EXPECT_EQ(details.error_code(), static_cast<int64_t>(ErrorCode::INVALID_PARAMS));
+            EXPECT_FALSE(response_call.get().ok());
+            EXPECT_EQ(polling.wait_for(std::chrono::milliseconds(0)), std::future_status::timeout);
+            EXPECT_EQ(engine->stream, nullptr);
+            EXPECT_EQ(engine->getCacheManager()->freeBlocksNum(), free_before);
+            EXPECT_TRUE(engine->scheduler().empty());
+            return;
+        }
         const bool reached_output = polling.wait_for(std::chrono::seconds(5)) == std::future_status::ready;
         const bool returned       = call.wait_for(std::chrono::seconds(2)) == std::future_status::ready;
         if (!returned) {
@@ -374,16 +391,16 @@ TEST_F(RpcHandlerLifecycleTest, LocalFailurePreservesPriorityPreemption) {
 TEST_F(RpcHandlerLifecycleTest, LocalExceptionUnwindsAndDiagnosesOnce) {
     runSynchronousHandler(Handler::LOCAL, OutputAction::THROW);
 }
-TEST_F(RpcHandlerLifecycleTest, PrefillNonPdFallbackCompletesThroughLocalHandler) {
+TEST_F(RpcHandlerLifecycleTest, PrefillNonPdRequestIsRejectedBeforeLocalHandler) {
     runSynchronousHandler(Handler::PREFILL_LOCAL, OutputAction::COMPLETE);
 }
-TEST_F(RpcHandlerLifecycleTest, PrefillSingleTokenFallsBackWithoutP2PHandoff) {
+TEST_F(RpcHandlerLifecycleTest, PrefillSingleTokenIsRejectedBeforeP2PHandoff) {
     runSynchronousHandler(Handler::PREFILL_SINGLE_TOKEN, OutputAction::COMPLETE);
 }
-TEST_F(RpcHandlerLifecycleTest, PrefillNonPdFallbackPreservesExecutionFailure) {
+TEST_F(RpcHandlerLifecycleTest, PrefillNonPdRequestDoesNotRunFailingExecutor) {
     runSynchronousHandler(Handler::PREFILL_LOCAL, OutputAction::FAIL);
 }
-TEST_F(RpcHandlerLifecycleTest, PrefillNonPdFallbackCleansUpAfterException) {
+TEST_F(RpcHandlerLifecycleTest, PrefillNonPdRequestDoesNotRunThrowingExecutor) {
     runSynchronousHandler(Handler::PREFILL_LOCAL, OutputAction::THROW);
 }
 TEST_F(RpcHandlerLifecycleTest, PrefillSuccessReturnsBeforeSchedulerWithoutCanceling) {

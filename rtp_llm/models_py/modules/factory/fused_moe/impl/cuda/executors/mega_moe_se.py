@@ -250,7 +250,7 @@ class MegaMoeSEExecutor(MegaMoeExecutor):
 
         args = (
             self.cfg.ep_size,
-            self.cfg.n_routed_experts,
+            self.cfg.physical_expert_num,
             self._mega_buf.num_max_tokens_per_rank,
             int(tokens),
             self.cfg.n_activated_experts,
@@ -267,7 +267,7 @@ class MegaMoeSEExecutor(MegaMoeExecutor):
             self._block_m(tokens),
         )
 
-    def _run_kernel(self, y, tokens):
+    def _run_kernel(self, y, tokens, expert_load=None):
         import deep_gemm
 
         kwargs = (
@@ -279,6 +279,8 @@ class MegaMoeSEExecutor(MegaMoeExecutor):
                 )
             }
         )
+        if expert_load is not None:
+            kwargs["cumulative_local_expert_recv_stats"] = expert_load.expert_token_counts
         getattr(deep_gemm, self._kernel_name)(
             y,
             (self._mega_l1_w, self._mega_l1_sf),
@@ -374,7 +376,7 @@ class MegaMoeFusedBackend(MegaMoeExecutor):
                 f"is smaller than input tokens={tokens}"
             )
 
-    def _run_kernel(self, y, tokens):
+    def _run_kernel(self, y, tokens, expert_load=None):
         import deep_gemm
 
         deep_gemm.fp8_fp4_mega_moe_fused(

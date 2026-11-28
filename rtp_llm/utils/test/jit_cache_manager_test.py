@@ -745,6 +745,32 @@ class ScopeTest(JitCacheTestBase):
         self.assertNotEqual(scope.scope_id, online.scope_id)
         self.assertIn("flashinfer", [item.name for item in online.components])
 
+    def test_flashinfer_scope_tracks_patched_source_location_with_same_cubins(self):
+        cubin = "/cache/flashinfer_cubin/site-packages/flashinfer_cubin/__init__.py"
+        previous = "/cache/flashinfer_python-1.0/site-packages/flashinfer/__init__.py"
+        patched = "/cache/flashinfer_python-1.0__source_digest/site-packages/flashinfer/__init__.py"
+
+        def resolve_at(source):
+            def find_spec(package):
+                return types.SimpleNamespace(
+                    origin=source if package == "flashinfer" else cubin
+                )
+
+            with mock.patch.object(
+                jit.importlib.util, "find_spec", side_effect=find_spec
+            ):
+                return self.resolve()
+
+        old_scope = resolve_at(previous)
+        patched_scope = resolve_at(patched)
+        self.assertNotEqual(old_scope.scope_id, patched_scope.scope_id)
+        self.assertNotEqual(old_scope.root, patched_scope.root)
+        self.assertEqual(patched_scope.scope_id, resolve_at(patched).scope_id)
+        self.assertEqual(
+            [item.name for item in old_scope.components],
+            [item.name for item in patched_scope.components],
+        )
+
     def test_artifact_rules_fork_scope_from_incomplete_old_snapshots(self):
         current = self.scope_id()
         old_components = tuple(

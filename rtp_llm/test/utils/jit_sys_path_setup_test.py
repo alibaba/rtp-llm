@@ -15,6 +15,43 @@ class FlashinferCacheTest(unittest.TestCase):
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
 
+    def test_same_version_patch_gets_a_distinct_stable_copy(self):
+        source = self.root / "pip_cuda13_torch_flashinfer" / "flashinfer"
+        source.mkdir(parents=True)
+        kernel = source / "kernel.py"
+        kernel.write_text("allocate = 'make_fragment'\n")
+        cache = self.root / "cache"
+        cache.mkdir()
+        with patch.object(
+            setup, "get_package_info", return_value=("0.6.9", str(source))
+        ):
+            old = Path(setup.copy_package_with_lock("flashinfer", cache))
+            kernel.write_text("allocate = 'make_rmem_tensor'\n")
+            new = Path(setup.copy_package_with_lock("flashinfer", cache))
+            self.assertNotEqual(old, new)
+            self.assertIn("make_fragment", (old / "flashinfer/kernel.py").read_text())
+            self.assertIn(
+                "make_rmem_tensor", (new / "flashinfer/kernel.py").read_text()
+            )
+            self.assertEqual(
+                str(new), setup.copy_package_with_lock("flashinfer", cache)
+            )
+
+    def test_source_identity_ignores_action_path_and_bytecode(self):
+        sources = [
+            self.root / action / "pip_flashinfer" / "flashinfer"
+            for action in ("a", "b")
+        ]
+        for source in sources:
+            source.mkdir(parents=True)
+            (source / "kernel.py").write_text("allocate = 'make_rmem_tensor'\n")
+        (sources[0] / "__pycache__").mkdir()
+        (sources[0] / "__pycache__/kernel.pyc").write_bytes(b"cached")
+        self.assertEqual(
+            setup._cache_key("flashinfer", "0.6.9", sources[0]),
+            setup._cache_key("flashinfer", "0.6.9", sources[1]),
+        )
+
     def make_op(self, relative, compiler=None):
         op = self.root / relative
         op.mkdir(parents=True)

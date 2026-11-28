@@ -17,6 +17,7 @@ from rtp_llm.models_py.modules.factory.fused_moe.defs.fused_moe import FusedMoe
 from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.strategy.fp8_per_block import (
     CudaFp8PerBlockNoDPMaskedStrategy,
 )
+from rtp_llm.models_py.utils.expert_load_monitor import ExpertLoadContext
 from rtp_llm.ops import MoeConfig, ParallelismConfig
 from rtp_llm.utils.model_weight import W
 
@@ -150,12 +151,16 @@ class DeepGemmMaskedExecutorV2CudaGraphTest(unittest.TestCase):
 
     def test_replay_with_updated_hidden_states_and_routing(self) -> None:
         static_hidden, static_weights, static_ids = self._make_inputs(offset=0)
+        counts = torch.zeros(self.NUM_EXPERTS, device="cuda", dtype=torch.int32)
+        expert_load = ExpertLoadContext(counts)
 
         # Warm DeepGEMM/Triton compilation outside capture.
         warmup_stream = torch.cuda.Stream()
         warmup_stream.wait_stream(torch.cuda.current_stream())
         with torch.cuda.stream(warmup_stream):
-            self.fused_moe(static_hidden, static_weights, static_ids)
+            self.fused_moe(
+                static_hidden, static_weights, static_ids, expert_load=expert_load
+            )
         torch.cuda.current_stream().wait_stream(warmup_stream)
         torch.cuda.synchronize()
 
@@ -163,7 +168,9 @@ class DeepGemmMaskedExecutorV2CudaGraphTest(unittest.TestCase):
         graph_output = None
         try:
             with torch.cuda.graph(graph):
-                graph_output = self.fused_moe(static_hidden, static_weights, static_ids)
+                graph_output = self.fused_moe(
+                    static_hidden, static_weights, static_ids, expert_load=expert_load
+                )
 
             replay_hidden, replay_weights, replay_ids = self._make_inputs(
                 offset=2, skewed_routing=True
@@ -177,11 +184,19 @@ class DeepGemmMaskedExecutorV2CudaGraphTest(unittest.TestCase):
             static_hidden.copy_(replay_hidden)
             static_weights.copy_(replay_weights)
             static_ids.copy_(replay_ids)
+            counts.zero_()
             graph.replay()
             captured = graph_output.clone()
+            expected_counts = torch.bincount(
+                replay_ids.flatten(), minlength=self.NUM_EXPERTS
+            ).to(counts.dtype)
+            torch.testing.assert_close(counts, expected_counts)
 
-            eager = self.fused_moe(static_hidden, static_weights, static_ids)
+            eager = self.fused_moe(
+                static_hidden, static_weights, static_ids, expert_load=expert_load
+            )
             torch.testing.assert_close(captured, eager, rtol=2e-2, atol=2e-2)
+            torch.testing.assert_close(counts, 2 * expected_counts)
         finally:
             torch.cuda.synchronize()
             del graph_output

@@ -346,12 +346,11 @@ class DataType:
         ...
 
 class EPLBConfig:
-    balance_method: str
-    eplb_balance_layer_per_step: int
-    eplb_control_step: int
-    eplb_force_repack: int
+    eplb_rearrange_after_prefill: bool
+    eplb_rearrange_p2p_groups: int
+    eplb_metrics_report_interval: int
+    eplb_metrics_snapshot_max_files: int
     eplb_stats_window_size: int
-    eplb_test_mode: bool
     eplb_update_time: int
     redundant_expert: int
     def __getstate__(self) -> tuple:
@@ -445,6 +444,7 @@ class GrammarConfig:
     num_workers: int
     terminate_without_stop_token: bool
     tokenizer_info_json: str
+    update_timeout_ms: int
 
     def __getstate__(self) -> tuple:
         ...
@@ -1631,7 +1631,6 @@ class RopeStyle:
 class RuntimeConfig:
     enable_linear_replay: bool
     output_dispatcher_worker_count: int
-    max_block_size_per_item: int
     max_generate_batch_size: int
     model_name: str
     reserve_runtime_mem_mb: int
@@ -1642,6 +1641,7 @@ class RuntimeConfig:
     model_warm_up: bool
     worker_addrs: list[str]
     worker_grpc_addrs: list[str]
+    shutdown_worker_grpc_addrs: list[str]
     def __getstate__(self) -> tuple:
         ...
     def __init__(self) -> None:
@@ -1674,6 +1674,11 @@ class SpeculativeExecutionConfig:
     model_type: str
     quantization: str
     tree_decode_config: str
+    sp_dspark_confidence_mode: str
+    sp_dspark_confidence_temperature: float
+    sp_dspark_verify_budget: int
+    sp_dspark_verify_mode: str
+    sp_dspark_verify_budget_mode: str
     def __getstate__(self) -> tuple:
         ...
     def __init__(self) -> None:

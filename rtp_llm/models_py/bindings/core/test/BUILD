@@ -57,6 +57,7 @@ cc_test(
     name = "generic_sampler_batch_fallback_test",
     srcs = ["GenericSamplerBatchFallbackTest.cc"],
     deps = [
+        "//rtp_llm/models_py/bindings/core:sampling_params_hdr",
         "//rtp_llm/models_py/bindings/core:generic_sampler_fallback_test_lib",
         "@com_google_googletest//:gtest_main",
     ] + torch_deps(),
@@ -216,4 +217,21 @@ cc_test_wrapper(
         "H20_CU13",
         "MI308X-ROCM7",
     ],
+)
+
+# CPU coverage for the sampler's temperature-folding conditions and scale.
+cc_test(
+    name = "sample_temperature_test",
+    srcs = ["SampleTemperatureTest.cc"],
+    deps = [
+        # Exports SampleTemperature.h as a header-only std library.
+        "//rtp_llm/models_py/bindings/core:common_defines",
+        "@com_google_googletest//:gtest_main",
+    ],
+    copts = copts(),
+    env = {
+        "CUDA_VISIBLE_DEVICES": "",
+        "GPU_COUNT": "0",
+    },
+    tags = ["cpu"],
 )

@@ -100,12 +100,15 @@ struct DSparkRoundState {
     torch::Tensor committed_ends;
     torch::Tensor position_bases;
     torch::Tensor engram_windows;
+    // Optional round-owned tokens from the fused CUDA round-head kernel.
+    torch::Tensor proposal_tokens;
 };
 
 struct DSparkProposeInputBuffers {
     torch::Tensor combo_tokens;
     torch::Tensor input_lengths;
     torch::Tensor lm_output_indexes;
+    int64_t       query_width = 0;
 };
 
 void prepareDSparkProposeInput(GptModelInputs&            draft_input,

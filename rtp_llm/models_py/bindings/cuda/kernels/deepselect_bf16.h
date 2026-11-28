@@ -19,4 +19,38 @@ bool deepselect_bf16_available();
 // and short-row NaN in its fused remapping kernel.
 void deepselect_bf16(const torch::Tensor& logits, const torch::Tensor& ends, torch::Tensor& output);
 
+// Dense token K512 with the same storage/bounds contract as above. NaN ranks
+// like +inf instead of invalidating the whole row. When filter_finite is true,
+// selected NaN/+inf/-inf become -1, including short rows. When false, callers
+// must filter selected nonfinite scores before publishing token indices.
+void deepselect_bf16_dense(const torch::Tensor& logits,
+                           const torch::Tensor& ends,
+                           torch::Tensor&       output,
+                           bool                 filter_finite);
+
+// Dense BF16 K512 with ascending token IDs, using the upstream index epilogue
+// inside the selecting CTA. NaN ranks like +inf. Short rows return the visible
+// prefix followed by -1. Callers must filter nonfinite scores before publishing.
+void deepselect_bf16_dense_sorted(const torch::Tensor& logits, const torch::Tensor& ends, torch::Tensor& output);
+
+// Complete candidate-block K2048: ascending distinct IDs in the valid prefix,
+// followed by -1 for short rows. NaN ranks like +inf; no finite filtering.
+// The last visible block is always included (replaces the greatest selected ID
+// if absent), matching complete decode candidate publication. Same BF16 input
+// alignment/ends contract as above; output is int32 [M,2048].
+void deepselect_bf16_candidates(const torch::Tensor& scores, const torch::Tensor& ends, torch::Tensor& output);
+
+// Draft selection support: FP32 [B,V] logits with unit inner stride, B <= 65535,
+// native K in {512,1024,4096}, V >= K, padded V < 2^23, CUDA SM100/SM103.
+bool draft_markov_topk_bf16_supported(const torch::Tensor& logits, int64_t k);
+
+// Form BF16 corrected scores, select K, then divide selected values by temperature.
+// Bias is contiguous BF16 [B,V]; temperature is contiguous FP32 [B], finite and
+// positive. All tensors share a device. Scores may contain -INF masks but no NaN.
+// Returns FP32 values and distinct int32 token IDs [B,K] in unspecified order.
+std::tuple<torch::Tensor, torch::Tensor> draft_markov_topk_bf16(const torch::Tensor& logits,
+                                                                const torch::Tensor& markov_bias,
+                                                                const torch::Tensor& temperature,
+                                                                int64_t              k);
+
 }  // namespace torch_ext

@@ -1,8 +1,10 @@
+#include "rtp_llm/models_py/bindings/cuda/kernels/expert_load.h"
 #include "rtp_llm/models_py/bindings/RegisterOps.h"
 #include "rtp_llm/models_py/bindings/cuda/RegisterBaseBindings.hpp"
 #include "rtp_llm/models_py/bindings/cuda/RegisterAttnOpBindings.hpp"
 #include "rtp_llm/models_py/bindings/cuda/Bf16GemmOp.h"
 #include "rtp_llm/models_py/bindings/common/CpuTpStatus.h"
+#include "rtp_llm/models_py/bindings/cuda/kernels/expert_load.h"
 
 #if defined(ENABLE_FP4)
 #include "rtp_llm/models_py/bindings/cuda/kernels/scaled_fp4_quant.h"
@@ -14,6 +16,7 @@
 namespace rtp_llm {
 
 void registerPyModuleOps(py::module& rtp_ops_m) {
+    rtp_ops_m.def("record_expert_load", &recordExpertLoad, py::arg("ids"), py::arg("expert_token_counts"));
     rtp_ops_m.def("cpu_status_size", &cpu_status_size, py::arg("world_size") = 2);
     rtp_ops_m.def(
         "cpu_status_initialize",
@@ -37,6 +40,19 @@ void registerPyModuleOps(py::module& rtp_ops_m) {
                   "cuBLAS BF16 x BF16 GEMM with FP32 accumulation and FP32 output",
                   py::arg("input"),
                   py::arg("weight"));
+    rtp_ops_m.def("cublas_gemm_bf16_bf16_fp32_packed",
+                  &torch_ext::cublas_gemm_bf16_bf16_fp32_packed,
+                  "Project contiguous BF16 packet rows into FP32 output columns",
+                  py::arg("input"),
+                  py::arg("weights"),
+                  py::arg("output"));
+
+    rtp_ops_m.def("cublas_gemm_bf16_bf16_fp32_packed",
+                  &torch_ext::cublas_gemm_bf16_bf16_fp32_packed,
+                  "Project contiguous BF16 packet rows into FP32 output columns",
+                  py::arg("input"),
+                  py::arg("weights"),
+                  py::arg("output"));
 
     rtp_ops_m.def("per_tensor_quant_fp8",
                   &per_tensor_quant_fp8,

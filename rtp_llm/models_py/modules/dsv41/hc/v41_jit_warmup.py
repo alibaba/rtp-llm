@@ -4,9 +4,12 @@ The pinned DeepGEMM 2.8.0 mega_mhc implementation specializes on hidden,
 split count, SM count and output modes; M is a runtime argument. The split
 planner below mirrors csrc/apis/mega_mhc.hpp and layout/mega_mhc.cuh.
 TileKernels norm_fn, split_mixes, sinkhorn, apply_mix and post likewise use
-T.dynamic for M, so one launch covers all prefill lengths for a configuration.
+T.dynamic for M; norm_fn needs one launch per reachable split count.
 The small-prenorm DG GEMM uses fixed split16, but RTP's Triton reduction has
-TOKENS constexpr: every reachable M <= 64 needs its own reduction variant.
+TOKENS constexpr: every reachable M <= 512 needs its own reduction variant
+(<=64 with an explicit TileLang backend). Fused prenorm uses its runtime
+wrapper's physical-SM split heuristic, independently of the DeepGEMM budget,
+and needs one launch for each reachable split key.
 
 Only disposable copies of HC units/weights are executed. No live pre_mix_out,
 predecessor reference, weight tensor cache attribute or KV cache is modified.
@@ -16,15 +19,21 @@ existing eager preparation for DeepGEMM's per-stream split barriers.
 
 from __future__ import annotations
 
+import importlib
 import logging
 import math
+import os
 from functools import partial
 
 import torch
 
 from rtp_llm.models_py.modules.dsv41 import dsv4_kernel_jit_warmup as common
 from rtp_llm.models_py.modules.dsv41.hc import v41_mega_mhc, v41_prenorm
-from rtp_llm.models_py.modules.dsv41.hc.delayed import DelayedHCUnit, _tile_ops
+from rtp_llm.models_py.modules.dsv41.hc.delayed import (
+    DelayedHCUnit,
+    _tile_ops,
+    can_fuse_big_pre,
+)
 
 _WARMED_KEYS: set[tuple] = set()
 
@@ -123,7 +132,42 @@ def _mega_representative_ms(max_m, num_sms, hidden=5120):
 
 def _small_prenorm_ms(max_m):
     # DG's M is runtime, but _reduce_prenorm_kernel.TOKENS is constexpr.
-    return tuple(range(1, min(max(int(max_m), 0), 64) + 1))
+    return tuple(
+        range(1, min(max(int(max_m), 0), v41_prenorm.max_supported_tokens()) + 1)
+    )
+
+
+def _fused_pre_warmup_specs(max_m: int, k_value: int) -> tuple[tuple[int, int], ...]:
+    """Reuse runtime split selection; DG's configured SM budget is unrelated."""
+    if max_m <= 0:
+        return ()
+    _tile_ops()
+    fused_pre = importlib.import_module(
+        "rtp_llm.models_py.3rdparty.tile_kernels.modeling.mhc.ops.pre_big_fuse"
+    )
+    seen, specs = set(), []
+    for tokens in range(1, int(max_m) + 1, 64):
+        splits = fused_pre._compute_num_split(64, k_value, (tokens + 63) // 64)
+        if splits not in seen:
+            seen.add(splits)
+            specs.append((splits, tokens))
+        if splits == 1:
+            break
+    return tuple(specs)
+
+
+def _tilelang_norm_ms(max_m, hidden, device, *, use_small):
+    min_m = 65 if use_small else 1
+    if int(max_m) < min_m:
+        return ()
+    _tile_ops()
+    norm = importlib.import_module(
+        "rtp_llm.models_py.3rdparty.tile_kernels.modeling.mhc.ops.norm_fn"
+    )
+    index = device.index if device.index is not None else torch.cuda.current_device()
+    return norm._tilelang_representative_ms(
+        max_m, hidden, norm._tilelang_device_num_sms(index), min_m=min_m
+    )
 
 
 def _clone_unit(source, device):
@@ -146,6 +190,11 @@ def _launch_small_prenorm(unit, tokens, device):
         raise RuntimeError("V4.1 HC warmup small prenorm rejected a reachable shape")
 
 
+def _launch_tilelang_norm(unit, tokens, device):
+    residual = torch.ones((1, tokens, 4, unit.dim), dtype=torch.bfloat16, device=device)
+    _tile_ops().mhc_pre_norm_fn(residual, unit.fn, None, unit.norm_eps, n_splits=1)
+
+
 def _launch_tilelang_chain(unit, tokens, device, *, include_norm):
     ops = _tile_ops()  # Initializes TileLang/libz3/TVM environment before imports.
     residual = torch.ones((1, tokens, 4, unit.dim), dtype=torch.bfloat16, device=device)
@@ -161,6 +210,25 @@ def _launch_tilelang_chain(unit, tokens, device, *, include_norm):
     # The delayed collapse/final head uses this same apply_mix specialization.
     hidden = ops.mhc_pre_apply_mix(residual, pre)
     ops.mhc_post(hidden, residual, post, comb, out=residual)
+
+
+def _launch_fused_pre(unit, tokens, device):
+    residual = torch.ones((1, tokens, 4, unit.dim), dtype=torch.bfloat16, device=device)
+    previous = torch.full((1, tokens, 4), 0.25, dtype=torch.float32, device=device)
+    use_deepgemm = tokens <= v41_prenorm.max_supported_tokens()
+    _tile_ops().mhc_pre_big_fuse(
+        residual,
+        unit.fn,
+        unit.scale,
+        unit.base,
+        unit.norm_eps,
+        unit.hc_eps,
+        unit.hc_eps,
+        2.0,
+        unit.hc_sinkhorn_iters,
+        previous_pre_mix=previous,
+        gemm_backend="deepgemm" if use_deepgemm else None,
+    )
 
 
 def _clone_pair(pair, device):
@@ -195,6 +263,9 @@ def _launch_mega(pair, tokens, device):
         is None
     ):
         raise RuntimeError("V4.1 HC warmup mega_mhc rejected a reachable shape")
+    v41_mega_mhc.try_fused_post_pre(
+        hidden, residual, post, comb, previous, next_hc, norm, output_fp8=True
+    )
 
 
 @torch.inference_mode()
@@ -216,9 +287,25 @@ def warmup_v41_hc_jit(v4, *, max_m, device):
         return
     small_enabled = v41_prenorm._has_prenorm_gemm()
     mega_enabled = bool(pairs) and v41_mega_mhc._get_mega_mhc() is not None
-    num_sms = common._get_deep_gemm_num_sms(device) if mega_enabled else 0
+    fused_enabled = can_fuse_big_pre()
+    fused_deepgemm = fused_enabled and v41_prenorm.max_supported_tokens() > 64
+    mega_num_sms = common._get_deep_gemm_num_sms(device) if mega_enabled else 0
     small_ms = _small_prenorm_ms(max_m) if small_enabled else ()
-    mega_ms = _mega_representative_ms(int(max_m), num_sms) if mega_enabled else ()
+    mega_ms = _mega_representative_ms(int(max_m), mega_num_sms) if mega_enabled else ()
+    fused_specs = {
+        config: _fused_pre_warmup_specs(int(max_m), source.dim * source.hc_mult)
+        for config, source in units.items()
+        if fused_deepgemm and source.dim == 5120
+    }
+    tile_ms = {
+        config: _tilelang_norm_ms(
+            max_m,
+            source.dim * source.hc_mult,
+            device,
+            use_small=small_enabled and source.dim == 5120,
+        )
+        for config, source in units.items()
+    }
     stream = torch.cuda.current_stream(device)
     key = (
         str(device),
@@ -228,7 +315,11 @@ def warmup_v41_hc_jit(v4, *, max_m, device):
         int(max_m),
         small_ms,
         mega_ms,
-        num_sms,
+        mega_num_sms,
+        tuple(sorted(fused_specs.items())),
+        tuple(sorted(tile_ms.items())),
+        fused_enabled,
+        os.environ.get("DSV4_MHC_PRE_GEMM_BACKEND", ""),
     )
     if key in _WARMED_KEYS:
         return
@@ -262,18 +353,42 @@ def warmup_v41_hc_jit(v4, *, max_m, device):
                         ),
                         device=device,
                     )
+            norm_ms = tile_ms[config]
             common._run_tilelang_warmup_launch_with_retry(
                 "V41 HC TileLang",
                 f"config={config}",
                 partial(
                     _launch_tilelang_chain,
                     unit,
-                    min(int(max_m), 65),
+                    norm_ms[0] if norm_ms else 1,
                     device,
-                    include_norm=not use_small or int(max_m) > 64,
+                    include_norm=bool(norm_ms),
                 ),
                 device=device,
             )
+            for tokens in norm_ms[1:]:
+                common._run_tilelang_warmup_launch_with_retry(
+                    "V41 HC TileLang prenorm",
+                    f"config={config} m={tokens}",
+                    partial(_launch_tilelang_norm, unit, tokens, device),
+                    device=device,
+                )
+            if fused_enabled and unit.dim == 5120:
+                if fused_deepgemm:
+                    fused_ms = tuple(tokens for _, tokens in fused_specs[config])
+                else:
+                    # Explicit TileLang backend: DG only at M<=64, followed
+                    # by the runtime-M TileLang single-split specialization.
+                    fused_ms = ((1,) if use_small else ()) + (
+                        (65,) if int(max_m) > 64 else ()
+                    )
+                for tokens in fused_ms:
+                    common._run_tilelang_warmup_launch_with_retry(
+                        "V41 HC fused pre",
+                        f"config={config} m={tokens}",
+                        partial(_launch_fused_pre, unit, tokens, device),
+                        device=device,
+                    )
             del unit
             common._sync_cuda(device)
             common._release_cuda_cache(device)

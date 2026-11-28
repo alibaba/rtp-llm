@@ -381,7 +381,6 @@ grpc::Status DecodeRpcServer::BatchGenerateCall(grpc::ServerContext*        cont
     std::unordered_set<int64_t> request_ids;
     bool                        all_pd            = true;
     bool                        master_admitted   = false;
-    bool                        batch_has_unbounded_request = false;
     int64_t                     batch_deadline_ms = entry_ms;
     BatchGenerateInputPB        effective;
     for (const auto& item : request->inputs()) {
@@ -391,28 +390,27 @@ grpc::Status DecodeRpcServer::BatchGenerateCall(grpc::ServerContext*        cont
             return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "batch requires distinct positive request_ids");
         if (prefillAddress(item) != address)
             return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "batch items require the same Prefill address");
-        // Prefill's local batch path owns multimodal preprocessing and execution.
-        all_pd          = all_pd && !multimodal && (item.enqueued_by_master() || checkPDSupport(item).supported);
+        const auto support = checkPDSupport(item);
+        if (!support.supported) {
+            return serializeErrorMsg(std::to_string(item.request_id()),
+                                     QueryConverter::transRequestInfo(item.request_info()),
+                                     {ErrorCode::INVALID_PARAMS, support.reason});
+        }
+        all_pd = all_pd && !multimodal;
         master_admitted = master_admitted || item.enqueued_by_master();
         auto* copy      = effective.add_inputs();
         copy->CopyFrom(item);
         const auto timeout = clampRpcTimeoutMsToInt32(configuredRpcTimeoutMs(
             item.generate_config().timeout_ms(), maga_init_params_.pd_sep_config.max_rpc_timeout_ms));
         copy->mutable_generate_config()->set_timeout_ms(timeout);
-        batch_has_unbounded_request = batch_has_unbounded_request || timeout == 0;
         batch_deadline_ms = std::max(batch_deadline_ms, entry_ms + (timeout > 0 ? timeout : kDefaultRpcTimeoutMs));
     }
     const auto client_cancelled = [context]() { return context && context->IsCancelled(); };
     const bool single_dp        = maga_init_params_.parallelism_config.dp_size == 1;
     if ((!all_pd || !single_dp) && !master_admitted) {
-        // Match single-request fallback, while retaining the existing batch result contract.
-        for (auto& item : *effective.mutable_inputs())
-            item.mutable_generate_config()->set_can_use_pd_separation(false);
-        return prefill_server_caller_->forwardBatchGenerate(
-            effective, response, address, batch_has_unbounded_request ? 0 : batch_deadline_ms, client_cancelled);
+        return serializeErrorMsg("batch", {ErrorCode::INVALID_PARAMS,
+                                          "PD batch requires text-only inputs and a single Decode DP rank"});
     }
-    // Preserve client semantics before adding P2P-only keys, groups and handoff timeouts.
-    const auto fallback_request = effective;
     struct BatchContextGuard {
         PDCancelRegistry&                             registry;
         EngineBase&                                   engine;
@@ -424,7 +422,6 @@ grpc::Status DecodeRpcServer::BatchGenerateCall(grpc::ServerContext*        cont
         size_t                                        enqueued_stream_count = 0;
         bool                                          completed             = false;
         bool                                          cleaned               = false;
-        bool                                          forwarded             = false;
         ~BatchContextGuard() {
             cleanup();
         }
@@ -477,10 +474,7 @@ grpc::Status DecodeRpcServer::BatchGenerateCall(grpc::ServerContext*        cont
                 // Resume after any partial submission without enqueueing a stream twice.
                 for (size_t i = enqueued_stream_count; i < streams.size(); ++i) {
                     cleanup([&] {
-                        if (forwarded)
-                            streams[i]->finishWithoutGenerate();
-                        else
-                            engine.enqueue(streams[i]);
+                        engine.enqueue(streams[i]);
                     });
                 }
             }
@@ -618,55 +612,6 @@ grpc::Status DecodeRpcServer::BatchGenerateCall(grpc::ServerContext*        cont
                 prefill_request, &ack, address, batch_deadline_ms, client_cancelled);
             if (client_cancelled())
                 return guard.status = grpcStatusFromErrorInfo({ErrorCode::CANCELLED, "batch cancelled"});
-            if (status.error_code() == grpc::StatusCode::UNIMPLEMENTED && !master_admitted) {
-                // UNIMPLEMENTED admits no P2P items, but the request is still live.
-                // Keep the control records and contexts until the forwarded RPC returns:
-                // cleanup here would publish CANCELLED and disable downstream Cancel.
-                BatchGenerateInputPB forwarded;
-                for (const auto& original : fallback_request.inputs()) {
-                    if (!attempted.count(original.request_id()))
-                        continue;
-                    auto* item = forwarded.add_inputs();
-                    item->CopyFrom(original);
-                    auto* config = item->mutable_generate_config();
-                    config->set_can_use_pd_separation(false);
-                    if (config->timeout_ms() > 0) {
-                        config->set_timeout_ms(clampRpcTimeoutMsToInt32(
-                            std::max<int64_t>(1, entry_ms + config->timeout_ms() - currentTimeMs())));
-                    }
-                }
-                BatchGenerateOutputsPB forwarded_response;
-                guard.forwarded = true;
-                guard.status =
-                    prefill_server_caller_->forwardBatchGenerate(forwarded,
-                                                                 &forwarded_response,
-                                                                 address,
-                                                                 batch_has_unbounded_request ? 0 : batch_deadline_ms,
-                                                                 client_cancelled);
-                if (guard.status.ok() && forwarded_response.results_size() != forwarded.inputs_size())
-                    guard.status = grpc::Status(grpc::StatusCode::INTERNAL, "Prefill fallback result size mismatch");
-                if (guard.status.ok()) {
-                    for (int i = 0; i < forwarded.inputs_size(); ++i)
-                        response->mutable_results(response_indices.at(forwarded.inputs(i).request_id()))
-                            ->Swap(forwarded_response.mutable_results(i));
-                }
-                // These Decode streams were only prepared, never submitted to the engine.
-                // Mirror the actual result before releasing them and publishing completion.
-                for (const auto& stream : guard.streams) {
-                    const auto index = response_indices.at(stream->generateInput()->request_id);
-                    if (!guard.status.ok()) {
-                        const auto error = errorInfoFromGrpcStatus(guard.status);
-                        stream->reportError(error.code(), error.ToString());
-                    } else if (index < response->results_size() && response->results(index).has_error_info()) {
-                        const auto& error = response->results(index).error_info();
-                        stream->reportError(transRPCErrorCode(error.error_code()), error.error_message());
-                    }
-                    stream->finishWithoutGenerate();
-                }
-                guard.enqueued_stream_count = guard.streams.size();
-                guard.completed             = guard.status.ok() && !client_cancelled();
-                return guard.status;
-            }
             std::unordered_set<int64_t> accepted;
             if (status.ok() && ack.batch_id() == prefill_request.batch_id()) {
                 for (const auto& success : ack.successes())
@@ -691,6 +636,10 @@ grpc::Status DecodeRpcServer::BatchGenerateCall(grpc::ServerContext*        cont
                     && !response->results(response_indices.at(request_id)).has_error_info()) {
                     fail_item(request_id,
                               status.ok() ? ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "Prefill batch ACK mismatch") :
+                              status.error_code() == grpc::StatusCode::UNIMPLEMENTED ?
+                                            ErrorInfo(ErrorCode::INVALID_PARAMS,
+                                                      "PD batch inference requires single-DP Prefill admission; "
+                                                      "Prefill local decode fallback is unsupported") :
                                             errorInfoFromGrpcStatus(status));
                 }
             }
@@ -825,9 +774,13 @@ grpc::Status DecodeRpcServer::GenerateStreamCall(grpc::ServerContext*           
     // already entered the P2P path, so Decode must attach to that handoff.
     const bool needs_prefill_multimodal_processing = request->multimodal_inputs_size() > 0 && !request->has_v41_inputs()
                                                      && !request->has_multimodal_token_layout() && !mm_processor_;
-    const bool pd_separation =
-        request->enqueued_by_master() || (checkPDSupport(*request).supported && !needs_prefill_multimodal_processing);
-    if (pd_separation) {
+    const auto support = checkPDSupport(*request);
+    if (!support.supported || needs_prefill_multimodal_processing) {
+        return serializeErrorMsg(std::to_string(request->request_id()),
+                                 QueryConverter::transRequestInfo(request->request_info()),
+                                 {ErrorCode::INVALID_PARAMS,
+                                  support.supported ? "PD requires frontend-expanded multimodal inputs" : support.reason});
+    }
         std::string handoff_unique_key;
         if (request->enqueued_by_master()) {
             handoff_unique_key = masterEnqueuedHandoffUniqueKey(request->request_id());
@@ -838,35 +791,6 @@ grpc::Status DecodeRpcServer::GenerateStreamCall(grpc::ServerContext*           
         request_with_handoff_key = makeDecodeEntranceHandoffRequest(*request, handoff_unique_key);
         request_with_handoff_key.mutable_generate_config()->set_timeout_ms(handoff_timeout_ms);
         effective_request = &request_with_handoff_key;
-    }
-    if (!pd_separation) {
-        RTP_LLM_LOG_DEBUG("pd separation is disabled, call prefill server");
-        if (!cancel_registry_ || !prefill_server_caller_) {
-            return grpc::Status(grpc::StatusCode::UNAVAILABLE, "Decode is not initialized");
-        }
-        PDCancelRegistry::Handle handle;
-        const auto admission = cancel_registry_->admit(*request,
-                                                       "",
-                                                       prefillAddress(*request),
-                                                       request_entry_ms + handoff_timeout_ms,
-                                                       handle);
-        if (!admission.ok()) {
-            return serializeErrorMsg(std::to_string(request->request_id()),
-                                     QueryConverter::transRequestInfo(request->request_info()),
-                                     admission);
-        }
-        PDCancelRegistry::CallGuard call_guard(*cancel_registry_, handle);
-        GenerateInputPB prefill_forward_request;
-        prefill_forward_request.CopyFrom(*effective_request);
-        prefill_forward_request.mutable_generate_config()->set_timeout_ms(configured_timeout_ms);
-        prefill_forward_request.mutable_generate_config()->set_can_use_pd_separation(false);
-        const auto status = prefill_server_caller_->callPrefill(server_context, &prefill_forward_request, response_writer);
-        if (!handle->canceled.load()) {
-            cancel_registry_->finishDownstream(handle);
-        }
-        return status;
-    }
-
     const auto log_pd_error = [&](const char* stage, const grpc::Status& status) {
         const auto error = errorInfoFromGrpcStatus(status);
         const auto& trace_id = request->request_info().trace_id().empty()

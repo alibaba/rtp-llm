@@ -59,7 +59,6 @@ class PpuLegacyDeepEPStrategy(torch.nn.Module):
         for name, value in zip(("_ppu_w13", "_ppu_s13", "_ppu_w2", "_ppu_s2"), weights):
             self.register_buffer(name, value, persistent=False)
 
-
     def _compute_local(
         self, recv_x, recv_weights, recv_indices, counts
     ):
@@ -137,6 +136,7 @@ class PpuLegacyDeepEPStrategy(torch.nn.Module):
             dummy_out_scale,
             output_index,
             scale_ue8m0=False,
+            expert_token_counts=None,
         )
 
         scatter_fp4, scatter_scale = downcast_to_mxfp4(scatter_x.contiguous())
@@ -214,7 +214,6 @@ class PpuLegacyDeepEPStrategy(torch.nn.Module):
             gathered,
         )
         return gathered.float()
-
 
     @staticmethod
     def _pad_topk_for_deepep(

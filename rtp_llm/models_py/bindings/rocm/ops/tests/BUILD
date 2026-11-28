@@ -41,6 +41,7 @@ cc_test(
     data = [],
     copts = copts(),
     deps = test_deps + [
+        "//rtp_llm/models_py/bindings/core:sampling_params_hdr",
         "//rtp_llm/cpp/models:models",
         "//rtp_llm/models_py/bindings/rocm/kernels/sampling:sampling",
     ],

@@ -144,6 +144,7 @@ class AuxInfo:
     first_token_cost_time: float = 0
     wait_time: float = 0
     pd_sep: bool = False
+    xgrammar_update_timeout: bool = False
     cum_log_probs: List[float] = field(default_factory=list)
     beam_responses: List[str] = field(default_factory=list)
     softmax_probs: List[float] = field(default_factory=list)
@@ -168,6 +169,7 @@ class AuxInfo:
 
     multimodal_lengths: Dict[int, int] = field(default_factory=dict)
     speculative_draft_rounds: int = 0
+    speculative_verified_draft_tokens: int = -1
     speculative_accepted_tokens_per_pos: List[int] = field(default_factory=list)
     generation_prefill_cuda_graph_status: str = (
         GENERATION_PREFILL_CUDA_GRAPH_STATUS_NOT_REQUESTED

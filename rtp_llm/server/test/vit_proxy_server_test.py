@@ -13,6 +13,8 @@ from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import (
     CacheStatusPB,
     CacheVersionPB,
     MMRdmaSlotPB,
+    MultimodalHashRequestPB,
+    MultimodalHashResponsePB,
     MultimodalInputsPB,
     MultimodalOutputPB,
     ReleaseLeasePB,
@@ -1245,6 +1247,79 @@ class VitProxyRpcServerForwardingTest(TestCase):
         return VitProxyRpcServer(
             load_balancer, connection_pool, min_healthy_workers=min_healthy_workers
         )
+
+    def test_hash_forwarding_failover_preserves_response_and_deadline(self):
+        dead, live = MagicMock(), MagicMock()
+        dead.GetMultimodalHashes.future.return_value = FakeGrpcFuture(
+            error=RpcUnavailable()
+        )
+        response = MultimodalHashResponsePB(worker_instance="child-2")
+        response.entries.add(
+            key="image", hash_hit=True, feature_hashes=b"1234", split_size=[1]
+        )
+        live.GetMultimodalHashes.future.return_value = FakeGrpcFuture(response=response)
+        server = self._make_server({"dead": dead, "live": live})
+        request = MultimodalHashRequestPB(keys=["image"], timeout_ms=5000)
+        actual = server.GetMultimodalHashes(request, FakeContext([0.5]))
+        self.assertIs(actual, response)
+        for stub in (dead, live):
+            args, kwargs = stub.GetMultimodalHashes.future.call_args
+            self.assertIs(args[0], request)
+            self.assertGreater(kwargs["timeout"], 0)
+            self.assertLessEqual(kwargs["timeout"], 0.5)
+        self.assertEqual(server.load_balancer.connection_counts, {"dead": 0, "live": 0})
+        self.assertEqual(server.load_balancer.get_alive_worker_addresses(), ["live"])
+
+    def test_hash_forwarding_keeps_overload_status_without_failover(self):
+        first, second = MagicMock(), MagicMock()
+        first.GetMultimodalHashes.future.return_value = FakeGrpcFuture(
+            error=RpcResourceExhausted()
+        )
+        server = self._make_server({"first": first, "second": second})
+        context = FakeContext()
+        with self.assertRaises(RpcResourceExhausted):
+            server.GetMultimodalHashes(MultimodalHashRequestPB(keys=["image"]), context)
+        self.assertEqual(context.code, grpc.StatusCode.RESOURCE_EXHAUSTED)
+        second.GetMultimodalHashes.future.assert_not_called()
+        self.assertEqual(server.load_balancer.connection_counts["first"], 0)
+        self.assertEqual(
+            server.load_balancer.get_alive_worker_addresses(), ["first", "second"]
+        )
+
+    def test_hash_probe_and_fill_share_proxy_identity_across_workers(self):
+        first, second = MagicMock(), MagicMock()
+        probe = MultimodalHashResponsePB(worker_instance="child-1")
+        probe.entries.add(key="image", hash_hit=False)
+        filled = MultimodalHashResponsePB(worker_instance="child-2")
+        filled.entries.add(
+            key="image", hash_hit=True, feature_hashes=b"1234", split_size=[1]
+        )
+        first.GetMultimodalHashes.future.return_value = FakeGrpcFuture(response=probe)
+        second.GetMultimodalHashes.future.return_value = FakeGrpcFuture(response=filled)
+        server = self._make_server({"first": first, "second": second})
+        request = MultimodalHashRequestPB(keys=["image"], timeout_ms=5000)
+        actual_probe = server.GetMultimodalHashes(request, FakeContext())
+        actual_fill = server.GetMultimodalHashes(request, FakeContext())
+        first.GetMultimodalHashes.future.assert_called_once()
+        second.GetMultimodalHashes.future.assert_called_once()
+        self.assertEqual(actual_probe.worker_instance, actual_fill.worker_instance)
+        self.assertNotIn(actual_fill.worker_instance, ("child-1", "child-2", ""))
+        self.assertEqual(actual_fill.entries[0].feature_hashes, b"1234")
+        restarted = self._make_server({"first": first})
+        self.assertNotEqual(
+            server._hash_worker_instance, restarted._hash_worker_instance
+        )
+
+    def test_hash_forwarding_cancels_worker_when_caller_has_finished(self):
+        stub = MagicMock()
+        call = FakeGrpcFuture(response=MultimodalHashResponsePB())
+        stub.GetMultimodalHashes.future.return_value = call
+        server = self._make_server({"worker": stub})
+        context = FakeContext()
+        context.add_callback = MagicMock(return_value=False)
+        with patch.object(call, "cancel") as cancel:
+            server.GetMultimodalHashes(MultimodalHashRequestPB(keys=["image"]), context)
+            cancel.assert_called_once()
 
     def test_status_health_is_used_by_forwarding(self):
         dead_stub = self._make_status_stub(

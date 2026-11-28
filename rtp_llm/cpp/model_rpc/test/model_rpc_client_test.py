@@ -52,6 +52,7 @@ from rtp_llm.config.generate_config import (
     ThinkingMode,
 )
 from rtp_llm.config.log_config import setup_logging
+from rtp_llm.config.py_config_modules import GenerateEnvConfig
 from rtp_llm.config.response_format_compiler import ReasoningFormat
 from rtp_llm.cpp.model_rpc.model_rpc_client import (
     ModelRpcClient,
@@ -117,6 +118,7 @@ class FakeStub:
         aux_info2.iter_count = 2
         aux_info2.output_len = 2
         aux_info2.speculative_draft_rounds = 4
+        aux_info2.speculative_verified_draft_tokens = 11
         aux_info2.speculative_accepted_tokens_per_pos.extend([3, 2, 1])
         output_pb2.logits.data_type = TensorPB.DataType.FP32
         output_pb2.logits.shape.extend([1, 1, 2])
@@ -548,7 +550,6 @@ class ModelRpcClientTest(TestCase):
         self.assertEqual(actual.images[0].content_sha256, image.content_sha256)
         self.assertEqual(actual.images[0].patches.shape, [1, 2])
         self.assertEqual(actual.images[0].patches.fp32_data, image.patches.numpy().tobytes())
-
     def test_multimodal_rpc_preserves_url_without_tensor(self):
         def mm_input(url, tensor):
             return SimpleNamespace(
@@ -618,6 +619,45 @@ class ModelRpcClientTest(TestCase):
         )
 
         self.assertTrue(trans_input(input_py).generate_config.frontend_metric_streaming)
+
+    def test_trans_input_preserves_original_image_source_for_backend_inspection(self):
+        import base64
+
+        from rtp_llm.utils.base_model_datatypes import MMUrlType
+
+        source = b"\x89PNG\0\xff"
+        url = "data:image/png;base64," + base64.b64encode(source).decode("ascii")
+        request = GenerateInput(
+            request_id=123,
+            token_ids=torch.tensor([7, 129264, 8]),
+            mm_inputs=[
+                SimpleNamespace(
+                    url=url,
+                    mm_type=MMUrlType.IMAGE,
+                    tensor=torch.empty(0),
+                    mm_preprocess_config=SimpleNamespace(
+                        width=-1,
+                        height=-1,
+                        min_pixels=-1,
+                        max_pixels=-1,
+                        fps=-1,
+                        min_frames=-1,
+                        max_frames=-1,
+                        crop_positions=[],
+                        mm_timeout_ms=0,
+                        max_long_side_pixel=-1,
+                    ),
+                )
+            ],
+            generate_config=GenerateConfig(),
+        )
+        wire = GenerateInputPB.FromString(trans_input(request).SerializeToString())
+        self.assertEqual(list(wire.token_ids), [7, 129264, 8])
+        self.assertEqual(len(wire.multimodal_inputs), 1)
+        self.assertEqual(
+            base64.b64decode(wire.multimodal_inputs[0].multimodal_url.split(",", 1)[1]),
+            source,
+        )
 
     def test_trans_input_fills_request_info_from_typed_headers(self):
         input_py = GenerateInput(
@@ -747,6 +787,15 @@ class ModelRpcClientTest(TestCase):
         round_tripped_input_pb = GenerateInputPB()
         round_tripped_input_pb.ParseFromString(input_pb.SerializeToString())
         return round_tripped_input_pb.generate_config
+
+    def test_trans_input_round_trips_timeline_detail(self):
+        for options, expected in (({}, False), ({"profile_light": True}, True)):
+            with self.subTest(options=options):
+                wire = self._round_trip_generate_config(
+                    GenerateConfig(gen_timeline=True, **options)
+                )
+                self.assertTrue(wire.gen_timeline)
+                self.assertEqual(wire.profile_light, expected)
 
     def test_trans_input_serializes_resolved_positive_default_max_new_tokens(self):
         config = GenerateConfig()
@@ -1405,7 +1454,10 @@ class ModelRpcClientTest(TestCase):
             max_thinking_tokens=16,
         )
         config.finalize_response_format(
-            reasoning_format=ReasoningFormat(tag_begin="", tag_end="</think>")
+            reasoning_format=ReasoningFormat(
+                tag_begin="",
+                tag_end="</think>",
+            )
         )
         config_before_rpc = config.model_dump()
 
@@ -1416,7 +1468,53 @@ class ModelRpcClientTest(TestCase):
         elements = structural_tag["format"]["elements"]
         self.assertEqual(len(elements), 2)
         self.assertEqual(elements[0]["type"], "tag")
+        self.assertNotIn("excludes", elements[0]["content"])
         self.assertEqual(elements[1]["type"], "json_schema")
+
+    def test_trans_input_preserves_enabled_reasoning_envelope_and_explicit_format(self):
+        for fields in ({}, {"response_format": {"type": "json_object"}}):
+            with self.subTest(fields=fields):
+                config = GenerateConfig(max_thinking_tokens=16, **fields)
+                env = GenerateEnvConfig()
+                env.think_mode = "enabled"
+                env.think_end_token_id = 7
+                config.add_thinking_params(None, env)
+                config = config.model_copy(deep=True)
+                config_before_rpc = config.model_dump()
+                first_pb = trans_input(
+                    self._make_generate_input(config)
+                ).generate_config
+                second_pb = trans_input(
+                    self._make_generate_input(config)
+                ).generate_config
+                self.assertEqual(config.model_dump(), config_before_rpc)
+                self.assertEqual(first_pb, second_pb)
+                self.assertTrue(first_pb.in_think_mode)
+                self.assertEqual(first_pb.thinking_mode, int(ThinkingMode.ENABLED))
+                self.assertEqual(list(first_pb.end_think_token_ids), [7])
+                self.assertTrue(first_pb.HasField("structural_tag"))
+                self.assertFalse(first_pb.HasField("json_schema"))
+                self.assertFalse(first_pb.HasField("regex"))
+                self.assertFalse(first_pb.HasField("ebnf"))
+                envelope = json.loads(first_pb.structural_tag.value)
+                final = envelope["format"]["elements"][-1]
+                if fields:
+                    self.assertEqual(
+                        final,
+                        {
+                            "type": "json_schema",
+                            "json_schema": {
+                                "anyOf": [{"type": "object"}, {"type": "array"}]
+                            },
+                            "style": "json",
+                        },
+                    )
+                else:
+                    self.assertEqual(final, {"type": "any_text"})
+                self.assertTrue(config._reasoning_envelope_applied)
+                self.assertNotIn(
+                    "enable_think_processor", first_pb.DESCRIPTOR.fields_by_name
+                )
 
     def test_trans_output_preserves_speculative_acceptance_counters(self):
         input_py = GenerateInput(
@@ -1438,6 +1536,80 @@ class ModelRpcClientTest(TestCase):
         actual = outputs.generate_outputs[0].aux_info
         self.assertEqual(actual.speculative_draft_rounds, 7)
         self.assertEqual(actual.speculative_accepted_tokens_per_pos, [6, 4, 2])
+        self.assertEqual(actual.speculative_verified_draft_tokens, -1)
+
+    def test_verified_draft_counter_presence_distinguishes_zero_unknown_and_int64(self):
+        input_py = GenerateInput(
+            token_ids=torch.tensor([1, 2], dtype=torch.int32),
+            generate_config=GenerateConfig(aux_info=True),
+            request_id=1,
+            mm_inputs=[],
+        )
+        for value in (None, 0, -1, 2**40):
+            with self.subTest(value=value):
+                output = GenerateOutputsPB()
+                output.flatten_output.finished.append(False)
+                aux = output.flatten_output.aux_info.add()
+                if value is not None:
+                    aux.speculative_verified_draft_tokens = value
+                decoded = trans_output(input_py, output, StreamState())
+                self.assertEqual(
+                    decoded.generate_outputs[
+                        0
+                    ].aux_info.speculative_verified_draft_tokens,
+                    -1 if value is None else value,
+                )
+
+    def test_trans_output_preserves_prefill_reuse_and_decode_diagnostics(self):
+        for prefill_reuse in (343040, 0):
+            for streaming in (True, False):
+                with self.subTest(prefill_reuse=prefill_reuse, streaming=streaming):
+                    input_py = GenerateInput(
+                        token_ids=torch.zeros(347211, dtype=torch.int32),
+                        generate_config=GenerateConfig(
+                            aux_info=True, is_streaming=streaming
+                        ),
+                        request_id=1,
+                        mm_inputs=[],
+                    )
+                    response = GenerateOutputsPB()
+                    output = response.flatten_output
+                    output.finished.append(True)
+                    output.output_ids.data_type = TensorPB.INT32
+                    output.output_ids.shape.extend([1, 1])
+                    output.output_ids.int32_data = struct.pack("<i", 42)
+                    aux = output.aux_info.add()
+                    aux.pd_sep = True
+                    aux.input_len = 347211
+                    aux.output_len = 1
+                    aux.total_reuse_len = prefill_reuse
+                    aux.local_reuse_len = prefill_reuse
+                    aux.memory_reuse_len = prefill_reuse
+                    aux.prefill_total_reuse_len = prefill_reuse
+                    aux.prefill_local_reuse_len = prefill_reuse
+                    aux.prefill_memory_reuse_len = prefill_reuse
+                    aux.decode_total_reuse_len = 347136
+                    aux.decode_local_reuse_len = 347136
+
+                    wire_response = GenerateOutputsPB.FromString(
+                        response.SerializeToString()
+                    )
+                    actual = (
+                        trans_output(input_py, wire_response, StreamState())
+                        .generate_outputs[0]
+                        .aux_info
+                    )
+
+                    self.assertTrue(actual.pd_sep)
+                    self.assertEqual(actual.input_len, 347211)
+                    self.assertEqual(actual.reuse_len, prefill_reuse)
+                    self.assertEqual(actual.local_reuse_len, prefill_reuse)
+                    self.assertEqual(actual.memory_reuse_len, prefill_reuse)
+                    self.assertEqual(actual.prefill_total_reuse_len, prefill_reuse)
+                    self.assertEqual(actual.prefill_memory_reuse_len, prefill_reuse)
+                    self.assertEqual(actual.decode_total_reuse_len, 347136)
+                    self.assertEqual(actual.decode_local_reuse_len, 347136)
+                    self.assertEqual(actual.decode_memory_reuse_len, 0)
 
     def test_trans_output_generation_prefill_cuda_graph_status_compatibility(self):
         input_py = GenerateInput(
@@ -1579,6 +1751,38 @@ class ModelRpcClientTest(TestCase):
         self.assertIsNone(output.frontend_generate_token_num)
         self.assertIsNone(output.frontend_generate_execute_time_us)
         self.assertEqual(output.generate_outputs, [])
+    def test_trans_output_xgrammar_update_timeout(self):
+        for timed_out in (None, False, True):
+            for aux_info_enabled in (False, True):
+                with self.subTest(
+                    timed_out=timed_out, aux_info_enabled=aux_info_enabled
+                ):
+                    input_py = GenerateInput(
+                        token_ids=torch.tensor([1, 2], dtype=torch.int32),
+                        generate_config=GenerateConfig(aux_info=aux_info_enabled),
+                        request_id=1,
+                        mm_inputs=[],
+                    )
+                    outputs_pb = GenerateOutputsPB()
+                    output_pb = outputs_pb.flatten_output
+                    output_pb.finished.append(True)
+                    aux_info = output_pb.aux_info.add()
+                    # Omitted fields from older workers retain the false default.
+                    if timed_out is not None:
+                        aux_info.xgrammar_update_timeout = timed_out
+                    wire_output = GenerateOutputsPB.FromString(
+                        outputs_pb.SerializeToString()
+                    )
+
+                    outputs = trans_output(input_py, wire_output, StreamState())
+
+                    actual = outputs.generate_outputs[0].aux_info
+                    if aux_info_enabled:
+                        self.assertEqual(
+                            actual.xgrammar_update_timeout, bool(timed_out)
+                        )
+                    else:
+                        self.assertIsNone(actual)
 
     @unittest.skip("need fix")
     def test_generate_stream(self):
@@ -1653,6 +1857,7 @@ class ModelRpcClientTest(TestCase):
         self.assertAlmostEqual(logits_1[0][0], 0.1, places=6)
         self.assertAlmostEqual(logits_1[0][1], 0.2, places=6)
         self.assertEqual(res[1].aux_info.speculative_draft_rounds, 4)
+        self.assertEqual(res[1].aux_info.speculative_verified_draft_tokens, 11)
         self.assertEqual(res[1].aux_info.speculative_accepted_tokens_per_pos, [3, 2, 1])
 
         # res[2] 是完成标记，包含指定位置token的logits
@@ -1711,6 +1916,177 @@ class ModelRpcClientTest(TestCase):
             [role_addr.role_str for role_addr in input_pb.generate_config.role_addrs],
             ["PREFILL", "DECODE"],
         )
+
+    def test_compact_logprobs_config_and_output_roundtrip(self):
+        input_py = GenerateInput(
+            token_ids=torch.tensor([1, 2, 3]),
+            generate_config=GenerateConfig(return_logprobs=True, top_logprobs=2),
+            request_id=123,
+            mm_inputs=[],
+        )
+        input_pb = trans_input(input_py)
+        self.assertTrue(input_pb.generate_config.return_logprobs)
+        self.assertEqual(input_pb.generate_config.top_logprobs, 2)
+
+        outputs_pb = GenerateOutputsPB()
+        output_pb = outputs_pb.flatten_output
+        output_pb.finished.append(False)
+        output_pb.output_ids.data_type = TensorPB.DataType.INT32
+        output_pb.output_ids.shape.extend([1, 2])
+        output_pb.output_ids.int32_data = struct.pack("<ii", 10, 11)
+
+        output_pb.token_logprobs.data_type = TensorPB.DataType.FP32
+        output_pb.token_logprobs.shape.extend([1, 2])
+        output_pb.token_logprobs.fp32_data = struct.pack("<ff", -0.1, -0.2)
+
+        output_pb.top_logprob_token_ids.data_type = TensorPB.DataType.INT32
+        output_pb.top_logprob_token_ids.shape.extend([1, 2, 2])
+        output_pb.top_logprob_token_ids.int32_data = struct.pack(
+            "<iiii", 10, 12, 11, 13
+        )
+
+        output_pb.top_logprobs.data_type = TensorPB.DataType.FP32
+        output_pb.top_logprobs.shape.extend([1, 2, 2])
+        output_pb.top_logprobs.fp32_data = struct.pack("<ffff", -0.1, -1.1, -0.2, -1.2)
+        output_pb.logprobs_offsets.append(0)
+        output_pb.logprobs_counts.append(2)
+
+        result = trans_output(input_py, outputs_pb, StreamState())
+        self.assertEqual(len(result.generate_outputs), 1)
+        output = result.generate_outputs[0]
+        self.assertEqual(output.token_logprobs.shape, torch.Size([2]))
+        self.assertEqual(output.top_logprob_token_ids.shape, torch.Size([2, 2]))
+        self.assertEqual(output.top_logprobs.shape, torch.Size([2, 2]))
+        self.assertEqual(output.logprobs_offset, 0)
+        self.assertEqual(output.logprobs_count, 2)
+        self.assertTrue(
+            torch.equal(
+                output.top_logprob_token_ids,
+                torch.tensor([[10, 12], [11, 13]], dtype=torch.int32),
+            )
+        )
+        self.assertTrue(
+            torch.allclose(
+                output.token_logprobs,
+                torch.tensor([-0.1, -0.2], dtype=torch.float32),
+            )
+        )
+
+    def test_compact_logprobs_zero_top_k_output_roundtrip(self):
+        input_py = GenerateInput(
+            token_ids=torch.tensor([1, 2, 3]),
+            generate_config=GenerateConfig(return_logprobs=True, top_logprobs=0),
+            request_id=123,
+            mm_inputs=[],
+        )
+
+        outputs_pb = GenerateOutputsPB()
+        output_pb = outputs_pb.flatten_output
+        output_pb.finished.append(False)
+        output_pb.output_ids.data_type = TensorPB.DataType.INT32
+        output_pb.output_ids.shape.extend([1, 2])
+        output_pb.output_ids.int32_data = struct.pack("<ii", 10, 11)
+
+        output_pb.token_logprobs.data_type = TensorPB.DataType.FP32
+        output_pb.token_logprobs.shape.extend([1, 2])
+        output_pb.token_logprobs.fp32_data = struct.pack("<ff", -0.1, -0.2)
+
+        output_pb.top_logprob_token_ids.data_type = TensorPB.DataType.INT32
+        output_pb.top_logprob_token_ids.shape.extend([1, 2, 0])
+        output_pb.top_logprobs.data_type = TensorPB.DataType.FP32
+        output_pb.top_logprobs.shape.extend([1, 2, 0])
+        output_pb.logprobs_offsets.append(0)
+        output_pb.logprobs_counts.append(2)
+
+        result = trans_output(input_py, outputs_pb, StreamState())
+
+        self.assertEqual(len(result.generate_outputs), 1)
+        output = result.generate_outputs[0]
+        self.assertEqual(output.token_logprobs.shape, torch.Size([2]))
+        self.assertEqual(output.top_logprob_token_ids.shape, torch.Size([2, 0]))
+        self.assertEqual(output.top_logprob_token_ids.dtype, torch.int32)
+        self.assertEqual(output.top_logprobs.shape, torch.Size([2, 0]))
+        self.assertEqual(output.top_logprobs.dtype, torch.float32)
+
+    def test_compact_logprobs_boundary_uses_count_to_remove_rpc_padding(self):
+        input_py = GenerateInput(
+            token_ids=torch.tensor([1, 2, 3]),
+            generate_config=GenerateConfig(return_logprobs=True, top_logprobs=1),
+            request_id=123,
+            mm_inputs=[],
+        )
+
+        outputs_pb = GenerateOutputsPB()
+        output_pb = outputs_pb.flatten_output
+        output_pb.finished.extend([False, False])
+        output_pb.output_ids.data_type = TensorPB.DataType.INT32
+        output_pb.output_ids.shape.extend([2, 1, 5])
+        output_pb.output_ids.int32_data = struct.pack(
+            "<10i", 10, 11, 128822, 271, 20, 30, 31, 32, 0, 0
+        )
+
+        # Row 0 owns two real content rows plus one transport padding row;
+        # row 1 owns all three rows.
+        output_pb.token_logprobs.data_type = TensorPB.DataType.FP32
+        output_pb.token_logprobs.shape.extend([2, 3])
+        output_pb.token_logprobs.fp32_data = struct.pack(
+            "<6f", -0.13, -0.20, 0.0, -0.30, -0.31, -0.32
+        )
+        output_pb.top_logprob_token_ids.data_type = TensorPB.DataType.INT32
+        output_pb.top_logprob_token_ids.shape.extend([2, 3, 1])
+        output_pb.top_logprob_token_ids.int32_data = struct.pack(
+            "<6i", 271, 20, 0, 30, 31, 32
+        )
+        output_pb.top_logprobs.data_type = TensorPB.DataType.FP32
+        output_pb.top_logprobs.shape.extend([2, 3, 1])
+        output_pb.top_logprobs.fp32_data = struct.pack(
+            "<6f", -0.13, -0.20, 0.0, -0.30, -0.31, -0.32
+        )
+        output_pb.logprobs_offsets.extend([3, 0])
+        output_pb.logprobs_counts.extend([2, 3])
+
+        result = trans_output(input_py, outputs_pb, StreamState())
+
+        first, second = result.generate_outputs
+        self.assertEqual(first.logprobs_offset, 3)
+        self.assertEqual(first.logprobs_count, 2)
+        self.assertEqual(first.token_logprobs.shape, torch.Size([2]))
+        self.assertTrue(
+            torch.allclose(
+                first.token_logprobs,
+                torch.tensor([-0.13, -0.20], dtype=torch.float32),
+            )
+        )
+        self.assertEqual(first.top_logprob_token_ids.tolist(), [[271], [20]])
+        self.assertEqual(second.logprobs_offset, 0)
+        self.assertEqual(second.logprobs_count, 3)
+        self.assertEqual(second.token_logprobs.shape, torch.Size([3]))
+
+    def test_compact_logprobs_thinking_only_metadata_survives_without_tensors(self):
+        input_py = GenerateInput(
+            token_ids=torch.tensor([1, 2, 3]),
+            generate_config=GenerateConfig(return_logprobs=True, top_logprobs=0),
+            request_id=123,
+            mm_inputs=[],
+        )
+
+        outputs_pb = GenerateOutputsPB()
+        output_pb = outputs_pb.flatten_output
+        output_pb.finished.append(False)
+        output_pb.output_ids.data_type = TensorPB.DataType.INT32
+        output_pb.output_ids.shape.extend([1, 3])
+        output_pb.output_ids.int32_data = struct.pack("<3i", 10, 11, 128822)
+        output_pb.logprobs_offsets.append(3)
+        output_pb.logprobs_counts.append(0)
+
+        result = trans_output(input_py, outputs_pb, StreamState())
+
+        output = result.generate_outputs[0]
+        self.assertEqual(output.logprobs_offset, 3)
+        self.assertEqual(output.logprobs_count, 0)
+        self.assertIsNone(output.token_logprobs)
+        self.assertIsNone(output.top_logprob_token_ids)
+        self.assertIsNone(output.top_logprobs)
 
     def test_trans_input_request_info_fallback(self):
         input_pb = trans_input(
@@ -3907,6 +4283,32 @@ class ClientSpanSettlementTest(TestCase):
                 self.assertEqual(span.status, "ERROR")
                 self.assertEqual(span.end_count, 1)
 
+    def test_greennet_rpc_preserves_request_id_and_multimodal_inputs(self):
+        greennet_hook = importlib.import_module("rtp_llm.multimodal.greennet_hook")
+        client = self._build_client(_FakeClientSpan(), total=1)
+        inp = self._make_input()
+        inp.generate_config.role_addrs = [
+            RoleAddr(role=RoleType.VIT, ip="127.0.0.1", grpc_port=8001, http_port=8000)
+        ]
+        request_pb = GenerateInputPB(request_id=7)
+        request_pb.multimodal_inputs.add(multimodal_url="image://test")
+        stub = MagicMock()
+        stub.WaitGreenNetVerdict = AsyncMock()
+        with (
+            patch.object(greennet_hook, "greennet_enabled", return_value=True),
+            patch(
+                "rtp_llm.cpp.model_rpc.model_rpc_client.MultimodalRpcServiceStub",
+                return_value=stub,
+            ),
+        ):
+            asyncio.run(client._wait_greennet_verdict(inp, request_pb))
+        stub.WaitGreenNetVerdict.assert_awaited_once()
+        sent = stub.WaitGreenNetVerdict.call_args.args[0]
+        self.assertEqual(sent.request_id, 7)
+        self.assertEqual(
+            list(sent.multimodal_inputs), list(request_pb.multimodal_inputs)
+        )
+
     def test_greennet_transport_failure_is_not_content_rejection(self):
         # String patch lookup can resolve through rtp_llm.__getattr__ to the
         # mocked ops module before the real greennet_hook has been imported.
@@ -4813,13 +5215,15 @@ class MixedPdfusionBatchTest(unittest.IsolatedAsyncioTestCase):
 
 
 class PdTraceDecisionTest(unittest.TestCase):
-    def test_decode_matches_pd_support_and_master_admission(self):
+    def test_pd_trace_rejects_unsupported_requests_even_after_master_admission(self):
         config = GenerateConfig(max_new_tokens=8)
         self.assertTrue(_selected_pd_separation(RoleType.DECODE, config, False))
-        self.assertFalse(_selected_pd_separation(RoleType.PREFILL, config, False))
+        self.assertTrue(_selected_pd_separation(RoleType.PREFILL, config, False))
         config.can_use_pd_separation = False
-        self.assertFalse(_selected_pd_separation(RoleType.DECODE, config, False))
-        self.assertTrue(_selected_pd_separation(RoleType.DECODE, config, True))
+        for master_admitted in (False, True):
+            with self.assertRaises(FtRuntimeException) as caught:
+                _selected_pd_separation(RoleType.DECODE, config, master_admitted)
+            self.assertEqual(caught.exception.exception_type, ExceptionType.INVALID_PARAMS)
         self.assertFalse(_selected_pd_separation(RoleType.PDFUSION, config, True))
 
 

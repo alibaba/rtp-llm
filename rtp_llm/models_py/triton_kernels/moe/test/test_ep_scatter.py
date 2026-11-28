@@ -242,6 +242,7 @@ class TestEpScatter1Correctness(unittest.TestCase):
             scale_storage[:capacity],
             m_indices,
             output_index,
+            expert_token_counts=None,
             align_m=alignment,
             derive_counts_from_topk=True,
         )
@@ -306,6 +307,7 @@ class TestEpScatter1Correctness(unittest.TestCase):
             scale_storage[:capacity],
             m_indices,
             output_index,
+            expert_token_counts=None,
             align_m=alignment,
             derive_counts_from_topk=True,
         )

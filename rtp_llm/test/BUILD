@@ -278,18 +278,6 @@ py_test(
     tags = ["L20_CU13"],
 )
 
-py_test(
-    name = "start_server_warmup_test",
-    srcs = [
-        "start_server_warmup_test.py",
-    ],
-    deps = [
-        "//rtp_llm:sdk",
-        "//rtp_llm:testlib",
-    ],
-    exec_properties = {"gpu": "L20_CU13"},
-    tags = ["L20_CU13"],
-)
 
 py_test(
     name = "auto_configure_deepep_test",
@@ -531,4 +519,17 @@ py_test(
     name = "compact_logprobs_renderer_test",
     srcs = ["compact_logprobs_renderer_test.py"],
     deps = ["//rtp_llm:testlib"],
+)
+
+py_test(
+    name = "start_server_warmup_test",
+    srcs = [
+        "start_server_warmup_test.py",
+    ],
+    deps = [
+        "//rtp_llm:sdk",
+        "//rtp_llm:testlib",
+    ],
+    exec_properties = {"gpu": "L20_CU13"},
+    tags = ["L20_CU13"],
 )

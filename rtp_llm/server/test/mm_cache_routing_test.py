@@ -341,18 +341,19 @@ class MMCacheRoutingIntegrationTest(unittest.IsolatedAsyncioTestCase):
         self.assertIs(self.request.mm_token_expansion, expansion)
         self.visitor.master_client.get_vit_cache_metadata.assert_not_awaited()
 
-    async def test_domain_pd_uses_prefill_fallback_if_hash_rpc_is_unavailable(self):
+    async def test_domain_pd_rejects_unavailable_routing_hashes(self):
         decode = self.prefill.model_copy(update={"role": RoleType.DECODE})
         self.request.generate_config.role_addrs = [self.vit, self.prefill, decode]
         self.visitor.master_client.get_vit_cache_metadata.return_value = None
-        await self.visitor._expand_pd_multimodal_tokens(self.request)
-        wire = trans_input(self.request)
-        self.assertFalse(wire.generate_config.can_use_pd_separation)
-        self.assertFalse(wire.HasField("multimodal_token_layout"))
-        self.assertEqual(list(wire.token_ids), [1, 99, 2])
+        with self.assertRaisesRegex(
+            FtRuntimeException, "routing hashes are unavailable"
+        ) as raised:
+            await self.visitor._expand_pd_multimodal_tokens(self.request)
         self.assertEqual(
-            self.request.generate_config.role_addrs, [self.vit, self.prefill, decode]
+            raised.exception.exception_type, ExceptionType.MM_PROCESS_ERROR
         )
+        self.assertIsNone(self.request.mm_token_expansion)
+        self.assertTrue(self.request.generate_config.can_use_pd_separation)
 
     async def test_admitted_pd_cannot_fallback_when_hash_rpc_is_unavailable(self):
         decode = self.prefill.model_copy(update={"role": RoleType.DECODE})
@@ -395,7 +396,7 @@ class MMCacheRoutingIntegrationTest(unittest.IsolatedAsyncioTestCase):
             calls = self.visitor.master_client.get_backend_role_addrs.call_args_list
             self.assertEqual(len(calls), 1)
 
-    async def test_frontend_falls_back_through_vit_proxy_to_worker(self):
+    async def test_vit_proxy_embedding_survives_missing_hashes_but_pd_rejects(self):
         received = []
 
         class Worker(MultimodalRpcServiceServicer):
@@ -443,8 +444,14 @@ class MMCacheRoutingIntegrationTest(unittest.IsolatedAsyncioTestCase):
                 list(route_calls[1].kwargs["input_pb"].token_ids), [1, 99, 2]
             )
             self.assertIsNone(self.request.mm_token_expansion)
-            await self.visitor._expand_pd_multimodal_tokens(self.request)
-            self.assertFalse(self.request.generate_config.can_use_pd_separation)
+            with self.assertRaisesRegex(
+                FtRuntimeException, "Prefill local decode fallback is unsupported"
+            ) as raised:
+                await self.visitor._expand_pd_multimodal_tokens(self.request)
+            self.assertEqual(
+                raised.exception.exception_type, ExceptionType.MM_PROCESS_ERROR
+            )
+            self.assertTrue(self.request.generate_config.can_use_pd_separation)
 
             wire = MultimodalInputsPB(request_id=self.request.request_id)
             wire.multimodal_inputs.add().CopyFrom(

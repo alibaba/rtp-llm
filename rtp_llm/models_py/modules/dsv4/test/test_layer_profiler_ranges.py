@@ -14,6 +14,7 @@ from rtp_llm.models_py.modules.dsv4 import _profiler
 from rtp_llm.models_py.modules.dsv4.decode import forward as decode_forward
 from rtp_llm.models_py.modules.dsv4.kv_cache_utils import SWA_KV
 from rtp_llm.models_py.modules.dsv4.transformer import V4Transformer
+from rtp_llm.models_py.utils import profiler as shared_profiler
 
 
 def _logging_layer_range(events):
@@ -28,8 +29,9 @@ def _logging_layer_range(events):
     return layer_range
 
 
-class _DecodeLayer:
+class _DecodeLayer(torch.nn.Module):
     def __init__(self, layer_idx, events):
+        super().__init__()
         self.layer_id = layer_idx
         self._events = events
 
@@ -49,6 +51,61 @@ class _PrefillLayer:
 
 
 class LayerProfilerRangeTest(unittest.TestCase):
+    def test_decode_and_dspark_take_expert_load_views_from_each_input(self):
+        class RecordingLayer(_DecodeLayer):
+            def forward_decode(
+                self, hidden, attn_metadata, input_ids, expert_load, **kwargs
+            ):
+                self.expert_load = expert_load
+                return super().forward_decode(
+                    hidden, attn_metadata, input_ids, **kwargs
+                )
+
+        for dspark in (False, True):
+            events = []
+            model = DeepSeekV4DSparkModel.__new__(DeepSeekV4DSparkModel)
+            model.v4 = SimpleNamespace(
+                embed=lambda ids: torch.zeros((*ids.shape, 2)),
+                hc_mult=1,
+                layers=[RecordingLayer(0, events), RecordingLayer(1, events)],
+                capture_aux_hidden_layer_ids=(),
+                _mtp_hidden_buffer=None,
+                _hc_head_reduce=lambda hidden: hidden.squeeze(2),
+                norm=lambda hidden: hidden,
+            )
+            batches = [torch.zeros((2, 4), dtype=torch.int32) for _ in range(2)] + [
+                None
+            ]
+            with self.subTest(dspark=dspark):
+                for expert_token_counts in batches:
+                    if dspark:
+                        model._forward_layers(
+                            torch.tensor([[1, 2]]),
+                            torch.tensor([[3, 4]]),
+                            torch.tensor([3]),
+                            torch.tensor([True]),
+                            None,
+                            16,
+                            SimpleNamespace(),
+                            expert_token_counts=expert_token_counts,
+                        )
+                    else:
+                        decode_forward.forward_layers(
+                            model.v4,
+                            None,
+                            torch.tensor([1, 2]),
+                            SimpleNamespace(batch_size=1, q_len_per_req=2),
+                            expert_token_counts=expert_token_counts,
+                        )
+                    for layer_id, layer in enumerate(model.v4.layers):
+                        if expert_token_counts is None:
+                            self.assertIsNone(layer.expert_load)
+                        else:
+                            self.assertEqual(
+                                layer.expert_load.expert_token_counts.data_ptr(),
+                                expert_token_counts[layer_id].data_ptr(),
+                            )
+
     def test_factory_is_noop_without_active_profiler(self):
         with patch.object(_profiler, "_RANGES_ENABLED", True), patch.object(
             torch.autograd, "_profiler_enabled", return_value=False
@@ -94,6 +151,19 @@ class LayerProfilerRangeTest(unittest.TestCase):
                 pass
 
         record_function.assert_not_called()
+
+    def test_light_timeline_layer_uses_user_scope(self):
+        with patch.object(
+            shared_profiler, "is_light_timeline", return_value=True
+        ), patch.object(_profiler, "_RANGES_ENABLED", True), torch.profiler.profile(
+            activities=[torch.profiler.ProfilerActivity.CPU]
+        ) as prof:
+            with _profiler.make_layer_forward_range()(5):
+                torch.ones(1)
+
+        layers = [event for event in prof.events() if event.name == "forward(layer=5)"]
+        self.assertEqual(len(layers), 1)
+        self.assertTrue(layers[0].is_user_annotation)
 
     def test_layer_range_is_cpu_function_scope(self):
         with patch.object(_profiler, "_RANGES_ENABLED", True), torch.profiler.profile(
@@ -180,6 +250,7 @@ class LayerProfilerRangeTest(unittest.TestCase):
                 kv_cache=None,
                 input_ids=torch.tensor([1, 2]),
                 attn_metadata=meta,
+                expert_token_counts=None,
             )
 
         self.assertEqual(
@@ -281,6 +352,7 @@ class LayerProfilerRangeTest(unittest.TestCase):
                 block_table=torch.tensor([[1]]),
                 tokens_per_block=16,
                 graph_metadata=SimpleNamespace(),
+                expert_token_counts=None,
             )
 
         expected = [
@@ -306,7 +378,9 @@ class LayerProfilerRangeTest(unittest.TestCase):
                 ("layer", layer_idx)
             )
         )
-        inputs = SimpleNamespace(attention_inputs=SimpleNamespace())
+        inputs = SimpleNamespace(
+            attention_inputs=SimpleNamespace(), expert_token_counts=None
+        )
 
         with patch.object(
             _profiler,

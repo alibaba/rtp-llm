@@ -182,7 +182,9 @@ class DeepSeekV41ContractTest(unittest.TestCase):
             query = {
                 "prompt": prompt,
                 "generate_config": {
-                    "max_new_tokens": 1,
+                    # PD requires a decode step; the first token still comes
+                    # from a fresh full prefill and remains the reference.
+                    "max_new_tokens": 2 if self.pd_separation else 1,
                     "top_k": 1,
                     "reuse_cache": False,
                     "can_use_pd_separation": self.pd_separation,
@@ -201,7 +203,10 @@ class DeepSeekV41ContractTest(unittest.TestCase):
                 )
             )
             self.assertEqual(actual["input_ids"][0], prefix)
-            self.assertEqual(len(actual["output_ids"][0]), 1)
+            self.assertGreaterEqual(len(actual["output_ids"][0]), 1)
+            self.assertLessEqual(
+                len(actual["output_ids"][0]), query["generate_config"]["max_new_tokens"]
+            )
             token = actual["output_ids"][0][0]
             expected.append(token)
             prefix.append(token)

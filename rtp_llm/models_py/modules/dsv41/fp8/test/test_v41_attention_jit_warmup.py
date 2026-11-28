@@ -2,8 +2,11 @@
 
 import ast
 import importlib.util
+import os
+import re
 import sys
 import unittest
+from itertools import product
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
@@ -35,6 +38,750 @@ def attention(layer, ratio=2, producer=False):
 
 
 class V41AttentionWarmupCPU(unittest.TestCase):
+    def test_index_plan_warms_scalar_and_packed_ragged_metadata(self):
+        import torch
+
+        build = Mock(return_value=object())
+        module = "rtp_llm.models_py.modules.dsv41.fp8._v41_prefill_index_plan"
+        with patch.dict(
+            sys.modules, {module: SimpleNamespace(try_build_index_plan=build)}
+        ), patch.object(
+            torch.cuda, "_lazy_init", side_effect=AssertionError("CPU-only fixture")
+        ):
+            warmup._warm_index_plan(attention(2), "cpu")
+        observed = set()
+        packed_alignments = set()
+        for call in build.call_args_list:
+            selected, positions, offset, count, start, window = call.args
+            self.assertEqual(selected.dtype, torch.int32)
+            self.assertTrue(selected.is_contiguous())
+            self.assertEqual(selected.shape, (len(positions), 512))
+            self.assertEqual(window, 128)
+            scalar = isinstance(offset, int)
+            observed.add(
+                (
+                    len(positions),
+                    positions.dtype,
+                    positions.stride(0),
+                    positions.storage_offset(),
+                    scalar,
+                )
+            )
+            if scalar:
+                self.assertEqual((offset, count, start), (0, 1, 0))
+            else:
+                for tensor in (offset, count, start):
+                    self.assertEqual(tensor.shape, (len(positions), 1))
+                    self.assertEqual(tensor.dtype, positions.dtype)
+                    self.assertEqual(tensor.stride(0), 1)
+                self.assertEqual(
+                    len(
+                        {x.untyped_storage().data_ptr() for x in (offset, count, start)}
+                    ),
+                    1,
+                )
+                packed_alignments.add(
+                    (
+                        positions.dtype,
+                        tuple(x.data_ptr() % 16 for x in (offset, count, start)),
+                    )
+                )
+        self.assertEqual(
+            observed,
+            {
+                (rows, dtype, stride, offset, scalar)
+                for (rows, stride, offset), dtype, scalar in product(
+                    warmup._indexer_warmup_layouts(),
+                    (torch.int32, torch.int64),
+                    (False, True),
+                )
+            },
+        )
+        self.assertEqual(
+            packed_alignments,
+            {
+                (torch.int32, (0, 4, 8)),
+                (torch.int32, (0, 8, 0)),
+                (torch.int32, (0, 0, 0)),
+                (torch.int64, (0, 8, 0)),
+                (torch.int64, (0, 0, 0)),
+            },
+        )
+        build.return_value = None
+        with patch.dict(
+            sys.modules, {module: SimpleNamespace(try_build_index_plan=build)}
+        ):
+            with self.assertRaisesRegex(RuntimeError, "scalar FlashMLA index plan"):
+                warmup._warm_index_plan(attention(2), "cpu")
+
+    def test_fused_producer_uses_configured_cp_geometry(self):
+        import torch
+
+        producer = SimpleNamespace(
+            SlotLayout=lambda *args: args,
+            prepare_raw=Mock(return_value=SimpleNamespace(key_counts=object())),
+            prepare_fused_tile=Mock(return_value=object()),
+            _RAW_TILE_ROWS=32768,
+        )
+        package = "rtp_llm.models_py.modules.dsv41.fp8"
+        with patch.dict(
+            sys.modules, {package: SimpleNamespace(_v41_producer_metadata=producer)}
+        ), patch.object(warmup, "__package__", package), patch.object(
+            warmup,
+            "__spec__",
+            importlib.util.spec_from_loader(
+                package + "._v41_attention_jit_warmup", loader=None
+            ),
+        ), patch.object(
+            torch.cuda, "_lazy_init", side_effect=AssertionError("CPU-only fixture")
+        ):
+            for cp_size in (2, 4):
+                for ratio in (1, 2):
+                    layouts = tuple(
+                        warmup.PoolLayout(
+                            region,
+                            2 if region == 2 else 64,
+                            64 * 288,
+                            512 if region == 2 else 128,
+                            512 if region == 2 else 256,
+                            ratio,
+                        )
+                        for region in range(3 if ratio == 2 else 2)
+                    )
+                    producer.prepare_raw.reset_mock()
+                    warmup._warm_fused_producer_metadata(
+                        layouts, cp_size, cp_size - 1, "cpu"
+                    )
+                    self.assertEqual(producer.prepare_raw.call_count, 12)
+                    self.assertEqual(producer.prepare_fused_tile.call_count, 8)
+                    self.assertTrue(
+                        all(
+                            call.args[1].dtype == torch.int32
+                            for call in producer.prepare_fused_tile.call_args_list
+                        )
+                    )
+                    self.assertEqual(
+                        [
+                            call.args[0].numel()
+                            for call in producer.prepare_fused_tile.call_args_list
+                        ],
+                        [1, 129, 257, 513] * 2,
+                    )
+                    self.assertTrue(
+                        all(
+                            call.args[4][1] == 2
+                            and all(
+                                x[0].shape == (call.args[0].numel(), 2)
+                                for x in call.args[3]
+                            )
+                            for call in producer.prepare_fused_tile.call_args_list
+                        )
+                    )
+                    producer.prepare_fused_tile.reset_mock()
+                    for call in producer.prepare_raw.call_args_list:
+                        self.assertEqual(call.args[0].cp_size, cp_size)
+                        descriptors = call.kwargs["slot_layouts"]
+                        self.assertEqual(len(descriptors), len(layouts))
+                        self.assertTrue(
+                            all(d[4:] == (cp_size, cp_size - 1) for d in descriptors)
+                        )
+                        self.assertTrue(all(d[3] == 256 for d in descriptors))
+                        self.assertEqual(
+                            [d[1:3] for d in descriptors],
+                            [
+                                (layout.entries, layout.tokens_per_block)
+                                for layout in layouts
+                            ],
+                        )
+
+    def test_main_compression_warms_independent_boundary_view_alignment(self):
+        import torch
+
+        package = "rtp_llm.models_py.modules.dsv41.fp8"
+        producer = SimpleNamespace(
+            _enabled=lambda value: True, compress_main=Mock(return_value=object())
+        )
+        fp4 = SimpleNamespace(
+            **{
+                name: Mock()
+                for name in (
+                    "quantize_and_insert_k_cache_fp4",
+                    "dequantize_k_cache_slots_fp4",
+                    "gather_k_cache_bytes_fp4",
+                    "dequantize_k_cache_bytes_fp4",
+                )
+            }
+        )
+        meta = SimpleNamespace(try_slot_mapping=Mock(return_value=object()))
+        modules = {
+            package: SimpleNamespace(
+                _v41_fp4_triton=fp4,
+                _v41_prefill_global=producer,
+                _v41_prefill_metadata=meta,
+                _v41_swa_triton=SimpleNamespace(),
+            ),
+            package
+            + "._v41_prefill_pools": SimpleNamespace(_group_row_metadata=Mock()),
+            "rtp_llm.models_py.modules.dsv41.attn_type": SimpleNamespace(
+                CSA_KV=1,
+                CSA_STATE=2,
+                HCA_KV=3,
+                INDEXER_KV=4,
+                SWA_KV=5,
+            ),
+        }
+        with patch.dict(sys.modules, modules), patch.object(
+            warmup, "__package__", package
+        ), patch.object(
+            warmup,
+            "__spec__",
+            importlib.util.spec_from_loader(
+                package + "._v41_attention_jit_warmup", loader=None
+            ),
+        ), patch.object(
+            warmup, "_warm_chunk_metadata"
+        ), patch.object(
+            warmup, "_warm_raw_producer_metadata"
+        ), patch.object(
+            torch.cuda, "_lazy_init", side_effect=AssertionError("CPU-only fixture")
+        ):
+            for ratio in (1, 2):
+                attn = attention(2, ratio=ratio)
+                attn.global_norm = torch.ones(512, dtype=torch.bfloat16)
+                layout = warmup.PoolLayout(1, 64, 64 * 288, 128, 128, ratio)
+                producer.compress_main.reset_mock()
+                warmup._warm_pool(attn, layout, 4, 0, 64, "cpu")
+                observed = set()
+                for call in producer.compress_main.call_args_list:
+                    values, _, _, _, positions, requests, _, _, indices = call.args[:9]
+                    slots, carry = call.args[11], call.args[13]
+                    count = len(indices)
+                    self.assertEqual(indices.tolist(), list(range(1, 2 * count, 2)))
+                    self.assertEqual(
+                        positions.storage_offset(), requests.storage_offset()
+                    )
+                    observed.add(
+                        (
+                            count,
+                            values.stride(0),
+                            positions.storage_offset(),
+                            slots.storage_offset(),
+                            indices.storage_offset(),
+                            carry is not None,
+                        )
+                    )
+                self.assertEqual(
+                    observed,
+                    set(
+                        product(
+                            (1, 8, 16),
+                            (512, 1024),
+                            (0, 1),
+                            (0, 1),
+                            (0, 1),
+                            (False, True) if ratio == 2 else (False,),
+                        )
+                    ),
+                )
+
+    def test_native_selector_warmup_calls_both_waves_and_fallback_functions(self):
+        import torch
+
+        native_raw, native_finite = Mock(), Mock()
+        dense = SimpleNamespace(
+            rtp_llm_ops=SimpleNamespace(deepselect_bf16_dense_sorted=Mock()),
+            is_available=Mock(return_value=True),
+            try_select_tokens=Mock(return_value=object()),
+        )
+        sparse = SimpleNamespace(
+            is_available=Mock(return_value=True),
+            try_select_sparse_tokens=Mock(return_value=object()),
+        )
+        topk = SimpleNamespace(
+            _TOPK_V3_OK=True,
+            rtp_llm_ops=SimpleNamespace(
+                topk_v3=native_raw, dsv41_topk_v3_finite=native_finite
+            ),
+            _get_topk_workspace=Mock(return_value=object()),
+            supports_bf16=lambda: True,
+        )
+        package = "rtp_llm.models_py.modules.dsv41.fp8"
+        modules = {
+            package: SimpleNamespace(
+                _v41_deepselect=sparse,
+                _v41_prefill_deepselect=dense,
+                _v41_prefill_topk=topk,
+            )
+        }
+        with patch.dict(sys.modules, modules), patch.object(
+            torch.cuda,
+            "get_device_properties",
+            return_value=SimpleNamespace(multi_processor_count=148),
+        ) as properties, patch.object(
+            torch.cuda, "_lazy_init", side_effect=AssertionError("CPU-only fixture")
+        ):
+            warmup._warm_native_selectors(32769, "cpu")
+            properties.assert_called_once_with("cpu")
+            self.assertEqual(
+                {
+                    (c.args[0].shape[0], c.args[0].dtype, c.kwargs["filter_finite"])
+                    for c in dense.try_select_tokens.call_args_list
+                },
+                set(product((1, 149), (torch.float32, torch.bfloat16), (False, True))),
+            )
+            self.assertEqual(
+                {
+                    c.args[0].shape[0]
+                    for c in sparse.try_select_sparse_tokens.call_args_list
+                },
+                {1, 149},
+            )
+            for call in (
+                dense.try_select_tokens.call_args_list
+                + sparse.try_select_sparse_tokens.call_args_list
+            ):
+                logits, ends = call.args[:2]
+                self.assertEqual(logits.shape[1], 1024)
+                self.assertEqual(logits.stride(0), 1536)
+                self.assertEqual(ends.dtype, torch.int32)
+                self.assertEqual(ends.tolist(), [1024] * len(ends))
+            expected = {
+                (rows, width, dtype, aligned)
+                for (rows, width), dtype, aligned in product(
+                    warmup._native_topk_warmup_shapes(32769),
+                    (torch.float32, torch.bfloat16),
+                    (False, True),
+                )
+            }
+            for select in (native_raw, native_finite):
+                observed = set()
+                for call in select.call_args_list:
+                    logits, ends, output, workspace, k, width = call.args
+                    alignment = 4 * logits.element_size()
+                    observed.add(
+                        (
+                            len(logits),
+                            width,
+                            logits.dtype,
+                            logits.data_ptr() % alignment == 0,
+                        )
+                    )
+                    self.assertEqual(logits.stride(0) % 4, 0)
+                    self.assertEqual(ends.tolist(), [width] * len(logits))
+                    self.assertEqual(output.shape, (len(logits), k))
+                    self.assertIs(workspace, topk._get_topk_workspace.return_value)
+                    self.assertEqual(k, 512)
+                self.assertEqual(observed, expected)
+            # Explicitly disabled/unavailable DeepSelect still warms fallback;
+            # no device-property query is necessary for that branch.
+            properties.reset_mock()
+            dense.is_available.return_value = False
+            sparse.is_available.return_value = False
+            dense.try_select_tokens.reset_mock()
+            sparse.try_select_sparse_tokens.reset_mock()
+            native_raw.reset_mock()
+            warmup._warm_native_selectors(512, "cpu")
+            properties.assert_not_called()
+            dense.try_select_tokens.assert_not_called()
+            sparse.try_select_sparse_tokens.assert_not_called()
+            self.assertEqual(native_raw.call_count, 4)
+            dense.is_available.return_value = True
+            dense.try_select_tokens.return_value = None
+            with self.assertRaisesRegex(RuntimeError, "native dense DeepSelect"):
+                warmup._warm_native_selectors(512, "cpu")
+
+    def test_default_sorted_decode_warms_when_prefill_deepselect_is_disabled(self):
+        import torch
+
+        dense = SimpleNamespace(
+            rtp_llm_ops=SimpleNamespace(deepselect_bf16_dense_sorted=Mock()),
+            is_available=lambda device, dtype, enabled=None: (
+                dtype == torch.bfloat16 and enabled is True
+            ),
+            try_select_tokens=Mock(
+                side_effect=lambda *args, **kw: (
+                    kw["out"] if kw.get("enabled") is True else None
+                )
+            ),
+        )
+        package = "rtp_llm.models_py.modules.dsv41.fp8"
+        modules = {
+            package: SimpleNamespace(
+                _v41_deepselect=SimpleNamespace(is_available=lambda device: False),
+                _v41_prefill_deepselect=dense,
+                _v41_prefill_topk=SimpleNamespace(_TOPK_V3_OK=False),
+            )
+        }
+        with patch.dict(sys.modules, modules), patch.dict(
+            os.environ,
+            {"DSV41_PREFILL_DEEPSELECT": "0", "DSV41_DECODE_DEEPSELECT": "1"},
+        ), patch.object(
+            torch.cuda,
+            "get_device_properties",
+            return_value=SimpleNamespace(multi_processor_count=148),
+        ):
+            os.environ.pop("DSV41_DECODE_DEEPSELECT_SORTED", None)
+            warmup._warm_native_selectors(32768, "cpu")
+        sorted_calls = [
+            c
+            for c in dense.try_select_tokens.call_args_list
+            if c.kwargs.get("sorted_index")
+        ]
+        self.assertEqual({c.args[0].shape[0] for c in sorted_calls}, {1, 149})
+        self.assertTrue(all(c.kwargs["enabled"] for c in sorted_calls))
+
+    def test_sorted_decode_warmup_honors_switches_and_native_capability(self):
+        import torch
+
+        package = "rtp_llm.models_py.modules.dsv41.fp8"
+        for prefill, decode, sorted_enabled, binding in product(("0", "1"), repeat=4):
+            with self.subTest(
+                prefill=prefill, decode=decode, sorted=sorted_enabled, binding=binding
+            ):
+                ops = SimpleNamespace()
+                if binding == "1":
+                    ops.deepselect_bf16_dense_sorted = Mock()
+                dense = SimpleNamespace(
+                    rtp_llm_ops=ops,
+                    is_available=lambda device, dtype, enabled=None: (
+                        dtype == torch.bfloat16
+                        and (prefill == "1" if enabled is None else enabled)
+                    ),
+                    try_select_tokens=Mock(side_effect=lambda *a, **kw: kw["out"]),
+                )
+                native_fallback = Mock()
+                topk = SimpleNamespace(
+                    _TOPK_V3_OK=True,
+                    rtp_llm_ops=SimpleNamespace(topk_v3=native_fallback),
+                    _get_topk_workspace=lambda device: object(),
+                    supports_bf16=lambda: True,
+                )
+                modules = {
+                    package: SimpleNamespace(
+                        _v41_deepselect=SimpleNamespace(is_available=lambda d: False),
+                        _v41_prefill_deepselect=dense,
+                        _v41_prefill_topk=topk,
+                    )
+                }
+                with patch.dict(sys.modules, modules), patch.dict(
+                    os.environ,
+                    {
+                        "DSV41_PREFILL_DEEPSELECT": prefill,
+                        "DSV41_DECODE_DEEPSELECT": decode,
+                        "DSV41_DECODE_DEEPSELECT_SORTED": sorted_enabled,
+                    },
+                ), patch.object(
+                    torch.cuda,
+                    "get_device_properties",
+                    return_value=SimpleNamespace(multi_processor_count=148),
+                ), patch.object(
+                    torch.cuda,
+                    "_lazy_init",
+                    side_effect=AssertionError("CPU-only fixture"),
+                ):
+                    warmup._warm_native_selectors(512, "cpu")
+                calls = dense.try_select_tokens.call_args_list
+                sorted_calls = [c for c in calls if c.kwargs.get("sorted_index")]
+                sorted_expected = decode == sorted_enabled == binding == "1"
+                self.assertEqual(len(sorted_calls), 2 if sorted_expected else 0)
+                self.assertEqual(
+                    len(calls) - len(sorted_calls),
+                    4 if prefill == "1" or sorted_expected else 0,
+                )
+                # Even without the preferred binding, startup loads fallback.
+                self.assertEqual(native_fallback.call_count, 4)
+
+    def test_sorted_decode_warmup_propagates_native_execution_errors(self):
+        import torch
+
+        dense = SimpleNamespace(
+            rtp_llm_ops=SimpleNamespace(deepselect_bf16_dense_sorted=Mock()),
+            is_available=lambda device, dtype, enabled=None: (
+                dtype == torch.bfloat16 and enabled is True
+            ),
+            try_select_tokens=Mock(
+                side_effect=lambda *a, **kw: (
+                    None if kw.get("sorted_index") else kw["out"]
+                )
+            ),
+        )
+        package = "rtp_llm.models_py.modules.dsv41.fp8"
+        modules = {
+            package: SimpleNamespace(
+                _v41_deepselect=SimpleNamespace(is_available=lambda device: False),
+                _v41_prefill_deepselect=dense,
+                _v41_prefill_topk=SimpleNamespace(_TOPK_V3_OK=False),
+            )
+        }
+        with patch.dict(sys.modules, modules), patch.dict(
+            os.environ,
+            {"DSV41_DECODE_DEEPSELECT": "1", "DSV41_DECODE_DEEPSELECT_SORTED": "1"},
+        ), patch.object(
+            torch.cuda,
+            "get_device_properties",
+            return_value=SimpleNamespace(multi_processor_count=148),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "native sorted dense DeepSelect"):
+                warmup._warm_native_selectors(512, "cpu")
+            dense.try_select_tokens.side_effect = RuntimeError("native launch failed")
+            with self.assertRaisesRegex(RuntimeError, "native launch failed"):
+                warmup._warm_native_selectors(512, "cpu")
+
+    def test_native_selector_warms_sm103_long_masks_with_bounded_storage(self):
+        import torch
+
+        select = Mock()
+        topk = SimpleNamespace(
+            _TOPK_V3_OK=True,
+            rtp_llm_ops=SimpleNamespace(
+                topk_v3=Mock(), dsv41_topk_v3_with_reference=select
+            ),
+            _get_topk_workspace=Mock(return_value=object()),
+            supports_bf16=lambda: True,
+        )
+        disabled = SimpleNamespace(is_available=lambda *args, **kwargs: False)
+        package = "rtp_llm.models_py.modules.dsv41.fp8"
+        real_zeros, real_full, real_empty = torch.zeros, torch.full, torch.empty
+
+        def on_cpu(fn):
+            return lambda *a, **kw: fn(*a, **dict(kw, device="cpu"))
+
+        modules = {
+            package: SimpleNamespace(
+                _v41_deepselect=disabled,
+                _v41_prefill_deepselect=SimpleNamespace(
+                    is_available=disabled.is_available, rtp_llm_ops=SimpleNamespace()
+                ),
+                _v41_prefill_topk=topk,
+            ),
+        }
+        with (
+            patch.dict(sys.modules, modules),
+            patch.object(torch.cuda, "get_device_capability", return_value=(10, 3)),
+            patch.object(torch, "zeros", on_cpu(real_zeros)),
+            patch.object(torch, "full", on_cpu(real_full)),
+            patch.object(torch, "empty", on_cpu(real_empty)),
+        ):
+            warmup._warm_native_selectors(262145, "cuda")
+
+        self.assertEqual(select.call_count, 6)
+        for call, expected in zip(
+            select.call_args_list, (32769, 32769, 163841, 163841, 262145, 262145)
+        ):
+            logits, ends, output, _, k, width, rows, reference_width, finite = call.args
+            self.assertEqual(
+                (k, width, rows, reference_width, finite),
+                (512, 513, 145, expected, True),
+            )
+            self.assertEqual(
+                (tuple(logits.shape), ends.tolist(), tuple(output.shape)),
+                ((1, 513), [513], (1, 512)),
+            )
+            self.assertEqual(logits.dtype, torch.bfloat16)
+            self.assertLess(logits.untyped_storage().nbytes(), 2048)
+        self.assertEqual(
+            [c.args[0].storage_offset() for c in select.call_args_list], [0, 1] * 3
+        )
+
+    def test_topk_witnesses_cover_actual_native_dispatcher(self):
+        # Read conditions from the native source, rather than maintaining a
+        # second handwritten dispatcher. A native routing change must update
+        # the bounded startup witnesses before this coverage assertion passes.
+        kernels = _FP8.parents[2] / "bindings" / "cuda" / "kernels"
+        source = (kernels / "topk_v3.cu").read_text()
+        header = (kernels / "topk_v3.cuh").read_text()
+        constants = {
+            name: int(value)
+            for name, value in re.findall(
+                r"constexpr uint32_t\s+(\w+)\s*=\s*(\d+);", source + header
+            )
+        }
+        for scale in (1, 2, 4):
+            constants[f"kReg{scale}MaxSeqLen"] = (
+                constants["kBlockSize"] * constants["kVecSize"] * scale
+            )
+        capacities = [
+            (int(a), int(b)) for a, b in re.findall(r"\{(\d+), (\d+)\}", source)
+        ]
+
+        def uniform_plan_uses_cluster(batch, width):
+            for threshold, capacity in capacities:
+                if (batch if width > threshold else 0) <= capacity:
+                    return width > threshold
+            return False
+
+        # These witnesses exercise the ordinary dispatcher. The device-gated
+        # finite BF16 path uses independent reference-geometry witnesses.
+        ordinary = source.index("if (reference_width <= kReg1MaxSeqLen")
+        dispatch = source[ordinary:].split("return error ==", 1)[0]
+        branches = re.findall(
+            r"(?:else )?if \((.*?)\) \{(.*?)\}\s*(?=else|$)", dispatch, re.S
+        )
+        self.assertEqual(len(branches), 17)
+
+        def family(batch, width):
+            values = dict(
+                constants,
+                reference_rows=batch,
+                reference_width=width,
+                k=512,
+                uniform_plan_uses_cluster=uniform_plan_uses_cluster,
+            )
+            for condition, body in branches:
+                expression = condition.replace(
+                    "static_cast<uint32_t>(reference_width)", "reference_width"
+                )
+                expression = (
+                    expression.replace("&&", " and ")
+                    .replace("||", " or ")
+                    .replace("!", "not ")
+                )
+                if eval(" ".join(expression.split()), {"__builtins__": {}}, values):
+                    return re.search(
+                        r"(main_kernel<[-\d]+|direct_cluster_kernel<Cluster\d+)", body
+                    ).group(1)
+            return "persistent_cluster"
+
+        row_boundaries = {1, 32, 33}
+        width_boundaries = {512}
+        for name, value in constants.items():
+            if "BatchLimit" in name:
+                row_boundaries.update((value, value + 1))
+            if "MaxSeqLen" in name:
+                width_boundaries.update((value, value + 1))
+        for width, capacity in capacities:
+            row_boundaries.update((capacity, capacity + 1))
+            width_boundaries.update((width, width + 1))
+        for limit in (512, 4096, 4097, 8193, 16385, 32769, 131072, 524288, 1048576):
+            observed = {
+                family(rows, width)
+                for rows, width in warmup._native_topk_warmup_shapes(limit)
+            }
+            reachable = {
+                family(rows, width)
+                for rows, width in product(row_boundaries, width_boundaries | {limit})
+                if 512 <= width <= limit
+            }
+            self.assertEqual(observed, reachable)
+            self.assertNotIn("persistent_cluster", reachable)
+        self.assertLess(
+            max(
+                rows * ((width + 3) // 4 * 4) * 4
+                for rows, width in warmup._native_topk_warmup_shapes(1048576)
+            ),
+            5 * 1024 * 1024,
+        )
+
+    def test_joint_pool_is_scheduled_for_single_request_and_cp1(self):
+        from rtp_llm.models_py.modules.dsv41.attn_type import HCA_KV, INDEXER_KV
+
+        tree = ast.parse((_FP8 / "_v41_attention_jit_warmup.py").read_text())
+        gate = next(
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.If)
+            and node.body
+            and isinstance(node.body[0], ast.ImportFrom)
+            and node.body[0].module == "rtp_llm.models_py.modules.dsv41.attn_type"
+        )
+        main = warmup.PoolLayout(HCA_KV, 128, 128 * 288, 128, 256, 1)
+        index = warmup.PoolLayout(INDEXER_KV, 128, 128 * 68, 128, 256, 1)
+        code = compile(ast.Module(body=[gate], type_ignores=[]), "warmup_gate", "exec")
+        for cp in (1, 2, 4):
+            for batch in (1, 2, 31, 32, 128):
+                with self.subTest(cp=cp, batch=batch):
+                    run = Mock()
+                    namespace = dict(warmup.__dict__)
+                    namespace.update(
+                        cp_size=cp,
+                        cp_rank=cp - 1,
+                        kv_cache_sharded=cp > 1,
+                        max_batch_size=batch,
+                        layouts={
+                            (main, "same-layer"): object(),
+                            (index, "same-layer"): object(),
+                        },
+                        device="private-device",
+                        run=run,
+                    )
+                    exec(code, namespace)
+                    joint_calls = [
+                        call
+                        for call in run.call_args_list
+                        if call.args[0][0] == "joint_pool"
+                    ]
+                    self.assertEqual(len(joint_calls), 1)
+                    self.assertEqual(joint_calls[0].args[0][-2:], (cp, cp - 1))
+
+    def test_chunk_metadata_warmup_covers_mixed_types_and_independent_offsets(self):
+        import torch
+
+        meta = SimpleNamespace(try_chunk_metadata=Mock(return_value=object()))
+        warmup._warm_chunk_metadata(meta, 2, 128, "cpu")
+        observed = set()
+        for call in meta.try_chunk_metadata.call_args_list:
+            prefixes, lengths, requests, ratio, window, replay = call.args
+            self.assertEqual((ratio, window), (2, 128))
+            self.assertEqual(prefixes.shape, (3,))
+            self.assertEqual(lengths.shape, (3,))
+            self.assertEqual(requests.dtype, torch.int64)
+            physical = call.kwargs["physical_offsets"]
+            if physical is not None:
+                self.assertEqual(physical.shape, (3,))
+                self.assertEqual(physical.dtype, torch.int64)
+                self.assertTrue(physical.is_contiguous())
+            observed.add(
+                (
+                    prefixes.dtype,
+                    lengths.dtype,
+                    prefixes.storage_offset(),
+                    lengths.storage_offset(),
+                    requests.storage_offset(),
+                    replay,
+                    call.kwargs["compact_replay"],
+                    physical is not None,
+                )
+            )
+        expected = set(
+            product(
+                (torch.int32, torch.int64),
+                (torch.int32, torch.int64),
+                (0, 1),
+                (0, 1),
+                (0, 1),
+                (False, True),
+                (False, True),
+                (False, True),
+            )
+        )
+        self.assertEqual(observed, expected)
+        self.assertEqual(meta.try_chunk_metadata.call_count, len(expected))
+        meta.try_chunk_metadata.return_value = None
+        with self.assertRaisesRegex(RuntimeError, "chunk metadata"):
+            warmup._warm_chunk_metadata(meta, 2, 128, "cpu")
+
+    def test_norm_quant_must_be_ready_before_requests(self):
+        package = "rtp_llm.models_py.modules.dsv41.fp8"
+        quant = SimpleNamespace(warmup=Mock(return_value=True))
+        with patch.dict(sys.modules, {package: SimpleNamespace(_v41_norm_quant=quant)}):
+            warmup._warm_norm_quant("private-device")
+            quant.warmup.assert_called_once_with("private-device")
+            quant.warmup.return_value = False
+            with self.assertRaisesRegex(RuntimeError, "attention RMSNorm quantization"):
+                warmup._warm_norm_quant("private-device")
+
+    def test_ragged_swa_refresh_must_be_ready_before_requests(self):
+        package = "rtp_llm.models_py.modules.dsv41.fp8"
+        refresh = SimpleNamespace(warmup=Mock(return_value=True))
+        with patch.dict(
+            sys.modules, {package: SimpleNamespace(_v41_swa_refresh_triton=refresh)}
+        ):
+            warmup._warm_swa_refresh("private-device")
+            refresh.warmup.assert_called_once_with("private-device")
+            refresh.warmup.return_value = False
+            with self.assertRaisesRegex(RuntimeError, "ragged SWA refresh"):
+                warmup._warm_swa_refresh("private-device")
+
     def test_joint_pool_layout_fallback_and_required_compilation(self):
         package = "rtp_llm.models_py.modules.dsv41.fp8"
         joint = SimpleNamespace(
@@ -104,8 +851,23 @@ class V41AttentionWarmupCPU(unittest.TestCase):
         self.assertEqual(warmup._collect_pool_layouts(Unreadable(), None, 4, True), {})
 
     def test_real_schema_read_uses_metadata_and_reconstructs_cp_swa_stride(self):
-        # These objects intentionally have no tensor read/write/view interface.
-        # Collecting warmup layouts must not inspect real cache contents.
+        import torch
+
+        def load(name, path):
+            spec = importlib.util.spec_from_file_location(name, path)
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            return module
+
+        # Load the real tag resolver and metadata readers without importing the
+        # attention package or native bindings. Cache contents remain unreadable.
+        tags = load("_v41_warmup_tags", _FP8.parent / "attn_type.py")
+        cache_utils = load("_v41_warmup_cache_utils", _FP8.parent / "kv_cache_utils.py")
+        modules = {
+            "rtp_llm.models_py.modules.dsv41.attn_type": tags,
+            "rtp_llm.models_py.modules.dsv41.kv_cache_utils": cache_utils,
+        }
+
         class Base:
             def __init__(self, columns):
                 self.shape = (10000, columns)
@@ -113,45 +875,106 @@ class V41AttentionWarmupCPU(unittest.TestCase):
             def element_size(self):
                 return 1
 
-        attn = attention(2, producer=True)
         u8, f32 = SimpleNamespace(itemsize=1), SimpleNamespace(itemsize=4)
-        attn._pool_spec = {7: (u8, 528), 1: (u8, 288), 3: (u8, 68), 5: (f32, 1024)}
-        sizes = {7: 19072, 1: 128 * 288, 3: 256 * 68, 5: 2 * 1024 * 4}
-        cache = SimpleNamespace(
-            get_seq_size_per_block=lambda tag: 4096,
-            get_layer_cache=lambda layer, region: SimpleNamespace(
-                kv_cache_base=Base(sizes[region])
-            ),
+        index, compact = tags.INDEXER_KV, tags.INDEXER_KV_C2
+        cases = (
+            ("mixed", (index, compact), 2, compact, 64),
+            ("compact_only", (compact,), 2, compact, 64),
+            ("ratio_one", (index, compact), 1, index, 128),
+            ("compact_disabled", (index,), 2, index, 128),
         )
-        modules = {
-            "rtp_llm.models_py.modules.dsv41.attn_type": SimpleNamespace(
-                CSA_KV=1, HCA_KV=2, INDEXER_KV=3, CSA_STATE=5, SWA_KV=7
-            ),
-            "rtp_llm.models_py.modules.dsv41.fp8._kv_cache_utils": SimpleNamespace(
-                pool_entry_count=lambda cache, tag: None,
-                require_pool_tokens_per_block=lambda cache, region: (
-                    4096 if region in (5, 7) else 256
-                ),
-            ),
-            "rtp_llm.models_py.modules.dsv41.fp8.attention": SimpleNamespace(
-                _CACHE_TAG_BY_NAME={i: i for i in sizes}
-            ),
-        }
-        modules["rtp_llm.models_py.modules.dsv41.kv_cache_utils"] = SimpleNamespace(
-            swa_region_for_layer=lambda cache, layer: 7
-        )
-        with patch.dict(sys.modules, modules):
-            layouts = warmup._collect_pool_layouts(
-                {warmup._attention_key(attn): attn}, cache, 4, True
-            )
-        by_region = {layout.region: layout for layout, _ in layouts}
-        self.assertEqual(set(by_region), {1, 3, 5, 7})
-        self.assertEqual(by_region[7].stride_bytes, 19072 * 4)
-        self.assertEqual(by_region[7].entries, (19072 * 4) // 528)
-        self.assertEqual(by_region[1].entries, 128)
-        self.assertEqual(by_region[3].entries, 256)
-        self.assertEqual(by_region[5].entries, 2)
-        self.assertEqual(by_region[1].owner_tokens_per_block, 4096)
+        full_swa_stride = 5 * 16896  # Includes padding beyond the 136 entries.
+        with patch.dict(sys.modules, modules), patch.object(
+            torch.cuda, "_lazy_init", side_effect=AssertionError("CPU-only fixture")
+        ) as cuda_init:
+            pool_utils = load("_v41_warmup_pool_utils", _FP8 / "_kv_cache_utils.py")
+            with patch.dict(
+                sys.modules,
+                {"rtp_llm.models_py.modules.dsv41.fp8._kv_cache_utils": pool_utils},
+            ):
+                for cp_size, case in product((1, 2, 4), cases):
+                    name, index_tags, ratio, physical_index, index_entries = case
+                    with self.subTest(schema=name, cp_size=cp_size):
+                        attn = attention(2, ratio=ratio, producer=True)
+                        main = tags.CSA_KV if ratio == 2 else tags.HCA_KV
+                        attn._pool_spec = {
+                            tags.SWA_KV: (u8, 528),
+                            main: (u8, 288),
+                            index: (u8, 68),
+                            tags.CSA_STATE: (f32, 1024),
+                        }
+                        sizes = {
+                            tags.SWA_KV: full_swa_stride // cp_size,
+                            main: (64 if ratio == 2 else 128) * 288,
+                            index: 128 * 68,
+                            compact: 64 * 68,
+                            tags.CSA_STATE: 2 * 1024 * 4,
+                        }
+                        entries = {
+                            tags.SWA_KV: 136,
+                            main: 64 if ratio == 2 else 128,
+                            index: 128,
+                            compact: 64,
+                            tags.CSA_STATE: 2,
+                        }
+                        physical_tags = {tags.SWA_KV, tags.CSA_STATE}
+                        cache = SimpleNamespace(
+                            group_tags=[tags.SWA_KV, main, *index_tags]
+                            + ([tags.CSA_STATE] if ratio == 2 else []),
+                            get_seq_size_per_block=Mock(
+                                side_effect=lambda tag: (
+                                    4096 if tag in physical_tags else 128
+                                )
+                            ),
+                            get_kernel_seq_size_per_block=Mock(return_value=128),
+                            get_entries_per_block=Mock(side_effect=entries.__getitem__),
+                            get_layer_cache=Mock(
+                                side_effect=lambda layer, tag: SimpleNamespace(
+                                    kv_cache_base=Base(sizes[tag])
+                                )
+                            ),
+                        )
+                        layouts = warmup._collect_pool_layouts(
+                            {warmup._attention_key(attn): attn}, cache, cp_size, True
+                        )
+                        by_region = {layout.region: layout for layout, _ in layouts}
+                        expected = {tags.SWA_KV, main, index}
+                        if ratio == 2:
+                            expected.add(tags.CSA_STATE)
+                        self.assertEqual(set(by_region), expected)
+                        self.assertEqual(
+                            by_region[tags.SWA_KV].stride_bytes, full_swa_stride
+                        )
+                        self.assertEqual(by_region[tags.SWA_KV].entries, 136)
+                        self.assertEqual(by_region[tags.SWA_KV].tokens_per_block, 4096)
+                        self.assertEqual(by_region[main].entries, entries[main])
+                        self.assertEqual(by_region[index].entries, index_entries)
+                        self.assertEqual(
+                            by_region[index].stride_bytes, index_entries * 68
+                        )
+                        self.assertEqual(by_region[index].tokens_per_block, 128)
+                        self.assertEqual(by_region[index].owner_tokens_per_block, 128)
+                        if ratio == 2:
+                            self.assertEqual(by_region[tags.CSA_STATE].entries, 2)
+                        cache.get_layer_cache.assert_any_call(
+                            attn.layer_id, physical_index
+                        )
+                        for reader in (
+                            cache.get_entries_per_block,
+                            cache.get_kernel_seq_size_per_block,
+                            cache.get_seq_size_per_block,
+                        ):
+                            reader.assert_any_call(physical_index)
+                            if physical_index == compact:
+                                self.assertNotIn(
+                                    (index,), [c.args for c in reader.call_args_list]
+                                )
+                        if physical_index == compact:
+                            self.assertNotIn(
+                                (attn.layer_id, index),
+                                [c.args for c in cache.get_layer_cache.call_args_list],
+                            )
+            cuda_init.assert_not_called()
 
     def test_required_wrapper_rejection_cannot_be_marked_warmed(self):
         for result in (False, None):
@@ -221,12 +1044,15 @@ class V41AttentionWarmupCPU(unittest.TestCase):
             token_indices=None,
             token_ends=None,
         ):
-            if mask_tail:
+            if mask_tail and token_indices is not None:
                 self.assertEqual(token_indices.shape, (len(logits), 512))
                 self.assertEqual(token_indices.dtype, torch.int32)
                 self.assertTrue(token_indices.is_contiguous())
                 self.assertIs(token_ends, visible)
                 self.assertTrue(token_ends.is_contiguous())
+            elif mask_tail:
+                self.assertEqual(logits.dtype, torch.bfloat16)
+                self.assertIsNone(token_ends)
             ids = torch.zeros(
                 (len(logits), min(count, (logits.shape[1] + block - 1) // block)),
                 dtype=torch.int32,
@@ -261,7 +1087,18 @@ class V41AttentionWarmupCPU(unittest.TestCase):
                         )
                         all_calls = candidates.select_candidates.call_args_list
                         calls = [c for c in all_calls if not c.kwargs.get("mask_tail")]
-                        fused = [c for c in all_calls if c.kwargs.get("mask_tail")]
+                        fused = [
+                            c
+                            for c in all_calls
+                            if c.kwargs.get("mask_tail")
+                            and c.kwargs.get("token_indices") is not None
+                        ]
+                        masked = [
+                            c
+                            for c in all_calls
+                            if c.kwargs.get("mask_tail")
+                            and c.kwargs.get("token_indices") is None
+                        ]
                         direct = [
                             c for c in calls if c.kwargs.get("build_bitmap") is False
                         ]
@@ -271,8 +1108,28 @@ class V41AttentionWarmupCPU(unittest.TestCase):
                         widths = set(warmup._candidate_widths(length, 8, 2048)) | {
                             min(length, 16384)
                         }
+                        self.assertEqual(len(masked), 4 * len(widths))
                         self.assertEqual(
-                            len(fused), 2 * len(widths) if stride == 1 else 0
+                            {
+                                (
+                                    c.args[0].shape[1],
+                                    c.args[0].dtype,
+                                    c.args[1].dtype,
+                                    c.args[1].stride(0),
+                                    c.args[1].storage_offset(),
+                                    c.kwargs["build_bitmap"],
+                                )
+                                for c in masked
+                            },
+                            {
+                                (width, torch.bfloat16, dtype, stride, offset, bitmap)
+                                for width in widths
+                                for dtype in (torch.int32, torch.int64)
+                                for bitmap in (False, True)
+                            },
+                        )
+                        self.assertEqual(
+                            len(fused), 4 * len(widths) if stride == 1 else 0
                         )
                         if stride == 1:
                             self.assertEqual(
@@ -287,12 +1144,21 @@ class V41AttentionWarmupCPU(unittest.TestCase):
                                 },
                             )
                         self.assertEqual({c.args[0].shape[1] for c in direct}, widths)
-                        self.assertEqual(len(direct), 2 * len(widths))
+                        self.assertEqual(len(direct), 4 * len(widths))
                         self.assertEqual(len(bitmap), len(direct))
                         self.assertEqual(
-                            {c.args[1].dtype for c in direct},
-                            {torch.int32, torch.int64},
+                            {(c.args[0].dtype, c.args[1].dtype) for c in direct},
+                            {
+                                (score_dtype, visible_dtype)
+                                for score_dtype in (torch.float32, torch.bfloat16)
+                                for visible_dtype in (torch.int32, torch.int64)
+                            },
                         )
+                        if stride == 1:
+                            self.assertEqual(
+                                {c.args[0].dtype for c in fused},
+                                {torch.float32, torch.bfloat16},
+                            )
                         self.assertTrue(
                             any((c.args[0].shape[1] + 7) // 8 <= 2048 for c in direct)
                         )
@@ -365,6 +1231,12 @@ class V41AttentionWarmupCPU(unittest.TestCase):
             score=Mock(return_value=torch.zeros(1, 16392, dtype=torch.bfloat16)),
             remap=Mock(return_value=selected),
         )
+
+        def native_scores(*args, return_bf16=False, **kwargs):
+            # Direct scores keep native padded stride; compatibility scores are FP32.
+            dtype = torch.bfloat16 if return_bf16 else torch.float32
+            return torch.zeros(1, 1152, dtype=dtype)[:, :1024]
+
         indexer = SimpleNamespace(
             is_supported=lambda *args: True,
             quantize_indexer_q=Mock(
@@ -373,7 +1245,7 @@ class V41AttentionWarmupCPU(unittest.TestCase):
             PrefillIndexerKeys=lambda quant, scale: SimpleNamespace(
                 quant=quant, scale=scale
             ),
-            score_indexer_chunk=Mock(return_value=torch.zeros(1, 1024)),
+            score_indexer_chunk=Mock(side_effect=native_scores),
         )
         package = SimpleNamespace(
             _v41_deepselect=SimpleNamespace(
@@ -381,19 +1253,23 @@ class V41AttentionWarmupCPU(unittest.TestCase):
                 try_select_sparse_tokens=Mock(return_value=selected),
             ),
             _v41_indexer_q_triton=SimpleNamespace(
-                is_supported=lambda *args: True,
-                try_fused_indexer_q=lambda *args: (
-                    torch.zeros(1, 1, 32, 64),
-                    torch.ones(1, 1, 32),
-                    torch.ones(1, 1, 32),
+                is_supported=lambda *args, **kwargs: True,
+                try_fused_indexer_q=Mock(
+                    side_effect=lambda *args, weights_out_dtype=torch.float32, **kwargs: (
+                        torch.zeros(1, 1, 32, 64),
+                        torch.ones(1, 1, 32),
+                        torch.ones(1, 1, 32, dtype=weights_out_dtype),
+                    )
                 ),
             ),
             _v41_prefill_candidates=SimpleNamespace(),
             _v41_prefill_indexer=indexer,
             _v41_prefill_metadata=meta,
             _v41_prefill_topk=SimpleNamespace(
+                supports_bf16=lambda: True,
                 is_supported=lambda *args: True,
                 try_select_tokens=Mock(return_value=selected),
+                finish_tokens=Mock(),
             ),
             _v41_sparse_prefill_indexer=sparse,
         )
@@ -406,7 +1282,7 @@ class V41AttentionWarmupCPU(unittest.TestCase):
                 return self.launch
 
         grouped_bounds, mask_tail = Kernel(), Kernel()
-        grouped_score = Mock(return_value=torch.zeros(1, 1024))
+        grouped_score = Mock(side_effect=native_scores)
         package_name = "rtp_llm.models_py.modules.dsv41.fp8"
         modules = {
             package_name: package,
@@ -438,10 +1314,61 @@ class V41AttentionWarmupCPU(unittest.TestCase):
                 attn, 32768, "cpu", rows=1, vector_stride=1, vector_offset=0
             )
             meta.try_score_bounds.assert_called_once()
-            capability.assert_called_once_with("cpu")
-            grouped_bounds.launch.assert_called_once()
-            grouped_score.assert_called_once()
-            mask_tail.launch.assert_called_once()
+            fused_calls = (
+                package._v41_indexer_q_triton.try_fused_indexer_q.call_args_list
+            )
+            self.assertEqual(
+                [
+                    call.kwargs.get("weights_out_dtype", torch.float32)
+                    for call in fused_calls
+                ],
+                [torch.float32, torch.bfloat16, torch.bfloat16, torch.bfloat16],
+            )
+            self.assertEqual(fused_calls[2].kwargs["selection_out"].shape, (1, 512))
+            self.assertIsNone(fused_calls[2].kwargs["candidates_out"])
+            self.assertEqual(fused_calls[3].kwargs["candidates_out"].shape, (1, 2048))
+            self.assertEqual(
+                [
+                    c.kwargs["return_bf16"]
+                    for c in indexer.score_indexer_chunk.call_args_list
+                ],
+                [False, True],
+            )
+            for call in indexer.score_indexer_chunk.call_args_list:
+                self.assertEqual(call.args[4].dtype, torch.bfloat16)
+            for call in grouped_score.call_args_list:
+                self.assertEqual(call.args[4].dtype, torch.bfloat16)
+            for call in sparse.score.call_args_list:
+                self.assertEqual(call.args[3].dtype, torch.bfloat16)
+            self.assertEqual(capability.call_count, 2)
+            self.assertEqual(grouped_bounds.launch.call_count, 2)
+            self.assertEqual(
+                [c.kwargs["return_bf16"] for c in grouped_score.call_args_list],
+                [False, True],
+            )
+            self.assertEqual(mask_tail.launch.call_count, 2)
+            topk = package._v41_prefill_topk
+            self.assertEqual(topk.try_select_tokens.call_count, 12)
+            self.assertEqual(
+                {c.args[0].dtype for c in topk.try_select_tokens.call_args_list},
+                {torch.float32, torch.bfloat16},
+            )
+            for call in topk.try_select_tokens.call_args_list:
+                self.assertEqual(call.args[0].stride(), (1152, 1))
+            raw_calls = [
+                c
+                for c in topk.try_select_tokens.call_args_list
+                if c.kwargs.get("filter_finite") is False
+            ]
+            self.assertEqual(len(raw_calls), 4)
+            self.assertEqual(topk.finish_tokens.call_count, 4)
+            for call in raw_calls:
+                self.assertIs(call.kwargs["bounds"], meta.try_score_bounds.return_value)
+                self.assertEqual(call.kwargs["out"].shape, selected.shape)
+                self.assertEqual(call.kwargs["out"].dtype, torch.int32)
+            for call in topk.finish_tokens.call_args_list:
+                self.assertIs(call.args[1], meta.try_score_bounds.return_value[1])
+                self.assertIs(call.args[2], selected)
             # Each visible dtype warms both plain and mixed-request lookup plans.
             self.assertEqual(sparse.prepare_plan.call_count, 8)
             self.assertEqual(
@@ -468,6 +1395,24 @@ class V41AttentionWarmupCPU(unittest.TestCase):
                 self.assertEqual(counts.dtype, torch.int32)
                 self.assertEqual(counts.tolist(), [16392, 16392])
                 self.assertEqual(lookup.args[2], 16640 + 16392)
+            package._v41_prefill_topk.supports_bf16 = lambda: False
+            indexer.score_indexer_chunk.reset_mock()
+            grouped_score.reset_mock()
+            topk.try_select_tokens.reset_mock()
+            warmup._warm_indexer_layout(
+                attn, 32768, "cpu", rows=1, vector_stride=1, vector_offset=0
+            )
+            self.assertEqual(indexer.score_indexer_chunk.call_count, 1)
+            self.assertFalse(
+                indexer.score_indexer_chunk.call_args.kwargs["return_bf16"]
+            )
+            self.assertEqual(grouped_score.call_count, 1)
+            self.assertFalse(grouped_score.call_args.kwargs["return_bf16"])
+            self.assertEqual(topk.try_select_tokens.call_count, 6)
+            self.assertEqual(
+                {c.args[0].dtype for c in topk.try_select_tokens.call_args_list},
+                {torch.float32},
+            )
             # Supported warmup work must fail loudly if a helper stops launching.
             meta.try_score_bounds.return_value = None
             with self.assertRaisesRegex(RuntimeError, "score bounds"):
@@ -542,10 +1487,13 @@ class V41AttentionWarmupCPU(unittest.TestCase):
             "rtp_llm.models_py.modules.dsv41.fp8": SimpleNamespace(_swa_ops_triton=ops),
         }
         layout = warmup.PoolLayout(7, 72, 72 * 528, 8192, 8192, 0)
-        with patch.dict(sys.modules, modules):
+        with patch.dict(sys.modules, modules), patch.object(
+            warmup, "_warm_host_swa_metadata"
+        ) as host_metadata:
             warmup._warm_swa_metadata(
                 SimpleNamespace(window_size=63), layout, 17, "private-dummy-device"
             )
+        host_metadata.assert_called_once_with(layout, "private-dummy-device")
         planner.assert_called_once_with(17)
         mapping = ops.compute_swa_slot_mapping.call_args.kwargs
         self.assertEqual(mapping["pool_entries_per_block"], 72)
@@ -553,10 +1501,17 @@ class V41AttentionWarmupCPU(unittest.TestCase):
         self.assertEqual(mapping["tokens_per_block_for_block_table"], 8192)
         flat = ops.compute_swa_slot_in_flat_from_cu.call_args_list
         self.assertEqual(
-            [call.kwargs["num_tokens"] for call in flat], [2, 2, 6, 6, 34, 34]
+            [call.kwargs["num_tokens"] for call in flat], [2] * 4 + [6] * 4 + [34] * 4
         )
         self.assertTrue(all(call.kwargs["window_size"] == 63 for call in flat))
         self.assertEqual({call.args[1].dtype for call in flat}, {"int32", "int64"})
+        for original, packed in zip(flat[::2], flat[1::2]):
+            self.assertIsNone(original.kwargs["row_offsets"])
+            offsets = packed.kwargs["row_offsets"]
+            self.assertEqual(offsets.dtype, "int64")
+            self.assertEqual(
+                offsets.values, list(range(0, packed.kwargs["num_tokens"] // 2 * 3, 3))
+            )
 
     def test_ratio_one_compression_uses_none_previous_state(self):
         source = ast.parse((_FP8 / "_v41_attention_jit_warmup.py").read_text())
@@ -583,6 +1538,7 @@ class V41AttentionWarmupCPU(unittest.TestCase):
                 "_prepare_sparse_prefill_plan_kernel": {"KEY_COUNT"}
             },
             "_v41_prefill_metadata.py": {
+                "_chunk_metadata_kernel": {"ROWS", "BATCH", "PS", "LS", "RS"},
                 "_prefill_slots_kernel": {"ROWS", "REQUESTS", "COLS", "TABLE_STRIDE"},
                 "_prefill_bounds_kernel": {"ROWS", "WIDTH"},
             },

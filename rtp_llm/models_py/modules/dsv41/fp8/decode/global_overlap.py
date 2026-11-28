@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import threading
 from dataclasses import dataclass
 
 import torch
@@ -12,26 +13,31 @@ from rtp_llm.models_py.modules.dsv41.fp8 import _v41_decode_global, _v41_decode_
 from rtp_llm.models_py.modules.dsv41.fp8._kv_cache_utils import (
     require_pool_tokens_per_block,
 )
+from rtp_llm.models_py.modules.dsv41.kv_cache_utils import indexer_region_for_ratio
 
-_GLOBAL_COMPUTE_STREAMS: dict[int, torch.cuda.Stream] = {}
+_GLOBAL_COMPUTE_STREAMS = threading.local()
 
 
 def is_supported(attn, x, positions, req_ids, starts) -> bool:
+    if os.environ.get("DSV41_OVERLAP_GLOBAL_QKV", "1") != "1":
+        return False
+    return supports_paged_global(attn, x, positions, req_ids, starts)
+
+
+def supports_paged_global(attn, x, positions, req_ids, starts) -> bool:
+    """Native producer/layout contract, independent of the scheduling policy."""
     if (
-        os.environ.get("DSV41_OVERLAP_GLOBAL_QKV", "0") != "1"
-        or not attn.is_kv_source
-        or attn.compress_ratio not in (1, 2)
-        or not x.is_cuda
-        or x.ndim != 3
-        or not 0 < x.shape[0] * x.shape[1] <= 64
-        or not _v41_decode_global.is_supported(attn, x, positions, req_ids, starts)
+        os.environ.get('MOEDBG', '0') != '0' or not attn.is_kv_source or attn.compress_ratio not in (1, 2) or (not x.is_cuda) or (x.ndim != 3) or (x.shape[0] * x.shape[1] <= 0) or (not _v41_decode_global.is_supported(attn, x, positions, req_ids, starts))
     ):
         return False
     # Only the native paged descriptor crosses streams. The dense fallback
     # materializes temporary keys with a different allocator lifetime.
     pool = attn._source_pool(INDEXER_KV)
     table = attn._block_tables_by_type[INDEXER_KV]
-    raw_tpb = require_pool_tokens_per_block(attn._kv_cache, region=INDEXER_KV)
+    raw_tpb = require_pool_tokens_per_block(
+        attn._kv_cache,
+        region=indexer_region_for_ratio(attn._kv_cache, attn.compress_ratio),
+    )
     entries = raw_tpb // attn.compress_ratio
     return (
         raw_tpb % attn.compress_ratio == 0
@@ -60,23 +66,39 @@ class GlobalDecodeWork:
             self.joined = True
 
 
+def _get_compute_stream(cache, device, current, *, capturing):
+    """Lookup under the caller's device guard; never create a stream in capture."""
+    from rtp_llm.models_py.modules.dsv41.fp8._v41_wo_a_quant import _context
+    from rtp_llm.models_py.modules.dsv41.fp8.attention import _cuda_device_index
+
+    stream_key = (_cuda_device_index(device), _context(), current.cuda_stream)
+    streams = getattr(cache, "streams", None)
+    if streams is None:
+        if capturing:
+            return None
+        streams = cache.streams = {}
+    stream = streams.get(stream_key)
+    if stream is None:
+        if capturing:
+            return None
+        stream = streams[stream_key] = torch.cuda.Stream(device=device)
+    return stream
+
+
 def start_global_decode(attn, x, positions, req_ids, starts) -> GlobalDecodeWork | None:
     if not is_supported(attn, x, positions, req_ids, starts):
         return None
-    from rtp_llm.models_py.modules.dsv41.fp8.attention import (
-        _cuda_device_index,
-        _get_process_cuda_stream,
-    )
+    from rtp_llm.models_py.modules.dsv41.fp8.attention import _cuda_device_index
 
     device_index = _cuda_device_index(x.device)
     current = torch.cuda.current_stream(x.device)
     with torch.cuda.device(x.device):
         capturing = torch.cuda.is_current_stream_capturing()
-    stream = _GLOBAL_COMPUTE_STREAMS.get(device_index)
+        stream = _get_compute_stream(
+            _GLOBAL_COMPUTE_STREAMS, x.device, current, capturing=capturing
+        )
     if stream is None:
-        if capturing:
-            return None
-        stream = _get_process_cuda_stream(_GLOBAL_COMPUTE_STREAMS, x.device)
+        return None
     warm_key = (device_index, tuple(x.shape), stream.cuda_stream)
     warmed = getattr(attn, "_global_decode_overlap_warmed", None)
     if capturing and (warmed is None or warm_key not in warmed):

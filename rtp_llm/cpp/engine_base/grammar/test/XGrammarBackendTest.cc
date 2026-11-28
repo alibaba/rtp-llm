@@ -662,6 +662,17 @@ TEST(XGrammarBackendTest, OrdinaryRuntimeFailureIsTransientAndNotCached) {
     EXPECT_EQ(backend->stats().invalid_cache_size, 0);
 }
 
+TEST(XGrammarBackendTest, LargeRegexRepetitionCompilesAndEnforcesBounds) {
+    auto       backend = makeBackend();
+    const auto result  = backend->compileNow(jsonKey(R"({"type":"string","pattern":"^[\\s\\S]{8,600}$"})"));
+    ASSERT_TRUE(result.status.ok()) << result.status.ToString();
+    ASSERT_TRUE(result.compiled);
+    for (const int length : {7, 8, 600, 601}) {
+        xgrammar::GrammarMatcher matcher(*result.compiled);
+        EXPECT_EQ(matcher.AcceptString("\"" + std::string(length, 'a') + "\""), length >= 8 && length <= 600);
+    }
+}
+
 TEST(XGrammarBackendTest, ExplicitSyntaxRuntimeFailuresAreDeterministicAndCached) {
     const std::vector<std::string> messages = {
         "Regex parsing error at position 4",

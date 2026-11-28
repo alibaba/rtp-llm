@@ -38,7 +38,7 @@ def make_layer():
     layer.sigmoid_gate_scale_add = SigmoidGateScaleAdd()
     layer.use_ep_shared_allreduce = False
     layer.use_unified_tp_allreduce = False
-    layer._forward_routed = lambda x: x * 0.7
+    layer._forward_routed = lambda x, expert_load=None: x * 0.7
     layer._shared_stream = torch.cuda.Stream()
     layer._shared_input_ready = torch.cuda.Event()
     layer._shared_output_ready = torch.cuda.Event()

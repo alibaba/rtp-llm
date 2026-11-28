@@ -243,97 +243,6 @@ PrefillServerCaller::callPrefill(const GenerateInputPB* request,
     return std::move(context);
 }
 
-grpc::Status PrefillServerCaller::callPrefill(grpc::ServerContext*                   server_context,
-                                              const GenerateInputPB*                 request,
-                                              grpc::ServerWriter<GenerateOutputsPB>* response_writer) {
-    return callPrefill(server_context, request, response_writer, [server_context]() {
-        return server_context && server_context->IsCancelled();
-    });
-}
-
-grpc::Status PrefillServerCaller::callPrefill(grpc::ServerContext*                   server_context,
-                                              const GenerateInputPB*                 request,
-                                              grpc::ServerWriter<GenerateOutputsPB>* response_writer,
-                                              const std::function<bool()>&           is_cancelled) {
-    std::string prefill_addr;
-    for (const auto& role_addr : request->generate_config().role_addrs()) {
-        if (role_addr.role() == RoleAddrPB::PREFILL) {
-            prefill_addr = formatGrpcHostPort(role_addr.ip(), role_addr.grpc_port());
-            break;
-        }
-    }
-    if (prefill_addr.empty()) {
-        RTP_LLM_LOG_WARNING("request [%lld] no prefill server address found in role_addrs", request->request_id());
-        return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "no prefill server address found in role_addrs");
-    }
-    return callPrefillToAddr(server_context, request, response_writer, prefill_addr, is_cancelled);
-}
-
-grpc::Status PrefillServerCaller::callPrefillToAddr(grpc::ServerContext*                   server_context,
-                                                    const GenerateInputPB*                 request,
-                                                    grpc::ServerWriter<GenerateOutputsPB>* response_writer,
-                                                    const std::string&                     prefill_addr,
-                                                    const std::function<bool()>&           is_cancelled) {
-    auto connect_status = rpc_pool_->getConnection(prefill_addr);
-    if (!connect_status.ok()) {
-        RTP_LLM_LOG_WARNING("request [%lld] get grpc connection to prefill server %s failed",
-                            request->request_id(),
-                            prefill_addr.c_str());
-        return grpc::Status(grpc::StatusCode::INTERNAL, "get grpc connection to prefill server failed");
-    }
-
-    auto stub = connect_status.value().stub;
-
-    // 创建客户端上下文
-    grpc::ClientContext client_context;
-    const auto          rpc_timeout_ms = request->generate_config().timeout_ms();
-    auto deadline = server_context ? server_context->deadline() : std::chrono::system_clock::time_point::max();
-    if (rpc_timeout_ms > 0) {
-        deadline = std::min(deadline, std::chrono::system_clock::now() + std::chrono::milliseconds(rpc_timeout_ms));
-    }
-    if (deadline != std::chrono::system_clock::time_point::max()) {
-        client_context.set_deadline(deadline);
-    }
-    SyncPrefillRpcCancelGuard cancel_guard(is_cancelled, &client_context, deadline);
-
-    // 调用 PrefillServer 的 GenerateStreamCall
-    auto reader = stub->GenerateStreamCall(&client_context, *request);
-    if (!reader) {
-        RTP_LLM_LOG_WARNING("request [%lld] create stream reader to prefill server %s failed",
-                            request->request_id(),
-                            prefill_addr.c_str());
-        return grpc::Status(grpc::StatusCode::INTERNAL, "create stream reader to prefill server failed");
-    }
-
-    // 读取 PrefillServer 的响应并转发给客户端
-    GenerateOutputsPB response;
-    grpc::Status      forwarding_status;
-    while (reader->Read(&response)) {
-        if (cancel_guard.poll()) {
-            forwarding_status = grpc::Status(grpc::StatusCode::CANCELLED, "prefill response forwarding cancelled");
-            break;
-        }
-        if (!response_writer->Write(response)) {
-            RTP_LLM_LOG_WARNING("request [%lld] write response to client failed", request->request_id());
-            client_context.TryCancel();
-            forwarding_status = grpc::Status(grpc::StatusCode::INTERNAL, "write response to client failed");
-            break;
-        }
-    }
-
-    // 获取最终状态
-    auto status = reader->Finish();
-    status      = cancel_guard.finish(forwarding_status.ok() ? std::move(status) : forwarding_status);
-    if (!status.ok()) {
-        RTP_LLM_LOG_WARNING("request [%lld] prefill server rpc failed, status %d(%s)",
-                            request->request_id(),
-                            status.error_code(),
-                            status.error_message().c_str());
-    }
-
-    return status;
-}
-
 ErrorResult<PrefillPeerInfo> PrefillServerCaller::getPrefillPeerInfo(const std::string& ip,
                                                                      uint32_t           port,
                                                                      int32_t            request_timeout_ms,
@@ -406,25 +315,6 @@ grpc::Status PrefillServerCaller::enqueueBatch(const EnqueueBatchRequestPB& requ
     context.set_deadline(deadline);
     SyncPrefillRpcCancelGuard cancel_guard(is_cancelled, &context, deadline);
     return cancel_guard.finish(connection->stub->EnqueueBatch(&context, request, response));
-}
-
-grpc::Status PrefillServerCaller::forwardBatchGenerate(const BatchGenerateInputPB&  request,
-                                                   BatchGenerateOutputsPB*      response,
-                                                   const std::string&           prefill_address,
-                                                   int64_t                      deadline_ms,
-                                                   const std::function<bool()>& is_cancelled) {
-    auto connection = rpc_pool_->getConnection(prefill_address);
-    if (!connection.ok())
-        return grpcStatusFromErrorInfo({ErrorCode::GET_CONNECTION_FAILED, connection.status().ToString()});
-    grpc::ClientContext context;
-    const auto          deadline = deadline_ms > 0 ?
-                                       std::chrono::system_clock::time_point(std::chrono::milliseconds(deadline_ms)) :
-                                       std::chrono::system_clock::time_point::max();
-    if (deadline_ms > 0) {
-        context.set_deadline(deadline);
-    }
-    SyncPrefillRpcCancelGuard cancel_guard(is_cancelled, &context, deadline);
-    return cancel_guard.finish(connection->stub->BatchGenerateCall(&context, request, response));
 }
 
 }  // namespace rtp_llm

@@ -39,21 +39,26 @@ from rtp_llm.model_loader.model_weight_info import ModelWeights
 from rtp_llm.models_py.model_desc.deepseek_v41_base_model import DeepSeekV4Model
 from rtp_llm.models_py.modules import RMSNorm
 from rtp_llm.models_py.modules.dsv41 import _profiler
+from rtp_llm.models_py.modules.dsv41._cp_collectives import (
+    SUPPORTED_CP_SIZES,
+    reuse_prefill_cp_collectives,
+    try_commit_all_gather,
+)
+from rtp_llm.models_py.modules.dsv41._dspark_commit_wkv import prepare_dspark_commit_wkv
 from rtp_llm.models_py.modules.dsv41._dspark_metadata_triton import (
     DSparkMetadata,
     try_build_dspark_metadata,
 )
-from rtp_llm.models_py.modules.dsv41._fused_rmsnorm_rope_triton import (
-    fused_rmsnorm_rope,
-)
 from rtp_llm.models_py.modules.dsv41.attn_type import SWA_KV
 from rtp_llm.models_py.modules.dsv41.cp import build_cp_context_for_forward
 from rtp_llm.models_py.modules.dsv41.fp8._kv_cache_utils import (
+    pool_entry_count,
     require_pool_tokens_per_block,
 )
 from rtp_llm.models_py.modules.dsv41.fp8._swa_ops_triton import (
     compute_swa_slot_mapping_from_positions,
 )
+from rtp_llm.models_py.modules.dsv41.fp8._v41_swa_kv import swa_kv_norm_rope
 from rtp_llm.models_py.modules.dsv41.fp8.attention import BIND_KEEP, bind_attn_cache
 from rtp_llm.models_py.modules.dsv41.fp8.decode.compute_qkv import decode_compute_qkv
 from rtp_llm.models_py.modules.dsv41.fp8.decode.decode_attn_metadata import (
@@ -66,6 +71,8 @@ from rtp_llm.models_py.modules.dsv41.kv_cache_utils import (
     build_block_tables_batched,
     cached_swa_region,
     create_tagged_cache_store_writer,
+    device_attention_metadata,
+    host_block_table_for_tag,
 )
 from rtp_llm.models_py.modules.dsv41.utils import _v4_fp8_linear
 from rtp_llm.models_py.modules.factory.attention.common import (
@@ -75,9 +82,18 @@ from rtp_llm.models_py.speculative.dspark_proposer_mixin import (
     DSparkProposerMixin,
     optional_tensor,
 )
+from rtp_llm.models_py.utils.expert_load_monitor import expert_load_for_layer
 from rtp_llm.ops import RoleType
 from rtp_llm.ops.compute_ops import PyModelInputs, PyModelOutputs
 from rtp_llm.utils.model_weight import W
+
+
+def _gather_commit_shards(shard: torch.Tensor, *, retain: bool = False) -> torch.Tensor:
+    """Gather contiguous rank-local commit metadata or normalized KV."""
+    from rtp_llm.models_py.distributed.collective_torch import Group, all_gather
+
+    gathered = try_commit_all_gather(shard, retain=retain)
+    return all_gather(shard, group=Group.TP) if gathered is None else gathered
 
 
 def _write_dspark_swa(*, kv, slot_mapping, swa_pool_3d, bsz, q_len, head_dim):
@@ -118,6 +134,7 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
     # Draft side: carries the capture ids for the shared-buffer row-width
     # derivation but consumes the features — only the target captures.
     _captures_aux_hidden = False
+    _dspark_confidence_enabled = False
 
     def __init__(
         self,
@@ -151,6 +168,11 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
             or str(role_type).upper().rsplit(".", 1)[-1] == "PREFILL"
         )
         self._v4_args.commit_only = self._commit_only_prefill
+        self._dspark_confidence_enabled = (
+            bool(getattr(model_config, "dspark_confidence_enabled", False))
+            and not self._commit_only_prefill
+        )
+        self._dspark_confidence_hidden_weight: Optional[torch.Tensor] = None
         if self._commit_only_prefill:
             logging.info(
                 "[DeepSeekV4DSparkModel] PREFILL role: enabling commit-only "
@@ -254,16 +276,51 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
             sched_meta_cache={},
             prepare_cuda_graph=lambda _attention_inputs: None,
             support_cuda_graph=lambda: True,
+            # Commit/proposal math reads device length mirrors and block
+            # tables; no host metadata values are consumed during replay.
+            cuda_graph_uses_device_metadata=True,
+            cuda_graph_preparation_in_graph=True,
         )
 
     def _load_extra_weights(self, weights: ModelWeights) -> None:
         gw = weights.global_weights
+        if self._dspark_confidence_enabled:
+            confidence_weight = gw[W.dspark_confidence_head]
+            expected_shape = (1, int(self._v4_args.dim) + self._dspark_markov_rank)
+            if (
+                tuple(confidence_weight.shape) != expected_shape
+                or confidence_weight.dtype != torch.float32
+            ):
+                raise ValueError(
+                    "V4.1 confidence head requires FP32 weight "
+                    f"{expected_shape}, got {tuple(confidence_weight.shape)} "
+                    f"{confidence_weight.dtype}"
+                )
+            self._dspark_confidence_hidden_weight = confidence_weight[
+                :, : int(self._v4_args.dim)
+            ]
         self.main_norm = RMSNorm(
             gw[W.v4_dspark_main_norm], float(self._v4_args.norm_eps)
         )
         self.main_proj = _v4_fp8_linear(
             gw[W.v4_dspark_main_proj_w], gw[W.v4_dspark_main_proj_s]
         )
+        linears = [layer.attn.wkv for layer in self.v4.layers]
+        projection = getattr(self, "_commit_wkv_projection", None)
+        if projection is not None:
+            if not projection.matches(linears):
+                raise RuntimeError(
+                    "DSpark WKV ownership changed; rebuild model and graphs"
+                )
+            projection.reload(weights.weights)
+        else:
+            self._commit_wkv_projection = prepare_dspark_commit_wkv(
+                linears,
+                layer_weights=weights.weights,
+                merged_linears=[
+                    getattr(layer.attn, "wq_a_wkv", None) for layer in self.v4.layers
+                ],
+            )
 
     # ------------------------------------------------------------------
     # DSparkProposerMixin hooks
@@ -442,6 +499,87 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
     # DSpark attention / block forward
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _commit_slot_metadata(
+        attn,
+        block_table: torch.Tensor,
+        context_req_ids: torch.Tensor,
+        context_positions: torch.Tensor,
+        committed_ends: torch.Tensor,
+        entries_per_block: int,
+        tokens_per_block: int,
+        metadata_by_geometry: Optional[dict] = None,
+        host_block_table: Optional[torch.Tensor] = None,
+    ):
+        """Share the write map only within one CP prefill commit.
+
+        The three draft pools hold different KV values, but their write slots
+        use the same request table and gathered row order. Pool geometry can
+        differ between layers, so it is part of the key. The caller owns both
+        the cache and all its inputs for this forward; no target-model or
+        previous-forward metadata is retained on the draft modules.
+        """
+        byte_sliced = attn._swa_cp_byte_sliced()
+        geometry = (
+            entries_per_block,
+            tokens_per_block,
+            byte_sliced,
+            int(attn._pool_raw_u8(SWA_KV).shape[0]) if byte_sliced else 0,
+        )
+        if metadata_by_geometry is not None:
+            metadata = metadata_by_geometry.get(geometry)
+            if metadata is not None:
+                return metadata
+
+        # Host request lengths and physical page ids are known before target
+        # execution. Only positions/order depend on the CP GPU row map; fuse
+        # their mapping into the fixed-sized slots instead of sizing nonzero
+        # and unique outputs on the host after the target forward.
+        if byte_sliced and host_block_table is not None:
+            from rtp_llm.models_py.modules.dsv41.fp8._v41_swa_metadata import (
+                try_host_slot_metadata,
+            )
+
+            metadata = try_host_slot_metadata(
+                block_table,
+                host_block_table,
+                attn._cp_ctx,
+                entries=entries_per_block,
+                span=tokens_per_block,
+                num_blocks=geometry[-1],
+                request_ids=context_req_ids,
+                positions=context_positions,
+            )
+            if metadata is not None:
+                if metadata_by_geometry is not None:
+                    metadata_by_geometry[geometry] = metadata
+                return metadata
+
+        slots = compute_swa_slot_mapping_from_positions(
+            block_table=block_table,
+            req_id_per_token=context_req_ids,
+            positions=context_positions,
+            seq_lens=committed_ends,
+            num_tokens=int(context_positions.numel()),
+            pool_entries_per_block=entries_per_block,
+            tokens_per_block_for_block_table=tokens_per_block,
+            ring_entries=entries_per_block,
+        )
+        compaction = (
+            attn._build_swa_cp_byte_compaction(
+                slots,
+                full_entries_per_block=entries_per_block,
+                validation_site=f"dspark.commit.layer_{attn.layer_id}",
+                negative_mode="skip_minus_one",
+            )
+            if byte_sliced
+            else None
+        )
+        metadata = (slots, compaction)
+        if metadata_by_geometry is not None:
+            metadata_by_geometry[geometry] = metadata
+        return metadata
+
     @contextmanager
     def _swa_cache_bound(
         self,
@@ -458,14 +596,16 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
         write through the raw per-rank pool selected by
         ``attn._swa_cp_byte_sliced()``."""
         attn = self.v4.layers[layer_idx].attn
+        region = cached_swa_region(self, self.kv_cache, layer_idx)
         with bind_attn_cache(
             attn,
             self.kv_cache,
-            {cached_swa_region(self, self.kv_cache, layer_idx): block_table},
+            {region: block_table},
             cp_ctx=cp_ctx if cp_ctx is not None else BIND_KEEP,
         ):
             attn._ensure_freqs_cis_bound()
-            entries_per_block = int(attn._swa_entries_per_block())
+            logical_entries = pool_entry_count(self.kv_cache, region)
+            entries_per_block = int(logical_entries or attn._swa_entries_per_block())
             pool = attn._pool_view_3d_fp8(SWA_KV)
             yield attn, entries_per_block, pool
 
@@ -482,6 +622,9 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
         gathered_req_ids: Optional[torch.Tensor] = None,
         gathered_positions: Optional[torch.Tensor] = None,
         cp_ctx: Any = None,
+        metadata_by_geometry: Optional[dict] = None,
+        host_block_table: Optional[torch.Tensor] = None,
+        projected_kv: Optional[torch.Tensor] = None,
     ) -> None:
         """Insert committed target features through one layer's own
         wkv/kv_norm/RoPE pipeline. Rows superseded by newer SWA ring
@@ -499,39 +642,63 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
             entries_per_block,
             pool,
         ):
+            write_req_ids = (
+                gathered_req_ids if gathered_positions is not None else context_req_ids
+            )
+            write_positions = (
+                gathered_positions
+                if gathered_positions is not None
+                else context_positions
+            )
+            metadata = None
+            if metadata_by_geometry is not None:
+                # Build before this layer's RoPE/all-gather and fallback WKV.
+                # Shared/stacked WKV may already be projected before the loop;
+                # fallback compaction can synchronize behind that projection.
+                metadata = self._commit_slot_metadata(
+                    attn,
+                    block_table,
+                    write_req_ids,
+                    write_positions,
+                    committed_ends,
+                    entries_per_block,
+                    tokens_per_block,
+                    metadata_by_geometry,
+                    host_block_table=host_block_table,
+                )
             safe_context_pos = context_positions.to(torch.long).clamp_min(0)
             context_freqs = attn.freqs_cis.index_select(
                 0, safe_context_pos
             ).contiguous()
-            context_kv = fused_rmsnorm_rope(
-                attn._lin(attn.wkv, main_x).contiguous(),
+            context_kv = swa_kv_norm_rope(
+                (
+                    attn._lin(attn.wkv, main_x).contiguous()
+                    if projected_kv is None
+                    else projected_kv
+                ),
                 attn.kv_norm,
                 context_freqs,
                 int(attn.rope_head_dim),
                 eps=float(attn.eps),
             )
             if gathered_positions is not None:
-                from rtp_llm.models_py.distributed.collective_torch import (
-                    Group,
-                    all_gather,
+                context_kv = _gather_commit_shards(context_kv)
+            context_rows = int(write_positions.numel())
+            if metadata is None:
+                # Dense decode / CUDA graph calls keep their existing build
+                # location and recompute from the current graph input tensors.
+                metadata = self._commit_slot_metadata(
+                    attn,
+                    block_table[:batch_size]
+                    .to(device=main_x.device, dtype=torch.int32)
+                    .contiguous(),
+                    write_req_ids,
+                    write_positions,
+                    committed_ends,
+                    entries_per_block,
+                    tokens_per_block,
                 )
-
-                context_kv = all_gather(context_kv.contiguous(), group=Group.TP)
-                context_req_ids = gathered_req_ids
-                context_positions = gathered_positions
-            context_rows = int(context_positions.numel())
-            context_slots = compute_swa_slot_mapping_from_positions(
-                block_table=block_table[:batch_size]
-                .to(device=main_x.device, dtype=torch.int32)
-                .contiguous(),
-                req_id_per_token=context_req_ids,
-                positions=context_positions,
-                seq_lens=committed_ends,
-                num_tokens=context_rows,
-                pool_entries_per_block=entries_per_block,
-                tokens_per_block_for_block_table=tokens_per_block,
-                ring_entries=entries_per_block,
-            )
+            context_slots, compaction = metadata
             if attn._swa_cp_byte_sliced():
                 # Sharded prefill: same full-domain slots, but each rank owns
                 # only its byte slice of every block — route through the
@@ -546,12 +713,6 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
                         _swa_kv_insert_triton as insert_ops,
                     )
 
-                compaction = attn._build_swa_cp_byte_compaction(
-                    context_slots,
-                    full_entries_per_block=entries_per_block,
-                    validation_site=f"dspark.commit.layer_{layer_idx}",
-                    negative_mode="skip_minus_one",
-                )
                 insert_ops.quantize_and_insert_k_cache_cp_byte_sliced(
                     context_kv.reshape(-1, int(attn.head_dim)).to(torch.bfloat16),
                     attn._pool_raw_u8(SWA_KV),
@@ -607,7 +768,13 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
             row_count,
             device,
             prefix_lengths=optional_tensor(
-                getattr(attention_inputs, "prefix_lengths", None)
+                device_attention_metadata(attention_inputs, "prefix_lengths")
+            ),
+            prefix_lengths_host=optional_tensor(
+                getattr(cp_info, "prefill_prefix_lengths_cpu", None)
+            ),
+            chunk_lengths_device=optional_tensor(
+                getattr(attention_inputs, "input_lengths_device", None)
             ),
             kv_cache_sharded=self._dspark_kv_cache_sharded,
         )
@@ -648,15 +815,34 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
         )
         gathered_req_ids: Optional[torch.Tensor] = None
         gathered_positions: Optional[torch.Tensor] = None
+        metadata_by_geometry = None
+        host_block_table = None
         if commit_ctx is not None:
             # Proj-then-gather: the row map is gathered once here; each
             # layer's projected KV is gathered inside _commit_layer_features.
-            from rtp_llm.models_py.distributed.collective_torch import Group, all_gather
-
-            gathered_req_ids = all_gather(context_req_ids.contiguous(), group=Group.TP)
-            gathered_positions = all_gather(
-                context_positions.contiguous(), group=Group.TP
+            gathered_req_ids = _gather_commit_shards(context_req_ids, retain=True)
+            gathered_positions = _gather_commit_shards(context_positions, retain=True)
+            block_table = (
+                block_table[:batch_size]
+                .to(device=main_x.device, dtype=torch.int32)
+                .contiguous()
             )
+            # Each layer consumes on the current forward stream; retain the
+            # shared tensors until the final writer has been enqueued. A new
+            # local cache also makes failures and retries unable to reuse an
+            # old request's physical pages or CP row order.
+            metadata_by_geometry = {}
+            host_block_table = host_block_table_for_tag(
+                self.kv_cache,
+                attention_inputs,
+                cached_swa_region(self, self.kv_cache, 0),
+            )
+        projection = getattr(self, "_commit_wkv_projection", None)
+        projected = None
+        if projection is not None and projection.matches(
+            [layer.attn.wkv for layer in self.v4.layers]
+        ):
+            projected = projection.project(main_x)
         layer_forward_range = _profiler.make_layer_forward_range()
         for layer_idx in range(len(self.v4.layers)):
             with layer_forward_range(layer_idx):
@@ -672,6 +858,9 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
                     gathered_req_ids=gathered_req_ids,
                     gathered_positions=gathered_positions,
                     cp_ctx=commit_ctx,
+                    metadata_by_geometry=metadata_by_geometry,
+                    host_block_table=host_block_table,
+                    projected_kv=None if projected is None else projected[layer_idx],
                 )
                 # PD-separated prefill publishes each committed draft-layer
                 # cache from the commit call: the published range is exactly
@@ -701,9 +890,6 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
             entries_per_block,
             pool,
         ):
-            # Project and insert all query KVs before attention so each query
-            # can read every other query position, including future noise.
-            qkv = decode_compute_qkv(attn, x, query_positions.reshape(-1))
             query_slots, global_indices, topk_length = self._proposal_metadata(
                 query_positions,
                 prefix_lengths,
@@ -713,18 +899,52 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
                 tokens_per_block,
                 metadata_by_geometry,
             )
-            _write_dspark_swa(
-                kv=qkv.kv,
-                slot_mapping=query_slots,
-                swa_pool_3d=pool,
-                bsz=batch_size,
-                q_len=gamma,
-                head_dim=int(attn.head_dim),
-            )
-
             topk = int(global_indices.shape[-1])
-            global_indices = global_indices.view(batch_size, gamma, topk).contiguous()
+            mega = getattr(attn, "_mega_attention", None)
+            mega_indices = global_indices.view(batch_size * gamma, topk).contiguous()
+            if mega is not None and not (
+                mega.supports_input(x) and mega.supports_decode(pool, mega_indices)
+            ):
+                mega = None
+            # Select the layout before Q projection. Both paths insert every
+            # proposal KV before attention, preserving noncausal visibility.
+            qkv = decode_compute_qkv(
+                attn,
+                x,
+                query_positions.reshape(-1),
+                swa_pool=pool,
+                swa_slots=query_slots,
+                **({"mega_attention": mega} if mega is not None else {}),
+            )
+            if not qkv.swa_written:
+                _write_dspark_swa(
+                    kv=qkv.kv,
+                    slot_mapping=query_slots,
+                    swa_pool_3d=pool,
+                    bsz=batch_size,
+                    q_len=gamma,
+                    head_dim=int(attn.head_dim),
+                )
 
+            if mega is not None:
+                # DSpark lengths are per request; Mega flattens query tokens.
+                swa_lengths = (
+                    None
+                    if topk_length is None
+                    else topk_length.repeat_interleave(gamma)
+                )
+                output = mega.decode(
+                    qkv.q,
+                    pool,
+                    mega_indices,
+                    query_positions.reshape(-1).to(torch.int32).contiguous(),
+                    swa_lengths=swa_lengths,
+                )
+                projected = mega.project_output(output, attn.wo_b)
+                attn._prefill_output_all_reduce(projected)
+                return projected.reshape(batch_size, gamma, -1)
+
+            global_indices = global_indices.view(batch_size, gamma, topk).contiguous()
             sched_meta = get_or_build_sched_meta(
                 graph_metadata,
                 batch_size=batch_size,
@@ -757,6 +977,7 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
         block_table: Optional[torch.Tensor],
         tokens_per_block: int,
         graph_metadata: Any,
+        expert_token_counts: Optional[torch.Tensor],
     ) -> torch.Tensor:
         hidden = self.v4.embed(query_ids)
         hidden = hidden.unsqueeze(2).repeat(1, 1, self.v4.hc_mult, 1)
@@ -769,7 +990,11 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
         from rtp_llm.models_py.modules.dsv41.hc.decode_transition import (
             forward_decode_layer,
         )
+        from rtp_llm.models_py.modules.dsv41.moe.routing_metadata import (
+            prepare_model_gate_routing_metadata,
+        )
 
+        routing_metadata = prepare_model_gate_routing_metadata(self.v4, query_ids)
         for layer_idx, layer in enumerate(self.v4.layers):
             with layer_forward_range(layer_idx):
                 hidden = forward_decode_layer(
@@ -777,11 +1002,13 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
                     hidden,
                     attn_metadata=None,
                     input_ids=query_ids,
+                    routing_metadata=routing_metadata,
                     next_layer=(
                         self.v4.layers[layer_idx + 1]
                         if layer_idx + 1 < len(self.v4.layers)
                         else None
                     ),
+                    expert_load=expert_load_for_layer(expert_token_counts, layer_idx),
                     attn_fn=lambda x_pre, layer_idx=layer_idx: self._forward_dspark_attention(
                         layer_idx,
                         x_pre,
@@ -838,6 +1065,7 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
             block_table,
             tokens_per_block,
             graph_metadata,
+            expert_token_counts=inputs.expert_token_counts,
         )
 
     def compute_draft_hidden_states(self, hidden: torch.Tensor) -> torch.Tensor:
@@ -846,6 +1074,36 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
 
         head_hidden = self.v4._hc_head_reduce(hidden).reshape(batch_size * gamma, dim)
         return self.v4.norm(head_hidden)
+
+    def compute_draft_outputs(self, hidden: torch.Tensor) -> PyModelOutputs:
+        if not self._dspark_confidence_enabled:
+            return super().compute_draft_outputs(hidden)
+        batch_size, gamma = int(hidden.shape[0]), int(hidden.shape[1])
+        dim = int(self._v4_args.dim)
+        head_hidden = self.v4._hc_head_reduce(hidden).reshape(batch_size * gamma, dim)
+        if self._dspark_confidence_hidden_weight is None:
+            raise RuntimeError("V4.1 confidence head weight was not loaded")
+        # The checkpoint confidence head reads pre-norm hidden. Only its scalar
+        # hidden contribution crosses the Python/C++ boundary; the sampler adds
+        # the previous-token Markov contribution before applying sigmoid.
+        hidden_logits = torch.mm(
+            head_hidden.float(), self._dspark_confidence_hidden_weight.t()
+        )
+        outputs = PyModelOutputs(self.v4.norm(head_hidden))
+        outputs.dspark_confidence_hidden_logits = hidden_logits
+        return outputs
+
+    def dspark_empty_outputs(
+        self, batch_size: int, device: torch.device
+    ) -> PyModelOutputs:
+        outputs = super().dspark_empty_outputs(batch_size, device)
+        if self._dspark_confidence_enabled:
+            outputs.dspark_confidence_hidden_logits = torch.zeros(
+                (batch_size * self._dspark_query_width, 1),
+                dtype=torch.float32,
+                device=device,
+            )
+        return outputs
 
     def _forward_device(self) -> torch.device:
         if getattr(self, "_commit_only_prefill", False):
@@ -889,6 +1147,23 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
                     device=device,
                 )
             )
+        if (
+            device.type == "cuda"
+            and self._dspark_commit_cp_enabled
+            and self.tp_size in SUPPORTED_CP_SIZES
+        ):
+            attn = as_tagged_attention_inputs(inputs.attention_inputs)
+            cp_info = getattr(attn, "context_parallel_info", None)
+            padding_mask = getattr(cp_info, "prefill_qkv_padding_mask", None)
+            if (
+                getattr(attn, "is_prefill", False)
+                and not getattr(attn, "is_target_verify", False)
+                and not getattr(attn, "is_cuda_graph", False)
+                and padding_mask is not None
+                and padding_mask.numel() > 0
+            ):
+                with reuse_prefill_cp_collectives(device, cp_size=self.tp_size):
+                    return self.run_commit_step(inputs, device)
         return self.run_commit_step(inputs, device)
 
     def forward(self, inputs: PyModelInputs, fmha_impl: Any = None) -> PyModelOutputs:

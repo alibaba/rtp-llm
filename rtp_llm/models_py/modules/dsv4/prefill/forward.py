@@ -121,6 +121,7 @@ from rtp_llm.models_py.modules.factory.attention.common import (
 from rtp_llm.models_py.modules.factory.fused_moe.utils.fp8_fp4.chunked_layer import (
     synchronized_moe_chunk_plan,
 )
+from rtp_llm.models_py.utils.expert_load_monitor import expert_load_for_layer
 from rtp_llm.ops import ParallelismConfig
 from rtp_llm.ops.compute_ops import (
     KVCache,
@@ -202,6 +203,22 @@ def _prefill_fast_path_enabled(
     return layer_calls is not None
 
 
+def _int64_on_device(source: torch.Tensor, device: torch.device) -> torch.Tensor:
+    """H2D with dtype conversion that keeps the copy asynchronous.
+
+    ``source.to(device=..., dtype=torch.int64)`` converts the dtype on the host
+    first, and that intermediate is unpinned, so the H2D that follows is a
+    blocking pageable copy even when ``source`` is pinned. Allocating the
+    destination on the device and converting inside ``copy_`` keeps the pinned
+    source and the transfer asynchronous.
+    """
+    if source.is_cuda:
+        return source.to(dtype=torch.int64)
+    out = torch.empty(source.shape, dtype=torch.int64, device=device)
+    out.copy_(source, non_blocking=True)
+    return out
+
+
 def _build_positions_from_lengths(
     input_lengths: torch.Tensor,  # [B] int
     prefix_lengths: torch.Tensor,  # [B] int
@@ -219,8 +236,8 @@ def _build_positions_from_lengths(
     (``input_lengths`` / ``prefix_lengths``) during capture. Keep the
     body tensor-only so capture does not synchronize on scalar reads.
     """
-    input_lengths = input_lengths.to(device=device, dtype=torch.int64)
-    prefix_lengths = prefix_lengths.to(device=device, dtype=torch.int64)
+    input_lengths = _int64_on_device(input_lengths, device)
+    prefix_lengths = _int64_on_device(prefix_lengths, device)
     batch_size = int(input_lengths.numel())
     if total_tokens is None:
         total_tokens = int(input_lengths.sum().item())
@@ -334,6 +351,7 @@ def forward_layers(
     positions: torch.Tensor,  # [T_total] int64 — per-token global absolute pos
     cu_seqlens: torch.Tensor,  # [B+1] int64 — request boundaries
     block_tables_by_type: Optional[Dict[str, torch.Tensor]],
+    expert_token_counts: Optional[torch.Tensor],
     attn_inputs: Optional[PyAttentionInputs] = None,
     attention_inputs: Any = None,
     prepare_hidden_fn: Optional[Any] = None,
@@ -617,6 +635,7 @@ def forward_layers(
             )
             for layer_idx, layer_call in enumerate(layer_calls):
                 with layer_forward_range(layer_idx):
+                    expert_load = expert_load_for_layer(expert_token_counts, layer_idx)
                     h = layer_call(
                         h,  # [T, hc, dim]
                         input_ids,  # [T]
@@ -624,6 +643,7 @@ def forward_layers(
                         cu_seqlens,  # [B+1]
                         kv_cache=kv_cache,
                         block_tables_by_type=block_tables_by_type,
+                        expert_load=expert_load,
                     )  # [T, hc, dim]
                     if layer_idx in capture_ids:
                         v4.capture_aux_hidden(layer_idx, h)
@@ -818,5 +838,6 @@ def forward_prefill(
         attention_inputs=attn_inputs,
         prepare_hidden_fn=prepare_hidden_fn,
         capture_context=capture_context,
+        expert_token_counts=inputs.expert_token_counts,
     )  # [T_total, dim] or [T_total, (num_capture_layers + 1) * dim]
     return PyModelOutputs(hidden)

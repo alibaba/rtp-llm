@@ -1,8 +1,23 @@
 #include "rtp_llm/cpp/normal_engine/speculative/SpeculativeSampler.h"
+#include "rtp_llm/cpp/normal_engine/speculative/DSparkSampleSeed.h"
+#include "rtp_llm/cpp/models/Sampler.h"
+#include "rtp_llm/cpp/normal_engine/NormalGenerateStream.h"
 
 #include <limits>
 
+#include <algorithm>
+#include <cmath>
+#include <chrono>
+#include <cstdlib>
+#include <cstdint>
+#include <cstring>
+#include <exception>
 #include <gtest/gtest.h>
+#include <limits>
+#include <iostream>
+#include <set>
+#include <string>
+#include <vector>
 #include <torch/all.h>
 #include <ATen/cuda/CUDAGeneratorImpl.h>
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"

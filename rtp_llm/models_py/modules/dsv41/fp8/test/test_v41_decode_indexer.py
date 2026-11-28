@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import os
 import unittest
+from dataclasses import replace
+from types import MethodType, SimpleNamespace
 from unittest.mock import patch
 
 import torch
@@ -218,13 +221,894 @@ def _check_unallocated_table_rows(logical, ratio):
     case["block_table"][1, 2] = -99
     keys[0, :logical] = 0
     keys[1, 2 * logical : 3 * logical] = 0
-    output = fused.score_decode_indexer(**case)
+    with patch.dict(os.environ, {"DSV41_DIRECT_INDEXER_LOGITS": "0"}):
+        output = fused.score_decode_indexer(**case)
     assert_logits_and_topk(output, reference(case, keys), case)
     assert torch.count_nonzero(output[:6, :logical]).item() == 0
     assert torch.count_nonzero(output[6:, 2 * logical : 3 * logical]).item() == 0
 
 
+def _selector_or_skip():
+    from rtp_llm.models_py.modules.dsv41.fp8 import _v41_decode_topk as selector
+
+    if not selector._TOPK_V3_OK:
+        raise unittest.SkipTest("topk_v3 unavailable; bounded readers not testable")
+    return selector
+
+
+def _visible_mask(case, capacity):
+    lengths = case["context_lens"].flatten()
+    return torch.arange(capacity, device="cuda")[None] < lengths[:, None]
+
+
+def _check_elided_padding(
+    logical, ratio, capacity, preserve, poison_table, physical=128
+):
+    """pad_invisible=False keeps visible columns bitwise identical and every
+    bounded decode selector output-identical, without inspecting undefined
+    columns beyond each row's causal length."""
+    if not torch.cuda.is_available() or not fused.is_supported(
+        torch.device("cuda"), physical
+    ):
+        raise unittest.SkipTest("paged FP8 indexer unsupported on this device")
+    selector = _selector_or_skip()
+    torch.backends.cuda.matmul.allow_tf32 = False
+    b, s = 2, 6
+    case, keys = make_case(b, s, capacity, physical, logical, ratio)
+    if poison_table:
+        case["block_table"][0, 0] = 0
+        case["block_table"][1, 2] = -7
+        keys[0, :logical] = 0
+        keys[1, 2 * logical : 3 * logical] = 0
+    kwargs = dict(case, preserve_score_dtype=preserve)
+    # Visible zero-K holes belong to the compact compatibility path. Direct
+    # scoring requires the real request's visible prefix to be allocated.
+    with patch.dict(
+        os.environ, {"DSV41_DIRECT_INDEXER_LOGITS": "0" if poison_table else "1"}
+    ):
+        padded = fused.score_decode_indexer(**kwargs)
+        elided = fused.score_decode_indexer(**kwargs, pad_invisible=False)
+    visible = _visible_mask(case, capacity)
+    assert torch.isfinite(elided[visible]).all()
+    assert torch.equal(elided[visible], padded[visible])
+    assert torch.isneginf(padded[~visible]).all()
+    lengths = case["context_lens"].flatten().contiguous()
+    assert selector.is_supported(elided, lengths, 512)
+    assert torch.equal(
+        selector.select_tokens(elided, lengths, 512),
+        selector.select_tokens(padded, lengths, 512),
+    )
+    for block_size, blocks in ((8, 64), (16, 32)):
+        elided_c, elided_f = selector.select_candidates(
+            elided, lengths, block_size, blocks
+        )
+        padded_c, padded_f = selector.select_candidates(
+            padded, lengths, block_size, blocks
+        )
+        assert torch.equal(elided_c, padded_c)
+        assert torch.equal(elided_f, padded_f)
+    del padded, elided
+
+
+def _check_graph_replay_elided(logical, ratio, physical=128, poison_table=False):
+    """Replayed elided scoring with growing/shrinking/zero lengths keeps the
+    bounded selection identical to freshly padded scoring. Undefined padding
+    is never used as evidence or passed to an unbounded selector."""
+    if not torch.cuda.is_available() or not fused.is_supported(
+        torch.device("cuda"), physical
+    ):
+        raise unittest.SkipTest("paged FP8 indexer unsupported on this device")
+    selector = _selector_or_skip()
+    torch.backends.cuda.matmul.allow_tf32 = False
+    case, _ = make_case(2, 6, 2053, physical, logical, ratio)
+    kwargs = dict(case, preserve_score_dtype=True)
+    stream = torch.cuda.Stream()
+    stream.wait_stream(torch.cuda.current_stream())
+    with torch.cuda.stream(stream):
+        for _ in range(3):
+            fused.score_decode_indexer(**kwargs, pad_invisible=False)
+    torch.cuda.current_stream().wait_stream(stream)
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        output = fused.score_decode_indexer(**kwargs, pad_invisible=False)
+    # Direct replays retain a fully allocated visible prefix. The compact
+    # compatibility run also regrows with a hole; both exercise zero lengths.
+    starts_by_step = [(0, 901), (11, 40), (300, 1801), (0, 0)]
+    prev_lengths = None
+    shrinking_rows = 0
+    for step, starts in enumerate(starts_by_step):
+        updated, _ = make_case(2, 6, 2053, physical, logical, ratio, seed=71 + step)
+        if step == 2 and poison_table:
+            updated["block_table"][0, 0] = 0
+        for key in ("q", "weights", "freqs_cis", "pool", "block_table"):
+            case[key].copy_(updated[key])
+        positions = (
+            torch.tensor(starts, device="cuda")[:, None] * ratio
+            + torch.arange(6, device="cuda")[None]
+        )
+        case["context_lens"].copy_(((positions + 1) // ratio).int())
+        if step == 3:
+            case["context_lens"].zero_()
+        graph.replay()
+        lengths = case["context_lens"].flatten().contiguous()
+        if prev_lengths is not None:
+            shrinking_rows += int((lengths < prev_lengths).sum())
+        reference = fused.score_decode_indexer(**kwargs)
+        visible = _visible_mask(case, 2053)
+        assert torch.isfinite(output[visible]).all()
+        assert torch.equal(output[visible], reference[visible])
+        assert torch.equal(
+            selector.select_tokens(output, lengths, 512),
+            selector.select_tokens(reference, lengths, 512),
+        )
+        prev_lengths = lengths.clone()
+    assert shrinking_rows > 0, "graph replay never exercised shorter live lengths"
+    del output, graph
+
+
 class V41DecodeIndexerTest(unittest.TestCase):
+    def test_direct_allocated_prefix_returns_native_scores_without_postprocessing(self):
+        from rtp_llm.models_py.modules.dsv41.fp8 import _indexer_score
+
+        for entries in (64, 128):
+            with self.subTest(entries=entries):
+                batch, span, capacity = 2, 4, 2053
+                rows = batch * span
+                payload = torch.empty(batch, span, 32, 64, dtype=torch.int8)
+                scales = torch.empty(batch, span, 32, dtype=torch.int32)
+                weights = torch.zeros(batch, span, 32, dtype=torch.bfloat16)
+                pool = torch.empty(2, entries, 68, dtype=torch.uint8)
+                table = torch.ones(batch, 33, dtype=torch.int32)
+                lengths = torch.tensor(
+                    [0, 1, entries, entries + 1, 513, 1025, 2052, capacity],
+                    dtype=torch.int32,
+                )
+                paged = SimpleNamespace(lengths=lengths[:, None])
+                plan = fused.DecodeIndexerMetadata(lengths, table, paged)
+                # Native DG can return a tensor with an aligned row stride.
+                # Direct consumers must preserve that tensor and honor lengths.
+                storage = torch.zeros(rows, capacity + 16, dtype=torch.bfloat16)
+                native = storage[:, :capacity]
+                with patch.dict(
+                    os.environ, {"DSV41_DIRECT_INDEXER_LOGITS": "1"}
+                ), patch.object(fused, "is_supported", return_value=True), patch.object(
+                    _indexer_score, "fp8_fp4_paged_indexer_score", return_value=native
+                ) as score, patch.object(
+                    fused, "_prepare_paged_metadata_kernel"
+                ) as prepare, patch.object(
+                    fused, "_compact_logits_kernel"
+                ) as compact, patch.object(
+                    fused, "_compact_logits_bounded_kernel"
+                ) as bounded, patch.object(
+                    torch, "empty", side_effect=AssertionError("unexpected score copy")
+                ):
+                    actual = fused.score_decode_indexer(
+                        q=None,
+                        weights=weights,
+                        freqs_cis=None,
+                        pool=pool,
+                        block_table=table,
+                        context_lens=lengths.view(batch, span),
+                        max_ctx_len=capacity,
+                        logical_entries_per_block=entries,
+                        preserve_score_dtype=True,
+                        pad_invisible=False,
+                        metadata=plan,
+                        prepared_query=(payload, scales, weights),
+                    )
+                self.assertIs(actual, native)
+                self.assertEqual(actual.stride(), (capacity + 16, 1))
+                score.assert_called_once()
+                self.assertIs(score.call_args.kwargs["metadata"], paged)
+                prepare.__getitem__.assert_not_called()
+                compact.__getitem__.assert_not_called()
+                bounded.__getitem__.assert_not_called()
+
+    def test_actual_decode_pool_builder_preserves_both_indexer_groups(self):
+        from rtp_llm.models_py.modules.dsv41.decode.forward import (
+            build_paged_pool_specs,
+        )
+        from rtp_llm.models_py.modules.dsv41.fp8.attention_v41 import AttentionV41FP8
+        from rtp_llm.models_py.modules.dsv41.fp8.decode.decode_attn_metadata import (
+            allocate_decode_metadata_fp8,
+        )
+        from rtp_llm.models_py.modules.dsv41.fp8.decode.decode_fmha_impl import (
+            DSv4DecodeFmhaImplFP8,
+        )
+
+        entries = {"indexer_kv": 128, "indexer_kv_c2": 64}
+        pools = {
+            (0, "indexer_kv_c2"): torch.empty(3, 64 * 68, dtype=torch.uint8),
+            (1, "indexer_kv"): torch.empty(3, 128 * 68, dtype=torch.uint8),
+        }
+
+        def get_layer_cache(layer, tag):
+            if (layer, tag) not in pools:
+                raise RuntimeError("layer does not own the requested group")
+            return SimpleNamespace(kv_cache_base=pools[(layer, tag)])
+
+        cache = SimpleNamespace(
+            group_tags=list(entries),
+            get_entries_per_block=lambda tag: entries[tag],
+            get_kernel_seq_size_per_block=lambda tag: 128,
+            get_layer_cache=get_layer_cache,
+            get_layer_cache_groups=lambda layer: [
+                SimpleNamespace(tag=tag) for owner, tag in pools if owner == layer
+            ],
+        )
+        owners = []
+        for layer in range(2):
+            owner = SimpleNamespace(
+                layer_id=layer,
+                _kv_cache=None,
+                _pool_spec={tag: (torch.uint8, 68) for tag in entries},
+            )
+            owner._pool_entries_per_block = MethodType(
+                AttentionV41FP8._pool_entries_per_block, owner
+            )
+            owners.append(owner)
+        model = SimpleNamespace(layers=[SimpleNamespace(attn=a) for a in owners])
+        specs = build_paged_pool_specs(cache, model, max_seq_len=512)
+        self.assertEqual(specs["indexer_kv"], (128, 128, 5))
+        self.assertEqual(specs["indexer_kv_c2"], (64, 128, 5))
+        self.assertTrue(all(owner._kv_cache is None for owner in owners))
+        metadata = allocate_decode_metadata_fp8(
+            2, 4, 128, 512, 512, [0], 512, torch.device("cpu"), specs
+        )
+        self.assertEqual(set(metadata.pool_block_tables), set(entries))
+        self.assertEqual(metadata.pool_block_tables["indexer_kv_c2"].shape, (2, 5))
+        inputs = {
+            tag: SimpleNamespace(
+                kv_cache_kernel_block_id_device=torch.full((2, 5), i + 1),
+                is_prefill=False,
+            )
+            for i, tag in enumerate(entries)
+        }
+        impl = SimpleNamespace(config=SimpleNamespace(paged_pool_specs=specs))
+        extracted = DSv4DecodeFmhaImplFP8._extract_paged_block_tables(impl, inputs)
+        self.assertIs(
+            extracted["indexer_kv_c2"],
+            inputs["indexer_kv_c2"].kv_cache_kernel_block_id_device,
+        )
+
+    def test_decode_pool_specs_skip_nonowners_and_restore_bindings(self):
+        from rtp_llm.models_py.modules.dsv41.decode.forward import (
+            build_paged_pool_specs,
+        )
+        from rtp_llm.models_py.modules.dsv41.fp8.attention_v41 import AttentionV41FP8
+
+        for bounded, compact, fault in (
+            (True, True, None),
+            (True, False, None),
+            (False, True, None),
+            (True, True, "lookup"),
+            (True, True, "groups"),
+            (True, True, "runtime"),
+        ):
+            with self.subTest(bounded=bounded, compact=compact, fault=fault):
+                index_tag = "indexer_kv_c2" if compact else "indexer_kv"
+                tail_tag = "decoder_swa_kv" if bounded else "swa_kv"
+                owned = {
+                    0: ("swa_kv",),
+                    1: ("swa_kv", "csa_kv", index_tag, "csa_state"),
+                    2: ("swa_kv", "hca_kv", "indexer_kv"),
+                    3: (tail_tag,),
+                }
+                # Small equivalent of separate CSA and HCA producer layers.
+                geometry = {
+                    "swa_kv": (torch.uint8, 528, 128),
+                    "decoder_swa_kv": (torch.uint8, 528, 128),
+                    "csa_kv": (torch.uint8, 288, 64),
+                    "hca_kv": (torch.uint8, 288, 128),
+                    "indexer_kv_c2": (torch.uint8, 68, 64),
+                    "indexer_kv": (torch.uint8, 68, 128),
+                    "csa_state": (torch.float32, 1024, 2),
+                }
+                pools = {
+                    tag: torch.empty(3, width * entries, dtype=dtype)
+                    for tag, (dtype, width, entries) in geometry.items()
+                }
+                lookups = []
+
+                def lookup(layer, tag):
+                    self.assertIn(tag, owned[layer], "non-owner pool lookup")
+                    lookups.append((layer, tag))
+                    if (layer, tag) == (2, "hca_kv"):
+                        if fault == "lookup":
+                            raise AssertionError("injected owner lookup failure")
+                        if fault == "runtime":
+                            raise RuntimeError("injected unavailable owner pool")
+                    return SimpleNamespace(kv_cache_base=pools[tag])
+
+                def groups(layer):
+                    if fault == "groups" and layer == 2:
+                        raise ValueError("injected ownership failure")
+                    return [SimpleNamespace(tag=tag) for tag in owned[layer]]
+
+                cache = SimpleNamespace(
+                    group_tags=sorted(
+                        {tag for tags in owned.values() for tag in tags}
+                    ),
+                    get_layer_cache=lookup,
+                    get_layer_cache_groups=groups,
+                    get_entries_per_block=lambda tag: geometry[tag][2],
+                    get_kernel_seq_size_per_block=lambda tag: 128,
+                    get_seq_size_per_block=lambda tag: 256,
+                )
+                previous_cache = object()
+                owners = [
+                    SimpleNamespace(
+                        layer_id=layer,
+                        _kv_cache=previous_cache,
+                        _swa_cache_region="swa_kv",
+                        _pool_spec={tag: (g[0], g[1]) for tag, g in geometry.items()},
+                    )
+                    for layer in owned
+                ]
+                for owner in owners:
+                    owner._pool_entries_per_block = MethodType(
+                        AttentionV41FP8._pool_entries_per_block, owner
+                    )
+                model = SimpleNamespace(
+                    layers=[SimpleNamespace(attn=a) for a in owners]
+                )
+                if fault in ("lookup", "groups"):
+                    error = AssertionError if fault == "lookup" else ValueError
+                    with self.assertRaisesRegex(error, "injected"):
+                        build_paged_pool_specs(cache, model, max_seq_len=512)
+                else:
+                    specs = build_paged_pool_specs(cache, model, max_seq_len=512)
+                    expected = {
+                        "swa_kv": (128, 256, 5),
+                        "csa_kv": (64, 128, 5),
+                        "csa_state": (2, 256, 5),
+                        "hca_kv": (128, 128, 5),
+                        "indexer_kv": (128, 128, 5),
+                    }
+                    if compact:
+                        expected[index_tag] = (64, 128, 5)
+                    if bounded:
+                        expected[tail_tag] = (128, 256, 5)
+                    if fault == "runtime":
+                        # Preserve the helper's existing RuntimeError -> 0 fallback.
+                        del expected["hca_kv"]
+                    self.assertEqual(specs, expected)
+                    self.assertIn((2, "hca_kv"), lookups)
+                    self.assertIn((2 if compact else 1, "indexer_kv"), lookups)
+                for owner in owners:
+                    self.assertIs(owner._kv_cache, previous_cache)
+                    self.assertEqual(owner._swa_cache_region, "swa_kv")
+
+    def test_compact_indexer_table_alias_is_local_and_requires_its_own_group(self):
+        from rtp_llm.models_py.modules.dsv41.fp8.attention_v41 import AttentionV41FP8
+
+        owner = SimpleNamespace(compress_ratio=2, _shared_attention={})
+        old_table, compact_table = object(), object()
+        tables = {"indexer_kv": old_table, "indexer_kv_c2": compact_table}
+        cache = SimpleNamespace(group_tags=list(tables))
+        bound = AttentionV41FP8._bind_indexer_table(owner, tables, cache)
+        self.assertIs(bound["indexer_kv"], compact_table)
+        self.assertIs(tables["indexer_kv"], old_table)
+        self.assertIs(AttentionV41FP8._bind_indexer_table(owner, tables, cache), bound)
+        # Replacing a device table in a stable Python mapping must invalidate.
+        replacement = object()
+        tables["indexer_kv_c2"] = replacement
+        rebound = AttentionV41FP8._bind_indexer_table(owner, tables, cache)
+        self.assertIsNot(rebound, bound)
+        self.assertIs(rebound["indexer_kv"], replacement)
+        new_cache = SimpleNamespace(group_tags=list(tables))
+        self.assertIsNot(
+            AttentionV41FP8._bind_indexer_table(owner, tables, new_cache), rebound
+        )
+        self.assertEqual(len(owner._shared_attention["indexer_table_bindings"]), 1)
+        with self.assertRaisesRegex(RuntimeError, "indexer_kv_c2"):
+            AttentionV41FP8._bind_indexer_table(owner, {"indexer_kv": old_table}, cache)
+        owner.compress_ratio = 1
+        self.assertIs(AttentionV41FP8._bind_indexer_table(owner, tables, cache), tables)
+
+    def test_packed64_elision_preserves_poisoned_zero_page_contract(self):
+        _check_elided_padding(64, 2, 2053, True, True, physical=64)
+
+    @unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
+    def test_compact64_pages_match_legacy128_pages_without_mutating_cache(self):
+        if not fused.is_supported(torch.device("cuda"), 64):
+            self.skipTest("SM10x paged indexer required")
+        case, _ = make_case(2, 4, 2053, 128, 64, 2)
+        wide = case["pool"].view(-1, 128 * 68)
+        narrow = torch.empty(wide.shape[0], 64 * 68, dtype=torch.uint8, device="cuda")
+        narrow[:, :4096].copy_(wide[:, :4096])
+        narrow[:, 4096:].copy_(wide[:, 8192:8448])
+        packed_case = dict(case, pool=narrow.view(-1, 64, 68))
+        before = packed_case["pool"].clone()
+        with patch.dict(os.environ, {"DSV41_DIRECT_INDEXER_LOGITS": "1"}):
+            actual = fused.score_decode_indexer(
+                **packed_case, preserve_score_dtype=True, pad_invisible=False
+            )
+        expected = fused.score_decode_indexer(
+            **case, preserve_score_dtype=True, pad_invisible=False
+        )
+        visible = _visible_mask(case, 2053)
+        self.assertTrue(torch.isfinite(actual[visible]).all().item())
+        torch.testing.assert_close(actual[visible], expected[visible], rtol=0, atol=0)
+        torch.testing.assert_close(packed_case["pool"], before, rtol=0, atol=0)
+        with patch.dict(os.environ, {"DSV41_DIRECT_INDEXER_LOGITS": "0"}):
+            fallback = fused.score_decode_indexer(
+                **packed_case, preserve_score_dtype=True, pad_invisible=False
+            )
+        torch.testing.assert_close(actual[visible], fallback[visible], rtol=0, atol=0)
+
+        # Missing real pages retain their zero-K semantics only in the explicit
+        # compact fallback. Do not pass this fixture to the direct contract.
+        case["block_table"][0, 0] = 0
+        case["block_table"][1, 2] = -7
+        with patch.dict(os.environ, {"DSV41_DIRECT_INDEXER_LOGITS": "0"}):
+            legacy_holes = fused.score_decode_indexer(
+                **case, preserve_score_dtype=True, pad_invisible=False
+            )
+            packed_holes = fused.score_decode_indexer(
+                **packed_case, preserve_score_dtype=True, pad_invisible=False
+            )
+        torch.testing.assert_close(
+            packed_holes[visible], legacy_holes[visible], rtol=0, atol=0
+        )
+        self.assertEqual(
+            torch.count_nonzero(packed_holes[:4, :64][visible[:4, :64]]).item(), 0
+        )
+        self.assertEqual(
+            torch.count_nonzero(packed_holes[4:, 128:192][visible[4:, 128:192]]).item(),
+            0,
+        )
+        torch.testing.assert_close(packed_case["pool"], before, rtol=0, atol=0)
+
+    def test_pad_invisible_elision_keeps_visible_columns_and_bounded_selectors(self):
+        for logical, ratio, capacity, preserve, poison in [
+            (64, 2, 2053, False, False),
+            (64, 2, 2053, True, False),
+            (64, 2, 2048, True, True),
+            (128, 1, 2053, True, False),
+            (128, 1, 2048, False, True),
+        ]:
+            with self.subTest(
+                logical=logical,
+                ratio=ratio,
+                capacity=capacity,
+                preserve=preserve,
+                poison=poison,
+            ):
+                _check_elided_padding(logical, ratio, capacity, preserve, poison)
+
+    def test_pad_invisible_elision_graph_replay_length_changes(self):
+        for physical, logical, ratio in [(128, 64, 2), (128, 128, 1), (64, 64, 2)]:
+            for direct in ("1", "0"):
+                with self.subTest(
+                    physical=physical, logical=logical, ratio=ratio, direct=direct
+                ), patch.dict(os.environ, {"DSV41_DIRECT_INDEXER_LOGITS": direct}):
+                    _check_graph_replay_elided(
+                        logical, ratio, physical, poison_table=direct == "0"
+                    )
+
+    def test_fused_metadata_rejects_unsupported_inputs_before_launch(self):
+        keys = fused.DecodeIndexerKeys(
+            torch.empty(2, 128, 68, dtype=torch.uint8),
+            torch.ones(2, 4, dtype=torch.int32),
+            512,
+            128,
+        )
+        shared = {}
+        with patch.object(fused, "_fused_decode_metadata_kernel") as kernel:
+            self.assertIsNone(
+                fused.get_decode_metadata(
+                    shared,
+                    keys,
+                    torch.zeros(12, dtype=torch.int64),
+                    batch_size=2,
+                    query_len=6,
+                    compress_ratio=1,
+                )
+            )
+            kernel.__getitem__.assert_not_called()
+        self.assertEqual(shared, {})
+
+    def test_disabled_rope_reuse_bypasses_metadata_before_tensor_access(self):
+        shared = {}
+        keys = fused.DecodeIndexerKeys(object(), object(), 512, 128)
+        with patch.dict(
+            os.environ,
+            {"DSV41_FUSE_INDEXER_METADATA": "1", "DSV41_REUSE_DECODE_ROPE": "0"},
+        ), patch.object(fused, "_fused_decode_metadata_kernel") as kernel:
+            for _ in range(4):
+                self.assertIsNone(
+                    fused.get_decode_metadata(
+                        shared,
+                        keys,
+                        object(),
+                        batch_size=2,
+                        query_len=6,
+                        compress_ratio=1,
+                    )
+                )
+            kernel.__getitem__.assert_not_called()
+        self.assertEqual(shared, {})
+
+    @unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
+    def test_fused_metadata_matches_original_fields_and_isolates_groups(self):
+        if not fused.is_supported(torch.device("cuda"), 128):
+            self.skipTest("SM10x paged indexer required")
+        with patch.dict(os.environ, {"DSV41_FUSE_INDEXER_METADATA": "1"}):
+            for batch, span, context in ((1, 1, 32768), (3, 6, 32768), (64, 6, 131072)):
+                for physical, logical, ratio in (
+                    (128, 128, 1),
+                    (128, 64, 2),
+                    (64, 64, 2),
+                ):
+                    for dtype in (torch.int32, torch.int64):
+                        with self.subTest(
+                            batch=batch,
+                            span=span,
+                            ratio=ratio,
+                            physical=physical,
+                            dtype=dtype,
+                        ):
+                            capacity = context // ratio
+                            cols = (capacity + logical - 1) // logical
+                            storage = torch.arange(
+                                batch * (cols * 2 + 3), device="cuda", dtype=dtype
+                            ).reshape(batch, -1)
+                            table = storage[:, 1 : 1 + 2 * cols : 2]
+                            table[:, 0] = -7
+                            table[:, -1] = 0
+                            positions = torch.arange(
+                                batch * span, device="cuda", dtype=dtype
+                            ) % (context - 1)
+                            positions[-1] = context - 1
+                            positions[0] = -1
+                            keys = fused.DecodeIndexerKeys(
+                                torch.empty(
+                                    2, physical, 68, dtype=torch.uint8, device="cuda"
+                                ),
+                                table,
+                                capacity,
+                                logical,
+                            )
+                            shared = {}
+                            plan = fused.get_decode_metadata(
+                                shared,
+                                keys,
+                                positions,
+                                batch_size=batch,
+                                query_len=span,
+                                compress_ratio=ratio,
+                            )
+                            lengths = ((positions.long() + 1) // ratio).int()
+                            last = (lengths - 1).clamp_min(0)
+                            expected_physical = torch.where(
+                                lengths > 0,
+                                last // logical * physical + last % logical + 1,
+                                0,
+                            )
+                            for actual, expected in (
+                                (plan.lengths, lengths),
+                                (plan.paged.lengths.flatten(), expected_physical),
+                                (plan.safe_table, table.clamp_min(0).int()),
+                                (
+                                    plan.paged.tables,
+                                    table.clamp_min(0)
+                                    .int()
+                                    .repeat_interleave(span, dim=0),
+                                ),
+                                (
+                                    plan.paged.request_ids,
+                                    torch.arange(
+                                        batch, device="cuda", dtype=torch.int32
+                                    ).repeat_interleave(span),
+                                ),
+                            ):
+                                torch.testing.assert_close(
+                                    actual, expected, rtol=0, atol=0
+                                )
+                            # Owners with identical table views share metadata, never KV pools.
+                            view_keys = replace(
+                                keys, pool=keys.pool.clone(), block_table=table[:]
+                            )
+                            self.assertIs(
+                                fused.get_decode_metadata(
+                                    shared,
+                                    view_keys,
+                                    positions[:],
+                                    batch_size=batch,
+                                    query_len=span,
+                                    compress_ratio=ratio,
+                                ),
+                                plan,
+                            )
+                            for other, pos, other_ratio in (
+                                (
+                                    replace(keys, block_table=table.clone()),
+                                    positions,
+                                    ratio,
+                                ),
+                                (
+                                    replace(
+                                        keys,
+                                        block_table=table.as_strided(
+                                            table.shape, (table.stride(0), 1)
+                                        ),
+                                    ),
+                                    positions,
+                                    ratio,
+                                ),
+                                (
+                                    replace(keys, capacity=capacity - 1),
+                                    positions,
+                                    ratio,
+                                ),
+                                (keys, positions.clone(), ratio),
+                                (keys, positions, 3 - ratio),
+                            ):
+                                self.assertIsNot(
+                                    fused.get_decode_metadata(
+                                        shared,
+                                        other,
+                                        pos,
+                                        batch_size=batch,
+                                        query_len=span,
+                                        compress_ratio=other_ratio,
+                                    ),
+                                    plan,
+                                )
+            for disabled in ("DSV41_FUSE_INDEXER_METADATA", "DSV41_REUSE_DECODE_ROPE"):
+                shared = {}
+                with patch.dict(os.environ, {disabled: "0"}), patch.object(
+                    fused, "_fused_decode_metadata_kernel"
+                ) as kernel:
+                    self.assertIsNone(
+                        fused.get_decode_metadata(
+                            shared,
+                            keys,
+                            positions,
+                            batch_size=batch,
+                            query_len=span,
+                            compress_ratio=ratio,
+                        )
+                    )
+                    kernel.__getitem__.assert_not_called()
+                self.assertEqual(shared, {})
+
+    @unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
+    def test_shared_metadata_read_only_across_owners_and_graph_replays(self):
+        if not fused.is_supported(torch.device("cuda"), 128):
+            self.skipTest("SM10x paged indexer required")
+        with patch.dict(
+            os.environ,
+            {"DSV41_FUSE_INDEXER_METADATA": "1", "DSV41_REUSE_DECODE_ROPE": "1"},
+        ):
+            for logical, ratio in ((128, 1), (64, 2)):
+                cases = [
+                    make_case(2, 6, 2053, 128, logical, ratio, seed=seed)[0]
+                    for seed in (42, 43)
+                ]
+                cases[1]["block_table"] = cases[0]["block_table"][:]
+                cases[1]["context_lens"] = cases[0]["context_lens"]
+                positions = cases[0]["context_lens"].flatten().long() * ratio - 1
+
+                def prepared():
+                    shared, outputs = {}, []
+                    first = None
+                    # Distinct pools consume one schedule repeatedly, without rebuilds.
+                    for case in cases * 2:
+                        keys = fused.DecodeIndexerKeys(
+                            case["pool"], case["block_table"], 2053, logical
+                        )
+                        plan = fused.get_decode_metadata(
+                            shared,
+                            keys,
+                            positions,
+                            batch_size=2,
+                            query_len=6,
+                            compress_ratio=ratio,
+                        )
+                        if first is None:
+                            first = plan
+                            tensors = (
+                                plan.lengths,
+                                plan.safe_table,
+                                plan.paged.lengths,
+                                plan.paged.tables,
+                                plan.paged.request_ids,
+                                plan.paged.schedule,
+                            )
+                            before = tuple(t.clone() for t in tensors)
+                        else:
+                            self.assertIs(plan, first)
+                        outputs.append(
+                            fused.score_decode_indexer(
+                                **case, metadata=plan, preserve_score_dtype=True
+                            )
+                        )
+                    return outputs, tensors, before
+
+                stream = torch.cuda.Stream()
+                stream.wait_stream(torch.cuda.current_stream())
+                with torch.cuda.stream(stream):
+                    for _ in range(3):
+                        prepared()
+                torch.cuda.current_stream().wait_stream(stream)
+                graph = torch.cuda.CUDAGraph()
+                with torch.cuda.graph(graph):
+                    captured = prepared()
+                for step in range(3):
+                    for owner, case in enumerate(cases):
+                        update, _ = make_case(
+                            2, 6, 2053, 128, logical, ratio, seed=90 + step * 2 + owner
+                        )
+                        for name in ("q", "weights", "freqs_cis", "pool"):
+                            case[name].copy_(update[name])
+                        if owner == 0:
+                            case["block_table"].copy_(update["block_table"])
+                    lengths = torch.tensor(
+                        [0, 1, 63, 64, 65, 127, 128, 129, 511, 512, 1024, 2053],
+                        device="cuda",
+                        dtype=torch.int32,
+                    ).view(2, 6)
+                    if step == 2:
+                        lengths.zero_()
+                    cases[0]["context_lens"].copy_(lengths)
+                    positions.copy_(lengths.flatten().long() * ratio - 1)
+                    graph.replay()
+                    expected = [
+                        fused.score_decode_indexer(**case, preserve_score_dtype=True)
+                        for case in cases
+                    ]
+                    for actual, tensors, before in (captured, prepared()):
+                        for output, reference in zip(actual, expected * 2):
+                            torch.testing.assert_close(
+                                output, reference, rtol=0, atol=0
+                            )
+                        for tensor, snapshot in zip(tensors, before):
+                            torch.testing.assert_close(tensor, snapshot, rtol=0, atol=0)
+
+    @unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
+    def test_prepared_score_graph_replay_and_forward_cache_lifetime(self):
+        if not fused.is_supported(torch.device("cuda"), 128):
+            self.skipTest("SM10x paged indexer required")
+        from rtp_llm.models_py.modules.dsv41.fp8.attention_v41 import AttentionV41FP8
+
+        with patch.dict(os.environ, {"DSV41_FUSE_INDEXER_METADATA": "1"}):
+            for logical, ratio in ((128, 1), (64, 2)):
+                case, _ = make_case(2, 6, 2053, 128, logical, ratio)
+                keys = fused.DecodeIndexerKeys(
+                    case["pool"], case["block_table"], 2053, logical
+                )
+                positions = case["context_lens"].flatten().long() * ratio - 1
+                shared = {"layers": {0: None, 2: None}}
+                first = SimpleNamespace(layer_id=0, _shared_attention=shared)
+                later = SimpleNamespace(layer_id=2, _shared_attention=shared)
+
+                def prepared():
+                    AttentionV41FP8._begin_forward(first)
+                    self.assertNotIn("decode_indexer_metadata", shared)
+                    plan = fused.get_decode_metadata(
+                        shared,
+                        keys,
+                        positions,
+                        batch_size=2,
+                        query_len=6,
+                        compress_ratio=ratio,
+                    )
+                    AttentionV41FP8._begin_forward(later)
+                    reused = fused.get_decode_metadata(
+                        shared,
+                        keys,
+                        positions,
+                        batch_size=2,
+                        query_len=6,
+                        compress_ratio=ratio,
+                    )
+                    self.assertIs(reused, plan)
+                    return fused.score_decode_indexer(
+                        **case, metadata=plan, preserve_score_dtype=True
+                    )
+
+                stream = torch.cuda.Stream()
+                stream.wait_stream(torch.cuda.current_stream())
+                with torch.cuda.stream(stream):
+                    for _ in range(3):
+                        prepared()
+                torch.cuda.current_stream().wait_stream(stream)
+                graph = torch.cuda.CUDAGraph()
+                with torch.cuda.graph(graph):
+                    output = prepared()
+                for step in range(4):
+                    update, _ = make_case(
+                        2, 6, 2053, 128, logical, ratio, seed=91 + step
+                    )
+                    if step % 2:
+                        update["block_table"][0, 0] = 0
+                        update["block_table"][1, 2] = -7
+                    for name in ("q", "weights", "freqs_cis", "pool", "block_table"):
+                        case[name].copy_(update[name])
+                    lengths = torch.tensor(
+                        [0, 1, 63, 64, 65, 127, 128, 129, 511, 512, 1024, 2053],
+                        device="cuda",
+                        dtype=torch.int32,
+                    ).view(2, 6)
+                    if step == 3:
+                        lengths.zero_()
+                    case["context_lens"].copy_(lengths)
+                    positions.copy_(lengths.flatten().long() * ratio - 1)
+                    graph.replay()
+                    expected = fused.score_decode_indexer(
+                        **case, preserve_score_dtype=True
+                    )
+                    torch.testing.assert_close(output, expected, rtol=0, atol=0)
+                    torch.testing.assert_close(prepared(), expected, rtol=0, atol=0)
+
+    @unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
+    def test_full_layer_selector_uses_prepared_metadata_with_exact_fallback(self):
+        if not fused.is_supported(torch.device("cuda"), 128):
+            self.skipTest("SM10x paged indexer required")
+        from rtp_llm.models_py.modules.dsv41.fp8.attention_v41 import AttentionV41FP8
+
+        for logical, ratio, layer_id in ((128, 1, 20), (64, 2, 2)):
+            case, _ = make_case(2, 6, 2053, 128, logical, ratio)
+            positions = case["context_lens"].flatten().long() * ratio - 1
+            # Real requests have nonnegative positions; keep one short visible row.
+            positions.clamp_min_(0)
+            freqs = torch.ones(2053 * ratio, 32, dtype=torch.complex64, device="cuda")
+            owner = SimpleNamespace(
+                layer_id=layer_id,
+                kv_source_layer_id=layer_id,
+                is_index_source=True,
+                index_n_heads=32,
+                index_head_dim=128,
+                index_topk=512,
+                compress_ratio=ratio,
+                rope_head_dim=64,
+                index_weights=torch.randn(32, 16, dtype=torch.bfloat16, device="cuda"),
+                freqs_cis=freqs,
+                v41_config={},
+                _shared_attention={
+                    "global": {
+                        layer_id: fused.DecodeIndexerKeys(
+                            case["pool"], case["block_table"], 2053, logical
+                        )
+                    }
+                },
+            )
+            x = torch.randn(2, 6, 16, dtype=torch.bfloat16, device="cuda")
+
+            def run(enabled):
+                with patch.dict(os.environ, {"DSV41_FUSE_INDEXER_METADATA": enabled}):
+                    return AttentionV41FP8._select_indices_decode(
+                        owner, x, None, positions, index_q=case["q"].flatten(0, 1)
+                    )
+
+            expected = run("0")
+            with patch.object(
+                fused, "get_decode_metadata", wraps=fused.get_decode_metadata
+            ) as prepare:
+                actual = run("1")
+                self.assertEqual(prepare.call_count, 1)
+            self.assertTrue(owner._shared_attention["decode_indexer_metadata"])
+            torch.testing.assert_close(
+                actual.sort(dim=-1).values, expected.sort(dim=-1).values, rtol=0, atol=0
+            )
+
+            owner._shared_attention.pop("decode_indexer_metadata")
+            with patch.dict(os.environ, {"DSV41_REUSE_DECODE_ROPE": "0"}), patch.object(
+                fused, "_fused_decode_metadata_kernel"
+            ) as kernel:
+                for _ in range(4):
+                    actual = run("1")
+                    torch.testing.assert_close(
+                        actual.sort(dim=-1).values,
+                        expected.sort(dim=-1).values,
+                        rtol=0,
+                        atol=0,
+                    )
+                    self.assertNotIn("decode_indexer_metadata", owner._shared_attention)
+                kernel.__getitem__.assert_not_called()
+
     def test_paged_owner_layout_and_speculative_lengths(self):
         for physical, logical, ratio, b, s in [
             (64, 64, 1, 1, 1),

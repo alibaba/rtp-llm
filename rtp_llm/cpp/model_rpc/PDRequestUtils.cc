@@ -68,6 +68,9 @@ PDSupportDecision checkPDSupport(const GenerateInputPB& request) {
     if (config.num_beams() > 1 || config.variable_num_beams_size() != 0) {
         return {false, "PD does not support beam search"};
     }
+    if (config.return_prompt_logits()) {
+        return {false, "PD does not support prompt scoring"};
+    }
     if (config.num_return_sequences() > 1) {
         return {false, "PD does not support multiple return sequences"};
     }

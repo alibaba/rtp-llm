@@ -1,4 +1,5 @@
 -r requirements_base.txt
+annotated-doc==0.0.4
 plotly==7.1.0
 opentelemetry-sdk==1.44.0
 opentelemetry-exporter-otlp-proto-http==1.15.0
@@ -20,8 +21,6 @@ nvidia-cuda-cccl==13.2.86
 triton==3.6.0
 
 # SM120 GDN requires the CUDA 13 compiler, alongside the shared DSL frontend.
-nvidia-cutlass-dsl==4.4.2
-nvidia-cutlass-dsl-libs-cu13==4.4.2
 
 # Use the CUDA 13.2 artifacts from the same RTP FlashInfer build.
 # Pinned to the RTP fork build (not upstream 0.6.9): upstream copies an
@@ -41,8 +40,9 @@ flash-attn==2.8.3.post1+cu13torch2.11cxx11abitrue.r1
 # Preserve the GLM5 kernel versions used by the validated inference path.
 # Re-pinned from 2.8.0+6d6aaad.cu132 / 1.0.0+49e2000.cu132: those wheels were
 # removed from the wheel index and cold-cache builds could no longer resolve them.
-deep-gemm==2.8.0+122e18b.cu132
-flash-mla==1.0.0+9241ae3
+deep-gemm==2.8.2+341b656.cu132
+https://search-ad.oss-cn-hangzhou-zmf-internal.aliyuncs.com/rtp-llm-deps/dsv41/20261013/x86-cuda132/flash_mla-1.0.0%2B2e5429f-cp310-cp310-linux_x86_64.whl
+https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/miji/whl/eplb-20261023-01a16309/flash_mla_legacy-1.0.0%2B9241ae3.rtp1-cp310-cp310-linux_x86_64.whl
 
 # Official DeepEP main@a56d6156 with legacy Buffer and V2 APIs.
 deep-ep==2.1.0+a56d615
@@ -77,3 +77,10 @@ tabulate==0.9.0
 # tensorrt 10.x cu12 series — drop for cuda13 (use TRT-LLM plugins via C++ side).
 # multimodal video decode (matches deps/requirements_base.txt on main)
 av==16.1.0 ; platform_machine == "x86_64"
+
+# V4.1 attention and CuTe runtime dependencies.
+quack-kernels @ https://github.com/Dao-AILab/quack/archive/77a750c0d9548d4a6e23c0f64062d61b3ea420ff.tar.gz#sha256=ebc940da966e88a05be318c3dc3f650a7359a281642f8f2f77c28ba4e9affa05
+flash-attn-4 @ https://files.pythonhosted.org/packages/44/1c/7ee1a5949e9b275eb62017d6fcc70e385db161b5341b686a29beb94ea181/flash_attn_4-4.0.0b21-py3-none-any.whl#sha256=8ad0cdd22b279ef2ca8b4e43a4fb33b7dc78936d36c41788bad9d67372056949
+nvidia-cutlass-dsl==4.7.1
+nvidia-cutlass-dsl-libs-base==4.7.1
+torch-c-dlpack-ext==0.1.5

@@ -25,6 +25,7 @@ from rtp_llm.models_py.modules.factory.fused_moe.utils.fp8_fp4.chunked_layer imp
 from rtp_llm.models_py.modules.factory.fused_moe.utils.fp8_fp4.weight_adapter import (
     adapt_split_moe_weights,
 )
+from rtp_llm.models_py.utils.expert_load_monitor import ExpertLoadContext
 from rtp_llm.utils.model_weight import W
 
 _PrefillFastHCImpls = Tuple[Callable, Callable, Callable, Callable]
@@ -348,9 +349,12 @@ class Block(nn.Module):
         return residual, x_pre, post, comb
 
     def prefill_fast_ffn_body(
-        self, x_pre: torch.Tensor, input_ids: torch.Tensor
+        self,
+        x_pre: torch.Tensor,
+        input_ids: torch.Tensor,
+        expert_load: Optional[ExpertLoadContext],
     ) -> torch.Tensor:
-        return self.ffn(x_pre, input_ids)
+        return self.ffn(x_pre, input_ids=input_ids, expert_load=expert_load)
 
     def prefill_fast_ffn_post(
         self,
@@ -367,6 +371,7 @@ class Block(nn.Module):
         x: torch.Tensor,  # [B, 1, hc, dim]
         attn_metadata: "DSv4DecodeAttnMetadata",  # type: ignore[name-defined]
         input_ids: torch.Tensor,  # [B, 1]
+        expert_load: Optional[ExpertLoadContext],
         kv_cache=None,
         attn_fn=None,
     ) -> torch.Tensor:
@@ -413,7 +418,12 @@ class Block(nn.Module):
         x_pre, post, comb = self.ffn_hc.pre(x)
         bsz, q_len, dim_ = x_pre.shape
         x_pre = self.ffn_norm(x_pre.reshape(bsz * q_len, dim_)).view(bsz, q_len, dim_)
-        ffn_out = self.ffn(x_pre, input_ids, is_decode_forward=True)
+        ffn_out = self.ffn(
+            x_pre,
+            input_ids=input_ids,
+            is_decode_forward=True,
+            expert_load=expert_load,
+        )
         x = self.ffn_hc.post(ffn_out, residual, post, comb)
         return x
 
@@ -423,6 +433,7 @@ class Block(nn.Module):
         input_ids: Optional[torch.Tensor],  # [T]
         positions: torch.Tensor,  # [T] int64
         cu_seqlens: torch.Tensor,  # [B+1] int64
+        expert_load: Optional[ExpertLoadContext],
         kv_cache=None,
         block_tables_by_type=None,
     ) -> torch.Tensor:
@@ -443,6 +454,7 @@ class Block(nn.Module):
                 cu_seqlens,
                 kv_cache=kv_cache,
                 block_tables_by_type=block_tables_by_type,
+                expert_load=expert_load,
             )
         return fast_call(
             x,
@@ -451,6 +463,7 @@ class Block(nn.Module):
             cu_seqlens,
             kv_cache=kv_cache,
             block_tables_by_type=block_tables_by_type,
+            expert_load=expert_load,
         )
 
     def _forward_prefill_fast_fp8(
@@ -459,6 +472,7 @@ class Block(nn.Module):
         input_ids: Optional[torch.Tensor],
         positions: torch.Tensor,
         cu_seqlens: torch.Tensor,
+        expert_load: Optional[ExpertLoadContext],
         kv_cache=None,
         block_tables_by_type=None,
     ) -> torch.Tensor:
@@ -510,7 +524,11 @@ class Block(nn.Module):
         residual = x
         x_pre, post, comb = ffn_hc_pre(x)
         x_pre = _prefill_fast_norm(self.ffn_norm, x_pre)
-        ffn_out = self.ffn(x_pre, input_ids)
+        ffn_out = self.ffn(
+            x_pre,
+            input_ids=input_ids,
+            expert_load=expert_load,
+        )
         return ffn_hc_post(ffn_out, residual, post, comb)
 
     def forward(
@@ -519,6 +537,7 @@ class Block(nn.Module):
         input_ids: Optional[torch.Tensor],  # [T]
         positions: torch.Tensor,  # [T] int64
         cu_seqlens: torch.Tensor,  # [B+1] int64
+        expert_load: Optional[ExpertLoadContext],
         kv_cache=None,
         block_tables_by_type=None,
     ) -> torch.Tensor:
@@ -615,6 +634,10 @@ class Block(nn.Module):
             if input_ids is not None
             else torch.zeros(x.size(0), dtype=torch.long, device=x.device)
         )
-        ffn_out = self.ffn(x_pre, ffn_in_ids)  # [T, dim]
+        ffn_out = self.ffn(
+            x_pre,
+            input_ids=ffn_in_ids,
+            expert_load=expert_load,
+        )  # [T, dim]  # [T, dim]
         x = self.ffn_hc.post(ffn_out, residual, post, comb)  # [T, hc, dim]
         return x  # [T, hc, dim]

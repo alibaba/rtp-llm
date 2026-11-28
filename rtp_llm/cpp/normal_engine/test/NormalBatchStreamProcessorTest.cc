@@ -4,6 +4,7 @@
 #include <cstdlib>
 #include <exception>
 #include <functional>
+#include <exception>
 #include <future>
 #include <limits>
 #include <list>
@@ -29,8 +30,11 @@
 #include "rtp_llm/cpp/normal_engine/NormalGenerateStream.h"
 #include "rtp_llm/cpp/engine_base/schedulers/SchedulerUtils.h"
 #include "rtp_llm/cpp/normal_engine/NormalExecutor.h"
+#include "rtp_llm/cpp/normal_engine/AsyncRunner.h"
 #include "rtp_llm/cpp/models/ModelTypes.h"
 #include "rtp_llm/cpp/models/SampleInfos.h"
+#include "rtp_llm/cpp/models/Sampler.h"
+#include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
 #include "rtp_llm/cpp/models/logits_processor/MultiSeqLogitsProcessor.h"
 #include "rtp_llm/models_py/bindings/core/Types.h"
 #include "rtp_llm/cpp/testing/TestBase.h"
@@ -43,6 +47,10 @@
 #include "rtp_llm/cpp/cache/OpaqueKVCacheSpec.h"
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_base.h"
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_runner.h"
+
+#if USING_CUDA
+#include <cuda_runtime_api.h>
+#endif
 
 using namespace std;
 
@@ -186,6 +194,7 @@ protected:
 class OutputDispatchTest: public NormalBatchStreamProcessorTest, public ::testing::WithParamInterface<int> {};
 
 INSTANTIATE_TEST_SUITE_P(SerialAndParallel, OutputDispatchTest, ::testing::Values(0, 2));
+
 
 TEST_P(OutputDispatchTest, testDispatchPreservesCpuProfilingAndAsyncDisableGuard) {
     namespace tap = torch::autograd::profiler;
@@ -442,6 +451,95 @@ TEST_F(NormalBatchStreamProcessorTest, testWarmUpWithoutCacheManager) {
     EXPECT_FALSE(model_input->capture_hidden_states);
     EXPECT_FALSE(model_input->kv_cache_block_id.defined());
     EXPECT_FALSE(model_input->kv_cache_kernel_block_id.defined());
+}
+
+TEST_F(NormalBatchStreamProcessorTest, PrefillRetainsHostMetadataWithDeviceInputEnabled) {
+    const char* previous = std::getenv("RTP_LLM_DEVICE_INPUT");
+    struct RestoreDeviceInputEnv {
+        std::optional<std::string> previous;
+        ~RestoreDeviceInputEnv() {
+            if (previous.has_value()) {
+                setenv("RTP_LLM_DEVICE_INPUT", previous->c_str(), 1);
+            } else {
+                unsetenv("RTP_LLM_DEVICE_INPUT");
+            }
+        }
+    } restore{previous ? std::optional<std::string>(previous) : std::nullopt};
+    setenv("RTP_LLM_DEVICE_INPUT", "1", 1);
+
+    ModelConfig model_config;
+    model_config.max_seq_len      = 128;
+    model_config.vocab_size       = 128;
+    model_config.input_vocab_size = 128;
+    model_config.num_layers       = 1;
+    CacheConfig cache_config;
+    initFullCacheConfig(cache_config, 1);
+    rtp_llm::test::setGroupBlockLayout(cache_config, {"default"}, {64}, {4096}, {256});
+
+    enum class BatchKind {
+        PREFILL,
+        DECODE,
+        MIXED
+    };
+    for (const auto kind : {BatchKind::PREFILL, BatchKind::DECODE, BatchKind::MIXED}) {
+        const bool prefill_only = kind == BatchKind::PREFILL;
+        auto       make_stream  = [&](std::vector<int32_t> tokens, int reuse, std::vector<int> blocks, bool context) {
+            auto query             = std::make_shared<GenerateInput>();
+            query->input_ids       = hostIntBuffer(std::move(tokens));
+            query->generate_config = std::make_shared<GenerateConfig>();
+            auto stream            = std::make_shared<NormalGenerateStream>(
+                query, model_config, RuntimeConfig{}, ResourceContext{}, nullptr);
+            BatchKVCacheResource cache;
+            cache.resetBatchSize(1);
+            cache.initGroups(cache_config.topologyPtr());
+            cache.setBatchBlocks(0, "default", blocks);
+            stream->setKVCache(cache);
+            stream->setReuseLength(reuse);
+            stream->setIsContextStream(context);
+            stream->generate_status_->status = StreamState::RUNNING;
+            return stream;
+        };
+        auto short_stream = make_stream({1, 2, 3}, 0, {1, 2}, prefill_only);
+        auto long_stream =
+            make_stream({4, 5, 6, 7, 8, 9}, kind == BatchKind::DECODE ? 0 : 2, {3, 4}, kind != BatchKind::DECODE);
+        // Supply mixed streams in context/decode order. The packed model input
+        // must still put decode first and keep token/cache rows aligned.
+        StreamGroups groups(kind == BatchKind::MIXED ? std::list<GenerateStreamPtr>{long_stream, short_stream} :
+                                                       std::list<GenerateStreamPtr>{short_stream, long_stream});
+        NormalBatchStreamProcessor processor(
+            model_config, PDSepConfig{}, ProfilingDebugLoggingConfig{}, cache_config, false);
+        TensorHolder holder;
+        auto         inputs = processor.gatherModelInput(groups, holder);
+        ASSERT_TRUE(inputs.ok());
+        for (const auto* tensor : {&inputs->combo_tokens,
+                                   &inputs->input_lengths,
+                                   &inputs->prefix_lengths,
+                                   &inputs->sequence_lengths,
+                                   &inputs->kv_cache_block_id,
+                                   &inputs->kv_cache_kernel_block_id,
+                                   &inputs->lm_output_indexes}) {
+            ASSERT_TRUE(tensor->defined());
+            EXPECT_EQ(tensor->is_cuda(), !prefill_only);
+            if (prefill_only && tensor->numel() > 0) {
+                EXPECT_TRUE(tensor->is_pinned());
+            }
+        }
+        if (prefill_only) {
+            EXPECT_EQ(toVec<int32_t>(inputs->combo_tokens), (std::vector<int32_t>{1, 2, 3, 6, 7, 8, 9}));
+            EXPECT_EQ(toVec<int32_t>(inputs->input_lengths), (std::vector<int32_t>{3, 4}));
+            EXPECT_EQ(toVec<int32_t>(inputs->prefix_lengths), (std::vector<int32_t>{0, 2}));
+            EXPECT_EQ(toVec<int32_t>(inputs->lm_output_indexes), (std::vector<int32_t>{2, 6}));
+            EXPECT_EQ(toVec<int32_t>(inputs->kv_cache_block_id), (std::vector<int32_t>{1, 2, 3, 4}));
+        } else if (kind == BatchKind::MIXED) {
+            EXPECT_EQ(toVec<int32_t>(inputs->combo_tokens.cpu()), (std::vector<int32_t>{3, 6, 7, 8, 9}));
+            EXPECT_EQ(toVec<int32_t>(inputs->input_lengths.cpu()), (std::vector<int32_t>{3, 4}));
+            EXPECT_EQ(toVec<int32_t>(inputs->sequence_lengths.cpu()), (std::vector<int32_t>{2}));
+            EXPECT_EQ(toVec<int32_t>(inputs->prefix_lengths.cpu()), (std::vector<int32_t>{2}));
+            EXPECT_EQ(toVec<int32_t>(inputs->lm_output_indexes.cpu()), (std::vector<int32_t>{0, 4}));
+            EXPECT_EQ(toVec<int32_t>(inputs->kv_cache_block_id.cpu()), (std::vector<int32_t>{1, 2, 3, 4}));
+            EXPECT_EQ(toVec<int32_t>(inputs->kv_cache_kernel_block_id.cpu()), (std::vector<int32_t>{1, 2, 3, 4}));
+        }
+    }
 }
 
 TEST_F(NormalBatchStreamProcessorTest, testSpeculativeReserveStepFormula) {
@@ -2761,8 +2859,10 @@ TEST_F(NormalBatchStreamProcessorTest, testDisabledOutputVocabMasksPaddedLogits)
     auto sampler_inputs = processor.gatherSamplerInput(stream_groups, GptModelInputs(), model_output);
     ASSERT_TRUE(sampler_inputs.ok());
     EXPECT_EQ(sampler_inputs->top_k.data_ptr<int32_t>()[0], 8);
-    EXPECT_EQ(sampler_inputs->all_probs.size(1), 16);
+    EXPECT_EQ(sampler_inputs->probability_output, SamplerProbabilityOutput::DENSE);
     EXPECT_TRUE(torch::isneginf(sampler_inputs->logits.narrow(1, 10, 6)).all().item<bool>());
+    Sampler sampler({});
+    EXPECT_EQ(sampler.forward(*sampler_inputs).all_probs.size(1), 16);
 }
 
 TEST_F(NormalBatchStreamProcessorTest, testPaddedSizeLargerThanKKeepsDispatchAndSamplingOnK) {

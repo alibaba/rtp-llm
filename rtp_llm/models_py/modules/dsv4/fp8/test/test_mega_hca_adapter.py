@@ -57,7 +57,7 @@ def _block_stub(adapter: object | None) -> Block:
     block.ffn_hc = MagicMock()
     block.ffn_hc.pre.side_effect = block.attn_hc.pre.side_effect
     block.ffn_hc.post.side_effect = lambda value, *_args: value.unsqueeze(-2)
-    block.ffn = MagicMock(side_effect=lambda value, _input_ids, **_kwargs: value)
+    block.ffn = MagicMock(side_effect=lambda value, input_ids, **_kwargs: value)
     return block
 
 
@@ -121,7 +121,10 @@ class MegaHCARoutingTest(unittest.TestCase):
         metadata = SimpleNamespace(q_len_per_req=1)
 
         result = block.forward_decode(
-            hidden, metadata, torch.zeros(2, 1, dtype=torch.long)
+            hidden,
+            metadata,
+            torch.zeros(2, 1, dtype=torch.long),
+            expert_load=None,
         )
 
         self.assertEqual(tuple(result.shape), tuple(hidden.shape))
@@ -140,7 +143,10 @@ class MegaHCARoutingTest(unittest.TestCase):
         metadata = SimpleNamespace(batch_size=2, q_len_per_req=3)
 
         result = block.forward_decode(
-            hidden, metadata, torch.zeros(2, 3, dtype=torch.long)
+            hidden,
+            metadata,
+            torch.zeros(2, 3, dtype=torch.long),
+            expert_load=None,
         )
 
         self.assertEqual(tuple(result.shape), tuple(hidden.shape))
@@ -154,7 +160,7 @@ class MegaHCARoutingTest(unittest.TestCase):
         hidden = torch.zeros(86, 3, 1, 4)
         metadata = SimpleNamespace(batch_size=86, q_len_per_req=3)
 
-        block.forward_decode(hidden, metadata, torch.zeros(86, 3))
+        block.forward_decode(hidden, metadata, torch.zeros(86, 3), expert_load=None)
 
         adapter.forward_attention_sublayer.assert_not_called()
         block.attn.forward_decode.assert_called_once()
@@ -170,6 +176,7 @@ class MegaHCARoutingTest(unittest.TestCase):
                 torch.zeros(1, 1, 1, 4),
                 SimpleNamespace(q_len_per_req=1),
                 torch.zeros(1, 1, dtype=torch.long),
+                expert_load=None,
             )
         block.attn_hc.pre.assert_not_called()
         block.attn.forward_decode.assert_not_called()

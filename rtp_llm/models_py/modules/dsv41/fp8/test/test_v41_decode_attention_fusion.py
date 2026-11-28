@@ -269,6 +269,235 @@ class V41DecodeAttentionFusionCUDA(unittest.TestCase):
     def setUp(self):
         _LAST_PAGED_LOGITS.clear()
 
+    def _slot_reuse_case(self, ratio):
+        region = CSA_KV if ratio == 2 else HCA_KV
+        pool = torch.empty(8, 128 // ratio, 288, dtype=torch.uint8, device="cuda")
+        table = torch.tensor([[1, 0, 3], [2, 4, 0]], dtype=torch.int32, device="cuda")
+        selected = (
+            torch.arange(512, device="cuda", dtype=torch.int32)[None].repeat(12, 1) - 2
+        )
+        requests = torch.arange(2, device="cuda", dtype=torch.int32).repeat_interleave(
+            6
+        )
+        attn = SimpleNamespace(
+            layer_id=2,
+            index_source_layer_id=2,
+            kv_source_layer_id=2,
+            compress_ratio=ratio,
+            _cp_ctx=None,
+            _shared_attention={"layers": {2: None}, "topk": {2: selected}},
+            _kv_cache=SimpleNamespace(
+                get_kernel_seq_size_per_block=lambda tag: 128,
+                get_seq_size_per_block=lambda tag: 256,
+            ),
+            _block_tables_by_type={region: table},
+            _global_region=lambda: region,
+            _source_pool=lambda _: pool,
+        )
+        attn._slots = MethodType(AttentionV41FP8._slots, attn)
+        attn._source_entries = lambda _, p: p.shape[1]
+        attn._decode_global_slots = MethodType(
+            AttentionV41FP8._decode_global_slots, attn
+        )
+        return attn, selected, requests, table
+
+    def _slot_reference(self, attn, selected, requests):
+        # Independent CPU address calculation, including reserved page zero.
+        selected, requests = selected.cpu().long(), requests.cpu().long()
+        table = attn._block_tables_by_type[attn._global_region()].cpu().long()
+        entries = 128 // attn.compress_ratio
+        blocks = selected.clamp_min(0) // entries
+        pages = table[requests[:, None], blocks.clamp_max(table.shape[1] - 1)]
+        slots = pages * entries + selected.remainder(entries)
+        return torch.where(
+            (selected >= 0) & (blocks < table.shape[1]) & (pages > 0), slots, -1
+        ).int()
+
+    def test_physical_slots_reuse_published_topk_and_mapping(self):
+        for ratio in (1, 2):
+            with self.subTest(ratio=ratio):
+                attn, selected, requests, table = self._slot_reuse_case(ratio)
+                with patch.object(
+                    paged_topk_translator,
+                    "translate_local_to_global_slots",
+                    wraps=paged_topk_translator.translate_local_to_global_slots,
+                ) as convert:
+                    first = attn._decode_global_slots(selected, requests)
+                    torch.testing.assert_close(
+                        first.cpu(), self._slot_reference(attn, selected, requests)
+                    )
+                    for layer in range(3, 8):
+                        attn.layer_id = layer
+                        self.assertIs(
+                            attn._decode_global_slots(selected, requests[:]), first
+                        )
+                    self.assertEqual(convert.call_count, 1)
+                    changed_requests = requests.flip(0)
+                    second = attn._decode_global_slots(selected, changed_requests)
+                    self.assertEqual(convert.call_count, 2)
+                    torch.testing.assert_close(
+                        second.cpu(),
+                        self._slot_reference(attn, selected, changed_requests),
+                    )
+                    attn._block_tables_by_type[attn._global_region()] = table.flip(0)
+                    third = attn._decode_global_slots(selected, requests)
+                    self.assertEqual(convert.call_count, 3)
+                    torch.testing.assert_close(
+                        third.cpu(), self._slot_reference(attn, selected, requests)
+                    )
+                    new_selected = selected.clone()
+                    attn._shared_attention["topk"] = {2: new_selected}
+                    self.assertIsNot(
+                        attn._decode_global_slots(new_selected, requests), third
+                    )
+                    self.assertEqual(convert.call_count, 4)
+                    attn._decode_global_slots(selected, requests)
+                    attn._decode_global_slots(selected, requests)
+                    self.assertEqual(convert.call_count, 6)
+                    attn.index_source_layer_id = 8
+                    new_selected.add_(1)
+                    attn._shared_attention["topk"] = {8: new_selected}
+                    next_group = attn._decode_global_slots(new_selected, requests)
+                    self.assertEqual(convert.call_count, 7)
+                    torch.testing.assert_close(
+                        next_group.cpu(),
+                        self._slot_reference(attn, new_selected, requests),
+                    )
+
+    def test_fused_slots_are_published_without_retranslation(self):
+        from rtp_llm.models_py.modules.dsv41.fp8 import _v41_decode_topk as topk
+
+        for ratio in (1, 2):
+            attn, selected, requests, table = self._slot_reuse_case(ratio)
+            attn.is_index_source = True
+            attn._decode_slot_plan = MethodType(AttentionV41FP8._decode_slot_plan, attn)
+            with patch.dict(os.environ, {"DSV41_FUSED_TOPK_SLOTS": "1"}):
+                plan = attn._decode_slot_plan(requests)
+            self.assertIsNotNone(plan)
+            width = 1024
+            logits = torch.randn(12, width, device="cuda", dtype=torch.bfloat16)
+            lengths = torch.full((12,), width, device="cuda", dtype=torch.int32)
+
+            def forward():
+                AttentionV41FP8._begin_forward(attn)
+                attn._shared_attention["topk"] = {2: selected}
+                slots = torch.empty_like(selected)
+                topk._finite_topk_slots_kernel[(12, 2)](
+                    logits,
+                    lengths,
+                    selected,
+                    requests,
+                    table,
+                    slots,
+                    width,
+                    width,
+                    512,
+                    2,
+                    3,
+                    table.stride(0),
+                    128 // ratio,
+                    128 // ratio,
+                    256,
+                )
+                first = attn._decode_global_slots(selected, requests, slots=slots)
+                self.assertIs(first, slots)
+                self.assertIs(attn._decode_global_slots(selected, requests[:]), slots)
+                return slots
+
+            with patch.object(
+                paged_topk_translator,
+                "translate_local_to_global_slots",
+                side_effect=AssertionError("fused slots must be reused"),
+            ):
+                stream = torch.cuda.Stream()
+                stream.wait_stream(torch.cuda.current_stream())
+                with torch.cuda.stream(stream):
+                    forward()
+                torch.cuda.current_stream().wait_stream(stream)
+                graph = torch.cuda.CUDAGraph()
+                with torch.cuda.graph(graph):
+                    output = forward()
+                for phase in range(3):
+                    selected.copy_(torch.arange(512, device="cuda")[None] - phase * 9)
+                    table.copy_(
+                        torch.tensor([[1, 0, 3], [2, 4, 0]], device="cuda") + phase
+                    )
+                    graph.replay()
+                    torch.testing.assert_close(
+                        output.cpu(),
+                        self._slot_reference(attn, selected, requests),
+                        rtol=0,
+                        atol=0,
+                    )
+            attn.is_index_source = False
+            self.assertIsNone(attn._decode_slot_plan(requests))
+            attn.is_index_source = True
+            attn._cp_ctx = SimpleNamespace(cp_size=2, kv_cache_sharded=True)
+            self.assertIsNone(attn._decode_slot_plan(requests))
+
+    def test_physical_slots_forward_reset_and_stream_isolation(self):
+        attn, selected, requests, table = self._slot_reuse_case(1)
+        first = attn._decode_global_slots(selected, requests)
+        stream = torch.cuda.Stream()
+        stream.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(stream):
+            second = attn._decode_global_slots(selected, requests)
+        torch.cuda.current_stream().wait_stream(stream)
+        self.assertIsNot(first, second)
+        AttentionV41FP8._begin_forward(attn)
+        self.assertNotIn("decode_global_slots", attn._shared_attention)
+        selected.add_(7)
+        table.fill_(5)
+        attn._shared_attention["topk"] = {2: selected}
+        third = attn._decode_global_slots(selected, requests)
+        self.assertIsNot(first, third)
+        torch.testing.assert_close(
+            third.cpu(), self._slot_reference(attn, selected, requests)
+        )
+
+    def test_physical_slots_graph_replay_refreshes_shared_output(self):
+        for ratio in (1, 2):
+            with self.subTest(ratio=ratio):
+                attn, selected, requests, table = self._slot_reuse_case(ratio)
+
+                def forward():
+                    AttentionV41FP8._begin_forward(attn)
+                    attn._shared_attention["topk"] = {2: selected}
+                    first = attn._decode_global_slots(selected, requests)
+                    self.assertIs(
+                        first, attn._decode_global_slots(selected, requests[:])
+                    )
+                    return first
+
+                stream = torch.cuda.Stream()
+                stream.wait_stream(torch.cuda.current_stream())
+                with torch.cuda.stream(stream):
+                    for _ in range(3):
+                        forward()
+                torch.cuda.current_stream().wait_stream(stream)
+                graph = torch.cuda.CUDAGraph()
+                with torch.cuda.graph(graph):
+                    output = forward()
+                for phase in range(6):
+                    selected.copy_(
+                        torch.arange(512, device="cuda", dtype=torch.int32)[None]
+                        - phase * 13
+                    )
+                    table.copy_(
+                        torch.tensor(
+                            [[1 + phase % 3, 0, 4], [2, 5, 0]],
+                            dtype=torch.int32,
+                            device="cuda",
+                        )
+                    )
+                    requests.copy_(
+                        (torch.arange(12, device="cuda", dtype=torch.int32) + phase) % 2
+                    )
+                    graph.replay()
+                    torch.testing.assert_close(
+                        output.cpu(), self._slot_reference(attn, selected, requests)
+                    )
+
     def test_actual_slot_gate_and_padded_pool_fallback(self):
         for ratio in (1, 2):
             for padded in (False, True):
@@ -348,6 +577,8 @@ class V41DecodeAttentionFusionCUDA(unittest.TestCase):
                             _select(attn, x, qr, positions)
                     torch.cuda.current_stream().wait_stream(stream)
                     graph = torch.cuda.CUDAGraph()
+                    # Direct selection calls bypass the model's _begin_forward.
+                    attn._shared_attention.pop("decode_indexer_metadata", None)
                     with torch.cuda.graph(graph):
                         got = _select(attn, x, qr, positions)
                     for _ in range(2):
@@ -623,9 +854,9 @@ class V41Fp4DualDecodeAttentionCUDA(unittest.TestCase):
 class V41DecodeTopKFusionCUDA(unittest.TestCase):
     """Independent old-PyTorch oracles for the decode selection helpers.
 
-    Candidate membership must be exact, including cutoff ties. Token TopK has
-    an unordered contract: compare selected score multisets and uniqueness,
-    while keeping the old short-context ascending indices exactly.
+    Candidate and token TopK allow different indices at cutoff ties: compare
+    selected score multisets and uniqueness. Keep the old short-context token
+    selection's ascending indices exactly.
     """
 
     def setUp(self):
@@ -666,13 +897,43 @@ class V41DecodeTopKFusionCUDA(unittest.TestCase):
         flags.scatter_(1, torch.where(candidates >= 0, candidates, nblocks).long(), 1)
         return candidates, flags[:, :nblocks]
 
-    def _assert_candidates(self, logits, lengths, candidates, flags, block_size=8):
-        expected, expected_flags = self._old_candidates(logits, lengths, block_size)
+    def _assert_candidates(
+        self, logits, lengths, candidates, flags, block_size=8, topk_blocks=2048
+    ):
+        expected, _ = self._old_candidates(logits, lengths, block_size, topk_blocks)
         self.assertEqual(candidates.dtype, torch.int32)
         self.assertEqual(flags.dtype, torch.uint8)
-        torch.testing.assert_close(
-            candidates.sort(-1).values, expected.sort(-1).values, rtol=0, atol=0
+        self.assertEqual(candidates.shape, expected.shape)
+        rows, width = logits.shape
+        nblocks = (width + block_size - 1) // block_size
+        self.assertTrue(bool(((candidates >= -1) & (candidates < nblocks)).all()))
+        scores = F.pad(logits, (0, nblocks * block_size - width), value=-torch.inf)
+        scores = scores.view(rows, nblocks, block_size).amax(-1)
+        newest = (lengths.long() - 1).clamp_min(0) // block_size
+        scores.scatter_(
+            1, newest[:, None], torch.where(lengths > 0, torch.inf, -torch.inf)[:, None]
         )
+
+        def selected_scores(ids):
+            return (
+                scores.gather(1, ids.clamp_min(0).long())
+                .masked_fill(ids < 0, -torch.inf)
+                .sort(-1)
+                .values
+            )
+
+        torch.testing.assert_close(
+            selected_scores(candidates), selected_scores(expected), rtol=0, atol=0
+        )
+        # Validate flags against the selected IDs, not torch's arbitrary tie
+        # choices; subsequent masking must follow these exact flags.
+        expected_flags = torch.zeros(
+            (rows, nblocks + 1), dtype=torch.uint8, device=logits.device
+        )
+        expected_flags.scatter_(
+            1, torch.where(candidates >= 0, candidates, nblocks).long(), 1
+        )
+        expected_flags = expected_flags[:, :nblocks]
         torch.testing.assert_close(flags, expected_flags, rtol=0, atol=0)
         for row, visible in enumerate(lengths.cpu().tolist()):
             ids = candidates[row][candidates[row] >= 0]
@@ -682,6 +943,96 @@ class V41DecodeTopKFusionCUDA(unittest.TestCase):
             else:
                 self.assertEqual(ids.numel(), 0)
         return expected_flags
+
+    def test_candidate_counts_preserve_reference_and_dispatch(self):
+        # Cover the original K=8 regression, both sides of radix-supported K,
+        # and pools smaller than/equal to K, including a partial final block.
+        for topk_blocks in (
+            1,
+            8,
+            511,
+            512,
+            513,
+            1023,
+            1024,
+            1025,
+            2047,
+            2048,
+            2049,
+            4096,
+        ):
+            for nblocks in (max(1, topk_blocks - 1), topk_blocks, topk_blocks + 3):
+                with self.subTest(topk_blocks=topk_blocks, nblocks=nblocks):
+                    width = nblocks * 8 - 3
+                    columns = torch.arange(width, device="cuda")
+                    storage = torch.full((6, width + 13), 12345.0, device="cuda")
+                    logits = storage[:, :width]
+                    logits.copy_(columns.float()[None])
+                    lengths = torch.tensor(
+                        [0, 1, min(7, width), min(9, width), width - 1, width],
+                        dtype=torch.int32,
+                        device="cuda",
+                    )
+                    logits[4].fill_(-torch.inf)
+                    # PyTorch ranks NaN above the pinned +inf; leave room for
+                    # both so the newest-block assertion remains applicable.
+                    if topk_blocks > 1:
+                        logits[5, 0] = torch.nan
+                    logits.masked_fill_(columns[None] >= lengths[:, None], -torch.inf)
+                    with patch.object(
+                        self.impl.rtp_llm_ops,
+                        "topk_v3",
+                        wraps=self.impl.rtp_llm_ops.topk_v3,
+                    ) as radix:
+                        ids, flags = self.impl.select_candidates(
+                            logits, lengths, 8, topk_blocks
+                        )
+                    self.assertEqual(
+                        radix.call_count,
+                        int(
+                            (
+                                topk_blocks == 2048
+                                and self.impl.candidate_topk.is_available(
+                                    "decode", logits.device
+                                )
+                            )
+                            or (nblocks > topk_blocks and topk_blocks in (512, 1024))
+                        ),
+                    )
+                    expected_flags = self._assert_candidates(
+                        logits, lengths, ids, flags, topk_blocks=topk_blocks
+                    )
+                    expected = logits.masked_fill(
+                        ~expected_flags[:, columns // 8].bool(), -torch.inf
+                    )
+                    self.impl.mask_candidates(logits, flags, 8)
+                    torch.testing.assert_close(
+                        logits, expected, rtol=0, atol=0, equal_nan=True
+                    )
+                    self.assertTrue(bool((storage[:, width:] == 12345.0).all()))
+
+    def test_candidate_torch_fallback_graph_replay(self):
+        width, topk_blocks = 768, 8
+        columns = torch.arange(width, device="cuda")
+        logits = columns.float()[None].repeat(6, 1)
+        lengths = torch.full((6,), width, dtype=torch.int32, device="cuda")
+        stream = torch.cuda.Stream()
+        stream.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(stream):
+            for _ in range(2):
+                self.impl.select_candidates(logits, lengths, 8, topk_blocks)
+        torch.cuda.current_stream().wait_stream(stream)
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph, stream=stream):
+            ids, flags = self.impl.select_candidates(logits, lengths, 8, topk_blocks)
+        for visible in ([0, 1, 7, 8, 9, width], [width, 511, 65, 64, 63, 0]):
+            lengths.copy_(torch.tensor(visible, device="cuda", dtype=torch.int32))
+            logits.copy_(-columns.float()[None])
+            logits.masked_fill_(columns[None] >= lengths[:, None], -torch.inf)
+            graph.replay()
+            self._assert_candidates(
+                logits, lengths, ids, flags, topk_blocks=topk_blocks
+            )
 
     def _assert_tokens(self, logits, lengths, result, topk=512):
         self.assertEqual(result.dtype, torch.int32)
@@ -703,7 +1054,7 @@ class V41DecodeTopKFusionCUDA(unittest.TestCase):
                 logits[row, ids].sort().values, expected_values, rtol=0, atol=0
             )
 
-    def test_candidate_real_capacity_batch24_preserves_ties_and_flags(self):
+    def test_candidate_real_capacity_batch24_preserves_scores_and_flags(self):
         torch.manual_seed(4102048)
         rows, width = 24, 524288
         logits = torch.rand(rows, width, dtype=torch.float32, device="cuda")
@@ -738,7 +1089,7 @@ class V41DecodeTopKFusionCUDA(unittest.TestCase):
             device="cuda",
         )
         # All-zero cutoff ties span more blocks than K. The latest block must
-        # still be included, and batching 4x6 -> 24 must keep the same set.
+        # still be included; other tied indices may differ from torch.topk.
         logits[12].zero_()
         logits[16].fill_(1.0)
         logits[16, : 1023 * 8] = 3.0
@@ -887,10 +1238,11 @@ class V41DecodeTopKFusionCUDA(unittest.TestCase):
         logits = torch.empty(2, 1024, device="cuda")
         lengths = torch.tensor([8, 900], dtype=torch.int32, device="cuda")
         self.assertTrue(self.impl.is_supported(logits, lengths, 512))
+        self.assertTrue(self.impl.is_supported(logits.bfloat16(), lengths, 512))
         with patch.object(self.impl, "_TOPK_V3_OK", False):
             self.assertFalse(self.impl.is_supported(logits, lengths, 512))
         for values, lens, count in (
-            (logits.to(torch.bfloat16), lengths, 512),
+            (logits.to(torch.float16), lengths, 512),
             (logits[:, ::2], lengths, 512),
             (logits[:1].expand(2, -1), lengths, 512),
             (logits[:, :511], lengths, 512),

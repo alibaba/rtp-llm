@@ -1,7 +1,9 @@
 import functools
+import os
 
 import torch
 
+from ....mhc.norm_fn_kernel import _mhc_pre_norm_fn_fwd_mul, round_to_tf32
 from ....mhc.pre_big_fuse_kernel import _mhc_pre_big_fuse
 
 
@@ -17,6 +19,40 @@ def _compute_num_split(block_k: int, k: int, grid_size: int) -> int:
     num_block_k = _ceil_div(k, block_k)
     split_k = min(split_k, num_block_k // 4)
     return max(split_k, 1)
+
+
+def _requested_backend() -> str:
+    requested = os.environ.get("DSV4_MHC_PRE_GEMM_BACKEND", "").strip().lower()
+    if requested in ("", "auto"):
+        # Experiment branch: enable DeepGEMM by default to validate DSV4
+        # greedy/golden semantics under the full SM100 smoke suite. This is
+        # intentionally hard: DeepGEMM/JIT failures must surface directly.
+        return "deepgemm"
+    aliases = {
+        "dg": "deepgemm",
+        "tilelang": "tilelang_single",
+        "single": "tilelang_single",
+    }
+    return aliases.get(requested, requested)
+
+
+def _run_tilelang_single_gemm(
+    residual_flat: torch.Tensor,
+    fn: torch.Tensor,
+    gemm_out_mul: torch.Tensor,
+    gemm_out_sqrsum: torch.Tensor,
+    mhc_mult3: int,
+    mhc_hidden_size: int,
+) -> int:
+    fn = round_to_tf32(fn)
+    fwd_mul_kernel = _mhc_pre_norm_fn_fwd_mul(mhc_mult3, 1, mhc_hidden_size)
+    fwd_mul_kernel(
+        residual_flat.view(-1, mhc_hidden_size),
+        fn,
+        gemm_out_mul[:1].view(1, -1, mhc_mult3),
+        gemm_out_sqrsum[:1].view(1, -1),
+    )
+    return 1
 
 
 def _run_deepgemm_splitk_gemm(
@@ -48,7 +84,9 @@ def mhc_pre_big_fuse(
     mhc_post_mult_value: float,
     sinkhorn_repeat: int,
     n_splits: int = 16,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    previous_pre_mix: torch.Tensor | None = None,
+    gemm_backend: str | None = None,
+) -> tuple[torch.Tensor, ...]:
     assert residual.dtype == torch.bfloat16
     assert fn.dtype == torch.float32
     assert mhc_scale.dtype == torch.float32
@@ -71,9 +109,14 @@ def mhc_pre_big_fuse(
     num_tokens = residual_flat.shape[0]
     fn_flat = fn
 
+    backend = gemm_backend or _requested_backend()
     block_k = 64
     block_m = 64
-    n_splits = _compute_num_split(block_k, mhc_hidden_size, _ceil_div(num_tokens, block_m))
+    n_splits = (
+        _compute_num_split(block_k, mhc_hidden_size, _ceil_div(num_tokens, block_m))
+        if backend in ("deepgemm", "tilelang_splitk")
+        else 1
+    )
 
     post_mix = torch.empty(
         num_tokens, mhc_mult, dtype=torch.float32, device=residual.device
@@ -84,6 +127,15 @@ def mhc_pre_big_fuse(
     layer_input = torch.empty(
         num_tokens, hidden_size, dtype=torch.bfloat16, device=residual.device
     )
+    delayed = previous_pre_mix is not None
+    pre_mix_out = (
+        torch.empty(num_tokens, mhc_mult, dtype=torch.float32, device=residual.device)
+        if delayed
+        else post_mix
+    )
+    previous_pre_mix = (
+        previous_pre_mix.view(num_tokens, mhc_mult) if delayed else post_mix
+    )
 
     gemm_out_mul = torch.empty(
         n_splits, num_tokens, mhc_mult3, dtype=torch.float32, device=residual.device
@@ -91,13 +143,35 @@ def mhc_pre_big_fuse(
     gemm_out_sqrsum = torch.empty(
         n_splits, num_tokens, dtype=torch.float32, device=residual.device
     )
-    _run_deepgemm_splitk_gemm(
-        residual_flat.view(num_tokens, mhc_hidden_size),
-        fn_flat,
-        gemm_out_mul,
-        gemm_out_sqrsum,
-        n_splits,
-    )
+    if backend == "deepgemm":
+        _run_deepgemm_splitk_gemm(
+            residual_flat.view(num_tokens, mhc_hidden_size),
+            fn_flat,
+            gemm_out_mul,
+            gemm_out_sqrsum,
+            n_splits,
+        )
+    elif backend == "tilelang_single":
+        n_splits = _run_tilelang_single_gemm(
+            residual_flat,
+            fn_flat,
+            gemm_out_mul,
+            gemm_out_sqrsum,
+            mhc_mult3,
+            mhc_hidden_size,
+        )
+        gemm_out_mul = gemm_out_mul[:1]
+        gemm_out_sqrsum = gemm_out_sqrsum[:1]
+    elif backend == "tilelang_splitk":
+        raise RuntimeError(
+            "DSV4_MHC_PRE_GEMM_BACKEND=tilelang_splitk is not wired in this "
+            "RTP TileKernels snapshot; use deepgemm or tilelang_single."
+        )
+    else:
+        raise ValueError(
+            "Unsupported DSV4_MHC_PRE_GEMM_BACKEND="
+            f"{backend!r}; expected deepgemm, tilelang_splitk, or tilelang_single."
+        )
 
     _mhc_pre_big_fuse(
         hidden_size,
@@ -108,12 +182,15 @@ def mhc_pre_big_fuse(
         sinkhorn_repeat,
         n_splits=n_splits,
         mhc_mult=mhc_mult,
+        delayed=delayed,
     )(
         gemm_out_mul,
         gemm_out_sqrsum,
         mhc_scale,
         mhc_base,
         residual_flat,
+        previous_pre_mix,
+        pre_mix_out,
         post_mix,
         comb_mix,
         layer_input,
@@ -123,4 +200,6 @@ def mhc_pre_big_fuse(
     comb_mix = comb_mix.view(*outer_shape, mhc_mult, mhc_mult)
     layer_input = layer_input.view(*outer_shape, hidden_size)
 
+    if delayed:
+        return pre_mix_out.view(*outer_shape, mhc_mult), post_mix, comb_mix, layer_input
     return post_mix, comb_mix, layer_input

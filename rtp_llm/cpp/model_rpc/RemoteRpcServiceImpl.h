@@ -1,8 +1,10 @@
 #pragma once
 #include <memory>
+#include <mutex>
 #include "rtp_llm/cpp/model_rpc/LocalRpcServiceImpl.h"
 #include "rtp_llm/cpp/model_rpc/PrefillRpcServer.h"
 #include "rtp_llm/cpp/model_rpc/DecodeRpcServer.h"
+#include "rtp_llm/cpp/model_rpc/ShutdownCoordinator.h"
 
 namespace rtp_llm {
 
@@ -11,6 +13,22 @@ public:
     grpc::Status init(const EngineInitParams&                                params,
                       std::unique_ptr<rtp_llm::ProposeModelEngineInitParams> propose_params,
                       py::object                                             mm_process_engine) override;
+
+    grpc::Status GenerateStreamCall(grpc::ServerContext*                   context,
+                                    const GenerateInputPB*                 request,
+                                    grpc::ServerWriter<GenerateOutputsPB>* writer) override;
+
+    grpc::Status BatchGenerateCall(grpc::ServerContext*        context,
+                                   const BatchGenerateInputPB* request,
+                                   BatchGenerateOutputsPB*     response) override;
+
+    grpc::Status ExecuteFunction(grpc::ServerContext*     context,
+                                 const FunctionRequestPB* request,
+                                 FunctionResponsePB*      response) override;
+
+    size_t onflightRequestNum() override;
+    void   beginShutdown() override;
+    bool   waitForDrain(ShutdownCoordinator::Deadline deadline) override;
 
     grpc::Status EnqueueBatch(grpc::ServerContext*         context,
                               const EnqueueBatchRequestPB* request,
@@ -51,13 +69,8 @@ public:
         return grpc::Status(grpc::StatusCode::INTERNAL, "server not implement GetPeerInfo");
     }
 
-    void beginShutdown() override {
-        if (prefill_server_) {
-            prefill_server_->beginShutdown();
-        }
-    }
-
     void stop() override {
+        beginShutdown();
         if (prefill_server_) {
             prefill_server_->stop();
         }
@@ -67,8 +80,19 @@ public:
     }
 
 private:
-    std::shared_ptr<PrefillRpcServer> prefill_server_;
-    std::shared_ptr<DecodeRpcServer>  decode_server_;
+    bool                       tryAdmitRequest();
+    void                       finishRequest();
+    ShutdownCoordinator::State drainState();
+
+    // Admission and closure share this lock: a request cannot pass the gate
+    // while the coordinator observes an idle rank before its server counter rises.
+    std::mutex                           admission_mutex_;
+    bool                                 draining_{false};
+    size_t                               admitted_requests_{0};
+    bool                                 requires_group_drain_{false};
+    std::unique_ptr<ShutdownCoordinator>  shutdown_coordinator_;
+    std::shared_ptr<PrefillRpcServer>      prefill_server_;
+    std::shared_ptr<DecodeRpcServer>       decode_server_;
 };
 
 }  // namespace rtp_llm

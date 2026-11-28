@@ -144,6 +144,7 @@ RTP_LLM_POLL_LOCAL_OUTPUT_RT_US = "rtp_llm.poll_local_output_rt_us"
 RTP_LLM_POLL_REMOTE_OUTPUT_RT_US = "rtp_llm.poll_remote_output_rt_us"
 # True only when a failed request cuts off a phase before its natural end.
 RTP_LLM_PHASE_TRUNCATED = "rtp_llm.phase.truncated"
+RTP_LLM_PREFILL_TIMING_ERROR = "rtp_llm.prefill.timing_error"
 RTP_LLM_PREFILL_CACHE_EXPOSED_WAIT_US = "rtp_llm.prefill.cache_exposed_wait_us"
 RTP_LLM_PREFILL_ADMISSION_QUEUE_WAIT_US = "rtp_llm.prefill.admission_queue_wait_us"
 RTP_LLM_PREFILL_KV_CACHE_ACQUIRE_WALL_US = "rtp_llm.prefill.kv_cache_acquire_wall_us"

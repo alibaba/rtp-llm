@@ -29,9 +29,12 @@ struct MtpTargetLogprobs {
     // Empty means raw row i is dense target row i (the identity path).
     // Otherwise compact raw row i corresponds to this dense target row.
     std::vector<int64_t> captured_dense_row_indices;
-    int64_t              dense_row_count              = 0;
-    bool                 retains_full_lm_head_storage = false;
-    int64_t              requested_top_logprobs       = 0;
+    // DSpARK verifies a packed prefix of each request. Keep the device map
+    // until acceptance so capture does not synchronize the execution thread.
+    torch::Tensor packed_to_dense;
+    int64_t       dense_row_count              = 0;
+    bool          retains_full_lm_head_storage = false;
+    int64_t       requested_top_logprobs       = 0;
 
     bool defined() const {
         return raw_logits.defined() || token_logprobs.defined();

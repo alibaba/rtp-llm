@@ -159,15 +159,33 @@ cc_library(
 )
 
 cc_library(
+    name = "model_types",
+    hdrs = ["ModelTypes.h"],
+    deps = [
+        "//:rtp_compute_ops",
+        "//rtp_llm/cpp/cache:cache_types",
+        "//rtp_llm/cpp/config:config_modules",
+        "//rtp_llm/cpp/cuda_graph:dspark_cuda_graph_budget",
+        "//rtp_llm/cpp/models/models_weight:weights_define",
+        "//rtp_llm/models_py/bindings/core:tensor_holder",
+    ],
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
     name = "models",
     hdrs = glob([
         "*.h",
-    ], exclude = ["ModelInputsLogger.h"]),
+    ], exclude = ["ModelInputsLogger.h", "ModelTypes.h"]),
     srcs = glob([
         "*.cc",
     ], exclude = ["ModelInputsLogger.cc"]),
     deps = [
+        "//rtp_llm/models_py/bindings/core:sampling_params_hdr",
         ":model_inputs_logger",
+        ":model_types",
+        ":eplb",
+        ":expert_load_monitor",
         ":sample_infos",
         ":logits_processor",
         ":dfa_utils",
@@ -194,11 +212,13 @@ cc_library(
         "//rtp_llm/cpp/multimodal_processor:multimodal_types",
     ] + select({
         "//:using_cuda": [
+            "//rtp_llm/models_py/bindings/common/kernels:dspark_packed_sampling",
             "//rtp_llm/models_py/bindings/cuda/kernels:attention_input_metadata",
             "//rtp_llm/models_py/bindings/cuda/kernels:scaled_fp8_quant",
             "//rtp_llm/models_py/bindings/cuda:bf16_gemm_op",
             "//rtp_llm/models_py/bindings/cuda:cuda_host_utils",
         ],
+        "//:using_rocm": ["//rtp_llm/models_py/bindings/common/kernels:dspark_packed_sampling"],
         "//conditions:default": [],
     }),
     visibility = ["//visibility:public"],
@@ -206,10 +226,32 @@ cc_library(
 
 # Expert statistics - monitoring component
 cc_library(
-    name = "stats",
-    hdrs = [
-        "eplb/stats/ExpertStats.h",
-    ],
+    name = "expert_load_monitor",
+    hdrs = ["eplb/ExpertLoadMonitor.h"],
+    srcs = ["eplb/ExpertLoadMonitor.cc"],
+    deps = [
+        ":expert_metric_utils",
+        "//rtp_llm/cpp/config:config_modules",
+        "//rtp_llm/cpp/config:eplb_config",
+        "//rtp_llm/cpp/metrics:metrics",
+        "//rtp_llm/cpp/utils:core_utils",
+        "//rtp_llm/cpp/utils:profiling_scope",
+        "//rtp_llm/models_py/bindings/core:exec_ops_hdr",
+        "@havenask//aios/kmonitor:kmonitor_client_cpp",
+    ] + torch_deps(),
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
+    name = "expert_metric_utils",
+    hdrs = ["eplb/ExpertMetricUtils.h"],
+    srcs = ["eplb/ExpertMetricUtils.cc"],
+    deps = [
+        "//rtp_llm/cpp/config:config_modules",
+        "//rtp_llm/cpp/config:eplb_config",
+        "//rtp_llm/cpp/utils:core_utils",
+        "@havenask//aios/autil:env_util",
+    ] + torch_deps(),
     visibility = ["//visibility:public"],
 )
 
@@ -234,12 +276,14 @@ cc_library(
         "eplb/ExpertBalancerPythonWrapper.cc",
     ],
     deps = [
-        ":models",
+        ":model_types",
         ":dfa_utils",
+        ":expert_load_monitor",
         "//rtp_llm/cpp/config:eplb_config",
         "//rtp_llm/cpp/config:rank_layout",
         "//rtp_llm/cpp/metrics",
         "//rtp_llm/cpp/pybind:py_utils",
+        "//rtp_llm/cpp/utils:profiling_scope",
         "//rtp_llm/cpp/cache:cache_types",
     ],
     visibility = ["//visibility:public"],

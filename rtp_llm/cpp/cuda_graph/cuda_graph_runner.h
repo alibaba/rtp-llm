@@ -31,6 +31,8 @@ class MetricsReporter;
 namespace rtp_llm {
 
 struct CacheTopology;
+struct FusedD2DCopyParams;
+struct AttentionInputMetadataParams;
 
 class DirtyCudaGraphCaptureError: public std::runtime_error {
 public:
@@ -50,6 +52,8 @@ public:
     captureKernelBlockTableWidth(const CacheTopology& topology, size_t max_seq_len, size_t max_reserved_step);
     static int64_t captureKernelBlockTableWidth(const CacheTopology& topology, size_t fake_physical_block_count);
 
+    std::optional<DSparkCapturedCapacity> capturedDSparkCapacity(int64_t batch) const override;
+
     CudaGraphRunner(const GraphParams&                         graph_params,
                     py::object                                 py_instance,
                     const char*                                forward_method_name = "forward",
@@ -58,6 +62,8 @@ public:
         enable_cuda_graph_(graph_params.enable_cuda_graph),
         is_prefill_cuda_graph_mode_(graph_params.is_prefill_cuda_graph_mode),
         is_target_verify_(graph_params.is_target_verify),
+        is_packed_target_verify_(graph_params.is_packed_target_verify),
+        dspark_capacity_query_width_(graph_params.dspark_capacity_query_width),
         role_(graph_params.role),
         capture_stream_(cuda_graph::graphGetStreamFromPool(true)),
         enable_cuda_graph_debug_mode_(graph_params.enable_cuda_graph_debug_mode),
@@ -139,6 +145,7 @@ public:
         py_after_replay_method_  = py::getattr(py_instance_, "on_cuda_graph_replay", py::none());
         options_cuda_int32_ = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA).requires_grad(false);
         options_cpu_int32_  = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCPU).requires_grad(false);
+        capture_mem_hold_.py_model_inputs_.expert_token_counts = graph_params.expert_token_counts;
         options_cuda_float_ = torch::TensorOptions().dtype(model_data_type_).device(torch::kCUDA).requires_grad(false);
         RTP_LLM_LOG_INFO("Initialize CudaGraphRunner with parameters below: \n \
             enable_cuda_graph_: %d, max_bs_: %d, enable_cuda_graph_debug_mode_: %d, max_seq_len_: %d, max_kernel_block_table_width_: %lld, \
@@ -175,25 +182,34 @@ public:
         py_instance_.release();
         RTP_LLM_LOG_INFO("Release CudaGraphRunner Successfully");
     }
-    void           captureDecode();
-    void           capturePrefill();
-    void           captureDecodeOneBatchSize(int bs);
-    void           capturePrefillOneSeqLen(int seq_len);
-    void           prepareInputs(const PyModelInputs& inputs, CudaGraphState& state);
-    void           prepareInputData(const PyModelInputs& inputs, CudaGraphState& state);
-    void           prepareAttentionInputs(const PyModelInputs& inputs,
-                                          CudaGraphState&      state,
-                                          bool                 skip_forward_event_sync = false) override;
-    void           updateKVCacheKernelBlockId(const PyModelInputs& inputs, CudaGraphState& state) override;
-    bool           canRun(const PyModelInputs& inputs,
-                          CudaGraphState&      state,
-                          CudaGraphCheckMode   mode = CudaGraphCheckMode::FORWARD) override;
-    void           replayGraph(int key);
-    void           replayDecode(int bs);
-    void           replayPrefill(int seq_len);
-    int            getCurrentRealGraphSize(const CudaGraphState& state) const;
+    void captureDecode();
+    void capturePrefill();
+    void captureDecodeOneBatchSize(int bs);
+    void capturePrefillOneSeqLen(int seq_len);
+    void prepareInputs(const PyModelInputs&                inputs,
+                       CudaGraphState&                     state,
+                       const AttentionInputMetadataParams* metadata = nullptr);
+    void prepareInputData(const PyModelInputs& inputs, CudaGraphState& state, FusedD2DCopyParams* copies = nullptr);
+    void prepareAttentionInputs(const PyModelInputs& inputs,
+                                CudaGraphState&      state,
+                                bool                 skip_forward_event_sync = false) override;
+    void prepareAttentionInputsImpl(const PyModelInputs&                inputs,
+                                    CudaGraphState&                     state,
+                                    bool                                skip_forward_event_sync,
+                                    bool                                copy_input_data,
+                                    const AttentionInputMetadataParams* metadata = nullptr);
+    void updateKVCacheKernelBlockId(const PyModelInputs& inputs, CudaGraphState& state) override;
+    bool canRun(const PyModelInputs& inputs,
+                CudaGraphState&      state,
+                CudaGraphCheckMode   mode = CudaGraphCheckMode::FORWARD) override;
+    void replayGraph(int key);
+    void replayDecode(int bs);
+    void replayPrefill(int seq_len);
+    int  getCurrentRealGraphSize(const CudaGraphState& state) const;
     PyModelOutputs forward(const PyModelInputs& inputs, CudaGraphState& state) override;
-    void           initCapture() override;
+    PyModelOutputs
+         forward(const PyModelInputs& inputs, CudaGraphState& state, const AttentionInputMetadataParams* metadata);
+    void initCapture() override;
 
     bool captureSessionMayBeDirty() const override {
         return capture_session_may_be_dirty_.load(std::memory_order_acquire);
@@ -225,6 +241,8 @@ private:
     }
     // Common input preparation logic for capture
     void prepareCaptureInputs(PyModelInputs& inputs, int batch_size, int seq_len_or_tokens);
+    // Inputs captured by address must retain their storage and metadata for replay.
+    void checkGraphInputStable(const PyModelInputs& inputs, const PyModelInputs& captured_inputs) const;
     // Common memory hold creation logic
     CaptureMemoryHold createCaptureMemoryHold(PyModelInputs& inputs, int tokens_count);
     void              initKernelInternalMemory();
@@ -259,6 +277,8 @@ private:
     bool                    is_prefill_cuda_graph_mode_{false};
     bool                    is_target_verify_{false};
     bool                    draft_prefill_uses_request_lanes_{false};
+    bool                    is_packed_target_verify_{false};
+    int                     dspark_capacity_query_width_{0};
     CudaGraphRole           role_{CudaGraphRole::AUTO};
     cuda_graph::GraphStream capture_stream_;
     bool                    enable_cuda_graph_debug_mode_{false};

@@ -121,3 +121,9 @@ models_py_test(
     src = "qwen4_mtp_norm_test.py",
     gpu = "RTX_5000_PRO_CU13",
 )
+
+py_test(
+    name = "auto_legacy_quant_dispatch_test",
+    srcs = ["auto_legacy_quant_dispatch_test.py"],
+    deps = py_test_deps,
+)

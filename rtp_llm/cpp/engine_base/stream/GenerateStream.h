@@ -3,6 +3,8 @@
 
 #include "rtp_llm/cpp/utils/AsyncProfilingScope.h"
 
+#include "rtp_llm/cpp/utils/AsyncProfilingScope.h"
+
 #include "absl/status/statusor.h"
 #include "autil/TimeUtility.h"
 #include "kmonitor/client/MetricsReporter.h"
@@ -20,9 +22,8 @@
 #include <atomic>
 #include <condition_variable>
 #include <iterator>
-#include <condition_variable>
+#include <list>
 #include <cstdint>
-#include <iterator>
 #include <memory>
 #include <limits>
 #include <mutex>
@@ -91,6 +92,7 @@ struct StreamSpecUpdateInfo {
     torch::Tensor top_logprob_token_ids;
     torch::Tensor top_logprobs;
     int32_t       logprobs_offset = 0;
+    int64_t verified_draft_tokens = -1;
 };
 
 struct SpeculativeExecutorStreamOutput {
@@ -486,6 +488,9 @@ public:
     const std::vector<int32_t>& speculativeAcceptedTokensPerPos() const {
         return speculative_accepted_tokens_per_pos_;
     }
+    int64_t speculativeVerifiedDraftTokens() const {
+        return speculative_verified_draft_tokens_;
+    }
 
     void setLogProbs(const torch::Tensor& token_logprobs,
                      const torch::Tensor& top_logprob_token_ids,
@@ -529,6 +534,9 @@ public:
         last_hidden_states_ = std::move(hidden_states);
     };
     torch::Tensor        getSoftmaxProbs();
+    torch::Tensor        getTokenLogProbs() const;
+    torch::Tensor        getTopLogprobTokenIds() const;
+    torch::Tensor        getTopLogProbs() const;
     StreamCacheResource& streamCacheResource();
     void                 setPerfTest(bool perf_test_);
     bool                 isPerfTest() const {
@@ -706,6 +714,8 @@ public:
         return sampling_state_.logits_processors;
     }
 
+    bool xgrammarUpdateTimedOut() const;
+
     at::Generator getGenerator() {
         return sampling_state_.generator;
     }
@@ -777,6 +787,16 @@ public:
         // once bookkeeping catches up.
         // -1 = unset (first iter / cleared).
         int next_seq_len_upper_bound = -1;
+        // Opt-in from the V4.1 TP1 decode executor. The stream additionally
+        // verifies the retained SWA tail against this round's maximum advance.
+        bool allow_async_cache_reservation = false;
+        int  max_mtp_advance               = 0;
+        // Immutable pinned sources for an asynchronously published grown table.
+        std::vector<torch::Tensor> cache_snapshot_host_buffers;
+        // The MTP executor materializes these immutable host snapshots at its
+        // batch boundary, before constructing StreamGroups or reading pages.
+        bool batch_cache_snapshot_upload   = false;
+        bool cache_snapshot_upload_pending = false;
     };
 
     uint64_t setMtpAsyncDeviceState(MtpAsyncDeviceState state) {
@@ -859,10 +879,23 @@ public:
     bool hasMtpCacheSnapshot() const {
         return hasMtpCacheSnapshot(getMtpAsyncDeviceState());
     }
-    void clearMtpCacheSnapshot() {
+    bool canReserveMtpCacheWithoutBookkeepingJoin(const MtpAsyncDeviceState& state) const;
+    // Called under the stream mutex; cache-key reads and host table updates
+    // must not race specUpdate. Preserves every non-table field and the epoch.
+    absl::Status reserveMtpCacheFromUpperBound(const MtpAsyncDeviceState& state);
+    static void  flushMtpCacheSnapshotUploads(const std::list<std::shared_ptr<GenerateStream>>& streams,
+                                              std::optional<torch::Stream> upload_stream = std::nullopt);
+    bool         replaceMtpCacheSnapshot(uint64_t                   expected_epoch,
+                                         torch::Tensor              physical,
+                                         torch::Tensor              kernel,
+                                         std::vector<torch::Tensor> host_buffers,
+                                         bool                       upload_pending = false);
+    void         clearMtpCacheSnapshot() {
         std::lock_guard<std::mutex> lock(*mtp_async_state_mutex_);
         mtp_async_state_.next_kv_cache_block_id_gpu        = torch::Tensor();
         mtp_async_state_.next_kv_cache_kernel_block_id_gpu = torch::Tensor();
+        mtp_async_state_.cache_snapshot_upload_pending     = false;
+        mtp_async_state_.cache_snapshot_host_buffers.clear();
     }
     torch::Tensor getLastHiddenStatesGpu() const {
         std::lock_guard<std::mutex> lock(*mtp_async_state_mutex_);
@@ -1130,6 +1163,7 @@ protected:
     int  max_chunk_size_      = 0;
     bool chunk_advanced_      = false;
     bool warmup_chunk_window_ = false;
+    int64_t speculative_verified_draft_tokens_ = 0;
     // prefill reuse info (PD-sep); read/write only under output_mutex_
     bool    prefill_independent_block_pools_ = false;
     int64_t prefill_total_reuse_len_         = 0;

@@ -69,10 +69,22 @@ _PPU_LOCK_SKIPPED = [
 
 def requirement(names):
     for name in names:
+        if name in ("quack-kernels", "flash-attn-4"):
+            native.py_library(
+                name = name,
+                deps = select({
+                    "@rtp_llm//:using_cuda13_x86": [requirement_gpu_cuda13(name)],
+                    "@rtp_llm//:using_cuda13_arm": [requirement_cuda13_arm(name)],
+                    "//conditions:default": [],
+                }),
+                visibility = ["//visibility:public"],
+            )
+            continue
         if name == "flash-mla-legacy":
             native.py_library(
                 name = name,
                 deps = select({
+                    "@rtp_llm//:using_cuda13_x86": [requirement_gpu_cuda13(name)],
                     "@rtp_llm//:using_cuda13_arm": [requirement_cuda13_arm(name)],
                     "//conditions:default": [],
                 }),
@@ -80,8 +92,6 @@ def requirement(names):
             )
             continue
         cuda13_x86_deps = [] if name in _CUDA13_X86_DEFERRED else [requirement_gpu_cuda13(name)]
-        if name == "nvidia-cutlass-dsl":
-            cuda13_x86_deps.append(requirement_gpu_cuda13("nvidia-cutlass-dsl-libs-cu13"))
         cuda13_arm_deps = [] if name in _CUDA13_ARM_DEFERRED else [requirement_cuda13_arm(name)]
         ppu_deps = [] if name in _PPU_LOCK_SKIPPED else [requirement_ppu(name)]
         if name in _DSV4_PLATFORM_ONLY:
@@ -156,8 +166,9 @@ def whl_deps():
             "torch==2.11.0+cu130",
             "torchvision==0.26.0+cu130",
             # GLM5 kernels shared by the CUDA13 inference paths.
-            "deep-gemm==2.8.0+122e18b.cu132",
-            "flash-mla==1.0.0+9241ae3",
+            "deep-gemm==2.8.2+341b656.cu132",
+            "flash-mla==1.0.0+2e5429f",
+            "flash-mla-legacy@https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/miji/whl/eplb-20261023-01a16309/flash_mla_legacy-1.0.0%2B9241ae3.rtp1-cp310-cp310-linux_x86_64.whl",
             "deep-ep==2.1.0+a56d615",
             "fast-hadamard-transform@https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/whls/fast_hadamard/fast_hadamard_transform-1.1.0-cp310-cp310-linux_x86_64.whl",
             "flash_attn==2.8.3.post1+cu13torch2.11cxx11abitrue.r1",
@@ -174,14 +185,18 @@ def whl_deps():
             "tilelang==0.1.15",
             "apache-tvm-ffi==0.1.12",
             # FlashAttention 3 remains deferred on CUDA13.
-            "nvidia-cutlass-dsl==4.4.2",
-            "nvidia-cutlass-dsl-libs-cu13==4.4.2",
+
+            "quack-kernels @ https://github.com/Dao-AILab/quack/archive/77a750c0d9548d4a6e23c0f64062d61b3ea420ff.tar.gz#sha256=ebc940da966e88a05be318c3dc3f650a7359a281642f8f2f77c28ba4e9affa05",
+            "flash-attn-4 @ https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/rtp-kernel/rtp_kernel_260612/flash_attn_4-4.0.0b21-py3-none-any.whl#sha256=8ad0cdd22b279ef2ca8b4e43a4fb33b7dc78936d36c41788bad9d67372056949",
+            "nvidia-cutlass-dsl==4.7.1",
+            "nvidia-cutlass-dsl-libs-base==4.7.1",
+            "torch-c-dlpack-ext==0.1.5",
         ],
         "@rtp_llm//:using_cuda13_arm": [
             "torch==2.11.0+cu130",
             "torchvision==0.26.0+cu130",
             # DeepGEMM opt_glm5 + SM12x, CI-built against torch 2.11+cu130.
-            "deep_gemm==2.8.1+057ca59",
+            "deep-gemm==2.8.2+341b656.cu132",
             "flash-mla==1.0.0+2e5429f",
             "flash-mla-legacy==1.0.0+92fd68b.rtp1",
             "deep-ep==2.1.0+a56d615",
@@ -194,8 +209,12 @@ def whl_deps():
             "apache-tvm-ffi==0.1.12",
             # FlashAttention wheels remain deferred on CUDA13 ARM.
             "fast-hadamard-transform@https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/cu129/fast_hadamard_transform-1.0.4.post1-cp310-cp310-linux_aarch64.whl",
-            "nvidia-cutlass-dsl==4.5.0",
-            "nvidia-cutlass-dsl-libs-base==4.5.0",
+
+            "quack-kernels @ https://github.com/Dao-AILab/quack/archive/77a750c0d9548d4a6e23c0f64062d61b3ea420ff.tar.gz#sha256=ebc940da966e88a05be318c3dc3f650a7359a281642f8f2f77c28ba4e9affa05",
+            "flash-attn-4 @ https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/rtp-kernel/rtp_kernel_260612/flash_attn_4-4.0.0b21-py3-none-any.whl#sha256=8ad0cdd22b279ef2ca8b4e43a4fb33b7dc78936d36c41788bad9d67372056949",
+            "nvidia-cutlass-dsl==4.7.1",
+            "nvidia-cutlass-dsl-libs-base==4.7.1",
+            "torch-c-dlpack-ext==0.1.5",
         ],
         "@rtp_llm//:using_cuda12_9_x86": [
             # torch 2.8.0+cu129: the upstream wheel (http.bzl torch_2.8_py310_cuda
@@ -287,7 +306,7 @@ def ml_pin_reqs():
             "transformers==5.2.0",
             "sentence-transformers==5.2.0",
             "pyarrow==14.0.0",
-            "xgrammar==0.2.5",
+            "xgrammar==0.2.9",
         ],
     })
 

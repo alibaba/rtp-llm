@@ -90,19 +90,26 @@ template<typename T>
 __global__ void packed_mask_logits(T* __restrict__ logits_batch,
                                    const int32_t* __restrict__ packed_allow_mask,
                                    const int32_t* __restrict__ row_indices,
-                                   const int mask_rows,
-                                   const int logits_rows,
-                                   const int logits_row_stride,
-                                   const int vocab_size,
-                                   const int bitmask_row_stride,
-                                   const int bitmask_words) {
+                                   const int      mask_rows,
+                                   const int      logits_rows,
+                                   const int      logits_row_stride,
+                                   const int      vocab_size,
+                                   const int      bitmask_row_stride,
+                                   const int      bitmask_words,
+                                   const int32_t* dense_to_packed,
+                                   int            dense_rows) {
     const int compact_row = blockIdx.y;
     const int vocab_idx   = threadIdx.x + blockIdx.x * blockDim.x;
     if (compact_row >= mask_rows || vocab_idx >= vocab_size) {
         return;
     }
 
-    const int logits_row = row_indices == nullptr ? compact_row : row_indices[compact_row];
+    int logits_row = row_indices == nullptr ? compact_row : row_indices[compact_row];
+    if (dense_to_packed != nullptr) {
+        if (logits_row < 0 || logits_row >= dense_rows)
+            return;
+        logits_row = dense_to_packed[logits_row];
+    }
     if (logits_row < 0 || logits_row >= logits_rows) {
         return;
     }
@@ -150,13 +157,15 @@ template<typename T>
 void invokePackedMaskLogits(T* logits_batch,
                             const int32_t* __restrict__ packed_allow_mask,
                             const int32_t* __restrict__ row_indices,
-                            const int    mask_rows,
-                            const int    logits_rows,
-                            const int    logits_row_stride,
-                            const int    vocab_size,
-                            const int    bitmask_row_stride,
-                            const int    bitmask_words,
-                            cudaStream_t stream) {
+                            const int      mask_rows,
+                            const int      logits_rows,
+                            const int      logits_row_stride,
+                            const int      vocab_size,
+                            const int      bitmask_row_stride,
+                            const int      bitmask_words,
+                            cudaStream_t   stream,
+                            const int32_t* dense_to_packed,
+                            int            dense_rows) {
     const dim3 block(256);
     const dim3 grid((vocab_size + block.x - 1) / block.x, mask_rows);
     packed_mask_logits<<<grid, block, 0, stream>>>(logits_batch,
@@ -167,7 +176,9 @@ void invokePackedMaskLogits(T* logits_batch,
                                                    logits_row_stride,
                                                    vocab_size,
                                                    bitmask_row_stride,
-                                                   bitmask_words);
+                                                   bitmask_words,
+                                                   dense_to_packed,
+                                                   dense_rows);
 #if USING_CUDA
     check_cuda_value(cudaPeekAtLastError());
 #endif
@@ -195,33 +206,39 @@ template void invokeMaskLogits<__nv_bfloat16>(__nv_bfloat16* logits_batch,
 template void invokePackedMaskLogits<float>(float* logits_batch,
                                             const int32_t* __restrict__ packed_allow_mask,
                                             const int32_t* __restrict__ row_indices,
-                                            const int    mask_rows,
-                                            const int    logits_rows,
-                                            const int    logits_row_stride,
-                                            const int    vocab_size,
-                                            const int    bitmask_row_stride,
-                                            const int    bitmask_words,
-                                            cudaStream_t stream);
+                                            const int      mask_rows,
+                                            const int      logits_rows,
+                                            const int      logits_row_stride,
+                                            const int      vocab_size,
+                                            const int      bitmask_row_stride,
+                                            const int      bitmask_words,
+                                            cudaStream_t   stream,
+                                            const int32_t* dense_to_packed,
+                                            int            dense_rows);
 template void invokePackedMaskLogits<half>(half* logits_batch,
                                            const int32_t* __restrict__ packed_allow_mask,
                                            const int32_t* __restrict__ row_indices,
-                                           const int    mask_rows,
-                                           const int    logits_rows,
-                                           const int    logits_row_stride,
-                                           const int    vocab_size,
-                                           const int    bitmask_row_stride,
-                                           const int    bitmask_words,
-                                           cudaStream_t stream);
+                                           const int      mask_rows,
+                                           const int      logits_rows,
+                                           const int      logits_row_stride,
+                                           const int      vocab_size,
+                                           const int      bitmask_row_stride,
+                                           const int      bitmask_words,
+                                           cudaStream_t   stream,
+                                           const int32_t* dense_to_packed,
+                                           int            dense_rows);
 template void invokePackedMaskLogits<__nv_bfloat16>(__nv_bfloat16* logits_batch,
                                                     const int32_t* __restrict__ packed_allow_mask,
                                                     const int32_t* __restrict__ row_indices,
-                                                    const int    mask_rows,
-                                                    const int    logits_rows,
-                                                    const int    logits_row_stride,
-                                                    const int    vocab_size,
-                                                    const int    bitmask_row_stride,
-                                                    const int    bitmask_words,
-                                                    cudaStream_t stream);
+                                                    const int      mask_rows,
+                                                    const int      logits_rows,
+                                                    const int      logits_row_stride,
+                                                    const int      vocab_size,
+                                                    const int      bitmask_row_stride,
+                                                    const int      bitmask_words,
+                                                    cudaStream_t   stream,
+                                                    const int32_t* dense_to_packed,
+                                                    int            dense_rows);
 #endif
 
 }  // namespace rtp_llm

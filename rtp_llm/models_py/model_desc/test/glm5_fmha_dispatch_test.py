@@ -190,7 +190,9 @@ class Glm5FmhaDispatchTest(unittest.TestCase):
         first_output = None
         for step, token_ids in enumerate(([0, 1], [2])):
             inputs = SimpleNamespace(
-                input_ids=torch.tensor(token_ids), capture_hidden_states=True
+                input_ids=torch.tensor(token_ids),
+                capture_hidden_states=True,
+                expert_token_counts=None,
             )
             embedded = model.embed_tokens(inputs.input_ids)
             final = (embedded + 6) / 2
@@ -215,7 +217,9 @@ class Glm5FmhaDispatchTest(unittest.TestCase):
             with self.subTest(layer_ids=layer_ids, requested=requested):
                 model = self.make_capture_model(layer_ids)
                 inputs = SimpleNamespace(
-                    input_ids=torch.tensor([0, 1]), capture_hidden_states=requested
+                    input_ids=torch.tensor([0, 1]),
+                    capture_hidden_states=requested,
+                    expert_token_counts=None,
                 )
                 with patch(
                     "rtp_llm.models_py.model_desc.glm5.should_enable_glm5_cmp",
@@ -308,12 +312,15 @@ class Glm5FmhaDispatchTest(unittest.TestCase):
                     layer.self_attn = FakeMla() if mla else FakeCausal()
                     layer._fuse_input_norm_quant = fused
                     layer._fuse_input_scale_ue8m0 = False
+                    layer.mlp = nn.Identity()
                     layer.input_layernorm = Mock(
                         weight=SimpleNamespace(data=torch.ones(4)),
                         variance_epsilon=1e-6,
                         return_value=(normalized, normalized_residual),
                     )
-                    layer._fwd_mlp_or_moe = Mock(side_effect=lambda x, r: (x, r))
+                    layer._fwd_mlp_or_moe = Mock(
+                        side_effect=lambda x, r, expert_load=None: (x, r)
+                    )
                     with (
                         patch(
                             "rtp_llm.models_py.model_desc.glm5.MlaAttention", FakeMla

@@ -64,4 +64,5 @@ class DeepGemmMaskedExecutorV2(DeepGemmHybridExecutor):
             a2_scale,
             apply_router_weight_on_input,
             extra_expert_args,
+            expert_load=payload.expert_load,
         )

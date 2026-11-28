@@ -53,7 +53,10 @@ SpecLogitsVerifyRunner::LaunchResult makeFailureResultForActiveStreams(const Spe
 
 }  // namespace
 
-void SpecLogitsVerifyRunner::applyMaskToLogits(torch::Tensor& logits, const LaunchResult& result, size_t vocab_size) {
+void SpecLogitsVerifyRunner::applyMaskToLogits(torch::Tensor&       logits,
+                                               const LaunchResult&  result,
+                                               size_t               vocab_size,
+                                               const torch::Tensor& dense_to_packed) {
 #if USING_CUDA
     const auto& packed_allow_mask  = result.packed_allow_mask_gpu;
     const auto& logits_row_indices = result.logits_row_indices_gpu;
@@ -64,7 +67,10 @@ void SpecLogitsVerifyRunner::applyMaskToLogits(torch::Tensor& logits, const Laun
     if (!packed_allow_mask.defined()) {
         return;
     }
-    runtimeApplyPackedMaskLogits(logits, packed_allow_mask, logits_row_indices, vocab_size);
+    if (result.ready_event) {
+        result.ready_event->block(cuda_graph::graphGetCurrentStream());
+    }
+    runtimeApplyPackedMaskLogits(logits, packed_allow_mask, logits_row_indices, vocab_size, dense_to_packed);
 }
 
 SpecLogitsVerifyRunner::ActiveStreamLayout
